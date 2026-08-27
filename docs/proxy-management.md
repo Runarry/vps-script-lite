@@ -17,7 +17,7 @@ bash bin/vpsctl service proxy
 ```text
 bash bin/vpsctl service proxy status
 bash bin/vpsctl service proxy profiles
-bash bin/vpsctl --dry-run service proxy install --core sing-box
+bash bin/vpsctl --dry-run --install-deps service proxy install --core sing-box
 bash bin/vpsctl service proxy install --core sing-box
 bash bin/vpsctl service proxy node add --profile hysteria2 --core sing-box --port 8443 --address 203.0.113.10 --sni example.com
 bash bin/vpsctl service proxy start --core sing-box --enable
@@ -176,7 +176,7 @@ vpsctl service proxy time status [--json]
 vpsctl service proxy time sync
 ```
 
-`time status` 只读显示当前 UTC 时间、时区、NTP 是否启用、是否已同步以及检测到的后端；JSON 使用 `schema_version: 1`。`time sync` 是 root 变更：systemd 优先使用 `timedatectl` 和已有 timesyncd/chrony，OpenRC 使用 chrony；确实没有可用后端时才按检测到的包管理器安装 chrony，持久启用并启动服务。若 `chronyc` 可用，会执行 `makestep`，随后最多等待 30 秒确认同步。
+`time status` 只读显示当前 UTC 时间、时区、NTP 是否启用、是否已同步以及检测到的后端；JSON 使用 `schema_version: 1`。`time sync` 是 root 变更：systemd 优先使用 `timedatectl` 和已有 timesyncd/chrony，OpenRC 使用 chrony；确实没有可用后端时，提供 `--install-deps` 才会按检测到的包管理器安装 chrony，随后持久启用并启动服务。若 `chronyc` 可用，会执行 `makestep`，随后最多等待 30 秒确认同步。
 
 时间同步不使用 HTTP `Date`、网页时间解析或 `date -s`，也不会修改 DNS。
 
@@ -195,6 +195,6 @@ vpsctl service proxy time sync
 
 ## 8. 依赖、演练与退出码
 
-支持的平台范围是 Linux、systemd 或 OpenRC，以及 `x86_64`/`amd64`、`aarch64`/`arm64`、`armv7l`/`armv7` 架构。状态、清单和配置渲染依赖 `jq`；端口检查与订阅输出使用 `ss`、`base64` 和 `tr`；证书操作依赖 `openssl` 与 `sha256sum`；官方 Release 安装还依赖 `curl` 以及 Xray 的 `unzip` 或 sing-box 的 `tar`。systemd 日志使用 `journalctl`，OpenRC 日志使用 `tail`。时间同步支持 `apt-get`、`dnf5`、`dnf`、`yum`、`apk`、`pacman` 和 `zypper`，但只在缺少可用 NTP 后端时安装 chrony。
+支持的平台范围是 Linux、systemd 或 OpenRC，以及 `x86_64`/`amd64`、`aarch64`/`arm64`、`armv7l`/`armv7` 架构。状态、清单和配置渲染依赖 `jq`；端口检查与订阅输出使用 `ss`、`base64` 和 `tr`；证书操作依赖 `openssl` 与 `sha256sum`；受管变更使用 `flock` 加锁；官方 Release 安装还依赖 `curl` 以及 Xray 的 `unzip` 或 sing-box 的 `tar`。提供 `--install-deps` 后，当前动作可通过 `apt-get`、`dnf5`、`dnf`、`yum`、`apk`、`pacman` 或 `zypper` 补齐这些缺失工具；时间同步只在缺少可用 NTP 后端时补齐 chrony。systemd 的 `journalctl`、OpenRC 的 `tail`、服务管理器和 CPU 架构属于平台前置条件，不由该选项安装或绕过。
 
-`--dry-run` 会展示安装、写入、服务控制和时间同步命令，不下载、不写受管配置、不安装包，也不启停服务。常见退出码遵循项目统一约定：`2` 为参数错误，`3` 为前置条件或依赖不满足，`4` 为权限不足，`10` 为配置或证书校验失败，`20` 为外部命令或远端服务失败，`30` 为部分完成、同步确认超时或需要人工恢复，`130` 为用户中断。发生 `30` 时先查看 `status`、待重启记录和服务日志，不要直接删除状态或备份文件。
+`--dry-run` 会展示安装、写入、服务控制和时间同步命令，不下载、不写受管配置、不安装包，也不启停服务。与 `--install-deps` 组合且发现工具缺失时，会先展示固定的软件包安装计划，再安全停止并提示安装后重跑完整计划。常见退出码遵循项目统一约定：`2` 为参数错误，`3` 为前置条件或依赖不满足，`4` 为权限不足，`10` 为配置或证书校验失败，`20` 为外部命令或远端服务失败，`30` 为部分完成、同步确认超时或需要人工恢复，`130` 为用户中断。发生 `30` 时先查看 `status`、待重启记录和服务日志，不要直接删除状态或备份文件。

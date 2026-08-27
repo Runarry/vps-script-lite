@@ -34,7 +34,7 @@
 | `network rfw` | `commands/network/rfw.sh` | 安装、配置和管理 RFW systemd 服务 | `disruptive` | `optional-root` | `supported` | `linux,init:systemd` | `experimental` |
 | `service proxy` | `commands/service/proxy.sh` | 平级管理 Xray 与 sing-box 内核、节点、日志和时间同步 | `disruptive` | `optional-root` | `supported` | `linux,service:any` | `experimental` |
 
-`optional-root` 表示只读查询、帮助或部分计划阶段可以普通用户运行；实际系统变更仍须 root 或在具体步骤提权。`--dry-run` 只生成计划，不写配置、不安装依赖、不启动或重启服务。
+`optional-root` 表示只读查询、帮助或部分计划阶段可以普通用户运行；实际系统变更仍须 root 或在具体步骤提权。`--install-deps` 明确允许功能按当前动作安装缺失的软件包依赖；`--dry-run --install-deps` 只展示安装计划，仍不写配置、不安装依赖、不启动或重启服务。
 
 入口按“命令 + 完整子参数形状”计算本次调用的能力要求。`network rfw` 的无附加参数 `help`/`--help`/`-h` 与 `status` 在 Linux 上不要求 `init:systemd`；`service proxy` 的无附加参数 `help`/`--help`/`-h`、`profiles`、`status`，以及 `time status [--json]` 在 Linux 上不要求 `service:any`。这些是显式白名单中的只读例外，不会扩大到多余参数、安装、更新、卸载、服务控制、节点写操作、时间同步或它们的 `--dry-run` 调用；后者仍按完整注册能力门控。
 

@@ -81,6 +81,7 @@ test/set 选项：
 
 可直接运行脚本时使用的全局选项：
   --dry-run                    仅演练，不写入系统
+  --install-deps               明确允许安装缺失依赖
   --yes                        自动同意普通确认
   --non-interactive            禁止读取终端输入
   --quiet                      减少非必要输出
@@ -211,13 +212,28 @@ vps_dns_query_tool() {
     return 1
 }
 
+vps_dns_ensure_action_tools() {
+    local saved_authorization="${VPSCTL_INSTALL_DEPS:-0}" status=0
+
+    if [[ "${VPS_DNS_INSTALL_DEPS:-0}" == "1" ]]; then
+        VPSCTL_INSTALL_DEPS=1
+    fi
+    if vps_cmd_ensure_tools "$@"; then
+        status=0
+    else
+        status=$?
+    fi
+    VPSCTL_INSTALL_DEPS="$saved_authorization"
+    return "$status"
+}
+
 vps_dns_install_query_tool() {
-    local manager="" package="" status
-    if [[ "${VPSCTL_NON_INTERACTIVE:-0}" == "1" && "$VPS_DNS_INSTALL_DEPS" != "1" ]]; then
+    local status saved_authorization="${VPSCTL_INSTALL_DEPS:-0}"
+    if [[ "${VPSCTL_NON_INTERACTIVE:-0}" == "1" && "$VPS_DNS_INSTALL_DEPS" != "1" && "$saved_authorization" != "1" ]]; then
         vps_cmd_error "未找到 dig、drill 或 nslookup；请使用 --install-deps 重试"
         return 3
     fi
-    if [[ "$VPS_DNS_INSTALL_DEPS" != "1" ]]; then
+    if [[ "$VPS_DNS_INSTALL_DEPS" != "1" && "$saved_authorization" != "1" ]]; then
         [[ "${VPSCTL_DRY_RUN:-0}" != "1" ]] || {
             vps_cmd_error "演练依赖安装时需要显式指定 --install-deps"
             return 3
@@ -228,45 +244,14 @@ vps_dns_install_query_tool() {
             return "$status"
         fi
     fi
-    vps_cmd_require_root || return $?
-    for manager in apt-get dnf5 dnf yum apk pacman zypper; do
-        command -v "$manager" >/dev/null 2>&1 && break
-        manager=""
-    done
-    [[ -n "$manager" ]] || {
-        vps_cmd_error "未找到受支持的软件包管理器"
-        return 3
-    }
-    case "$manager" in
-        apt-get)
-            package="dnsutils"
-            vps_cmd_run apt-get update || return 20
-            vps_cmd_run apt-get install -y "$package" || return 20
-            ;;
-        dnf5 | dnf | yum)
-            package="bind-utils"
-            vps_cmd_run "$manager" install -y "$package" || return 20
-            ;;
-        apk)
-            package="bind-tools"
-            vps_cmd_run apk add "$package" || return 20
-            ;;
-        pacman)
-            package="bind"
-            vps_cmd_run pacman -Sy --noconfirm "$package" || return 20
-            ;;
-        zypper)
-            package="bind-utils"
-            vps_cmd_run zypper --non-interactive install "$package" || return 20
-            ;;
-    esac
-    if [[ "${VPSCTL_DRY_RUN:-0}" == "1" ]]; then
-        return 0
+    VPSCTL_INSTALL_DEPS=1
+    if vps_cmd_ensure_tools network-dns dns-query; then
+        status=0
+    else
+        status=$?
     fi
-    vps_dns_query_tool >/dev/null || {
-        vps_cmd_error "安装已结束，但 DNS 查询工具仍不可用"
-        return 3
-    }
+    VPSCTL_INSTALL_DEPS="$saved_authorization"
+    return "$status"
 }
 
 vps_dns_query() {
@@ -673,14 +658,27 @@ vps_dns_verify_servers() {
 }
 
 vps_dns_verify_system_resolution() {
+    local tool
+
     if command -v getent >/dev/null 2>&1; then
         getent ahosts "$VPS_DNS_TEST_DOMAIN" >/dev/null 2>&1
     elif command -v host >/dev/null 2>&1; then
         host "$VPS_DNS_TEST_DOMAIN" >/dev/null 2>&1
     else
-        local tool
         tool="$(vps_dns_query_tool 2>/dev/null || true)"
-        [[ -n "$tool" ]] && vps_dns_query "$tool" "${VPS_DNS_SERVERS[0]:-127.0.0.1}" "$VPS_DNS_TEST_DOMAIN"
+        if [[ -z "$tool" ]]; then
+            vps_dns_install_query_tool || return $?
+            tool="$(vps_dns_query_tool 2>/dev/null || true)"
+            if [[ -z "$tool" && "${VPSCTL_DRY_RUN:-0}" == "1" ]]; then
+                vps_cmd_info "演练：安装依赖后将验证系统解析链路"
+                return 0
+            fi
+        fi
+        [[ -n "$tool" ]] || {
+            vps_cmd_error "没有可用于验证系统解析链路的工具"
+            return 3
+        }
+        vps_dns_query "$tool" "${VPS_DNS_SERVERS[0]:-127.0.0.1}" "$VPS_DNS_TEST_DOMAIN"
     fi
 }
 
@@ -754,6 +752,7 @@ vps_dns_set() {
     fi
     if [[ -n "$managed_target" ]]; then vps_dns_require_writable_target "$managed_target" || return $?; fi
     if [[ "${VPSCTL_DRY_RUN:-0}" != "1" ]]; then
+        vps_dns_ensure_action_tools network-dns flock || return $?
         vps_cmd_lock "network-dns" || return $?
         trap 'vps_cmd_unlock; trap - RETURN' RETURN
         vps_dns_backup_current "$backend" || return 20
@@ -893,6 +892,7 @@ vps_dns_restore() {
     }
     if [[ "$target" == /* ]]; then vps_dns_require_writable_target "$target" || return $?; fi
     if [[ "${VPSCTL_DRY_RUN:-0}" != "1" ]]; then
+        vps_dns_ensure_action_tools network-dns flock || return $?
         if vps_cmd_confirm "是否从 $backup 恢复 DNS 配置？"; then :; else
             status=$?
             if [[ "$status" == 1 ]]; then
@@ -993,6 +993,7 @@ vps_dns_parse_standalone_globals() {
     while (($# > 0)); do
         case "$1" in
             --dry-run) VPSCTL_DRY_RUN=1 ;;
+            --install-deps) VPSCTL_INSTALL_DEPS=1 ;;
             --yes) VPSCTL_ASSUME_YES=1 ;;
             --non-interactive) VPSCTL_NON_INTERACTIVE=1 ;;
             --quiet) VPSCTL_QUIET=1 ;;

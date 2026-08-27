@@ -1,6 +1,8 @@
 # shellcheck shell=bash
 # Shared command safety helpers. Sourcing this file only defines functions.
 
+VPS_CMD_DEPENDENCIES_PLANNED=0
+
 _vps_cmd_normalize_boolean() {
     local value
 
@@ -134,6 +136,11 @@ vps_cmd_init() {
         return 2
     fi
     VPSCTL_DRY_RUN="$normalized"
+    if ! normalized="$(_vps_cmd_normalize_boolean "${VPSCTL_INSTALL_DEPS:-0}")"; then
+        _vps_cmd_log_named "$command_name" "错误" error "VPSCTL_INSTALL_DEPS 必须是 on/off 值"
+        return 2
+    fi
+    VPSCTL_INSTALL_DEPS="$normalized"
     if ! normalized="$(_vps_cmd_normalize_boolean "${VPSCTL_ASSUME_YES:-0}")"; then
         _vps_cmd_log_named "$command_name" "错误" error "VPSCTL_ASSUME_YES 必须是 on/off 值"
         return 2
@@ -193,6 +200,7 @@ vps_cmd_init() {
     fi
     VPS_CMD_LOCK_FD=""
     VPS_CMD_LOCK_PATH=""
+    VPS_CMD_DEPENDENCIES_PLANNED=0
 }
 
 vps_cmd_trim() {
@@ -302,6 +310,198 @@ vps_cmd_run() {
         return 0
     fi
     "$@"
+}
+
+vps_cmd_detect_package_manager() {
+    local configured="${VPSCTL_ENV_PACKAGE_MANAGER:-}"
+    local manager
+
+    case "$configured" in
+        '' | unknown) ;;
+        apt-get | dnf5 | dnf | yum | apk | pacman | zypper)
+            if command -v "$configured" >/dev/null 2>&1; then
+                printf '%s\n' "$configured"
+                return 0
+            fi
+            ;;
+        *)
+            vps_cmd_error "无效的软件包管理器：$configured"
+            return 2
+            ;;
+    esac
+    for manager in apt-get dnf5 dnf yum apk pacman zypper; do
+        if command -v "$manager" >/dev/null 2>&1; then
+            printf '%s\n' "$manager"
+            return 0
+        fi
+    done
+    vps_cmd_error "未找到受支持的软件包管理器"
+    return 3
+}
+
+vps_cmd_package_for_tool() {
+    local manager="${1:-}"
+    local tool="${2:-}"
+
+    (($# == 2)) || {
+        vps_cmd_error "vps_cmd_package_for_tool 需要 MANAGER 和 TOOL"
+        return 2
+    }
+    case "$manager" in
+        apt-get | dnf5 | dnf | yum | apk | pacman | zypper) ;;
+        *)
+            vps_cmd_error "无效的软件包管理器：${manager:-<空>}"
+            return 2
+            ;;
+    esac
+    case "$tool" in
+        dns-query)
+            case "$manager" in
+                apt-get) printf 'dnsutils\n' ;;
+                dnf5 | dnf | yum | zypper) printf 'bind-utils\n' ;;
+                apk) printf 'bind-tools\n' ;;
+                pacman) printf 'bind\n' ;;
+            esac
+            ;;
+        sysctl)
+            case "$manager" in
+                dnf5 | dnf | yum | pacman) printf 'procps-ng\n' ;;
+                *) printf 'procps\n' ;;
+            esac
+            ;;
+        modprobe) printf 'kmod\n' ;;
+        ip | tc | ss)
+            case "$manager" in
+                dnf5 | dnf | yum) printf 'iproute\n' ;;
+                *) printf 'iproute2\n' ;;
+            esac
+            ;;
+        base64 | sha256sum | tr) printf 'coreutils\n' ;;
+        flock)
+            if [[ "$manager" == apk ]]; then printf 'flock\n'; else printf 'util-linux\n'; fi
+            ;;
+        mountpoint)
+            if [[ "$manager" == apk ]]; then printf 'util-linux-misc\n'; else printf 'util-linux\n'; fi
+            ;;
+        curl | jq | openssl | unzip | tar | chrony) printf '%s\n' "$tool" ;;
+        chronyc) printf 'chrony\n' ;;
+        *)
+            vps_cmd_error "没有工具的软件包映射：${tool:-<空>}"
+            return 3
+            ;;
+    esac
+}
+
+vps_cmd_install_packages() {
+    local manager="${1:-}"
+    local package
+    local -a packages=()
+    local -A seen=()
+
+    (($# >= 2)) || {
+        vps_cmd_error "vps_cmd_install_packages 需要 MANAGER 和至少一个 PACKAGE"
+        return 2
+    }
+    case "$manager" in
+        apt-get | dnf5 | dnf | yum | apk | pacman | zypper) ;;
+        *)
+            vps_cmd_error "无效的软件包管理器：${manager:-<空>}"
+            return 2
+            ;;
+    esac
+    shift
+    for package in "$@"; do
+        [[ "$package" =~ ^[A-Za-z0-9][A-Za-z0-9+._-]*$ ]] || {
+            vps_cmd_error "不安全的软件包名称：${package:-<空>}"
+            return 2
+        }
+        if [[ -z "${seen[$package]+set}" ]]; then
+            seen[$package]=1
+            packages+=("$package")
+        fi
+    done
+    vps_cmd_require_root || return $?
+    case "$manager" in
+        apt-get)
+            vps_cmd_run apt-get update || return 20
+            vps_cmd_run apt-get install -y --no-install-recommends "${packages[@]}" || return 20
+            ;;
+        dnf5 | dnf | yum)
+            vps_cmd_run "$manager" install -y "${packages[@]}" || return 20
+            ;;
+        apk)
+            vps_cmd_run apk add --no-cache "${packages[@]}" || return 20
+            ;;
+        pacman)
+            vps_cmd_run pacman -S --needed --noconfirm "${packages[@]}" || return 20
+            ;;
+        zypper)
+            vps_cmd_run zypper --non-interactive install --no-recommends "${packages[@]}" || return 20
+            ;;
+    esac
+}
+
+_vps_cmd_tool_available() {
+    local tool="$1"
+
+    if [[ "$tool" == dns-query ]]; then
+        command -v dig >/dev/null 2>&1 || command -v drill >/dev/null 2>&1 || command -v nslookup >/dev/null 2>&1
+    else
+        command -v "$tool" >/dev/null 2>&1
+    fi
+}
+
+vps_cmd_ensure_tools() {
+    local feature="${1:-}"
+    local manager package tool missing_join packages_join
+    local -a missing=() packages=()
+    local -A package_seen=()
+
+    (($# >= 2)) || {
+        vps_cmd_error "vps_cmd_ensure_tools 需要 FEATURE 和至少一个 TOOL"
+        return 2
+    }
+    _vps_cmd_validate_feature "$feature" || {
+        vps_cmd_error "无效的依赖功能名称：${feature:-<空>}"
+        return 2
+    }
+    shift
+    for tool in "$@"; do
+        [[ "$tool" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || {
+            vps_cmd_error "无效的工具名称：${tool:-<空>}"
+            return 2
+        }
+        vps_cmd_package_for_tool apt-get "$tool" >/dev/null || return $?
+        _vps_cmd_tool_available "$tool" || missing+=("$tool")
+    done
+    ((${#missing[@]} > 0)) || return 0
+    missing_join="$(IFS=' '; printf '%s' "${missing[*]}")"
+    if [[ "${VPSCTL_INSTALL_DEPS:-0}" != 1 ]]; then
+        vps_cmd_error "${feature} 缺少工具：${missing_join}；请添加 --install-deps 允许安装依赖"
+        return 3
+    fi
+    manager="$(vps_cmd_detect_package_manager)" || return $?
+    for tool in "${missing[@]}"; do
+        package="$(vps_cmd_package_for_tool "$manager" "$tool")" || return $?
+        if [[ -z "${package_seen[$package]+set}" ]]; then
+            package_seen[$package]=1
+            packages+=("$package")
+        fi
+    done
+    packages_join="$(IFS=' '; printf '%s' "${packages[*]}")"
+    vps_cmd_info "${feature} 缺少工具：${missing_join}；将安装软件包：${packages_join}"
+    vps_cmd_install_packages "$manager" "${packages[@]}" || return $?
+    if [[ "${VPSCTL_DRY_RUN:-0}" == 1 ]]; then
+        VPS_CMD_DEPENDENCIES_PLANNED=1
+        return 0
+    fi
+    hash -r
+    for tool in "${missing[@]}"; do
+        if ! _vps_cmd_tool_available "$tool"; then
+            vps_cmd_error "依赖安装已结束，但工具仍不可用：$tool"
+            return 20
+        fi
+    done
 }
 
 vps_cmd_confirm() {

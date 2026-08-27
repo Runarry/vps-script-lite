@@ -13,12 +13,13 @@
 全局选项必须位于领域前，例如：
 
 ```text
-bash bin/vpsctl --dry-run network dns set --server 1.1.1.1 --install-deps
+bash bin/vpsctl --dry-run --install-deps network dns set --server 1.1.1.1
 ```
 
 三项功能的公共约定如下：
 
-- `--dry-run` 展示检测结果和计划，不写系统、不安装依赖、不改变服务状态。上述 DNS 示例显式授权演练依赖安装，因此在缺少 `dig`、`drill` 和 `nslookup` 时仍会继续展示完整计划，但不会实际安装。
+- `--install-deps` 明确允许按当前动作安装缺失的系统工具；未提供时只报告缺失项。它支持 `apt-get`、`dnf5`、`dnf`、`yum`、`apk`、`pacman` 与 `zypper`，但不安装或绕过内核、init 系统、CPU 架构、XDP/BPF 等平台能力。
+- `--dry-run` 展示检测结果和计划，不写系统、不安装依赖、不改变服务状态。与 `--install-deps` 组合时会展示包管理器命令；DNS 可继续展示后续计划，BBR 和 RFW 在缺失工具妨碍安全验证时会提示安装后重跑。
 - `--yes` 只跳过允许自动同意的普通提示，不绕过能力检查、写前验证或 RFW 的中断性操作强确认。
 - `--non-interactive` 禁止读取终端；缺少必要参数或必要的强确认时立即失败。
 - 修改操作分别使用 `/run/vpsctl/network-bbr.lock`、`/run/vpsctl/network-dns.lock` 和 `/run/vpsctl/network-rfw.lock`，阻止同一功能的并发事务互相覆盖。
@@ -38,12 +39,14 @@ bash bin/vpsctl --dry-run network dns set --server 1.1.1.1 --install-deps
 示例：
 
 ```text
-bash bin/vpsctl --dry-run network bbr enable
+bash bin/vpsctl --dry-run --install-deps network bbr enable
 bash bin/vpsctl network bbr set --algorithm bbr --qdisc fq
 bash bin/vpsctl network bbr restore
 ```
 
 命令只使用当前内核已经提供的拥塞控制能力，不下载、升级或替换内核。`enable` 默认选择 `bbr`/`fq`；指定算法和队列规则前必须验证其可用性。算法与默认 qdisc 会同时写入运行时 sysctl 和持久化片段；只有 `--apply-live-qdisc` 才会进一步替换当前默认网卡的 root qdisc，因此计划和确认信息必须单独标明该影响。
+
+BBR 会按动作检查并在获授权后安装 `sysctl`、`modprobe`、`ip`、`tc`、`base64` 和实际事务锁所需的 `flock`。这只补齐用户空间工具；当前内核未提供目标拥塞控制算法时仍安全失败，不会尝试升级或替换内核。
 
 ### 2.2 配置、状态与恢复
 
@@ -69,7 +72,7 @@ bash bin/vpsctl network bbr restore
 | `verify` | 使用当前配置验证解析器和系统解析链路 | 无选项 |
 | `restore` | 从项目备份恢复权威后端配置 | `--backup PATH/ID` |
 
-`--server` 只接受有效 IPv4 或 IPv6 地址，可重复传入以保持明确顺序；它不接受未经约束的主机名或任意配置片段。`--install-deps` 是对缺失探测工具的显式授权，未提供时不得为了测试静默安装软件。
+`--server` 只接受有效 IPv4 或 IPv6 地址，可重复传入以保持明确顺序；它不接受未经约束的主机名或任意配置片段。全局 `--install-deps` 或 `test`/`set` 动作后的同名选项都是对缺失 `dig`、`drill`、`nslookup` 探测工具的显式授权；`set`/`restore` 的真实事务还会按需补齐 `flock`。未提供授权时不得静默安装软件。
 
 ### 3.2 四种后端
 
@@ -106,6 +109,8 @@ RFW 入口仅支持以下组合：
 - IPv4 规则；它不修改 IPv6 规则，也不代表主机已获得 IPv6 防护。
 
 `install` 和 `update` 只从 [narwhal-cloud/rfw 官方 Releases](https://github.com/narwhal-cloud/rfw/releases)解析最新稳定 release，拒绝 prerelease、草稿、非 HTTPS 下载和无法匹配本机架构的资产。下载的二进制必须按官方 checksum 验证并核对版本后才能替换；校验信息缺失、不匹配或含糊时安全失败，不安装未验证资产。
+
+RFW 会在参数校验以及 Linux、systemd、架构和内核版本门禁通过后，按动作补齐 `curl`、`sha256sum`、`flock`、`ip`，以及启用端口日志时所需的 `mountpoint`。`systemctl`、`journalctl`、XDP、BPF 文件系统和 RFW 二进制能力仍按平台或功能前置条件处理，不作为通用软件包自动安装。
 
 ### 4.2 子动作和选项
 

@@ -225,25 +225,7 @@ proxy_time_status() {
 }
 
 _proxy_time_install_chrony() {
-    local -a command_args
-    case "$PROXY_PACKAGE_MANAGER" in
-        apt-get)
-            command_args=(apt-get update)
-            vps_cmd_run "${command_args[@]}" || return 20
-            command_args=(apt-get install -y --no-install-recommends chrony)
-            ;;
-        dnf5) command_args=(dnf5 install -y chrony) ;;
-        dnf) command_args=(dnf install -y chrony) ;;
-        yum) command_args=(yum install -y chrony) ;;
-        apk) command_args=(apk add --no-cache chrony) ;;
-        pacman) command_args=(pacman -S --noconfirm --needed chrony) ;;
-        zypper) command_args=(zypper --non-interactive install --no-recommends chrony) ;;
-        *)
-            vps_cmd_error "无法使用当前包管理器安装 chrony：${PROXY_PACKAGE_MANAGER}"
-            return 3
-            ;;
-    esac
-    vps_cmd_run "${command_args[@]}" || return 20
+    proxy_ensure_tools time-sync chronyc
 }
 
 _proxy_time_enable_systemd() {
@@ -307,10 +289,6 @@ proxy_time_sync() (
         vps_cmd_error "time sync 不接受位置参数"
         return 2
     }
-    vps_cmd_require_root || return $?
-    vps_cmd_lock proxy-time || return $?
-    trap 'vps_cmd_unlock' EXIT
-
     case "$PROXY_INIT_SYSTEM" in
         systemd | openrc) ;;
         *)
@@ -318,6 +296,11 @@ proxy_time_sync() (
             return 3
             ;;
     esac
+    vps_cmd_require_root || return $?
+    proxy_ensure_mutation_tools time-sync || return $?
+    if proxy_stop_after_dependency_plan; then return 0; fi
+    vps_cmd_lock proxy-time || return $?
+    trap 'vps_cmd_unlock' EXIT
 
     backend="$(_proxy_time_detect_backend)"
     if [[ "$PROXY_INIT_SYSTEM" == openrc && "$backend" != chrony ]]; then
@@ -325,6 +308,7 @@ proxy_time_sync() (
     fi
     if [[ "$backend" == none ]]; then
         _proxy_time_install_chrony || return $?
+        if proxy_stop_after_dependency_plan; then return 0; fi
         installed=1
         backend=chrony
     fi

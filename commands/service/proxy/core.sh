@@ -375,6 +375,7 @@ proxy_core_install() (
     local core="${1:-}" requested_tag="" version_set=0 arg external="" binary_logical owned=true
     local tmp="" candidate_config downloaded info version tag sha service_path service_logical config_logical meta_path pending_path
     local config_backup="" service_backup="" failed=0
+    local -a required_tools=(jq curl sha256sum)
     (($# >= 1)) || { vps_cmd_error "install 需要 CORE"; return 2; }
     shift
     while (($#)); do
@@ -391,7 +392,12 @@ proxy_core_install() (
     _proxy_core_require_name "$core" || return $?
     proxy_require_platform || return $?
     vps_cmd_require_root || return $?
-    command -v jq >/dev/null 2>&1 || { vps_cmd_error "代理内核管理需要 jq"; return 3; }
+    case "$core" in
+        sing-box) required_tools+=(tar) ;;
+        xray) required_tools+=(unzip) ;;
+    esac
+    proxy_ensure_mutation_tools "${core}-install" "${required_tools[@]}" || return $?
+    if proxy_stop_after_dependency_plan; then return 0; fi
     vps_cmd_lock proxy || return $?
     trap 'vps_cmd_unlock' EXIT
     proxy_recover_transaction || return $?
@@ -510,6 +516,7 @@ _proxy_core_confirm_external_update() {
 proxy_core_update() (
     local core="${1:-}" requested_tag="" version_set=0 confirmed=0 arg meta binary_logical binary_path owned installed_at
     local tmp downloaded info config version tag sha old_sha binary_backup meta_backup active=0 failed=0 rc
+    local -a required_tools=(jq curl sha256sum)
     (($# >= 1)) || { vps_cmd_error "update 需要 CORE"; return 2; }
     shift
     while (($#)); do
@@ -528,6 +535,12 @@ proxy_core_update() (
     _proxy_core_require_name "$core" || return $?
     proxy_require_platform || return $?
     vps_cmd_require_root || return $?
+    case "$core" in
+        sing-box) required_tools+=(tar) ;;
+        xray) required_tools+=(unzip) ;;
+    esac
+    proxy_ensure_mutation_tools "${core}-update" "${required_tools[@]}" || return $?
+    if proxy_stop_after_dependency_plan; then return 0; fi
     _proxy_core_require_registered "$core" || return $?
     vps_cmd_lock proxy || return $?
     trap 'vps_cmd_unlock' EXIT
@@ -641,6 +654,8 @@ proxy_core_start() (
     _proxy_core_require_name "$core" || return $?
     proxy_require_platform || return $?
     vps_cmd_require_root || return $?
+    proxy_ensure_mutation_tools core-start jq || return $?
+    if proxy_stop_after_dependency_plan; then return 0; fi
     _proxy_core_require_registered "$core" || return $?
     vps_cmd_lock proxy || return $?
     trap 'vps_cmd_unlock' EXIT
@@ -690,6 +705,8 @@ proxy_core_stop() (
     _proxy_core_require_name "$core" || return $?
     proxy_require_platform || return $?
     vps_cmd_require_root || return $?
+    proxy_ensure_mutation_tools core-stop jq || return $?
+    if proxy_stop_after_dependency_plan; then return 0; fi
     _proxy_core_require_registered "$core" || return $?
     vps_cmd_lock proxy || return $?
     trap 'vps_cmd_unlock' EXIT
@@ -710,6 +727,8 @@ proxy_core_restart() (
     _proxy_core_require_name "$core" || return $?
     proxy_require_platform || return $?
     vps_cmd_require_root || return $?
+    proxy_ensure_mutation_tools core-restart jq || return $?
+    if proxy_stop_after_dependency_plan; then return 0; fi
     _proxy_core_require_registered "$core" || return $?
     vps_cmd_lock proxy || return $?
     trap 'vps_cmd_unlock' EXIT
@@ -787,7 +806,8 @@ proxy_core_status() {
         shift
     done
     proxy_require_state_access || return $?
-    command -v jq >/dev/null 2>&1 || { vps_cmd_error "status 需要 jq"; return 3; }
+    proxy_ensure_tools status jq || return $?
+    if proxy_stop_after_dependency_plan; then return 0; fi
     for core in sing-box xray; do
         [[ "$target" == all || "$target" == "$core" ]] || continue
         record="$(_proxy_core_status_record "$core")" || return $?
@@ -845,6 +865,9 @@ proxy_core_logs() {
     done
     _proxy_core_require_name "$core" || return $?
     proxy_require_platform || return $?
+    proxy_ensure_tools core-logs jq || return $?
+    if proxy_stop_after_dependency_plan; then return 0; fi
+    _proxy_core_require_registered "$core" || return $?
     service="$(proxy_core_service_name "$core")" || return $?
     case "$PROXY_INIT_SYSTEM" in
         systemd)
@@ -896,6 +919,9 @@ proxy_core_uninstall() (
     _proxy_core_require_name "$core" || return $?
     proxy_require_platform || return $?
     vps_cmd_require_root || return $?
+    proxy_ensure_mutation_tools core-uninstall jq || return $?
+    if proxy_stop_after_dependency_plan; then return 0; fi
+    _proxy_core_require_registered "$core" || return $?
     vps_cmd_lock proxy || return $?
     trap 'vps_cmd_unlock' EXIT
     proxy_recover_transaction || return $?

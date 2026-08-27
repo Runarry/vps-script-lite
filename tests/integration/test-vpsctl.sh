@@ -35,6 +35,7 @@ test_cli() {
     test_contains "$output" "<domain> <action>" "help command model"
     test_contains "$output" "用法" "localized usage heading"
     test_contains "$output" "内置命令" "localized built-in heading"
+    test_contains "$output" "--install-deps" "global install-deps help"
     test_no_ansi "$output" "--no-color help output"
 
     output="$("${VPSCTL[@]}" env)"
@@ -96,6 +97,7 @@ EOF
     cat >"$sandbox/commands/network/bbr.sh" <<'EOF'
 #!/usr/bin/env bash
 printf 'no_color=%s\n' "${VPSCTL_NO_COLOR:-missing}"
+printf 'install_deps=%s\n' "${VPSCTL_INSTALL_DEPS:-missing}"
 EOF
     chmod 0644 "$sandbox/commands/network/bbr.sh"
 
@@ -121,6 +123,8 @@ EOF
 
     output="$(bash "$sandbox/bin/vpsctl" --no-color network bbr status)"
     test_contains "$output" "no_color=1" "no-color child context"
+    output="$(bash "$sandbox/bin/vpsctl" --install-deps network bbr status)"
+    test_contains "$output" "install_deps=1" "install-deps child context"
 
     marker="$sandbox/executed"
     output="$(VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" --no-color network rfw --help)"

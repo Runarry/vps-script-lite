@@ -12,6 +12,7 @@ umask 022
 readonly VPSCTL_VERSION="0.3.0"
 
 VPSCTL_DRY_RUN=0
+VPSCTL_INSTALL_DEPS=0
 VPSCTL_ASSUME_YES=0
 VPSCTL_NON_INTERACTIVE=0
 VPSCTL_QUIET=0
@@ -65,6 +66,7 @@ VPS Script Lite - VPS 部署与维护控制台
 
 全局选项：
   --dry-run            让支持演练的功能只显示计划，不执行变更
+  --install-deps       明确允许功能命令安装缺失依赖
   --yes                仅跳过允许自动确认的普通提示
   --non-interactive    禁止从终端读取输入
   --quiet              减少功能命令的非必要输出
@@ -106,6 +108,9 @@ vpsctl_parse_global_options() {
         case "$1" in
             --dry-run)
                 VPSCTL_DRY_RUN=1
+                ;;
+            --install-deps)
+                VPSCTL_INSTALL_DEPS=1
                 ;;
             --yes)
                 VPSCTL_ASSUME_YES=1
@@ -152,7 +157,7 @@ vpsctl_parse_global_options() {
 }
 
 vpsctl_export_context() {
-    export VPSCTL_PROJECT_ROOT VPSCTL_DRY_RUN VPSCTL_ASSUME_YES
+    export VPSCTL_PROJECT_ROOT VPSCTL_DRY_RUN VPSCTL_INSTALL_DEPS VPSCTL_ASSUME_YES
     export VPSCTL_NON_INTERACTIVE VPSCTL_QUIET VPSCTL_VERBOSE VPSCTL_NO_COLOR VPSCTL_CLEAR
     export VPSCTL_ENV_OS_ID="${VPS_ENV[os_id]}"
     export VPSCTL_ENV_OS_VERSION_ID="${VPS_ENV[os_version_id]}"

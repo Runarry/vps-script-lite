@@ -8,8 +8,11 @@ readonly RFW_SCRIPT="${TEST_ROOT}/commands/network/rfw.sh"
 TEST_TMP="$(mktemp -d "${TMPDIR:-/tmp}/vpsctl-rfw-test.XXXXXX")"
 readonly TEST_ROOT TEST_TMP
 readonly MOCK_BIN="${TEST_TMP}/mock-bin"
+readonly NO_DOWNLOAD_DEPS_BIN="${TEST_TMP}/no-download-deps-bin"
+readonly NO_RUNTIME_DEPS_BIN="${TEST_TMP}/no-runtime-deps-bin"
 readonly SYSTEM_ROOT="${TEST_TMP}/system-root"
 readonly MOCK_LOG="${TEST_TMP}/mock.log"
+readonly TEST_BASH="$(command -v bash)"
 export SYSTEM_ROOT MOCK_LOG
 
 cleanup() { rm -rf -- "$TEST_TMP"; }
@@ -25,6 +28,11 @@ assert_contains() {
     [[ "$value" == *"$expected"* ]] || fail "${message}: missing '${expected}'"
 }
 
+assert_not_contains() {
+    local value="$1" unexpected="$2" message="$3"
+    [[ "$value" != *"$unexpected"* ]] || fail "${message}: unexpectedly found '${unexpected}'"
+}
+
 assert_file_contains() {
     local file="$1" expected="$2" message="$3"
     [[ -f "$file" ]] || fail "${message}: file missing: ${file}"
@@ -37,7 +45,8 @@ assert_status() {
 }
 
 write_mocks() {
-    mkdir -p -- "$MOCK_BIN" "$SYSTEM_ROOT"
+    local command_name command_path limited_path
+    mkdir -p -- "$MOCK_BIN" "$NO_DOWNLOAD_DEPS_BIN" "$NO_RUNTIME_DEPS_BIN" "$SYSTEM_ROOT"
 
     cat >"${MOCK_BIN}/uname" <<'EOF'
 #!/usr/bin/env bash
@@ -177,7 +186,31 @@ fi
 exec /usr/bin/mv "$@"
 EOF
 
+    cat >"${MOCK_BIN}/apt-get" <<'EOF'
+#!/usr/bin/env bash
+{
+    printf 'apt-get'
+    printf ' %s' "$@"
+    printf '\n'
+} >> "$MOCK_LOG"
+EOF
+
     chmod +x "${MOCK_BIN}"/*
+
+    for limited_path in "$NO_DOWNLOAD_DEPS_BIN" "$NO_RUNTIME_DEPS_BIN"; do
+        ln -s "$TEST_BASH" "${limited_path}/bash"
+        for command_name in dirname readlink sed; do
+            command_path="$(command -v "$command_name")"
+            ln -s "$command_path" "${limited_path}/${command_name}"
+        done
+        ln -s "${MOCK_BIN}/systemctl" "${limited_path}/systemctl"
+        ln -s "${MOCK_BIN}/apt-get" "${limited_path}/apt-get"
+    done
+    for command_name in flock mountpoint; do
+        ln -s "${MOCK_BIN}/${command_name}" "${NO_DOWNLOAD_DEPS_BIN}/${command_name}"
+    done
+    ln -s "${MOCK_BIN}/sha256sum" "${NO_RUNTIME_DEPS_BIN}/sha256sum"
+    ln -s "${MOCK_BIN}/flock" "${NO_RUNTIME_DEPS_BIN}/flock"
 }
 
 reset_case() {
@@ -189,14 +222,16 @@ reset_case() {
 rfw() {
     local -a shell_args=()
     [[ "${RFW_INNER_XTRACE:-0}" == "1" ]] && shell_args=(-x)
-    PATH="${MOCK_BIN}:$PATH" \
+    PATH="${RFW_TEST_PATH:-${MOCK_BIN}:$PATH}" \
         VPSCTL_PROJECT_ROOT="$TEST_ROOT" \
         VPSCTL_TESTING=1 \
         VPSCTL_SYSTEM_ROOT="$SYSTEM_ROOT" \
         VPSCTL_ENV_KERNEL_NAME="${MOCK_KERNEL:-Linux}" \
         VPSCTL_ENV_KERNEL_RELEASE="${MOCK_KERNEL_RELEASE:-6.1.0}" \
         VPSCTL_ENV_ARCH="${MOCK_ARCH:-x86_64}" \
-        VPSCTL_ENV_INIT=systemd \
+        VPSCTL_ENV_INIT="${MOCK_INIT:-systemd}" \
+        VPSCTL_ENV_PACKAGE_MANAGER="${MOCK_PACKAGE_MANAGER:-}" \
+        VPSCTL_INSTALL_DEPS="${MOCK_INSTALL_DEPS:-0}" \
         VPSCTL_NON_INTERACTIVE=1 \
         VPSCTL_NO_COLOR=1 \
         MOCK_FAIL_TARGET="${MOCK_FAIL_TARGET:-}" \
@@ -213,7 +248,7 @@ rfw() {
         MOCK_PRERELEASE="${MOCK_PRERELEASE:-false}" \
         MOCK_RELEASE_TAG="${MOCK_RELEASE_TAG:-v1.2.3}" \
         MOCK_BINARY_VERSION="${MOCK_BINARY_VERSION:-1.2.3}" \
-        bash "${shell_args[@]}" "$RFW_SCRIPT" "$@"
+        "$TEST_BASH" "${shell_args[@]}" "$RFW_SCRIPT" "$@"
 }
 
 test_architecture_and_install() {
@@ -385,6 +420,9 @@ test_global_options_and_release_validation() {
     output="$(rfw help)"
     assert_contains "$output" "管理 narwhal-cloud/rfw XDP 防火墙" "localized help summary"
     assert_contains "$output" "全局选项" "localized global-options heading"
+    assert_contains "$output" "--install-deps" "install-deps help option"
+    output="$(rfw --install-deps status)"
+    assert_contains "$output" "RFW 状态" "install-deps direct global option"
     rfw -- --not-an-action >/dev/null 2>&1 || status=$?
     assert_status 2 "$status" "global option delimiter"
     status=0
@@ -410,6 +448,65 @@ test_global_options_and_release_validation() {
     reset_case
     rfw install
     assert_file_contains "$MOCK_LOG" "binary --version" "downloaded binary smoke test"
+}
+
+test_dependency_install_controls() {
+    local output status=0 config_hash pending_hash
+
+    reset_case
+    output="$(RFW_TEST_PATH="$NO_DOWNLOAD_DEPS_BIN" rfw install 2>&1)" || status=$?
+    assert_status 3 "$status" "install missing download tools without authorization"
+    assert_contains "$output" "--install-deps" "missing download tools authorization hint"
+    assert_not_contains "$output" "apt-get" "unauthorized dependency installation"
+    [[ ! -e "${SYSTEM_ROOT}/usr/local/bin/rfw" ]] || fail "missing tools install wrote binary"
+    [[ ! -e "${SYSTEM_ROOT}/etc/vpsctl/rfw.conf" ]] || fail "missing tools install wrote configuration"
+
+    reset_case
+    status=0
+    output="$(RFW_TEST_PATH="$NO_DOWNLOAD_DEPS_BIN" MOCK_PACKAGE_MANAGER=apt-get rfw --dry-run --install-deps install 2>&1)" || status=$?
+    assert_status 0 "$status" "authorized dry-run dependency plan"
+    assert_contains "$output" "apt-get update" "fixed apt dependency refresh plan"
+    assert_contains "$output" "apt-get install -y --no-install-recommends curl coreutils" "fixed apt download dependency plan"
+    assert_contains "$output" "iproute2" "install default-interface dependency plan"
+    assert_contains "$output" "安装依赖后重新运行" "dependency plan rerun guidance"
+    assert_not_contains "$(<"$MOCK_LOG")" "curl " "dependency-only plan downloaded release"
+    [[ ! -e "${SYSTEM_ROOT}/usr/local/bin/rfw" ]] || fail "dependency-only plan wrote binary"
+    [[ ! -e "${SYSTEM_ROOT}/etc/vpsctl/rfw.conf" ]] || fail "dependency-only plan wrote configuration"
+    [[ ! -e "${SYSTEM_ROOT}/var/lib/vpsctl/network/rfw" ]] || fail "dependency-only plan wrote managed state"
+
+    reset_case
+    status=0
+    output="$(RFW_TEST_PATH="$NO_DOWNLOAD_DEPS_BIN" MOCK_PACKAGE_MANAGER=apt-get MOCK_INIT=openrc rfw --dry-run --install-deps install 2>&1)" || status=$?
+    assert_status 3 "$status" "non-systemd dependency gate"
+    assert_not_contains "$output" "apt-get" "non-systemd attempted dependency installation"
+
+    reset_case
+    status=0
+    output="$(RFW_TEST_PATH="$NO_DOWNLOAD_DEPS_BIN" MOCK_PACKAGE_MANAGER=apt-get MOCK_ARCH=i686 rfw --dry-run --install-deps install 2>&1)" || status=$?
+    assert_status 3 "$status" "unsupported architecture dependency gate"
+    assert_not_contains "$output" "apt-get" "unsupported architecture attempted dependency installation"
+
+    reset_case
+    status=0
+    output="$(RFW_TEST_PATH="$NO_DOWNLOAD_DEPS_BIN" MOCK_PACKAGE_MANAGER=apt-get MOCK_KERNEL_RELEASE=5.14.0 rfw --dry-run --install-deps install 2>&1)" || status=$?
+    assert_status 3 "$status" "old kernel dependency gate"
+    assert_not_contains "$output" "apt-get" "old kernel attempted dependency installation"
+
+    reset_case
+    rfw install
+    rfw configure --block-http on --log-port-access on
+    config_hash="$(/usr/bin/sha256sum "${SYSTEM_ROOT}/etc/vpsctl/rfw.conf")"
+    pending_hash="$(/usr/bin/sha256sum "${SYSTEM_ROOT}/var/lib/vpsctl/network/rfw/pending")"
+    : >"$MOCK_LOG"
+    status=0
+    output="$(RFW_TEST_PATH="$NO_RUNTIME_DEPS_BIN" MOCK_PACKAGE_MANAGER=apt-get rfw --dry-run --install-deps start 2>&1)" || status=$?
+    assert_status 0 "$status" "logged start dependency plan"
+    assert_contains "$output" "apt-get install -y --no-install-recommends iproute2 util-linux" "logged start ip and mountpoint dependency plan"
+    assert_contains "$output" "安装依赖后重新运行" "logged start dependency rerun guidance"
+    assert_not_contains "$(<"$MOCK_LOG")" "curl " "logged start dependency plan downloaded release"
+    [[ "$config_hash" == "$(/usr/bin/sha256sum "${SYSTEM_ROOT}/etc/vpsctl/rfw.conf")" ]] || fail "logged start dependency plan changed configuration"
+    [[ "$pending_hash" == "$(/usr/bin/sha256sum "${SYSTEM_ROOT}/var/lib/vpsctl/network/rfw/pending")" ]] || fail "logged start dependency plan changed pending state"
+    [[ ! -e "${SYSTEM_ROOT}/service-active" ]] || fail "logged start dependency plan started service"
 }
 
 test_runtime_preconditions() {
@@ -664,6 +761,7 @@ test_update_preserves_state_without_restart
 test_dry_run_has_no_managed_writes
 test_managed_ancestor_symlink_guard
 test_global_options_and_release_validation
+test_dependency_install_controls
 test_runtime_preconditions
 test_managed_boundaries_and_stats_guards
 test_disruptive_confirmation_and_service_flags

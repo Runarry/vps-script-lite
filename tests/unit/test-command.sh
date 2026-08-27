@@ -47,6 +47,7 @@ test_assert_file_mode() {
 test_init_and_paths() {
     local escaped_root_link="${TEST_TEMP}/escaped-root"
     VPSCTL_DRY_RUN=yes
+    VPSCTL_INSTALL_DEPS=YES
     VPSCTL_ASSUME_YES=off
     VPSCTL_NON_INTERACTIVE=false
     VPSCTL_QUIET=0
@@ -59,6 +60,7 @@ test_init_and_paths() {
     vps_cmd_init " test-command " "$TEST_ROOT"
     test_assert_equal "test-command" "$VPSCTL_COMMAND_NAME" "trimmed command name"
     test_assert_equal "1" "$VPSCTL_DRY_RUN" "normalized dry-run"
+    test_assert_equal "1" "$VPSCTL_INSTALL_DEPS" "normalized install-deps"
     test_assert_equal "0" "$VPSCTL_ASSUME_YES" "normalized assume-yes"
     test_assert_equal "1" "$VPSCTL_VERBOSE" "normalized verbose"
     test_assert_equal "${TEST_TEMP}/system/etc/example.conf" "$(vps_cmd_system_path /etc/example.conf)" "test system path"
@@ -94,7 +96,79 @@ test_init_and_paths() {
     if vps_cmd_parse_on_off maybe >/dev/null; then
         test_fail "invalid on/off value was accepted"
     fi
+    if (VPSCTL_INSTALL_DEPS=maybe; vps_cmd_init "test-command" "$TEST_ROOT" >/dev/null 2>&1); then
+        test_fail "invalid install-deps boolean was accepted"
+    fi
 }
+
+test_dependency_installation() (
+    local manager calls expected status output_file marker
+    local -a managers=(apt-get dnf5 dnf yum apk pacman zypper)
+    local -A expected_calls=(
+        [apt-get]=$'apt-get update\napt-get install -y --no-install-recommends curl jq\n'
+        [dnf5]=$'dnf5 install -y curl jq\n'
+        [dnf]=$'dnf install -y curl jq\n'
+        [yum]=$'yum install -y curl jq\n'
+        [apk]=$'apk add --no-cache curl jq\n'
+        [pacman]=$'pacman -S --needed --noconfirm curl jq\n'
+        [zypper]=$'zypper --non-interactive install --no-recommends curl jq\n'
+    )
+
+    VPSCTL_TESTING=1
+    VPSCTL_DRY_RUN=0
+    vps_cmd_require_root() { return 0; }
+    vps_cmd_run() {
+        local IFS=' '
+        calls+="$*"$'\n'
+    }
+    for manager in "${managers[@]}"; do
+        calls=""
+        vps_cmd_install_packages "$manager" curl jq curl
+        test_assert_equal "${expected_calls[$manager]}" "$calls" "$manager fixed install argv and deduplication"
+    done
+
+    calls=""
+    status=0
+    vps_cmd_install_packages apt-get 'safe;touch-bad' >/dev/null 2>&1 || status=$?
+    test_assert_equal 2 "$status" "unsafe package status"
+    test_assert_equal "" "$calls" "unsafe package must not execute"
+    status=0
+    VPSCTL_ENV_PACKAGE_MANAGER='apt-get;id'
+    vps_cmd_detect_package_manager >/dev/null 2>&1 || status=$?
+    test_assert_equal 2 "$status" "invalid exported package manager status"
+
+    test_assert_equal dnsutils "$(vps_cmd_package_for_tool apt-get dns-query)" "apt DNS package"
+    test_assert_equal bind-utils "$(vps_cmd_package_for_tool dnf dns-query)" "dnf DNS package"
+    test_assert_equal bind-tools "$(vps_cmd_package_for_tool apk dns-query)" "apk DNS package"
+    test_assert_equal bind "$(vps_cmd_package_for_tool pacman dns-query)" "pacman DNS package"
+    test_assert_equal iproute "$(vps_cmd_package_for_tool dnf5 tc)" "dnf5 iproute package"
+    test_assert_equal util-linux "$(vps_cmd_package_for_tool apt-get flock)" "apt flock package"
+    test_assert_equal flock "$(vps_cmd_package_for_tool apk flock)" "Alpine flock package"
+    test_assert_equal util-linux-misc "$(vps_cmd_package_for_tool apk mountpoint)" "Alpine mountpoint package"
+    test_assert_equal chrony "$(vps_cmd_package_for_tool apt-get chronyc)" "chronyc package"
+
+    # Restore helper definitions after the argv-capture stubs above.
+    source "${TEST_ROOT}/lib/command.sh"
+    VPSCTL_DRY_RUN=1
+    VPSCTL_INSTALL_DEPS=1
+    VPSCTL_ENV_PACKAGE_MANAGER=apt-get
+    VPS_CMD_DEPENDENCIES_PLANNED=0
+    marker="${TEST_TEMP}/dependency-manager-ran"
+    output_file="${TEST_TEMP}/dependency-dry-run-output"
+    _vps_cmd_tool_available() { return 1; }
+    vps_cmd_detect_package_manager() { printf 'apt-get\n'; }
+    apt-get() { touch "$marker"; }
+    vps_cmd_ensure_tools test-feature curl jq >"$output_file" 2>&1
+    test_assert_equal 1 "$VPS_CMD_DEPENDENCIES_PLANNED" "dry-run dependency plan flag"
+    [[ ! -e "$marker" ]] || test_fail "dry-run dependency plan executed the package manager"
+    calls="$(<"$output_file")"
+    [[ "$calls" == *'apt-get update'* && "$calls" == *'apt-get install -y --no-install-recommends curl jq'* ]] || test_fail "dry-run dependency argv"
+
+    VPSCTL_INSTALL_DEPS=0
+    status=0
+    vps_cmd_ensure_tools test-feature curl >/dev/null 2>&1 || status=$?
+    test_assert_equal 3 "$status" "dependency installation authorization status"
+)
 
 test_logging_and_run() {
     local output
@@ -255,6 +329,7 @@ test_internal_symlink_component_guard() {
 }
 
 test_init_and_paths
+test_dependency_installation
 test_logging_and_run
 test_confirmation_guards
 test_lock_backup_and_atomic_write

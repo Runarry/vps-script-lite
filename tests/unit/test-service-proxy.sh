@@ -10,11 +10,15 @@ TEST_TEMP="$(mktemp -d)"
 readonly TEST_TEMP
 TEST_SYSTEM_ROOT="${TEST_TEMP}/root"
 TEST_FAKE_BIN="${TEST_TEMP}/bin"
+TEST_DEP_BIN="${TEST_TEMP}/bin-dependencies"
 MOCK_LOG="${TEST_TEMP}/mock.log"
-readonly TEST_SYSTEM_ROOT TEST_FAKE_BIN MOCK_LOG
+readonly TEST_SYSTEM_ROOT TEST_FAKE_BIN TEST_DEP_BIN MOCK_LOG
+REAL_BASH="$(command -v bash)"
+REAL_DIRNAME="$(command -v dirname)"
+REAL_GREP="$(command -v grep)"
 REAL_SHA256SUM="$(command -v sha256sum)"
 REAL_JQ="$(command -v jq)"
-readonly REAL_SHA256SUM REAL_JQ
+readonly REAL_BASH REAL_DIRNAME REAL_GREP REAL_SHA256SUM REAL_JQ
 trap 'rm -rf -- "$TEST_TEMP"' EXIT
 
 fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
@@ -24,7 +28,7 @@ assert_not_contains() { [[ "$1" != *"$2"* ]] || fail "$3: unexpectedly contained
 assert_file_contains() { [[ -f "$1" ]] || fail "$3: missing file $1"; grep -Fq -- "$2" "$1" || fail "$3: missing '$2'"; }
 assert_json() { jq -e . >/dev/null 2>&1 <<<"$1" || fail "$2: invalid JSON"; }
 
-mkdir -p "$TEST_FAKE_BIN"
+mkdir -p "$TEST_FAKE_BIN" "$TEST_DEP_BIN"
 
 make_mock() {
     local name="$1" body="$2"
@@ -77,6 +81,13 @@ make_mock unzip 'printf "unexpected unzip %s\n" "$*" >>"$MOCK_LOG"; exit 99'
 make_mock tar 'printf "unexpected tar %s\n" "$*" >>"$MOCK_LOG"; exit 99'
 make_mock sha256sum 'printf "sha256sum %s\n" "$*" >>"$MOCK_LOG"; exec "$REAL_SHA256SUM" "$@"'
 make_mock jq 'set -o pipefail; "$REAL_JQ" "$@" | tr -d "\r"; exit "${PIPESTATUS[0]}"'
+make_mock apt-get 'printf "apt-get %s\n" "$*" >>"$MOCK_LOG"'
+
+ln -s "$REAL_BASH" "${TEST_DEP_BIN}/bash"
+ln -s "$REAL_DIRNAME" "${TEST_DEP_BIN}/dirname"
+ln -s "$REAL_GREP" "${TEST_DEP_BIN}/grep"
+ln -s "${TEST_FAKE_BIN}/systemctl" "${TEST_DEP_BIN}/systemctl"
+ln -s "${TEST_FAKE_BIN}/apt-get" "${TEST_DEP_BIN}/apt-get"
 
 export VPSCTL_TESTING=1
 export VPSCTL_SYSTEM_ROOT="$TEST_SYSTEM_ROOT"
@@ -100,7 +111,7 @@ export PATH="${TEST_FAKE_BIN}:${PATH}"
 RUN_STATUS=0
 RUN_OUTPUT=""
 run_proxy() {
-    if RUN_OUTPUT="$(bash "$TEST_PROXY" "$@" 2>&1)"; then RUN_STATUS=0; else RUN_STATUS=$?; fi
+    if RUN_OUTPUT="$(PATH="${RUN_PROXY_PATH:-$PATH}" bash "$TEST_PROXY" "$@" 2>&1)"; then RUN_STATUS=0; else RUN_STATUS=$?; fi
 }
 
 reset_root() {
@@ -171,6 +182,65 @@ test_arguments_dry_run_and_time() {
     assert_file_contains "$MOCK_LOG" "timedatectl set-ntp true" "time sync routing"
     run_proxy time status extra
     assert_equal 2 "$RUN_STATUS" "time status arguments"
+}
+
+test_dependency_install_plans() {
+    reset_root
+
+    RUN_PROXY_PATH="$TEST_DEP_BIN" run_proxy --install-deps --help
+    assert_equal 0 "$RUN_STATUS" "direct install-deps help"
+    assert_contains "$RUN_OUTPUT" "--install-deps" "install-deps help listing"
+
+    RUN_PROXY_PATH="$TEST_DEP_BIN" run_proxy status
+    assert_equal 3 "$RUN_STATUS" "status missing jq"
+    assert_contains "$RUN_OUTPUT" "jq" "status missing jq tool"
+    assert_contains "$RUN_OUTPUT" "--install-deps" "status missing jq hint"
+
+    RUN_PROXY_PATH="$TEST_DEP_BIN" run_proxy --dry-run --install-deps install --core sing-box
+    assert_equal 0 "$RUN_STATUS" "sing-box dependency dry-run"
+    assert_contains "$RUN_OUTPUT" "jq" "sing-box jq package plan"
+    assert_contains "$RUN_OUTPUT" "curl" "sing-box curl package plan"
+    assert_contains "$RUN_OUTPUT" "coreutils" "sing-box checksum package plan"
+    assert_contains "$RUN_OUTPUT" "tar" "sing-box archive package plan"
+    assert_contains "$RUN_OUTPUT" "安装依赖后重跑完整计划" "sing-box dependency rerun message"
+    [[ ! -e "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy" ]] || fail "sing-box dependency plan wrote proxy state"
+
+    RUN_PROXY_PATH="$TEST_DEP_BIN" run_proxy --dry-run --install-deps install --core xray
+    assert_equal 0 "$RUN_STATUS" "Xray dependency dry-run"
+    assert_contains "$RUN_OUTPUT" "unzip" "Xray archive package plan"
+    assert_contains "$RUN_OUTPUT" "安装依赖后重跑完整计划" "Xray dependency rerun message"
+    [[ ! -e "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy" ]] || fail "Xray dependency plan wrote proxy state"
+
+    RUN_PROXY_PATH="$TEST_DEP_BIN" run_proxy --dry-run --install-deps node add \
+        --profile shadowsocks-aes-256-gcm --core sing-box --port invalid --address proxy.example
+    assert_equal 2 "$RUN_STATUS" "invalid node arguments before dependency install"
+    assert_not_contains "$RUN_OUTPUT" "apt-get" "invalid node arguments dependency plan"
+
+    RUN_PROXY_PATH="$TEST_DEP_BIN" run_proxy --dry-run --install-deps node add \
+        --profile shadowsocks-aes-256-gcm --core sing-box --address proxy.example
+    assert_equal 2 "$RUN_STATUS" "missing node port before dependency install"
+    assert_not_contains "$RUN_OUTPUT" "apt-get" "missing node port dependency plan"
+
+    RUN_PROXY_PATH="$TEST_DEP_BIN" run_proxy --dry-run --install-deps node add \
+        --profile vless-ws-tls --core sing-box --port 19991 --address proxy.example \
+        --sni proxy.example --path /dependency-plan
+    assert_equal 0 "$RUN_STATUS" "node add dependency dry-run"
+    assert_contains "$RUN_OUTPUT" "jq" "node add jq package plan"
+    assert_contains "$RUN_OUTPUT" "openssl" "node add openssl package plan"
+    assert_contains "$RUN_OUTPUT" "iproute2" "node add ss package plan"
+    assert_contains "$RUN_OUTPUT" "coreutils" "node add certificate checksum package plan"
+    assert_contains "$RUN_OUTPUT" "安装依赖后重跑完整计划" "node add dependency rerun message"
+    [[ ! -e "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy" ]] || fail "node dependency plan wrote proxy state"
+
+    RUN_PROXY_PATH="$TEST_DEP_BIN" run_proxy --dry-run --install-deps subscription --core all
+    assert_equal 0 "$RUN_STATUS" "subscription dependency dry-run"
+    assert_contains "$RUN_OUTPUT" "jq" "subscription jq package plan"
+    assert_contains "$RUN_OUTPUT" "coreutils" "subscription base64 and tr package plan"
+    assert_contains "$RUN_OUTPUT" "安装依赖后重跑完整计划" "subscription dependency rerun message"
+
+    VPSCTL_ENV_PACKAGE_MANAGER=unsupported RUN_PROXY_PATH="$TEST_DEP_BIN" run_proxy --dry-run --install-deps status
+    assert_equal 2 "$RUN_STATUS" "unknown package manager"
+    assert_contains "$RUN_OUTPUT" "无效的软件包管理器" "unknown package manager message"
 }
 
 test_status_service_and_logs() {
@@ -593,6 +663,8 @@ test_protocol_matrix() {
 
 printf 'TEST: proxy arguments, dry-run and time\n'
 test_arguments_dry_run_and_time
+printf 'TEST: proxy dependency installation plans\n'
+test_dependency_install_plans
 printf 'TEST: proxy status, services and logs\n'
 test_status_service_and_logs
 printf 'TEST: proxy CRUD, pending and validation\n'

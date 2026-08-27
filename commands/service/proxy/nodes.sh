@@ -542,7 +542,8 @@ proxy_node_add() (
     local profile="" requested_core="" name="" listen="::" port="" address="" sni="www.amd.com"
     local path="" service_name="" cert_mode="self-signed" import_cert="" import_key=""
     local obfs_type="none" up_mbps=10000 down_mbps=10000 congestion_control="bbr" arg core id node
-    local candidate_manifest candidate_config status=0 mode detected_address address_choice
+    local candidate_manifest candidate_config status=0 mode detected_address address_choice transport
+    local -a required_tools=(jq openssl ss)
     while (($#)); do
         arg="$1"
         case "$arg" in
@@ -566,18 +567,57 @@ proxy_node_add() (
             *) vps_cmd_error "node add 的未知选项：$arg"; return 2 ;;
         esac
     done
-    command -v jq >/dev/null 2>&1 && command -v openssl >/dev/null 2>&1 || {
-        vps_cmd_error "添加节点需要 jq 和 openssl"
-        return 3
-    }
     if [[ -z "$profile" && proxy_is_interactive ]]; then
         profile="$(proxy_prompt_profile)" || return $?
     fi
     [[ -n "$profile" ]] || { vps_cmd_error "node add 需要 --profile"; return 2; }
     proxy_profile_cores "$profile" >/dev/null || { vps_cmd_error "未知节点配置：$profile"; return 2; }
+    if [[ -n "$requested_core" ]]; then
+        proxy_core_valid "$requested_core" || { vps_cmd_error "无效内核：$requested_core"; return 2; }
+        proxy_profile_cores "$profile" | grep -Fxq "$requested_core" || {
+            vps_cmd_error "${requested_core} 不支持节点配置 ${profile}"
+            return 3
+        }
+    fi
+    [[ -z "$name" ]] || proxy_valid_name "$name" || { vps_cmd_error "节点名称不能为空、不能换行且最多 128 个字符"; return 2; }
+    [[ -z "$port" ]] || proxy_valid_port "$port" || { vps_cmd_error "监听端口无效：$port"; return 2; }
+    if [[ -z "$port" ]] && ! proxy_is_interactive; then
+        vps_cmd_error "非交互添加节点需要 --port"
+        return 2
+    fi
+    [[ -z "$address" ]] || proxy_valid_host "$address" || { vps_cmd_error "客户端连接地址无效：$address"; return 2; }
+    [[ "$listen" == "::" || "$listen" == "0.0.0.0" || "$listen" =~ ^[A-Fa-f0-9:.]+$ ]] || { vps_cmd_error "监听地址无效：$listen"; return 2; }
+    if proxy_profile_uses_reality "$profile" || proxy_profile_requires_tls_certificate "$profile" || [[ "$profile" == "shadowsocks-2022-shadowtls" ]]; then
+        proxy_valid_host "$sni" || { vps_cmd_error "SNI 无效：$sni"; return 2; }
+    fi
+    transport="$(proxy_profile_default_transport "$profile")"
+    if [[ -n "$path" && ( "$transport" == ws || "$transport" == xhttp ) ]]; then
+        proxy_valid_path "$path" || { vps_cmd_error "传输路径必须以 / 开头且不超过 256 字符"; return 2; }
+    fi
+    if [[ -n "$service_name" && "$transport" == grpc && ! "$service_name" =~ ^[A-Za-z0-9._/-]{1,128}$ ]]; then
+        vps_cmd_error "gRPC serviceName 无效"
+        return 2
+    fi
+    [[ "$cert_mode" == "self-signed" || "$cert_mode" == "imported" ]] || { vps_cmd_error "--cert-mode 仅支持 self-signed|imported"; return 2; }
+    if ! proxy_profile_requires_tls_certificate "$profile" && [[ "$cert_mode" != "self-signed" || -n "$import_cert$import_key" ]]; then
+        vps_cmd_error "${profile} 不使用受管 TLS 证书，不能指定导入证书选项"
+        return 2
+    fi
+    if [[ "$cert_mode" == "imported" ]] && proxy_profile_requires_tls_certificate "$profile"; then
+        [[ -n "$import_cert" && -n "$import_key" ]] || { vps_cmd_error "导入证书需要 --cert-file 和 --key-file"; return 2; }
+    fi
+    [[ "$obfs_type" == "none" || "$obfs_type" == "salamander" ]] || { vps_cmd_error "--obfs 仅支持 none|salamander"; return 2; }
+    [[ "$up_mbps" =~ ^[1-9][0-9]*$ && "$down_mbps" =~ ^[1-9][0-9]*$ ]] || { vps_cmd_error "带宽必须是正整数 Mbps"; return 2; }
+    case "$congestion_control" in bbr | cubic | new_reno) ;; *) vps_cmd_error "拥塞控制仅支持 bbr|cubic|new_reno"; return 2 ;; esac
     vps_cmd_require_root || return $?
     proxy_require_platform || return $?
+    if proxy_profile_requires_tls_certificate "$profile"; then
+        required_tools+=(sha256sum)
+    fi
+    proxy_ensure_mutation_tools node-add "${required_tools[@]}" || return $?
+    if proxy_stop_after_dependency_plan; then return 0; fi
     core="$(proxy_choose_core_for_profile "$profile" "$requested_core")" || return $?
+    if proxy_stop_after_dependency_plan; then return 0; fi
     proxy_prepare_manifest_state || return $?
 
     if proxy_is_interactive; then
@@ -742,6 +782,8 @@ proxy_node_list() {
     done
     [[ "$core" == "all" ]] || proxy_core_valid "$core" || { vps_cmd_error "无效内核：$core"; return 2; }
     proxy_require_state_access || return $?
+    proxy_ensure_tools node-list jq || return $?
+    if proxy_stop_after_dependency_plan; then return 0; fi
     [[ -f "$PROXY_MANIFEST" ]] || {
         ((json == 0)) && printf '当前没有受管节点。\n' || printf '{"schema_version":1,"total":0,"nodes":[]}\n'
         return 0
@@ -831,6 +873,9 @@ proxy_node_details_print() {
 
 proxy_node_view_interactive() {
     local id action node core
+    proxy_require_state_access || return $?
+    proxy_ensure_tools node-show jq || return $?
+    if proxy_stop_after_dependency_plan; then return 0; fi
     id="$(proxy_node_select_interactive "请选择要查看的节点")" || return $?
     node="$(proxy_manifest_node "$id")" || {
         vps_cmd_error "未找到节点：$id"
@@ -858,6 +903,17 @@ proxy_node_show() {
             *) vps_cmd_error "node show 的未知选项：$arg"; return 2 ;;
         esac
     done
+    if [[ -n "$id" && ! "$id" =~ ^node-[a-f0-9]{16}$ ]]; then
+        vps_cmd_error "node show 需要有效 --id"
+        return 2
+    fi
+    if [[ -z "$id" && ! proxy_is_interactive ]]; then
+        vps_cmd_error "node show 需要有效 --id"
+        return 2
+    fi
+    proxy_require_state_access || return $?
+    proxy_ensure_tools node-show jq || return $?
+    if proxy_stop_after_dependency_plan; then return 0; fi
     if [[ -z "$id" && "$uri" == "0" ]] && proxy_is_interactive; then
         proxy_node_view_interactive
         return
@@ -866,7 +922,6 @@ proxy_node_show() {
         id="$(proxy_node_select_interactive "请选择要输出 URI 的节点")" || return $?
     fi
     [[ "$id" =~ ^node-[a-f0-9]{16}$ ]] || { vps_cmd_error "node show 需要有效 --id"; return 2; }
-    proxy_require_state_access || return $?
     [[ -f "$PROXY_MANIFEST" ]] || { vps_cmd_error "当前没有节点"; return 3; }
     proxy_manifest_validate_file "$PROXY_MANIFEST" || return $?
     node="$(proxy_manifest_node "$id")" || { vps_cmd_error "未找到节点：$id"; return 3; }
@@ -890,12 +945,10 @@ proxy_subscription() {
             *) vps_cmd_error "subscription 的未知选项：$arg"; return 2 ;;
         esac
     done
-    [[ "$core" == "all" ]] || proxy_core_valid "$core" || return 2
+    [[ "$core" == "all" ]] || proxy_core_valid "$core" || { vps_cmd_error "无效内核：$core"; return 2; }
     proxy_require_state_access || return $?
-    command -v jq >/dev/null 2>&1 && command -v base64 >/dev/null 2>&1 && command -v tr >/dev/null 2>&1 || {
-        vps_cmd_error "订阅输出需要 jq、base64 和 tr"
-        return 3
-    }
+    proxy_ensure_tools subscription jq base64 tr || return $?
+    if proxy_stop_after_dependency_plan; then return 0; fi
     [[ -f "$PROXY_MANIFEST" ]] || { vps_cmd_error "当前没有节点"; return 3; }
     proxy_manifest_validate_file "$PROXY_MANIFEST" || return $?
     while IFS= read -r node; do
@@ -942,8 +995,9 @@ proxy_node_edit() (
     local id="" name="" listen="" port="" address="" sni="" path="" service_name=""
     local requested_cert_mode="" import_cert="" import_key="" obfs_type="" up_mbps="" down_mbps="" congestion_control="" arg
     local node current_node core profile old_port old_cert_mode cert_mode candidate_node candidate_manifest candidate_config status=0
-    local field transport current confirm_status=0
+    local field transport current confirm_status=0 certificate_tools_needed=0
     local -a edit_fields=()
+    local -a required_tools=()
     while (($#)); do
         arg="$1"
         case "$arg" in
@@ -967,7 +1021,35 @@ proxy_node_edit() (
     done
     local had_explicit_change=0
     [[ -z "$name$listen$port$address$sni$path$service_name$requested_cert_mode$import_cert$import_key$obfs_type$up_mbps$down_mbps$congestion_control" ]] || had_explicit_change=1
+    if [[ -n "$id" && ! "$id" =~ ^node-[a-f0-9]{16}$ ]]; then
+        vps_cmd_error "node edit 需要有效 --id"
+        return 2
+    fi
+    if [[ -z "$id" && ! proxy_is_interactive ]]; then
+        vps_cmd_error "node edit 需要有效 --id"
+        return 2
+    fi
+    if ((had_explicit_change == 0)) && ! proxy_is_interactive; then
+        vps_cmd_error "node edit 至少需要一个变更字段"
+        return 2
+    fi
+    [[ -z "$name" ]] || proxy_valid_name "$name" || { vps_cmd_error "节点名称不能为空、不能换行且最多 128 个字符"; return 2; }
+    [[ -z "$port" ]] || proxy_valid_port "$port" || { vps_cmd_error "监听端口无效：$port"; return 2; }
+    [[ -z "$address" ]] || proxy_valid_host "$address" || { vps_cmd_error "连接地址无效"; return 2; }
+    [[ -z "$listen" || "$listen" == "::" || "$listen" == "0.0.0.0" || "$listen" =~ ^[A-Fa-f0-9:.]+$ ]] || { vps_cmd_error "监听地址无效"; return 2; }
+    [[ -z "$sni" ]] || proxy_valid_host "$sni" || { vps_cmd_error "SNI 无效"; return 2; }
+    [[ -z "$path" ]] || proxy_valid_path "$path" || { vps_cmd_error "传输路径无效"; return 2; }
+    [[ -z "$service_name" || "$service_name" =~ ^[A-Za-z0-9._/-]{1,128}$ ]] || { vps_cmd_error "gRPC serviceName 无效"; return 2; }
+    [[ -z "$requested_cert_mode" || "$requested_cert_mode" == "self-signed" || "$requested_cert_mode" == "imported" ]] || { vps_cmd_error "--cert-mode 仅支持 self-signed|imported"; return 2; }
+    [[ -z "$import_cert$import_key" || ( -n "$import_cert" && -n "$import_key" ) ]] || { vps_cmd_error "证书和私钥必须成对提供"; return 2; }
+    [[ -z "$obfs_type" || "$obfs_type" == "none" || "$obfs_type" == "salamander" ]] || { vps_cmd_error "--obfs 仅支持 none|salamander"; return 2; }
+    [[ -z "$up_mbps" || "$up_mbps" =~ ^[1-9][0-9]*$ ]] || { vps_cmd_error "上行带宽必须是正整数 Mbps"; return 2; }
+    [[ -z "$down_mbps" || "$down_mbps" =~ ^[1-9][0-9]*$ ]] || { vps_cmd_error "下行带宽必须是正整数 Mbps"; return 2; }
+    case "$congestion_control" in '' | bbr | cubic | new_reno) ;; *) vps_cmd_error "拥塞控制仅支持 bbr|cubic|new_reno"; return 2 ;; esac
     vps_cmd_require_root || return $?
+    proxy_require_platform || return $?
+    proxy_ensure_mutation_tools node-edit jq || return $?
+    if proxy_stop_after_dependency_plan; then return 0; fi
     proxy_prepare_manifest_state || return $?
     if [[ -z "$id" && proxy_is_interactive ]]; then
         id="$(proxy_node_select_interactive "请选择要编辑的节点")" || return $?
@@ -1115,6 +1197,9 @@ proxy_node_edit() (
             esac
         done
     fi
+    if proxy_profile_requires_tls_certificate "$profile" && [[ -n "$requested_cert_mode$import_cert$import_key$sni" ]]; then
+        certificate_tools_needed=1
+    fi
     name="${name:-$(jq -r '.name' <<<"$node")}"
     listen="${listen:-$(jq -r '.listen' <<<"$node")}"
     port="${port:-$old_port}"
@@ -1126,8 +1211,6 @@ proxy_node_edit() (
     up_mbps="${up_mbps:-$(jq -r '.options.up_mbps' <<<"$node")}"
     down_mbps="${down_mbps:-$(jq -r '.options.down_mbps' <<<"$node")}"
     congestion_control="${congestion_control:-$(jq -r '.options.congestion_control' <<<"$node")}"
-    proxy_require_unique_name "$name" "$id" || return $?
-    proxy_require_available_port "$port" "$id" "$old_port" || return $?
     proxy_valid_host "$address" || { vps_cmd_error "连接地址无效"; return 2; }
     [[ "$listen" == "::" || "$listen" == "0.0.0.0" || "$listen" =~ ^[A-Fa-f0-9:.]+$ ]] || return 2
     if [[ -n "$path" ]] && ! proxy_valid_path "$path"; then vps_cmd_error "传输路径无效"; return 2; fi
@@ -1143,6 +1226,18 @@ proxy_node_edit() (
         vps_cmd_error "${profile} 不使用受管 TLS 证书，不能修改证书选项"
         return 2
     fi
+    if [[ -n "$port" && "$port" != "$old_port" ]]; then
+        required_tools+=(ss)
+    fi
+    if ((certificate_tools_needed)); then
+        required_tools+=(openssl sha256sum)
+    fi
+    if ((${#required_tools[@]} > 0)); then
+        proxy_ensure_tools node-edit "${required_tools[@]}" || return $?
+        if proxy_stop_after_dependency_plan; then return 0; fi
+    fi
+    proxy_require_unique_name "$name" "$id" || return $?
+    proxy_require_available_port "$port" "$id" "$old_port" || return $?
     port=$((10#$port))
     up_mbps=$((10#$up_mbps))
     down_mbps=$((10#$down_mbps))
@@ -1247,7 +1342,18 @@ proxy_node_delete() (
             *) vps_cmd_error "node delete 的未知选项：$arg"; return 2 ;;
         esac
     done
+    if [[ -n "$id" && ! "$id" =~ ^node-[a-f0-9]{16}$ ]]; then
+        vps_cmd_error "node delete 需要有效 --id"
+        return 2
+    fi
+    if [[ -z "$id" && ! proxy_is_interactive ]]; then
+        vps_cmd_error "node delete 需要有效 --id"
+        return 2
+    fi
     vps_cmd_require_root || return $?
+    proxy_require_platform || return $?
+    proxy_ensure_mutation_tools node-delete jq || return $?
+    if proxy_stop_after_dependency_plan; then return 0; fi
     proxy_prepare_manifest_state || return $?
     if [[ -z "$id" ]] && proxy_is_interactive; then
         id="$(proxy_node_select_interactive "请选择要删除的节点")" || return $?

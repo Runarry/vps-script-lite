@@ -18,6 +18,40 @@ PROXY_INIT_SYSTEM="unknown"
 PROXY_PACKAGE_MANAGER="unknown"
 PROXY_ARCH="unknown"
 
+proxy_ensure_tools() {
+    local feature="${1:-}" status=0
+    shift || return 2
+    if vps_cmd_ensure_tools "proxy-${feature}" "$@"; then
+        return 0
+    else
+        status=$?
+    fi
+    if ((status == 3)) && [[ "${VPSCTL_INSTALL_DEPS:-0}" != "1" ]]; then
+        vps_cmd_error "缺少必需的系统工具；请使用 --install-deps 明确允许安装依赖"
+    fi
+    return "$status"
+}
+
+proxy_ensure_mutation_tools() {
+    local feature="${1:-}"
+    local -a tools=()
+
+    (($# >= 1)) || {
+        vps_cmd_error "proxy_ensure_mutation_tools 需要 FEATURE"
+        return 2
+    }
+    shift
+    tools=("$@")
+    [[ "${VPSCTL_DRY_RUN:-0}" == "1" ]] || tools+=(flock)
+    ((${#tools[@]} > 0)) || return 0
+    proxy_ensure_tools "$feature" "${tools[@]}"
+}
+
+proxy_stop_after_dependency_plan() {
+    [[ "${VPS_CMD_DEPENDENCIES_PLANNED:-0}" == "1" ]] || return 1
+    vps_cmd_info "依赖仅完成安装计划；请安装依赖后重跑完整计划"
+}
+
 proxy_is_interactive() {
     # Capture the real terminal state before any command substitution redirects
     # stdout.  Subshells inherit this scalar without re-testing the pipe.

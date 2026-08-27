@@ -102,8 +102,9 @@ proxy_usage() {
 --core CORE，install/update 还支持 --core all。非交互模式存在多个候选
 时必须显式指定 --core。
 
-全局选项 --dry-run、--yes、--non-interactive、--quiet、--verbose、
---no-color 应放在 service 之前；直接执行本脚本时也可放在 action 之前。
+全局选项 --dry-run、--install-deps、--yes、--non-interactive、--quiet、
+--verbose、--no-color 应放在 service 之前；直接执行本脚本时也可放在
+action 之前。--install-deps 明确允许安装当前动作缺少的系统工具。
 EOF
 }
 
@@ -112,6 +113,7 @@ proxy_parse_direct_globals() {
     while (($#)); do
         case "$1" in
             --dry-run) VPSCTL_DRY_RUN=1 ;;
+            --install-deps) VPSCTL_INSTALL_DEPS=1 ;;
             --yes) VPSCTL_ASSUME_YES=1 ;;
             --non-interactive) VPSCTL_NON_INTERACTIVE=1 ;;
             --quiet) VPSCTL_QUIET=1 ;;
@@ -238,7 +240,7 @@ proxy_prompt_core() {
 }
 
 proxy_resolve_lifecycle_core() {
-    local requested="$1" action="$2" allow_all="${3:-0}" mode="registered"
+    local requested="$1" action="$2" allow_all="${3:-0}"
     if [[ -n "$requested" ]]; then
         if [[ "$requested" == "all" && "$allow_all" == "1" ]]; then
             printf 'all'
@@ -248,11 +250,6 @@ proxy_resolve_lifecycle_core() {
             vps_cmd_error "无效内核：$requested"
             return 2
         }
-        [[ "$action" == "install" ]] && mode="install"
-        if [[ "$mode" == "registered" ]] && ! proxy_core_registered "$requested"; then
-            vps_cmd_error "内核尚未登记：$requested"
-            return 3
-        fi
         printf '%s' "$requested"
         return 0
     fi

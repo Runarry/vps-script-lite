@@ -61,6 +61,7 @@ bbr_usage() {
   --algorithm ALG      指定当前内核列出的 TCP 算法
   --qdisc QDISC        指定默认 qdisc（例如 fq 或 fq_codel）
   --apply-live-qdisc   立即替换默认路由网卡的 root qdisc
+  --install-deps       明确允许安装缺失的系统工具
   --dry-run            仅显示计划，不修改系统
   --yes                 自动同意普通确认提示
   --non-interactive    禁止从终端读取输入
@@ -93,6 +94,7 @@ bbr_parse_args() {
     : "${VPSCTL_DRY_RUN:=0}"
     : "${VPSCTL_ASSUME_YES:=0}"
     : "${VPSCTL_NON_INTERACTIVE:=0}"
+    : "${VPSCTL_INSTALL_DEPS:=0}"
 
     while (($# > 0)); do
         case "$1" in
@@ -138,6 +140,9 @@ bbr_parse_args() {
                 ;;
             --apply-live-qdisc)
                 BBR_APPLY_LIVE_QDISC=1
+                ;;
+            --install-deps)
+                VPSCTL_INSTALL_DEPS=1
                 ;;
             --)
                 shift
@@ -214,6 +219,44 @@ bbr_algorithm_available() {
         [[ "$item" == "$requested" ]] && return 0
     done
     return 1
+}
+
+bbr_ensure_dependencies() {
+    local action="$1"
+    local algorithm="${2:-}"
+    local -a tools=()
+
+    case "$action" in
+        status)
+            [[ "${VPSCTL_INSTALL_DEPS:-0}" == "1" ]] || return 0
+            tools=(sysctl ip tc)
+            ;;
+        enable | set)
+            tools=(sysctl base64)
+            [[ "${VPSCTL_DRY_RUN:-0}" == "1" ]] || tools+=(flock)
+            if [[ "$BBR_APPLY_LIVE_QDISC" == "1" ]]; then
+                tools+=(ip tc)
+            fi
+            ;;
+        restore)
+            tools=(sysctl base64 ip tc)
+            [[ "${VPSCTL_DRY_RUN:-0}" == "1" ]] || tools+=(flock)
+            ;;
+        *)
+            return 0
+            ;;
+    esac
+
+    vps_cmd_ensure_tools network-bbr "${tools[@]}" || return $?
+    [[ "${VPS_CMD_DEPENDENCIES_PLANNED:-0}" != "1" ]] || return 0
+    if [[ "$algorithm" == "bbr" ]] && ! bbr_algorithm_available bbr; then
+        vps_cmd_ensure_tools network-bbr modprobe
+    fi
+}
+
+bbr_stop_after_dependency_plan() {
+    [[ "${VPS_CMD_DEPENDENCIES_PLANNED:-0}" == "1" ]] || return 1
+    vps_cmd_info "依赖仅完成安装计划；请安装依赖后重新运行以查看完整计划"
 }
 
 bbr_status() {
@@ -864,7 +907,6 @@ bbr_apply_settings() {
     local locked=0
     local unmanaged_confirmed=0
 
-    vps_cmd_require_root || return $?
     bbr_validate_name "$algorithm" || {
         vps_cmd_error "TCP 算法名称无效：${algorithm}"
         return 10
@@ -873,6 +915,11 @@ bbr_apply_settings() {
         vps_cmd_error "qdisc 名称无效：${qdisc}"
         return 10
     }
+    bbr_ensure_dependencies "${BBR_ACTION:-set}" "$algorithm" || return $?
+    if bbr_stop_after_dependency_plan; then
+        return 0
+    fi
+    vps_cmd_require_root || return $?
     if [[ -e "$BBR_ORIGINAL_FILE" ]]; then
         bbr_load_original || return $?
     else
@@ -961,8 +1008,18 @@ bbr_restore() {
     local locked=0
     local partial_status=0
 
+    bbr_ensure_dependencies restore || return $?
+    if bbr_stop_after_dependency_plan; then
+        return 0
+    fi
     vps_cmd_require_root || return $?
     bbr_load_original || return $?
+    if [[ "$BBR_ORIGINAL_ALGORITHM" == "bbr" ]] && ! bbr_algorithm_available bbr; then
+        bbr_ensure_dependencies restore "$BBR_ORIGINAL_ALGORITHM" || return $?
+        if bbr_stop_after_dependency_plan; then
+            return 0
+        fi
+    fi
     bbr_validate_managed_paths || return $?
     bbr_validate_restore_ownership || return $?
     if bbr_persistence_matches_saved_original && bbr_runtime_matches_saved_original && bbr_live_matches_saved_original; then
@@ -1089,6 +1146,12 @@ bbr_main() {
     fi
     bbr_require_linux || return $?
     if [[ -z "$BBR_ACTION" ]]; then
+        if [[ "${VPSCTL_INSTALL_DEPS:-0}" == "1" ]]; then
+            bbr_ensure_dependencies status || return $?
+            if bbr_stop_after_dependency_plan; then
+                return 0
+            fi
+        fi
         if vps_cmd_is_interactive; then
             bbr_interactive_menu
         else
@@ -1103,6 +1166,10 @@ bbr_main() {
                 bbr_die_usage "status 不接受设置选项"
                 return $?
             }
+            bbr_ensure_dependencies status || return $?
+            if bbr_stop_after_dependency_plan; then
+                return 0
+            fi
             bbr_status
             ;;
         enable)

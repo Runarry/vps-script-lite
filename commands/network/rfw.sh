@@ -15,6 +15,7 @@ readonly RFW_PROJECT_ROOT
 # shellcheck source=../../lib/command.sh
 source "${RFW_PROJECT_ROOT}/lib/command.sh"
 vps_cmd_init rfw "$RFW_PROJECT_ROOT"
+: "${VPSCTL_INSTALL_DEPS:=0}"
 
 # Keep all path mapping, mutation execution, locking, backups, and token prompts
 # behind lib/command.sh's public API.  These tiny adapters accept already-mapped
@@ -117,7 +118,7 @@ RFW 当前仅过滤 IPv4。启用 block-all 或 FET strict 时，交互模式必
 APPLY-RFW；非交互模式必须显式传入 --confirm-disruptive。--yes 不能绕过此确认。
 
 全局选项（必须位于动作之前）：
-  --dry-run  --yes  --non-interactive  --quiet  --verbose  --no-color  --
+  --install-deps  --dry-run  --yes  --non-interactive  --quiet  --verbose  --no-color  --
 EOF
 }
 
@@ -182,6 +183,7 @@ rfw_parse_global_options() {
     RFW_ARGS=()
     while (($#)); do
         case "$1" in
+            --install-deps) VPSCTL_INSTALL_DEPS=1 ;;
             --dry-run) VPSCTL_DRY_RUN=1 ;;
             --yes) VPSCTL_ASSUME_YES=1 ;;
             --non-interactive) VPSCTL_NON_INTERACTIVE=1 ;;
@@ -438,6 +440,46 @@ rfw_kernel_supported() {
         rfw_error "RFW 需要 Linux 内核 5.15 或更高版本（当前 ${release}）"
         return 3
     fi
+}
+
+rfw_platform_gate() {
+    rfw_platform_target >/dev/null || return
+    rfw_kernel_supported
+}
+
+rfw_managed_files_present() {
+    if [[ -f "$RFW_BINARY" && ! -L "$RFW_BINARY" && -x "$RFW_BINARY" ]] &&
+        rfw_is_managed_file "$RFW_CONFIG" &&
+        rfw_is_managed_file "$RFW_UNIT" &&
+        rfw_load_metadata; then
+        return 0
+    fi
+    return 1
+}
+
+rfw_require_managed_files() {
+    rfw_managed_files_present && return 0
+    rfw_error "需要完整且由 vpsctl 管理的 RFW 安装"
+    return 3
+}
+
+rfw_ensure_dependencies() {
+    local status=0
+
+    if vps_cmd_ensure_tools network-rfw "$@"; then
+        return 0
+    else
+        status=$?
+    fi
+    if ((status == 3)) && [[ "${VPSCTL_INSTALL_DEPS:-0}" != "1" ]]; then
+        rfw_error "缺少必需的系统工具；请使用 --install-deps 明确允许安装依赖"
+    fi
+    return "$status"
+}
+
+rfw_stop_after_dependency_plan() {
+    [[ "${VPS_CMD_DEPENDENCIES_PLANNED:-0}" == "1" ]] || return 1
+    rfw_info "依赖仅完成安装计划；请安装依赖后重新运行以继续安全验证"
 }
 
 rfw_runtime_preflight() {
@@ -830,6 +872,7 @@ rfw_write_config_and_unit() {
 
 rfw_install_or_update() {
     local action="$1" force=0 arg tmp_dir downloaded status
+    local -a dependency_tools=(curl sha256sum)
     local binary_backup="" config_backup="" unit_backup="" metadata_backup="" previous_backup=""
     local pending_binary_backup="" pending_config_backup="" pending_metadata_backup=""
     local binary_existed=0 config_existed=0 unit_existed=0 metadata_existed=0
@@ -850,25 +893,42 @@ rfw_install_or_update() {
         shift
     done
     rfw_require_root || return
-    rfw_platform_target >/dev/null || return
-    if [[ "$action" == "install" ]] && rfw_is_managed_install; then
-        rfw_success "RFW 已安装并通过验证，无需更改。"
-        return 0
-    fi
+    rfw_platform_gate || return
     if [[ -L "$RFW_BINARY" || -L "$RFW_CONFIG" || -L "$RFW_UNIT" ]]; then
         rfw_error "拒绝操作包含符号链接的 RFW 文件"
         return 3
     fi
     if [[ "$action" == "update" ]]; then
-        rfw_require_managed_install || return
+        rfw_require_managed_files || return
         rfw_validate_pending_backups || return
     else
         rfw_confirm_overwrite "$force" || return
         [[ "$RFW_CONFIRM_APPROVED" == "1" ]] || return 0
-        if [[ "$force" == "0" ]] && rfw_install_owned && [[ -e "$RFW_BINARY" && -e "$RFW_UNIT" && -e "$RFW_CONFIG" ]]; then
-            rfw_error "RFW 已安装；如需替换受管二进制，请使用 update"
-            return 3
+    fi
+
+    if [[ "$action" == "install" ]] && rfw_managed_files_present; then
+        rfw_ensure_dependencies sha256sum || return
+        if rfw_stop_after_dependency_plan; then
+            return 0
         fi
+        if rfw_is_managed_install; then
+            rfw_success "RFW 已安装并通过验证，无需更改。"
+            return 0
+        fi
+    fi
+    if [[ "$action" == "install" && "$force" == "0" ]] &&
+        rfw_install_owned && [[ -e "$RFW_BINARY" && -e "$RFW_UNIT" && -e "$RFW_CONFIG" ]]; then
+        rfw_error "RFW 已安装；如需替换受管二进制，请使用 update"
+        return 3
+    fi
+    [[ "$action" == "install" ]] && dependency_tools+=(ip)
+    [[ "${VPSCTL_DRY_RUN:-0}" == "1" ]] || dependency_tools+=(flock)
+    rfw_ensure_dependencies "${dependency_tools[@]}" || return
+    if rfw_stop_after_dependency_plan; then
+        return 0
+    fi
+    if [[ "$action" == "update" ]]; then
+        rfw_require_managed_install || return
     fi
 
     rfw_take_lock
@@ -1026,10 +1086,10 @@ rfw_configure_wizard() {
 
 rfw_configure() {
     local changed=0 config_backup="" unit_backup="" previous_binary_backup="" previous_config_backup="" previous_metadata_backup="" pending_config_backup="" key value new_config new_unit
+    local -a dependency_tools=(sha256sum)
     rfw_require_root || return
-    rfw_platform_target >/dev/null || return
-    rfw_require_managed_install || return
-    rfw_validate_pending_backups || return
+    rfw_platform_gate || return
+    rfw_require_managed_files || return
     rfw_load_config || return
 
     while (($#)); do
@@ -1080,6 +1140,13 @@ rfw_configure() {
         fi
     fi
     rfw_validate_config || return
+    [[ "${VPSCTL_DRY_RUN:-0}" == "1" ]] || dependency_tools+=(flock)
+    rfw_ensure_dependencies "${dependency_tools[@]}" || return
+    if rfw_stop_after_dependency_plan; then
+        return 0
+    fi
+    rfw_require_managed_install || return
+    rfw_validate_pending_backups || return
     new_config="$(rfw_emit_config)"
     new_unit="$(rfw_emit_unit)"
     if cmp -s <(printf '%s\n' "$new_config") "$RFW_CONFIG" && cmp -s <(printf '%s\n' "$new_unit") "$RFW_UNIT"; then
@@ -1243,6 +1310,14 @@ rfw_restore_pending() {
     return 1
 }
 
+rfw_ensure_runtime_dependencies() {
+    local -a tools=(sha256sum ip)
+
+    [[ "${RFW_CFG[log]}" == "on" ]] && tools+=(mountpoint)
+    [[ "${VPSCTL_DRY_RUN:-0}" == "1" ]] || tools+=(flock)
+    rfw_ensure_dependencies "${tools[@]}"
+}
+
 rfw_service_start() {
     local enable=0 confirmed=0 was_enabled=0 arg
     while (($#)); do
@@ -1263,14 +1338,20 @@ rfw_service_start() {
         esac
     done
     rfw_require_root || return
-    rfw_require_managed_install || return
+    rfw_platform_gate || return
+    rfw_require_managed_files || return
     rfw_load_config || return
     rfw_has_effective_policy || {
         rfw_error "未启用任何过滤规则或端口日志，拒绝启动"
         return 3
     }
-    rfw_runtime_preflight || return
     rfw_validate_pending_backups || return
+    rfw_ensure_runtime_dependencies || return
+    if rfw_stop_after_dependency_plan; then
+        return 0
+    fi
+    rfw_require_managed_install || return
+    rfw_runtime_preflight || return
     if systemctl is-active --quiet rfw.service && [[ -e "$RFW_PENDING" ]]; then
         rfw_error "RFW 正在运行且存在待生效更改；请使用 restart 安全应用"
         return 3
@@ -1322,7 +1403,13 @@ rfw_service_stop() {
         shift
     done
     rfw_require_root || return
-    rfw_platform_target >/dev/null || return
+    rfw_platform_gate || return
+    if [[ "${VPSCTL_DRY_RUN:-0}" != "1" ]]; then
+        rfw_ensure_dependencies flock || return
+        if rfw_stop_after_dependency_plan; then
+            return 0
+        fi
+    fi
     rfw_take_lock
     run systemctl stop rfw.service || return 20
     if ((disable)); then
@@ -1347,14 +1434,20 @@ rfw_service_restart() {
         esac
     done
     rfw_require_root || return
-    rfw_require_managed_install || return
+    rfw_platform_gate || return
+    rfw_require_managed_files || return
     rfw_load_config || return
     rfw_has_effective_policy || {
         rfw_error "未启用任何过滤规则或端口日志，拒绝重启"
         return 3
     }
-    rfw_runtime_preflight || return
     rfw_validate_pending_backups || return
+    rfw_ensure_runtime_dependencies || return
+    if rfw_stop_after_dependency_plan; then
+        return 0
+    fi
+    rfw_require_managed_install || return
+    rfw_runtime_preflight || return
     rfw_require_disruptive_confirmation "$confirmed" || return
     [[ "$RFW_CONFIRM_APPROVED" == "1" ]] || return 0
     rfw_take_lock
@@ -1389,6 +1482,13 @@ rfw_status() {
     local version="未安装或不受管" active="未安装" enabled="未安装" pending="否" config="未安装" pending_reason=""
     local countries_display
     local active_style="muted" enabled_style="muted" pending_style="success" config_style="muted"
+    if [[ "${VPSCTL_INSTALL_DEPS:-0}" == "1" ]]; then
+        rfw_platform_gate || return
+        rfw_ensure_dependencies sha256sum || return
+        if rfw_stop_after_dependency_plan; then
+            return 0
+        fi
+    fi
     if rfw_is_managed_install; then
         version="$("$RFW_BINARY" --version 2>/dev/null | head -n 1 || printf '已安装（无法获取版本）') [${RFW_META_TAG}]"
         active="$(systemctl is-active rfw.service 2>/dev/null || true)"
@@ -1471,18 +1571,6 @@ rfw_status() {
 rfw_stats() {
     local arg blocked=0 allowed=0
     local -a args=(stats)
-    rfw_require_root || return
-    rfw_platform_target >/dev/null || return
-    rfw_require_managed_install || return
-    systemctl is-active --quiet rfw.service || {
-        rfw_error "查看统计信息前，rfw.service 必须处于运行状态"
-        return 3
-    }
-    rfw_load_config || return
-    [[ "${RFW_CFG[log]}" == "on" ]] || {
-        rfw_error "统计信息要求 log-port-access=on"
-        return 3
-    }
     while (($#)); do
         arg="$1"
         case "$arg" in
@@ -1534,13 +1622,29 @@ rfw_stats() {
         rfw_error "--blocked-only 与 --allowed-only 不能同时使用"
         return 2
     }
+    rfw_require_root || return
+    rfw_platform_gate || return
+    rfw_require_managed_files || return
+    rfw_load_config || return
+    [[ "${RFW_CFG[log]}" == "on" ]] || {
+        rfw_error "统计信息要求 log-port-access=on"
+        return 3
+    }
+    systemctl is-active --quiet rfw.service || {
+        rfw_error "查看统计信息前，rfw.service 必须处于运行状态"
+        return 3
+    }
+    rfw_ensure_dependencies sha256sum || return
+    if rfw_stop_after_dependency_plan; then
+        return 0
+    fi
+    rfw_require_managed_install || return
     "$RFW_BINARY" "${args[@]}" || return 20
 }
 
 rfw_logs() {
     local arg
     local -a args=(-u rfw.service --no-pager)
-    rfw_platform_target >/dev/null || return
     while (($#)); do
         arg="$1"
         case "$arg" in
@@ -1578,6 +1682,11 @@ rfw_logs() {
                 ;;
         esac
     done
+    rfw_platform_gate || return
+    command -v journalctl >/dev/null 2>&1 || {
+        rfw_error "缺少必需命令 journalctl"
+        return 3
+    }
     journalctl "${args[@]}" || return 20
 }
 
@@ -1626,7 +1735,7 @@ rfw_uninstall() {
         esac
     done
     rfw_require_root || return
-    rfw_platform_target >/dev/null || return
+    rfw_platform_gate || return
     if ((purge)); then
         rfw_confirm_purge "$confirmed" || return
         [[ "$RFW_CONFIRM_APPROVED" == "1" ]] || return 0
@@ -1642,6 +1751,12 @@ rfw_uninstall() {
     if ((purge)) && [[ -e "$RFW_CONFIG" ]] && ! rfw_is_managed_file "$RFW_CONFIG"; then
         rfw_error "拒绝彻底清除不受管的 RFW 配置"
         return 3
+    fi
+    if [[ "${VPSCTL_DRY_RUN:-0}" != "1" ]]; then
+        rfw_ensure_dependencies flock || return
+        if rfw_stop_after_dependency_plan; then
+            return 0
+        fi
     fi
     rfw_take_lock
     if systemctl is-active --quiet rfw.service >/dev/null 2>&1; then run systemctl stop rfw.service || failed=1; fi

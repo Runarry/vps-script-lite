@@ -13,7 +13,7 @@ trap 'rm -rf -- "$TEST_SYSTEM_ROOT"' EXIT
 export VPSCTL_PROJECT_ROOT="$TEST_ROOT"
 export VPSCTL_TESTING=1
 export VPSCTL_SYSTEM_ROOT="$TEST_SYSTEM_ROOT"
-export VPSCTL_DRY_RUN=0 VPSCTL_ASSUME_YES=1 VPSCTL_NON_INTERACTIVE=1
+export VPSCTL_DRY_RUN=0 VPSCTL_INSTALL_DEPS=0 VPSCTL_ASSUME_YES=1 VPSCTL_NON_INTERACTIVE=1
 export VPSCTL_QUIET=1 VPSCTL_VERBOSE=0 VPSCTL_NO_COLOR=1
 
 mkdir -p "$TEST_SYSTEM_ROOT/etc" "$TEST_SYSTEM_ROOT/var/lib/vpsctl/backups/network/dns"
@@ -42,17 +42,101 @@ test_address_validation() {
 }
 
 test_standalone_globals() {
-    VPSCTL_DRY_RUN=0 VPSCTL_ASSUME_YES=0 VPSCTL_NON_INTERACTIVE=0 VPSCTL_QUIET=0 VPSCTL_VERBOSE=0
-    vps_dns_parse_standalone_globals --dry-run --yes --non-interactive --quiet --verbose --no-color -- set --server 1.1.1.1
+    VPSCTL_DRY_RUN=0 VPSCTL_INSTALL_DEPS=0 VPSCTL_ASSUME_YES=0 VPSCTL_NON_INTERACTIVE=0 VPSCTL_QUIET=0 VPSCTL_VERBOSE=0
+    vps_dns_parse_standalone_globals --dry-run --install-deps --yes --non-interactive --quiet --verbose --no-color -- set --server 1.1.1.1
     assert_equal 1 "$VPSCTL_DRY_RUN" "standalone dry-run"
+    assert_equal 1 "$VPSCTL_INSTALL_DEPS" "standalone install-deps"
     assert_equal 1 "$VPSCTL_ASSUME_YES" "standalone yes"
     assert_equal 1 "$VPSCTL_NON_INTERACTIVE" "standalone non-interactive"
     assert_equal 1 "$VPSCTL_QUIET" "standalone quiet"
     assert_equal 1 "$VPSCTL_VERBOSE" "standalone verbose"
     assert_equal 1 "$VPSCTL_NO_COLOR" "standalone no-color"
     assert_equal set "${VPS_DNS_ARGS[0]}" "standalone option terminator"
-    VPSCTL_DRY_RUN=0 VPSCTL_ASSUME_YES=1 VPSCTL_NON_INTERACTIVE=1 VPSCTL_QUIET=1 VPSCTL_VERBOSE=0
+    VPSCTL_DRY_RUN=0 VPSCTL_INSTALL_DEPS=0 VPSCTL_ASSUME_YES=1 VPSCTL_NON_INTERACTIVE=1 VPSCTL_QUIET=1 VPSCTL_VERBOSE=0
 }
+
+test_dependency_authorization() (
+    local calls=0 status=0
+
+    VPSCTL_DRY_RUN=0
+    VPSCTL_NON_INTERACTIVE=1
+    VPSCTL_INSTALL_DEPS=1
+    VPS_DNS_INSTALL_DEPS=0
+    vps_cmd_ensure_tools() {
+        assert_equal 1 "$VPSCTL_INSTALL_DEPS" "global dependency authorization passed to shared helper"
+        calls=$((calls + 1))
+    }
+    vps_dns_install_query_tool
+    assert_equal 1 "$calls" "global dependency authorization call count"
+    assert_equal 1 "$VPSCTL_INSTALL_DEPS" "global dependency authorization preserved"
+
+    calls=0
+    VPSCTL_INSTALL_DEPS=0
+    vps_dns_parse_servers --server 1.1.1.1 --install-deps
+    assert_equal 1 "$VPS_DNS_INSTALL_DEPS" "action dependency authorization"
+    vps_dns_install_query_tool
+    assert_equal 1 "$calls" "action dependency authorization call count"
+    assert_equal 0 "$VPSCTL_INSTALL_DEPS" "action authorization must not leak globally"
+
+    vps_dns_ensure_action_tools network-dns flock
+    assert_equal 2 "$calls" "action authorization covers transaction dependencies"
+    assert_equal 0 "$VPSCTL_INSTALL_DEPS" "transaction dependency authorization must not leak globally"
+
+    calls=0
+    status=0
+    VPSCTL_INSTALL_DEPS=1
+    VPS_DNS_INSTALL_DEPS=0
+    vps_cmd_ensure_tools() {
+        calls=$((calls + 1))
+        return 20
+    }
+    vps_dns_install_query_tool >/dev/null 2>&1 || status=$?
+    assert_equal 20 "$status" "dependency installer failure status"
+    assert_equal 1 "$calls" "failing dependency helper call count"
+    assert_equal 1 "$VPSCTL_INSTALL_DEPS" "global authorization restored after dependency failure"
+
+    calls=0
+    status=0
+    VPSCTL_INSTALL_DEPS=0
+    VPS_DNS_INSTALL_DEPS=0
+    vps_dns_install_query_tool >/dev/null 2>&1 || status=$?
+    assert_equal 3 "$status" "missing DNS dependency authorization status"
+    assert_equal 0 "$calls" "unauthorized DNS dependency helper call count"
+)
+
+test_dry_run_dependency_and_dns_plan() (
+    local empty_path output
+
+    VPSCTL_DRY_RUN=1
+    VPSCTL_INSTALL_DEPS=1
+    VPSCTL_QUIET=0
+    VPS_DNS_SERVERS=(9.9.9.9)
+    VPS_DNS_TEST_DOMAIN=example.com
+    vps_dns_query_tool() { return 1; }
+    vps_dns_install_query_tool() {
+        VPS_CMD_DEPENDENCIES_PLANNED=1
+        vps_cmd_info "演练：将安装 DNS 查询依赖"
+    }
+    vps_dns_detect_backend() {
+        VPS_DNS_BACKEND=plain
+        VPS_DNS_NM_CONNECTION=""
+        VPS_DNS_NM_DEVICE=""
+    }
+    vps_dns_require_writable_target() { return 0; }
+    vps_dns_write_plain() { vps_cmd_info "演练：将替换 /etc/resolv.conf"; }
+    vps_dns_refresh_backend() { vps_cmd_info "演练：将刷新 DNS 后端"; }
+
+    output="$(vps_dns_set 2>&1)"
+    assert_contains "$output" '将安装 DNS 查询依赖' "dry-run DNS dependency plan"
+    assert_contains "$output" '安装依赖后将查询候选 DNS 服务器' "dry-run deferred query plan"
+    assert_contains "$output" '将替换 /etc/resolv.conf' "dry-run DNS write plan after dependencies"
+    assert_contains "$output" '将刷新 DNS 后端' "dry-run DNS refresh plan after dependencies"
+
+    empty_path="${TEST_SYSTEM_ROOT}/empty-query-path"
+    mkdir -p -- "$empty_path"
+    output="$(PATH="$empty_path" vps_dns_verify_system_resolution 2>&1)"
+    assert_contains "$output" '安装依赖后将验证系统解析链路' "dry-run deferred verify plan"
+)
 
 test_chinese_status_without_ansi() {
     local output help_output
@@ -353,6 +437,8 @@ test_nm_restore_rejects_unknown_property() {
 
 test_address_validation
 test_standalone_globals
+test_dependency_authorization
+test_dry_run_dependency_and_dns_plan
 test_backend_detection
 test_preflight_failure_does_not_write
 test_plain_replacement_preserves_directives

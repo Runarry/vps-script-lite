@@ -13,6 +13,7 @@ readonly TEST_BBR="${TEST_ROOT}/commands/network/bbr.sh"
 readonly TEST_BASH="$(command -v bash)"
 readonly TEST_CAT="$(command -v cat)"
 readonly TEST_DIRNAME="$(command -v dirname)"
+readonly TEST_BASE64="$(command -v base64)"
 trap 'rm -rf -- "$TEST_TEMP"' EXIT
 
 test_fail() {
@@ -130,6 +131,12 @@ ln -s "$TEST_BASH" "${TEST_NO_MODPROBE_BIN}/bash"
 ln -s "$TEST_CAT" "${TEST_NO_MODPROBE_BIN}/cat"
 ln -s "$TEST_DIRNAME" "${TEST_NO_MODPROBE_BIN}/dirname"
 ln -s "${TEST_FAKE_BIN}/sysctl" "${TEST_NO_MODPROBE_BIN}/sysctl"
+ln -s "$TEST_BASE64" "${TEST_NO_MODPROBE_BIN}/base64"
+cat >"${TEST_NO_MODPROBE_BIN}/apt-get" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "${TEST_NO_MODPROBE_BIN}/apt-get"
 
 export VPSCTL_TESTING=1
 export VPSCTL_SYSTEM_ROOT="$TEST_SYSTEM_ROOT"
@@ -185,6 +192,15 @@ test_status_and_arguments() {
     test_assert_contains "$RUN_OUTPUT" "set --algorithm ALG --qdisc QDISC" "help syntax"
     test_assert_contains "$RUN_OUTPUT" "管理 TCP 拥塞控制算法" "Chinese help heading"
     test_assert_contains "$RUN_OUTPUT" "--no-color" "no-color help option"
+    test_assert_contains "$RUN_OUTPUT" "--install-deps" "install-deps help option"
+    RUN_BBR_PATH="$TEST_NO_MODPROBE_BIN" run_bbr --install-deps --help
+    test_assert_equal 0 "$RUN_STATUS" "install-deps help exit code"
+    test_assert_not_contains "$RUN_OUTPUT" "apt-get" "help dependency install plan"
+
+    run_bbr --install-deps status
+    test_assert_equal 0 "$RUN_STATUS" "install-deps direct global option exit code"
+    run_bbr --install-deps
+    test_assert_equal 0 "$RUN_STATUS" "install-deps default query exit code"
 
     run_bbr status --bogus
     test_assert_equal 2 "$RUN_STATUS" "unknown option exit code"
@@ -215,9 +231,20 @@ test_dry_run() {
     printf 'reno cubic\n' >"$available_path"
     RUN_BBR_PATH="$TEST_NO_MODPROBE_BIN" run_bbr --dry-run --yes set --algorithm bbr --qdisc fq
     test_assert_equal 3 "$RUN_STATUS" "missing modprobe dry-run exit code"
-    test_assert_contains "$RUN_OUTPUT" "系统未安装 modprobe" "missing modprobe dry-run message"
+    test_assert_contains "$RUN_OUTPUT" "--install-deps" "missing modprobe install hint"
     test_assert_not_contains "$RUN_OUTPUT" "变更失败，正在恢复" "missing modprobe dry-run rollback warning"
     test_assert_not_contains "$RUN_OUTPUT" "net.ipv4.tcp_congestion_control=cubic" "missing modprobe dry-run rollback plan"
+
+    RUN_BBR_PATH="$TEST_NO_MODPROBE_BIN" run_bbr --dry-run --install-deps --yes set --algorithm bbr --qdisc fq
+    test_assert_equal 0 "$RUN_STATUS" "planned modprobe dependency exit code"
+    test_assert_contains "$RUN_OUTPUT" "apt-get" "planned dependency package manager"
+    test_assert_contains "$RUN_OUTPUT" "kmod" "planned modprobe package"
+    test_assert_contains "$RUN_OUTPUT" "重新运行以查看完整计划" "planned dependency stop message"
+    test_assert_not_contains "$RUN_OUTPUT" "变更失败，正在恢复" "planned dependency rollback warning"
+    test_assert_not_contains "$RUN_OUTPUT" "原子写入" "planned dependency managed write"
+    [[ ! -e "${TEST_SYSTEM_ROOT}/etc/sysctl.d/90-vpsctl-bbr.conf" ]] || test_fail "planned dependency wrote sysctl config"
+    [[ ! -e "${TEST_SYSTEM_ROOT}/etc/modules-load.d/90-vpsctl-bbr.conf" ]] || test_fail "planned dependency wrote modules config"
+    [[ ! -e "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/network/bbr/original.conf" ]] || test_fail "planned dependency saved original state"
 
     run_bbr --dry-run --yes set --algorithm vegas --qdisc fq
     test_assert_equal 3 "$RUN_STATUS" "unavailable algorithm dry-run exit code"
