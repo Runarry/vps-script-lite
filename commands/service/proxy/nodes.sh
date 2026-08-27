@@ -71,12 +71,13 @@ proxy_profile_default_name() {
 }
 
 proxy_choose_core_for_profile() {
-    local profile="$1" requested="${2:-}" core label choice confirm_status=0 installed_count=0
-    local -a candidates=()
+    local profile="$1" requested="${2:-}" core selected confirm_status=0 installed_count=0
+    local -a candidates=() supported=() choices=()
     while IFS= read -r core; do
         [[ -n "$core" ]] && installed_count=$((installed_count + 1))
     done < <(proxy_installed_cores)
     while IFS= read -r core; do
+        supported+=("$core")
         proxy_core_registered "$core" && candidates+=("$core")
     done < <(proxy_profile_cores "$profile")
 
@@ -99,12 +100,40 @@ proxy_choose_core_for_profile() {
 
     case "${#candidates[@]}" in
         0)
-            vps_cmd_error "没有已安装且支持 ${profile} 的内核"
-            return 3
+            if ! proxy_is_interactive; then
+                vps_cmd_error "没有已安装且支持 ${profile} 的内核；请先安装兼容内核"
+                return 3
+            fi
+            ((${#supported[@]} > 0)) || {
+                vps_cmd_error "没有内核支持节点配置 ${profile}"
+                return 3
+            }
+            if ((${#supported[@]} == 1)); then
+                selected="${supported[0]}"
+                proxy_confirm "${profile} 需要尚未安装的 $(proxy_core_label "$selected")，现在安装？" || confirm_status=$?
+                if ((confirm_status != 0)); then
+                    [[ "$confirm_status" == "130" ]] && return 130
+                    vps_cmd_info "已取消添加节点"
+                    return 130
+                fi
+            else
+                for core in "${supported[@]}"; do
+                    choices+=("$core" "$(proxy_core_label "$core")（安装后使用）")
+                done
+                selected="$(proxy_prompt_select "请选择要安装的兼容内核" "" "${choices[@]}")" || return $?
+            fi
+            # This helper is consumed through command substitution; keep install
+            # progress visible without mixing it into the selected core value.
+            proxy_core_install "$selected" >&2 || return $?
+            [[ "${VPSCTL_DRY_RUN:-0}" == "1" ]] || proxy_core_registered "$selected" || {
+                vps_cmd_error "$(proxy_core_label "$selected") 安装后仍未登记"
+                return 20
+            }
+            printf '%s' "$selected"
             ;;
         1)
-            if ((installed_count > 1)) && vps_cmd_is_interactive; then
-                vps_cmd_confirm "${profile} 仅由 $(proxy_core_label "${candidates[0]}") 提供，确认使用该内核？" || confirm_status=$?
+            if ((installed_count > 1)) && proxy_is_interactive; then
+                proxy_confirm "${profile} 仅由 $(proxy_core_label "${candidates[0]}") 提供，确认使用该内核？" || confirm_status=$?
                 if ((confirm_status != 0)); then
                     [[ "$confirm_status" == "130" ]] && return 130
                     vps_cmd_info "已取消添加节点"
@@ -114,23 +143,29 @@ proxy_choose_core_for_profile() {
             printf '%s' "${candidates[0]}"
             ;;
         *)
-            if ! vps_cmd_is_interactive; then
+            if ! proxy_is_interactive; then
                 vps_cmd_error "多个已安装内核支持 ${profile}，请使用 --core sing-box|xray"
                 return 2
             fi
-            printf '以下内核支持 %s：\n' "$(proxy_profile_label "$profile")" >&2
-            local index
-            for ((index = 0; index < ${#candidates[@]}; index++)); do
-                label="$(proxy_core_label "${candidates[$index]}")"
-                printf '  [%d] %s\n' "$((index + 1))" "$label" >&2
+            for core in "${candidates[@]}"; do
+                choices+=("$core" "$(proxy_core_label "$core")")
             done
-            printf '请选择内核：' >&2
-            IFS= read -r choice || return 130
-            [[ "$choice" =~ ^[1-9][0-9]*$ ]] || return 2
-            ((10#$choice >= 1 && 10#$choice <= ${#candidates[@]})) || return 2
-            printf '%s' "${candidates[$((10#$choice - 1))]}"
+            proxy_prompt_select "请选择运行 $(proxy_profile_label "$profile") 的内核" "" "${choices[@]}"
             ;;
     esac
+}
+
+proxy_prompt_profile() {
+    local profile label
+    local -a choices=()
+    while IFS=$'\t' read -r profile label; do
+        choices+=("$profile" "${label}（${profile}）")
+    done < <(proxy_all_profiles)
+    ((${#choices[@]} > 0)) || {
+        vps_cmd_error "当前没有可用的节点配置"
+        return 3
+    }
+    proxy_prompt_select "请选择协议配置" "${choices[0]}" "${choices[@]}"
 }
 
 proxy_prompt_value() {
@@ -507,7 +542,7 @@ proxy_node_add() (
     local profile="" requested_core="" name="" listen="::" port="" address="" sni="www.amd.com"
     local path="" service_name="" cert_mode="self-signed" import_cert="" import_key=""
     local obfs_type="none" up_mbps=10000 down_mbps=10000 congestion_control="bbr" arg core id node
-    local candidate_manifest candidate_config status=0
+    local candidate_manifest candidate_config status=0 mode detected_address address_choice
     while (($#)); do
         arg="$1"
         case "$arg" in
@@ -535,54 +570,77 @@ proxy_node_add() (
         vps_cmd_error "添加节点需要 jq 和 openssl"
         return 3
     }
-    vps_cmd_require_root || return $?
-    proxy_require_platform || return $?
-    proxy_prepare_manifest_state || return $?
-
-    if [[ -z "$profile" && vps_cmd_is_interactive ]]; then
-        local -a profiles=() labels=()
-        local item choice index
-        while IFS=$'\t' read -r item arg; do profiles+=("$item"); labels+=("$arg"); done < <(proxy_all_profiles)
-        printf '请选择协议配置：\n' >&2
-        for ((index = 0; index < ${#profiles[@]}; index++)); do
-            printf '  [%d] %s (%s)\n' "$((index + 1))" "${labels[$index]}" "${profiles[$index]}" >&2
-        done
-        printf '选择：' >&2
-        IFS= read -r choice || return 130
-        [[ "$choice" =~ ^[1-9][0-9]*$ ]] || return 2
-        ((10#$choice <= ${#profiles[@]})) || return 2
-        profile="${profiles[$((10#$choice - 1))]}"
+    if [[ -z "$profile" && proxy_is_interactive ]]; then
+        profile="$(proxy_prompt_profile)" || return $?
     fi
     [[ -n "$profile" ]] || { vps_cmd_error "node add 需要 --profile"; return 2; }
     proxy_profile_cores "$profile" >/dev/null || { vps_cmd_error "未知节点配置：$profile"; return 2; }
+    vps_cmd_require_root || return $?
+    proxy_require_platform || return $?
     core="$(proxy_choose_core_for_profile "$profile" "$requested_core")" || return $?
+    proxy_prepare_manifest_state || return $?
 
-    address="${address:-$(proxy_default_address)}"
-    if vps_cmd_is_interactive; then
-        address="$(proxy_prompt_value "客户端连接地址（IP 或域名）" "$address")" || return $?
+    if proxy_is_interactive; then
         port="$(proxy_prompt_value "监听端口" "$port")" || return $?
-        name="$(proxy_prompt_value "节点名称" "${name:-$(proxy_profile_default_name "$profile" "$port")}")" || return $?
-        if proxy_profile_uses_reality "$profile" || proxy_profile_requires_tls_certificate "$profile" || [[ "$profile" == "shadowsocks-2022-shadowtls" ]]; then
-            sni="$(proxy_prompt_value "SNI/伪装域名" "$sni")" || return $?
+        [[ -n "$port" ]] || {
+            vps_cmd_error "监听端口不能为空"
+            return 2
+        }
+        detected_address="${address:-$(proxy_default_address)}"
+        if [[ -n "$detected_address" ]]; then
+            address_choice="$(proxy_prompt_select "客户端连接地址" "detected" \
+                detected "使用探测地址 ${detected_address}" manual "手动输入")" || return $?
+            if [[ "$address_choice" == "detected" ]]; then
+                address="$detected_address"
+            else
+                address="$(proxy_prompt_value "客户端连接地址（IP 或域名）" "")" || return $?
+            fi
+        else
+            vps_cmd_warning "未探测到本机全局地址"
+            address="$(proxy_prompt_value "客户端连接地址（IP 或域名）" "")" || return $?
         fi
-        case "$(proxy_profile_default_transport "$profile")" in
-            ws | xhttp) path="$(proxy_prompt_value "传输路径" "${path:-/$(proxy_random_hex 6)}")" || return $? ;;
-            grpc) service_name="$(proxy_prompt_value "gRPC serviceName" "${service_name:-grpc-$(proxy_random_hex 4)}")" || return $? ;;
-        esac
-        if proxy_profile_requires_tls_certificate "$profile"; then
-            local cert_choice
-            printf '证书方式：[1] 自签名  [2] 导入现有证书：' >&2
-            IFS= read -r cert_choice || return 130
-            case "${cert_choice:-1}" in
-                1) cert_mode="self-signed" ;;
-                2)
-                    cert_mode="imported"
+        mode="$(proxy_prompt_mode "请选择添加模式")" || return $?
+        if [[ "$mode" == "custom" ]]; then
+            name="$(proxy_prompt_value "节点名称" "${name:-$(proxy_profile_default_name "$profile" "$port")}")" || return $?
+            local listen_choice listen_default="$listen"
+            case "$listen_default" in
+                :: | 0.0.0.0) ;;
+                *) listen_default=manual ;;
+            esac
+            listen_choice="$(proxy_prompt_select "监听模式" "$listen_default" \
+                :: "IPv4 + IPv6（::）" 0.0.0.0 "仅 IPv4（0.0.0.0）" manual "手动输入监听地址")" || return $?
+            if [[ "$listen_choice" == manual ]]; then
+                listen="$(proxy_prompt_value "监听地址" "$listen")" || return $?
+            else
+                listen="$listen_choice"
+            fi
+            if proxy_profile_uses_reality "$profile" || proxy_profile_requires_tls_certificate "$profile" || [[ "$profile" == "shadowsocks-2022-shadowtls" ]]; then
+                sni="$(proxy_prompt_value "SNI/伪装域名" "$sni")" || return $?
+            fi
+            case "$(proxy_profile_default_transport "$profile")" in
+                ws | xhttp) path="$(proxy_prompt_value "传输路径" "${path:-/$(proxy_random_hex 6)}")" || return $? ;;
+                grpc) service_name="$(proxy_prompt_value "gRPC serviceName" "${service_name:-grpc-$(proxy_random_hex 4)}")" || return $? ;;
+            esac
+            if proxy_profile_requires_tls_certificate "$profile"; then
+                cert_mode="$(proxy_prompt_select "证书方式" "$cert_mode" \
+                    self-signed "生成自签名证书" imported "导入现有证书")" || return $?
+                if [[ "$cert_mode" == "imported" ]]; then
                     import_cert="$(proxy_prompt_value "证书文件绝对路径" "$import_cert")" || return $?
                     import_key="$(proxy_prompt_value "私钥文件绝对路径" "$import_key")" || return $?
-                    ;;
-                *) return 2 ;;
-            esac
+                fi
+            fi
+            if [[ "$profile" == "hysteria2" ]]; then
+                obfs_type="$(proxy_prompt_select "混淆方式" "$obfs_type" \
+                    none "不使用混淆" salamander "Salamander")" || return $?
+                up_mbps="$(proxy_prompt_value "上行 Mbps" "$up_mbps")" || return $?
+                down_mbps="$(proxy_prompt_value "下行 Mbps" "$down_mbps")" || return $?
+            elif [[ "$profile" == "tuic-v5" ]]; then
+                congestion_control="$(proxy_prompt_select "拥塞控制" "$congestion_control" \
+                    bbr BBR cubic CUBIC new_reno "New Reno")" || return $?
+            fi
         fi
+    else
+        address="${address:-$(proxy_default_address)}"
     fi
 
     [[ -n "$address" ]] || { vps_cmd_error "无法探测本机全局地址，请使用 --address"; return 2; }
@@ -704,12 +762,90 @@ proxy_node_list() {
         label="$(proxy_profile_label "$profile" 2>/dev/null || printf '%s' "$profile")"
         printf '[%d] %s\n' "$count" "$(jq -r '.name' <<<"$node")"
         printf '    ID：%s  内核：%s  配置：%s\n' \
-            "$(jq -r '.id' <<<"$node")" "$(jq -r '.core' <<<"$node")" "$label"
+            "$(jq -r '.id' <<<"$node")" "$(proxy_core_label "$(jq -r '.core' <<<"$node")")" "$label"
         printf '    监听：%s:%s  连接地址：%s\n' \
             "$(jq -r '.listen' <<<"$node")" "$(jq -r '.port' <<<"$node")" "$(jq -r '.address' <<<"$node")"
     done < <(jq -c --arg core "$core" '.nodes[] | select($core == "all" or .core == $core)' "$PROXY_MANIFEST")
     total="$(proxy_manifest_count all)"
     printf '当前筛选：%d 个；节点总数：%s 个\n' "$count" "$total"
+}
+
+proxy_node_select_interactive() {
+    local prompt="${1:-请选择节点}" node id core profile name label
+    local -a choices=()
+    proxy_is_interactive || {
+        vps_cmd_error "非交互模式必须显式提供节点 ID"
+        return 2
+    }
+    proxy_require_state_access || return $?
+    [[ -f "$PROXY_MANIFEST" ]] || {
+        vps_cmd_error "当前没有节点"
+        return 3
+    }
+    proxy_manifest_validate_file "$PROXY_MANIFEST" || return $?
+    proxy_node_list >&2 || return $?
+    while IFS= read -r node; do
+        id="$(jq -r '.id' <<<"$node")"
+        core="$(jq -r '.core' <<<"$node")"
+        profile="$(jq -r '.profile' <<<"$node")"
+        name="$(jq -r '.name' <<<"$node")"
+        label="$(proxy_profile_label "$profile" 2>/dev/null || printf '%s' "$profile")"
+        choices+=("$id" "${name} · $(proxy_core_label "$core") · ${label}")
+    done < <(jq -c '.nodes[]' "$PROXY_MANIFEST")
+    ((${#choices[@]} > 0)) || {
+        vps_cmd_error "当前没有节点"
+        return 3
+    }
+    proxy_prompt_select "$prompt" "${choices[0]}" "${choices[@]}"
+}
+
+proxy_node_details_print() {
+    local node="$1" profile transport
+    profile="$(jq -r '.profile' <<<"$node")"
+    transport="$(proxy_profile_default_transport "$profile")"
+    printf '节点详情\n'
+    printf '  名称：%s\n' "$(jq -r '.name' <<<"$node")"
+    printf '  ID：%s\n' "$(jq -r '.id' <<<"$node")"
+    printf '  内核：%s\n' "$(proxy_core_label "$(jq -r '.core' <<<"$node")")"
+    printf '  配置：%s（%s）\n' "$(proxy_profile_label "$profile" 2>/dev/null || printf '%s' "$profile")" "$profile"
+    printf '  监听：%s:%s\n' "$(jq -r '.listen' <<<"$node")" "$(jq -r '.port' <<<"$node")"
+    printf '  连接地址：%s\n' "$(jq -r '.address' <<<"$node")"
+    if proxy_profile_uses_reality "$profile" || proxy_profile_requires_tls_certificate "$profile" || [[ "$profile" == "shadowsocks-2022-shadowtls" ]]; then
+        printf '  SNI：%s\n' "$(jq -r '.tls.server_name' <<<"$node")"
+    fi
+    case "$transport" in
+        ws | xhttp) printf '  传输路径：%s\n' "$(jq -r '.transport.path' <<<"$node")" ;;
+        grpc) printf '  gRPC serviceName：%s\n' "$(jq -r '.transport.service_name' <<<"$node")" ;;
+    esac
+    if proxy_profile_requires_tls_certificate "$profile"; then
+        printf '  证书方式：%s\n' "$(jq -r '.tls.mode' <<<"$node")"
+    fi
+    if [[ "$profile" == "hysteria2" ]]; then
+        printf '  混淆：%s  带宽：%s/%s Mbps\n' \
+            "$(jq -r '.options.obfs_type' <<<"$node")" "$(jq -r '.options.up_mbps' <<<"$node")" "$(jq -r '.options.down_mbps' <<<"$node")"
+    elif [[ "$profile" == "tuic-v5" ]]; then
+        printf '  拥塞控制：%s\n' "$(jq -r '.options.congestion_control' <<<"$node")"
+    fi
+    printf '  创建：%s  更新：%s\n' "$(jq -r '.created_at' <<<"$node")" "$(jq -r '.updated_at' <<<"$node")"
+}
+
+proxy_node_view_interactive() {
+    local id action node core
+    id="$(proxy_node_select_interactive "请选择要查看的节点")" || return $?
+    node="$(proxy_manifest_node "$id")" || {
+        vps_cmd_error "未找到节点：$id"
+        return 3
+    }
+    action="$(proxy_prompt_select "请选择查看内容" details details "节点详情" uri "分享 URI")" || return $?
+    if [[ "$action" == "details" ]]; then
+        proxy_node_details_print "$node"
+        return
+    fi
+    core="$(jq -r '.core' <<<"$node")"
+    case "$core" in
+        sing-box) proxy_sb_render_uri "$node" ;;
+        xray) proxy_xray_render_uri "$node" ;;
+    esac
 }
 
 proxy_node_show() {
@@ -722,6 +858,13 @@ proxy_node_show() {
             *) vps_cmd_error "node show 的未知选项：$arg"; return 2 ;;
         esac
     done
+    if [[ -z "$id" && "$uri" == "0" ]] && proxy_is_interactive; then
+        proxy_node_view_interactive
+        return
+    fi
+    if [[ -z "$id" && "$uri" == "1" ]] && proxy_is_interactive; then
+        id="$(proxy_node_select_interactive "请选择要输出 URI 的节点")" || return $?
+    fi
     [[ "$id" =~ ^node-[a-f0-9]{16}$ ]] || { vps_cmd_error "node show 需要有效 --id"; return 2; }
     proxy_require_state_access || return $?
     [[ -f "$PROXY_MANIFEST" ]] || { vps_cmd_error "当前没有节点"; return 3; }
@@ -771,10 +914,36 @@ proxy_subscription() {
     printf '%s\n' "$encoded"
 }
 
+proxy_node_menu_run() {
+    local action status=0 prompt_status=0 ignored
+    while true; do
+        action="$(proxy_prompt_select "节点管理" view \
+            add "添加节点" view "查看节点" edit "编辑节点" delete "删除节点" \
+            subscription "输出全部节点订阅" back "返回代理管理")" || prompt_status=$?
+        if ((prompt_status != 0)); then
+            [[ "$prompt_status" == "130" ]] && return "$status"
+            return "$prompt_status"
+        fi
+        case "$action" in
+            add) proxy_menu_action proxy_node_add || status=$? ;;
+            view) proxy_menu_action proxy_node_view_interactive || status=$? ;;
+            edit) proxy_menu_action proxy_node_edit || status=$? ;;
+            delete) proxy_menu_action proxy_node_delete || status=$? ;;
+            subscription) proxy_menu_action proxy_subscription || status=$? ;;
+            back) return "$status" ;;
+        esac
+        printf '\n按 Enter 返回节点菜单...' >&2
+        IFS= read -r ignored || return "$status"
+        prompt_status=0
+    done
+}
+
 proxy_node_edit() (
     local id="" name="" listen="" port="" address="" sni="" path="" service_name=""
     local requested_cert_mode="" import_cert="" import_key="" obfs_type="" up_mbps="" down_mbps="" congestion_control="" arg
     local node current_node core profile old_port old_cert_mode cert_mode candidate_node candidate_manifest candidate_config status=0
+    local field transport current confirm_status=0
+    local -a edit_fields=()
     while (($#)); do
         arg="$1"
         case "$arg" in
@@ -796,45 +965,155 @@ proxy_node_edit() (
             *) vps_cmd_error "node edit 的未知选项：$arg"; return 2 ;;
         esac
     done
-    [[ "$id" =~ ^node-[a-f0-9]{16}$ ]] || { vps_cmd_error "node edit 需要有效 --id"; return 2; }
     local had_explicit_change=0
     [[ -z "$name$listen$port$address$sni$path$service_name$requested_cert_mode$import_cert$import_key$obfs_type$up_mbps$down_mbps$congestion_control" ]] || had_explicit_change=1
     vps_cmd_require_root || return $?
     proxy_prepare_manifest_state || return $?
+    if [[ -z "$id" && proxy_is_interactive ]]; then
+        id="$(proxy_node_select_interactive "请选择要编辑的节点")" || return $?
+    fi
+    [[ "$id" =~ ^node-[a-f0-9]{16}$ ]] || { vps_cmd_error "node edit 需要有效 --id"; return 2; }
     node="$(proxy_manifest_node "$id")" || { vps_cmd_error "未找到节点：$id"; return 3; }
     core="$(jq -r '.core' <<<"$node")"
     profile="$(jq -r '.profile' <<<"$node")"
     old_port="$(jq -r '.port' <<<"$node")"
     if ((had_explicit_change == 0)); then
-        vps_cmd_is_interactive || {
+        proxy_is_interactive || {
             vps_cmd_error "node edit 至少需要一个变更字段"
             return 2
         }
-        vps_cmd_info "编辑节点 $(jq -r '.name' <<<"$node")；直接回车保留当前值"
-        name="$(proxy_prompt_value "节点名称" "$(jq -r '.name' <<<"$node")")" || return $?
-        listen="$(proxy_prompt_value "监听地址" "$(jq -r '.listen' <<<"$node")")" || return $?
-        port="$(proxy_prompt_value "监听端口" "$old_port")" || return $?
-        address="$(proxy_prompt_value "客户端连接地址" "$(jq -r '.address' <<<"$node")")" || return $?
+        transport="$(proxy_profile_default_transport "$profile")"
+        edit_fields=(name "节点名称" listen "监听模式" port "监听端口" address "客户端连接地址")
         if proxy_profile_uses_reality "$profile" || proxy_profile_requires_tls_certificate "$profile" || [[ "$profile" == "shadowsocks-2022-shadowtls" ]]; then
-            sni="$(proxy_prompt_value "SNI/伪装域名" "$(jq -r '.tls.server_name' <<<"$node")")" || return $?
+            edit_fields+=(sni "SNI/伪装域名")
         fi
-        if proxy_profile_requires_tls_certificate "$profile" && \
-            [[ "$(jq -r '.tls.mode' <<<"$node")" == "imported" ]] && \
-            [[ "$sni" != "$(jq -r '.tls.server_name' <<<"$node")" ]]; then
-            import_cert="$(proxy_prompt_value "新证书文件绝对路径" "")" || return $?
-            import_key="$(proxy_prompt_value "新私钥文件绝对路径" "")" || return $?
-        fi
-        case "$(proxy_profile_default_transport "$profile")" in
-            ws | xhttp) path="$(proxy_prompt_value "传输路径" "$(jq -r '.transport.path' <<<"$node")")" || return $? ;;
-            grpc) service_name="$(proxy_prompt_value "gRPC serviceName" "$(jq -r '.transport.service_name' <<<"$node")")" || return $? ;;
+        case "$transport" in
+            ws | xhttp) edit_fields+=(path "传输路径") ;;
+            grpc) edit_fields+=(service "gRPC serviceName") ;;
         esac
-        if [[ "$profile" == "hysteria2" ]]; then
-            obfs_type="$(proxy_prompt_value "混淆（none/salamander）" "$(jq -r '.options.obfs_type' <<<"$node")")" || return $?
-            up_mbps="$(proxy_prompt_value "上行 Mbps" "$(jq -r '.options.up_mbps' <<<"$node")")" || return $?
-            down_mbps="$(proxy_prompt_value "下行 Mbps" "$(jq -r '.options.down_mbps' <<<"$node")")" || return $?
-        elif [[ "$profile" == "tuic-v5" ]]; then
-            congestion_control="$(proxy_prompt_value "拥塞控制（bbr/cubic/new_reno）" "$(jq -r '.options.congestion_control' <<<"$node")")" || return $?
+        if proxy_profile_requires_tls_certificate "$profile"; then
+            edit_fields+=(certificate "证书方式")
         fi
+        if [[ "$profile" == "hysteria2" ]]; then
+            edit_fields+=(obfs "混淆方式" up "上行 Mbps" down "下行 Mbps")
+        elif [[ "$profile" == "tuic-v5" ]]; then
+            edit_fields+=(congestion "拥塞控制")
+        fi
+        edit_fields+=(save "预览并保存" cancel "取消编辑")
+        while true; do
+            field="$(proxy_prompt_select "请选择要修改的字段" save "${edit_fields[@]}")" || return $?
+            case "$field" in
+                name)
+                    current="${name:-$(jq -r '.name' <<<"$node")}"
+                    name="$(proxy_prompt_value "节点名称" "$current")" || return $?
+                    had_explicit_change=1
+                    ;;
+                listen)
+                    current="${listen:-$(jq -r '.listen' <<<"$node")}"
+                    local listen_choice listen_default="$current"
+                    case "$listen_default" in
+                        :: | 0.0.0.0) ;;
+                        *) listen_default=manual ;;
+                    esac
+                    listen_choice="$(proxy_prompt_select "监听模式" "$listen_default" \
+                        :: "IPv4 + IPv6（::）" 0.0.0.0 "仅 IPv4（0.0.0.0）" manual "手动输入监听地址")" || return $?
+                    if [[ "$listen_choice" == manual ]]; then
+                        listen="$(proxy_prompt_value "监听地址" "$current")" || return $?
+                    else
+                        listen="$listen_choice"
+                    fi
+                    had_explicit_change=1
+                    ;;
+                port)
+                    port="$(proxy_prompt_value "监听端口" "${port:-$old_port}")" || return $?
+                    had_explicit_change=1
+                    ;;
+                address)
+                    address="$(proxy_prompt_value "客户端连接地址" "${address:-$(jq -r '.address' <<<"$node")}")" || return $?
+                    had_explicit_change=1
+                    ;;
+                sni)
+                    sni="$(proxy_prompt_value "SNI/伪装域名" "${sni:-$(jq -r '.tls.server_name' <<<"$node")}")" || return $?
+                    had_explicit_change=1
+                    ;;
+                path)
+                    path="$(proxy_prompt_value "传输路径" "${path:-$(jq -r '.transport.path' <<<"$node")}")" || return $?
+                    had_explicit_change=1
+                    ;;
+                service)
+                    service_name="$(proxy_prompt_value "gRPC serviceName" "${service_name:-$(jq -r '.transport.service_name' <<<"$node")}")" || return $?
+                    had_explicit_change=1
+                    ;;
+                certificate)
+                    current="${requested_cert_mode:-$(jq -r '.tls.mode' <<<"$node")}"
+                    requested_cert_mode="$(proxy_prompt_select "证书方式" "$current" \
+                        self-signed "生成自签名证书" imported "导入现有证书")" || return $?
+                    import_cert=""
+                    import_key=""
+                    if [[ "$requested_cert_mode" == "imported" ]]; then
+                        import_cert="$(proxy_prompt_value "证书文件绝对路径" "")" || return $?
+                        import_key="$(proxy_prompt_value "私钥文件绝对路径" "")" || return $?
+                    fi
+                    had_explicit_change=1
+                    ;;
+                obfs)
+                    current="${obfs_type:-$(jq -r '.options.obfs_type' <<<"$node")}"
+                    obfs_type="$(proxy_prompt_select "混淆方式" "$current" none "不使用混淆" salamander Salamander)" || return $?
+                    had_explicit_change=1
+                    ;;
+                up)
+                    up_mbps="$(proxy_prompt_value "上行 Mbps" "${up_mbps:-$(jq -r '.options.up_mbps' <<<"$node")}")" || return $?
+                    had_explicit_change=1
+                    ;;
+                down)
+                    down_mbps="$(proxy_prompt_value "下行 Mbps" "${down_mbps:-$(jq -r '.options.down_mbps' <<<"$node")}")" || return $?
+                    had_explicit_change=1
+                    ;;
+                congestion)
+                    current="${congestion_control:-$(jq -r '.options.congestion_control' <<<"$node")}"
+                    congestion_control="$(proxy_prompt_select "拥塞控制" "$current" bbr BBR cubic CUBIC new_reno "New Reno")" || return $?
+                    had_explicit_change=1
+                    ;;
+                cancel)
+                    vps_cmd_info "已取消编辑"
+                    return 0
+                    ;;
+                save)
+                    if ((had_explicit_change == 0)); then
+                        vps_cmd_warning "尚未修改任何字段"
+                        continue
+                    fi
+                    old_cert_mode="$(jq -r '.tls.mode' <<<"$node")"
+                    cert_mode="${requested_cert_mode:-$old_cert_mode}"
+                    if proxy_profile_requires_tls_certificate "$profile" && [[ "$cert_mode" == "imported" ]] && \
+                        [[ "${sni:-$(jq -r '.tls.server_name' <<<"$node")}" != "$(jq -r '.tls.server_name' <<<"$node")" ]] && [[ -z "$import_cert" ]]; then
+                        vps_cmd_info "导入证书的 SNI 已改变，需要提供匹配的新证书"
+                        import_cert="$(proxy_prompt_value "新证书文件绝对路径" "")" || return $?
+                        import_key="$(proxy_prompt_value "新私钥文件绝对路径" "")" || return $?
+                    fi
+                    printf '\n保存预览\n'
+                    printf '  节点：%s（%s）\n' "${name:-$(jq -r '.name' <<<"$node")}" "$id"
+                    printf '  内核：%s（不可修改）\n' "$(proxy_core_label "$core")"
+                    printf '  协议：%s（不可修改）\n' "$(proxy_profile_label "$profile")"
+                    printf '  监听：%s:%s\n' "${listen:-$(jq -r '.listen' <<<"$node")}" "${port:-$old_port}"
+                    printf '  连接地址：%s\n' "${address:-$(jq -r '.address' <<<"$node")}"
+                    [[ -z "$sni" ]] || printf '  SNI：%s\n' "$sni"
+                    [[ -z "$path" ]] || printf '  传输路径：%s\n' "$path"
+                    [[ -z "$service_name" ]] || printf '  gRPC serviceName：%s\n' "$service_name"
+                    [[ -z "$requested_cert_mode" ]] || printf '  证书方式：%s\n' "$requested_cert_mode"
+                    [[ -z "$obfs_type" ]] || printf '  混淆：%s\n' "$obfs_type"
+                    [[ -z "$up_mbps$down_mbps" ]] || printf '  带宽：%s/%s Mbps\n' \
+                        "${up_mbps:-$(jq -r '.options.up_mbps' <<<"$node")}" "${down_mbps:-$(jq -r '.options.down_mbps' <<<"$node")}"
+                    [[ -z "$congestion_control" ]] || printf '  拥塞控制：%s\n' "$congestion_control"
+                    confirm_status=0
+                    proxy_confirm "确认保存这些修改？" || confirm_status=$?
+                    if ((confirm_status == 0)); then
+                        break
+                    fi
+                    [[ "$confirm_status" == "130" ]] && return 130
+                    ;;
+            esac
+        done
     fi
     name="${name:-$(jq -r '.name' <<<"$node")}"
     listen="${listen:-$(jq -r '.listen' <<<"$node")}"
@@ -970,17 +1249,16 @@ proxy_node_delete() (
     done
     vps_cmd_require_root || return $?
     proxy_prepare_manifest_state || return $?
-    if [[ -z "$id" ]] && vps_cmd_is_interactive; then
-        proxy_node_list || return $?
-        id="$(proxy_prompt_value "要删除的节点 ID" "")" || return $?
+    if [[ -z "$id" ]] && proxy_is_interactive; then
+        id="$(proxy_node_select_interactive "请选择要删除的节点")" || return $?
     fi
     [[ "$id" =~ ^node-[a-f0-9]{16}$ ]] || { vps_cmd_error "node delete 需要有效 --id"; return 2; }
     node="$(proxy_manifest_node "$id")" || { vps_cmd_error "未找到节点：$id"; return 3; }
     core="$(jq -r '.core' <<<"$node")"
     name="$(jq -r '.name' <<<"$node")"
     if [[ "${VPSCTL_DRY_RUN:-0}" != "1" && "$confirmed" != "1" ]]; then
-        if vps_cmd_is_interactive; then
-            vps_cmd_confirm "删除节点 ${name}（${id}）？" || confirm_status=$?
+        if proxy_is_interactive; then
+            proxy_confirm "删除节点 ${name}（${id}）？" || confirm_status=$?
             if ((confirm_status != 0)); then
                 [[ "$confirm_status" == "130" ]] && return 130
                 vps_cmd_info "已取消删除"

@@ -100,9 +100,10 @@ test_environment_chinese_fallbacks() {
 test_registry() {
     vps_registry_init
 
-    test_assert_equal "1" "${#VPS_DOMAIN_IDS[@]}" "registered domain count"
-    test_assert_equal "3" "${#VPS_COMMAND_KEYS[@]}" "registered command count"
+    test_assert_equal "2" "${#VPS_DOMAIN_IDS[@]}" "registered domain count"
+    test_assert_equal "4" "${#VPS_COMMAND_KEYS[@]}" "registered command count"
     test_assert_equal "network" "${VPS_DOMAIN_IDS[0]}" "network domain id"
+    test_assert_equal "service" "${VPS_DOMAIN_IDS[1]}" "service domain id"
     test_assert_equal "commands/network/bbr.sh" "${VPS_COMMAND_PATH["network:bbr"]}" "BBR command path"
     test_assert_equal "commands/network/dns.sh" "${VPS_COMMAND_PATH["network:dns"]}" "DNS command path"
     test_assert_equal "commands/network/rfw.sh" "${VPS_COMMAND_PATH["network:rfw"]}" "RFW command path"
@@ -113,6 +114,10 @@ test_registry() {
     test_assert_equal "supported" "${VPS_COMMAND_DRY_RUN["network:dns"]}" "DNS dry-run"
     test_assert_equal "linux,init:systemd" "${VPS_COMMAND_REQUIREMENTS["network:rfw"]}" "RFW requirements"
     test_assert_equal "experimental" "${VPS_COMMAND_LIFECYCLE["network:rfw"]}" "RFW lifecycle"
+    test_assert_equal "commands/service/proxy.sh" "${VPS_COMMAND_PATH["service:proxy"]}" "proxy command path"
+    test_assert_equal "disruptive" "${VPS_COMMAND_RISK["service:proxy"]}" "proxy risk"
+    test_assert_equal "optional-root" "${VPS_COMMAND_PRIVILEGE["service:proxy"]}" "proxy privilege"
+    test_assert_equal "linux,service:any" "${VPS_COMMAND_REQUIREMENTS["service:proxy"]}" "proxy requirements"
 
     vps_registry_register_domain \
         "test" \
@@ -148,6 +153,8 @@ test_ui_input() {
     output="$(vps_ui_main_menu)"
     [[ "$output" == *"网络设置"* ]] || test_fail "registered network domain should be visible"
     [[ "$output" == *"(3 个功能)"* ]] || test_fail "network domain command count should be visible"
+    [[ "$output" == *"服务管理"* ]] || test_fail "registered service domain should be visible"
+    [[ "$output" == *"(1 个功能)"* ]] || test_fail "service domain command count should be visible"
 
     VPS_UI_GREEN="<绿>"
     VPS_UI_YELLOW="<黄>"

@@ -6,7 +6,13 @@
 
 ## 1. 快速开始
 
-全局选项必须写在 `service` 之前：
+有终端时，直接进入统一多内核界面：
+
+```text
+bash bin/vpsctl service proxy
+```
+
+用于脚本或自动化时，使用明确的子动作；全局选项必须写在 `service` 之前：
 
 ```text
 bash bin/vpsctl service proxy status
@@ -17,9 +23,21 @@ bash bin/vpsctl service proxy node add --profile hysteria2 --core sing-box --por
 bash bin/vpsctl service proxy start --core sing-box --enable
 ```
 
-不带动作时，交互终端进入代理菜单；非交互环境显示全部内核状态。存在多个可用内核时，交互模式会询问目标内核，非交互模式必须用 `--core sing-box` 或 `--core xray` 明确选择。
+不带动作时，交互终端进入代理菜单；非交互环境显示全部内核状态。交互菜单不要求用户输入 `--core` 或节点 ID，而是根据当前状态列出有效候选并使用编号选择。命令模式保留 `--core sing-box|xray|all` 作为高级消歧接口：只有一个符合动作要求的候选时可以自动选中，存在多个候选时，非交互调用必须显式指定适用的单个内核或 `all`。
 
-## 2. 状态与路径
+## 2. 统一交互、状态与路径
+
+每次进入或返回代理菜单时，界面都会先显示 Xray 与 sing-box 两个内核的安装状态、版本、运行状态、开机启动状态、配置文件路径、各自节点数和待重启状态，并在末尾汇总全部内核的节点总数。因此，操作入口不是先固定到某一个内核，而是在完整状态上下文中按能力分组：
+
+- 内核生命周期：安装、更新和卸载。
+- 服务控制：启动、停止和重启。
+- 节点管理：添加、查看、修改和删除。
+- 查看与输出：订阅、日志和支持的协议。
+- 系统工具：系统时间状态与同步。
+
+生命周期和服务动作会按实时状态筛选候选，例如安装只列出未安装内核，更新、卸载和日志只列出已经登记的内核，启动不会列出已经运行的内核，停止和重启只面向当前运行的内核。多个候选可供安装或更新时，交互界面还提供“全部”选择；卸载和可能中断连接的服务动作仍逐个选择内核并执行相应确认。筛选只减少无效选项，不改变强确认、权限或待重启策略。
+
+命令模式可单独查询相同状态：
 
 ```text
 vpsctl service proxy status [--core sing-box|xray|all] [--json]
@@ -42,7 +60,7 @@ systemd 服务名为 `vpsctl-proxy-sing-box.service` 和 `vpsctl-proxy-xray.serv
 
 ## 3. 内核生命周期
 
-Xray 与 sing-box 使用相同的生命周期接口：
+Xray 与 sing-box 使用相同的命令模式生命周期接口：
 
 | 动作 | 用法与行为 |
 | --- | --- |
@@ -54,7 +72,7 @@ Xray 与 sing-box 使用相同的生命周期接口：
 | `restart` | `restart [--core CORE] [--confirm-disruptive]`；显式确认后重启，并提交或回退待生效事务。 |
 | `logs` | `logs [--core CORE] [--lines N] [--follow] [--since VALUE]`；systemd 读取 journal，OpenRC 读取项目日志；OpenRC 不支持 `--since`。 |
 
-`CORE` 为 `sing-box` 或 `xray`。只有 `install` 和 `update` 接受 `all`；`install --core all` 处理两个内核，`update --core all` 只处理当前已经登记的内核。两个项目的 tag 空间不同，因此 `--core all` 不能与单个 `--version` 共用。卸载、服务控制和日志必须解析到单个已经登记的内核。
+`CORE` 为 `sing-box` 或 `xray`。只有 `install` 和 `update` 接受 `all`；`install --core all` 处理两个内核，`update --core all` 只处理当前已经登记的内核。这与交互界面中安装/更新动作的“全部”选项对应。两个项目的 tag 空间不同，因此 `--core all` 不能与单个 `--version` 共用。卸载、服务控制和日志必须解析到单个已经登记的内核。
 
 ### 外部二进制所有权
 
@@ -102,6 +120,12 @@ vpsctl service proxy subscription [--core CORE|all]
 ```
 
 `profiles` 列出 profile ID、名称和支持它的内核。`node list` 可按内核筛选；`node show --uri` 输出单节点分享 URI；`subscription` 将全部或指定内核的分享 URI 按清单顺序拼接并输出单行 Base64 订阅内容。节点 ID、UUID、密码、Reality 密钥和需要的混淆密码由命令安全生成，编辑接口不直接接受替换凭据。
+
+交互式添加节点时，先用编号选择 profile 和适用内核，并填写监听端口与客户端连接地址，再选择“快速向导”或“自定义向导”。快速向导就此采用界面显示的推荐设置；自定义向导继续询问该 profile 支持的可调字段。profile、目标内核以及证书模式、混淆方式、拥塞控制等枚举值都通过编号选择，不要求记忆或手工输入内部枚举字符串；凭据在两种向导中都由命令安全生成。
+
+如果当前没有已安装且兼容所选 profile 的内核，界面会列出兼容内核并询问是否先安装；用户确认并完成安装后继续原节点向导，拒绝或取消则不创建节点。一个内核兼容时自动使用，多个已安装内核兼容时按编号选择。这个引导不改变非交互接口：自动化调用在没有兼容内核时仍会失败并要求先安装，在多个候选可用时使用 `--core` 消歧。
+
+交互式节点列表默认展示全部内核的节点，每一项都明确标注所属 Xray 或 sing-box。查看、编辑和删除从这份完整列表按编号选取节点；命令模式仍使用稳定的 `--id NODE_ID`，便于脚本精确引用。命令模式的 `node list` 默认同样返回全部节点并标注 `core`，只有显式传入 `--core` 时才筛选。
 
 端口在整个代理节点清单中必须唯一，且会检查本机当前监听占用。新增或编辑会先生成候选清单和候选内核配置，再调用对应内核校验；校验失败不会提交候选配置。非交互删除节点必须传入 `--confirm-delete`。
 

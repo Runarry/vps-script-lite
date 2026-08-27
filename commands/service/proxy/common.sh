@@ -18,6 +18,84 @@ PROXY_INIT_SYSTEM="unknown"
 PROXY_PACKAGE_MANAGER="unknown"
 PROXY_ARCH="unknown"
 
+proxy_is_interactive() {
+    # Capture the real terminal state before any command substitution redirects
+    # stdout.  Subshells inherit this scalar without re-testing the pipe.
+    [[ "${PROXY_INTERACTIVE:-0}" == "1" ]]
+}
+
+proxy_confirm() {
+    local prompt="${1:-是否继续？}" reply
+    [[ "${VPSCTL_DRY_RUN:-0}" == "1" || "${VPSCTL_ASSUME_YES:-0}" == "1" ]] && return 0
+    proxy_is_interactive || {
+        vps_cmd_error "确认操作需要交互式终端，或使用 --yes"
+        return 3
+    }
+    printf '%s [是/否，输入 y 确认] ' "$prompt" >&2
+    IFS= read -r reply || return 130
+    reply="$(vps_cmd_trim "$reply")"
+    [[ "$reply" == "y" || "$reply" == "Y" || "$reply" == "yes" || "$reply" == "YES" ]]
+}
+
+proxy_prompt_select() {
+    local prompt="${1:-}" default_value="${2:-}" choice value label index
+    local -a values=() labels=()
+    shift 2 || return 2
+    [[ -n "$prompt" ]] && (($# >= 2 && $# % 2 == 0)) || return 2
+    while (($#)); do
+        values+=("$1")
+        labels+=("$2")
+        shift 2
+    done
+
+    while true; do
+        printf '%s\n' "$prompt" >&2
+        for ((index = 0; index < ${#values[@]}; index++)); do
+            value="${values[$index]}"
+            label="${labels[$index]}"
+            if [[ -n "$default_value" && "$value" == "$default_value" ]]; then
+                printf '  [%d] %s（默认）\n' "$((index + 1))" "$label" >&2
+            else
+                printf '  [%d] %s\n' "$((index + 1))" "$label" >&2
+            fi
+        done
+        printf '  [q] 返回\n选择：' >&2
+        IFS= read -r choice || return 130
+        choice="$(vps_cmd_trim "$choice")"
+        case "$choice" in
+            q | Q | 0) return 130 ;;
+            '')
+                if [[ -n "$default_value" ]]; then
+                    printf '%s' "$default_value"
+                    return 0
+                fi
+                ;;
+            *)
+                if [[ "$choice" =~ ^[1-9][0-9]*$ ]] && ((10#$choice <= ${#values[@]})); then
+                    printf '%s' "${values[$((10#$choice - 1))]}"
+                    return 0
+                fi
+                ;;
+        esac
+        vps_cmd_warning "选择无效，请输入列表中的编号"
+    done
+}
+
+proxy_prompt_quick_custom() {
+    local prompt="${1:-请选择配置方式}" quick_label="${2:-使用推荐设置}" custom_label="${3:-自定义设置}"
+    proxy_prompt_select "$prompt" quick \
+        quick "$quick_label" \
+        custom "$custom_label"
+}
+
+proxy_prompt_quick_or_custom() {
+    proxy_prompt_quick_custom "$@"
+}
+
+proxy_prompt_mode() {
+    proxy_prompt_quick_custom "${1:-请选择配置方式}" "使用推荐设置" "自定义设置"
+}
+
 proxy_common_init() {
     PROXY_ETC_DIR="$(vps_cmd_system_path "$PROXY_ETC_LOGICAL")" || return $?
     PROXY_STATE_DIR="$(vps_cmd_system_path "$PROXY_STATE_LOGICAL")" || return $?

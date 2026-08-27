@@ -48,6 +48,8 @@ bash bin/vpsctl service proxy status
 bash bin/vpsctl service proxy profiles
 ```
 
+直接运行 `bash bin/vpsctl service proxy` 会进入统一代理界面。界面首先同时显示 Xray 与 sing-box 的安装/运行状态、配置路径、各自节点数和节点总数，再按内核生命周期、服务控制、节点管理、查看输出和系统工具等能力分组提供操作。交互过程使用枚举和编号选择内核或节点，不要求输入 `--core`。
+
 先查看变更计划的示例：
 
 ```text
@@ -57,7 +59,7 @@ bash bin/vpsctl --dry-run network rfw install
 bash bin/vpsctl --dry-run service proxy install --core sing-box
 ```
 
-全局选项写在领域之前；子动作及选项见[网络设置](docs/network-settings.md)和[代理管理](docs/proxy-management.md)。`--yes` 只跳过允许自动确认的提示，不能绕过 RFW 中断性操作、代理重启、外部二进制更新或彻底清除的强确认。
+全局选项写在领域之前；子动作及选项见[网络设置](docs/network-settings.md)和[代理管理](docs/proxy-management.md)。上例中的 `--core` 是脚本和非交互调用保留的高级消歧参数：只有一个符合条件的内核时通常可自动解析，存在多个候选时应显式指定。`--yes` 只跳过允许自动确认的提示，不能绕过 RFW 中断性操作、代理重启、外部二进制更新或彻底清除的强确认。
 
 ## 当前状态
 

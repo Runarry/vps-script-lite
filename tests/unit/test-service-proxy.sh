@@ -188,11 +188,21 @@ test_status_service_and_logs() {
     assert_contains "$RUN_OUTPUT" "/etc/vpsctl/proxy/xray/config.json" "xray config path"
     assert_equal 2 "$(grep -c '节点数：1' <<<"$RUN_OUTPUT")" "per-core status counts"
     assert_contains "$RUN_OUTPUT" "总节点数：2" "status total"
+    run_proxy node list
+    assert_equal 0 "$RUN_STATUS" "full node list"
+    assert_contains "$RUN_OUTPUT" "[1] status-sb" "numbered first node"
+    assert_contains "$RUN_OUTPUT" "[2] status-xr" "numbered second node"
+    assert_contains "$RUN_OUTPUT" "内核：sing-box" "sing-box node annotation"
+    assert_contains "$RUN_OUTPUT" "内核：Xray" "Xray node annotation"
+    assert_contains "$RUN_OUTPUT" "当前筛选：2 个；节点总数：2 个" "full node list totals"
     run_proxy status --json
     assert_equal true "$(jq -r '.cores[] | select(.core == "sing-box") | .installed' <<<"$RUN_OUTPUT")" "sing-box registered status"
     assert_file_contains "${TEST_SYSTEM_ROOT}/etc/systemd/system/vpsctl-proxy-sing-box.service" "ExecStart=/usr/bin/sing-box run -c /etc/vpsctl/proxy/sing-box/config.json" "systemd unit"
 
     printf '  systemd start/logs/stop\n'
+    run_proxy start
+    assert_equal 2 "$RUN_STATUS" "non-interactive lifecycle core ambiguity"
+    assert_contains "$RUN_OUTPUT" "存在多个候选内核" "non-interactive lifecycle ambiguity guidance"
     run_proxy start --core sing-box --enable
     assert_equal 0 "$RUN_STATUS" "systemd start"
     assert_file_contains "$MOCK_LOG" "systemctl start vpsctl-proxy-sing-box.service" "systemd start routing"
@@ -361,6 +371,141 @@ test_tls_certificate_transaction() {
     [[ ! -e "$cert_root/cert-${failed_cert}.pem" && -f "${TEST_SYSTEM_ROOT}${new_cert}" ]] || fail "failed TLS edit left an orphan certificate"
 }
 
+test_unified_interactive_api() (
+    local output selected status=0 menu_line status_line install_marker
+    local selector_stderr="${TEST_TEMP}/selector.stderr"
+    local guided_stderr="${TEST_TEMP}/guided.stderr"
+
+    reset_root
+    # Source the production entry point once with a harmless action so its
+    # function API can be exercised with deterministic stdin below.
+    # shellcheck source=../../commands/service/proxy.sh
+    source "$TEST_PROXY" help >/dev/null
+
+    selected="$(proxy_prompt_select "selector default" quick quick "Quick" custom "Custom" 2>"$selector_stderr" <<<"")"
+    assert_equal quick "$selected" "selector default"
+    selected="$(proxy_prompt_select "selector retry" quick quick "Quick" custom "Custom" 2>"$selector_stderr" <<< $'99\n2')"
+    assert_equal custom "$selected" "selector invalid retry"
+    assert_file_contains "$selector_stderr" "选择无效，请输入列表中的编号" "selector invalid warning"
+    status=0
+    proxy_prompt_select "selector quit" quick quick "Quick" custom "Custom" </dev/null >/dev/null 2>&1 || status=$?
+    assert_equal 130 "$status" "selector EOF quit"
+    status=0
+    proxy_prompt_select "selector quit" quick quick "Quick" custom "Custom" <<<q >/dev/null 2>&1 || status=$?
+    assert_equal 130 "$status" "selector q quit"
+    proxy_test_cancel_action() { return 130; }
+    proxy_test_fail_action() { return 3; }
+    status=0
+    proxy_menu_action proxy_test_cancel_action >/dev/null 2>&1 || status=$?
+    assert_equal 0 "$status" "menu action treats selection cancel as back"
+    status=0
+    proxy_menu_action proxy_test_fail_action >/dev/null 2>&1 || status=$?
+    assert_equal 3 "$status" "menu action preserves real failures"
+
+    assert_equal $'sing-box\nxray' "$(proxy_lifecycle_candidates install 1)" "install candidates are unregistered cores"
+    install_external sing-box
+    install_external xray
+    assert_equal "" "$(proxy_lifecycle_candidates install 1)" "registered cores filtered from install"
+    assert_equal $'sing-box\nxray' "$(proxy_lifecycle_candidates update 1)" "update candidates are registered cores"
+    assert_equal $'sing-box\nxray' "$(proxy_lifecycle_candidates start 1)" "start candidates are inactive cores"
+    touch "${TEST_SYSTEM_ROOT}/run/mock-systemd/active-vpsctl-proxy-sing-box.service"
+    assert_equal xray "$(proxy_lifecycle_candidates start 1)" "active core filtered from start"
+    assert_equal sing-box "$(proxy_lifecycle_candidates stop 1)" "stop candidates are active cores"
+    assert_equal sing-box "$(proxy_lifecycle_candidates restart 1)" "restart candidates are active cores"
+    assert_equal all "$(proxy_resolve_lifecycle_core all install 1)" "install accepts all cores"
+    assert_equal all "$(proxy_resolve_lifecycle_core all update 1)" "update accepts all cores"
+    for selected in uninstall start stop restart logs; do
+        status=0
+        proxy_resolve_lifecycle_core all "$selected" 0 >/dev/null 2>&1 || status=$?
+        assert_equal 2 "$status" "${selected} rejects all cores"
+    done
+
+    output="$(proxy_menu_run <<<q 2>&1)"
+    for selected in "内核管理" "节点管理" "服务控制" "日志" "时间" "协议"; do
+        assert_contains "$output" "$selected" "grouped proxy menu"
+    done
+    assert_contains "$output" "/etc/vpsctl/proxy/sing-box/config.json" "menu sing-box status path"
+    assert_contains "$output" "/etc/vpsctl/proxy/xray/config.json" "menu Xray status path"
+    assert_contains "$output" "总节点数：0" "menu status total"
+    menu_line="$(grep -n -m1 '代理能力' <<<"$output" | cut -d: -f1)"
+    status_line="$(grep -n -m1 '总节点数：0' <<<"$output" | cut -d: -f1)"
+    ((status_line < menu_line)) || fail "status summary was not above grouped proxy menu"
+
+    run_proxy node add --profile shadowsocks-aes-256-gcm --core xray --name numbered-one --port 19301 --address proxy.example
+    assert_equal 0 "$RUN_STATUS" "first numbered node fixture"
+    run_proxy node add --profile shadowsocks-aes-256-gcm --core xray --name numbered-two --port 19302 --address proxy.example
+    assert_equal 0 "$RUN_STATUS" "second numbered node fixture"
+
+    # The proxy entry point captures the real TTY state before selectors enter
+    # command substitutions. Keep the generic predicate false here to prove
+    # the captured proxy state remains usable after stdout becomes a pipe.
+    vps_cmd_is_interactive() { return 1; }
+    PROXY_INTERACTIVE=1
+    output="$(proxy_node_view_interactive <<< $'2\n1' 2>&1)"
+    assert_contains "$output" "[1] numbered-one" "interactive numbered node list"
+    assert_contains "$output" "[2] numbered-two" "interactive numbered node list"
+    assert_contains "$output" "节点详情" "interactive node details action"
+    assert_contains "$output" "名称：numbered-two" "interactive numbered details selection"
+    output="$(proxy_node_view_interactive <<< $'1\n2' 2>&1)"
+    assert_contains "$output" "ss://" "interactive numbered URI action"
+
+    reset_root
+    install_marker="${TEST_SYSTEM_ROOT}/run/stub-installed"
+    proxy_core_registered() { [[ -f "${install_marker}-$1" ]]; }
+    proxy_core_install() {
+        printf '%s\n' "$1" >>"${TEST_SYSTEM_ROOT}/run/stub-install.log"
+        [[ "${VPSCTL_DRY_RUN:-0}" == "1" ]] || touch "${install_marker}-$1"
+    }
+    selected="$(proxy_choose_core_for_profile shadowsocks-aes-256-gcm "" 2>"$guided_stderr" <<<2)"
+    assert_equal xray "$selected" "guided compatible core selection"
+    assert_file_contains "${TEST_SYSTEM_ROOT}/run/stub-install.log" xray "guided install stub"
+    [[ -f "${install_marker}-xray" ]] || fail "guided install did not use selected core"
+
+    rm -f -- "${install_marker}-sing-box" "${install_marker}-xray"
+    : >"${TEST_SYSTEM_ROOT}/run/stub-install.log"
+    VPSCTL_DRY_RUN=1
+    selected="$(proxy_choose_core_for_profile vless-tcp "" 2>"$guided_stderr")"
+    assert_equal sing-box "$selected" "dry-run guided compatible core"
+    assert_file_contains "${TEST_SYSTEM_ROOT}/run/stub-install.log" sing-box "dry-run guided install stub"
+    [[ ! -e "${install_marker}-sing-box" ]] || fail "dry-run guided install created registration metadata"
+
+    touch "${install_marker}-sing-box"
+    vps_cmd_require_root() { return 0; }
+    proxy_require_platform() { return 0; }
+    proxy_prepare_manifest_state() { return 0; }
+    proxy_require_available_port() { return 0; }
+    proxy_require_unique_name() { return 0; }
+
+    output="$(proxy_node_add --profile hysteria2 --port 19400 --address proxy.example <<< $'\n\n\n' 2>&1)"
+    assert_contains "$output" "请选择添加模式" "quick node add mode"
+    assert_not_contains "$output" "混淆方式" "quick mode skips custom enums"
+
+    output="$(proxy_node_add --profile vless-ws-tls --port 19401 --address proxy.example <<< $'\n\n2\n\n\n\n\n2\n/tmp/cert.pem\n/tmp/key.pem' 2>&1)"
+    assert_contains "$output" "证书方式" "custom certificate enum"
+    assert_contains "$output" "生成自签名证书" "certificate self-signed choice"
+    assert_contains "$output" "导入现有证书" "certificate imported choice"
+    assert_contains "$output" "证书文件绝对路径" "imported certificate selection"
+
+    output="$(proxy_node_add --profile hysteria2 --port 19402 --address proxy.example <<< $'\n\n2\n\n\n\n\n2\n123\n456' 2>&1)"
+    assert_contains "$output" "混淆方式" "custom obfuscation enum"
+    assert_contains "$output" "不使用混淆" "obfuscation none choice"
+    assert_contains "$output" "Salamander" "obfuscation Salamander choice"
+    assert_contains "$output" "上行 Mbps" "custom obfuscation bandwidth"
+
+    output="$(proxy_node_add --profile tuic-v5 --port 19403 --address proxy.example <<< $'\n\n2\n\n\n\n\n3' 2>&1)"
+    assert_contains "$output" "拥塞控制" "custom congestion enum"
+    assert_contains "$output" "BBR" "congestion BBR choice"
+    assert_contains "$output" "CUBIC" "congestion CUBIC choice"
+    assert_contains "$output" "New Reno" "congestion New Reno choice"
+
+    selected="$(proxy_prompt_select "证书方式" self-signed self-signed "生成自签名证书" imported "导入现有证书" <<<2 2>/dev/null)"
+    assert_equal imported "$selected" "certificate enum selection"
+    selected="$(proxy_prompt_select "混淆方式" none none "不使用混淆" salamander "Salamander" <<<2 2>/dev/null)"
+    assert_equal salamander "$selected" "obfuscation enum selection"
+    selected="$(proxy_prompt_select "拥塞控制" bbr bbr BBR cubic CUBIC new_reno "New Reno" <<<3 2>/dev/null)"
+    assert_equal new_reno "$selected" "congestion enum selection"
+)
+
 test_protocol_matrix() {
     reset_root
     write_core_binary sing-box
@@ -456,6 +601,8 @@ printf 'TEST: proxy core choice, ports and uninstall\n'
 test_overlap_port_ambiguity_and_uninstall
 printf 'TEST: proxy TLS certificate transactions\n'
 test_tls_certificate_transaction
+printf 'TEST: proxy unified interactive API\n'
+test_unified_interactive_api
 printf 'TEST: proxy protocol renderer matrix\n'
 test_protocol_matrix
 printf 'PASS: service proxy tests\n'
