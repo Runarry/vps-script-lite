@@ -311,15 +311,6 @@ vpsctl_run_menu() {
         choice="$VPS_UI_CHOICE"
 
         case "$choice" in
-            e | E)
-                vps_ui_clear_screen
-                vps_ui_header "环境详情"
-                vps_ui_environment_details
-                vps_ui_pause
-                ;;
-            r | R)
-                vps_env_detect
-                ;;
             q | Q)
                 return "$VPSCTL_MENU_STATUS"
                 ;;

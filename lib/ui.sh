@@ -117,12 +117,16 @@ vps_ui_main_menu() {
     local index domain count
 
     printf ' %s主菜单%s\n\n' "$VPS_UI_BOLD" "$VPS_UI_RESET"
-    for ((index = 0; index < ${#VPS_DOMAIN_IDS[@]}; index++)); do
-        domain="${VPS_DOMAIN_IDS[$index]}"
-        count="$(vps_registry_count_commands "$domain")"
-        printf '  [%d] %s  %s(%s 个功能)%s\n' "$((index + 1))" "${VPS_DOMAIN_LABEL[$domain]}" "$VPS_UI_DIM" "$count" "$VPS_UI_RESET"
-    done
-    printf '\n  [e] 环境详情    [r] 重新检测    [q] 退出\n\n'
+    if ((${#VPS_DOMAIN_IDS[@]} == 0)); then
+        printf '  %s暂无已登记功能。%s\n' "$VPS_UI_DIM" "$VPS_UI_RESET"
+    else
+        for ((index = 0; index < ${#VPS_DOMAIN_IDS[@]}; index++)); do
+            domain="${VPS_DOMAIN_IDS[$index]}"
+            count="$(vps_registry_count_commands "$domain")"
+            printf '  [%d] %s  %s(%s 个功能)%s\n' "$((index + 1))" "${VPS_DOMAIN_LABEL[$domain]}" "$VPS_UI_DIM" "$count" "$VPS_UI_RESET"
+        done
+    fi
+    printf '\n  [q] 退出\n\n'
 }
 
 vps_ui_domain_commands() {

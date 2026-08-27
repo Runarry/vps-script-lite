@@ -101,16 +101,8 @@ vps_registry_init() {
     VPS_COMMAND_LIFECYCLE=()
     VPS_REGISTRY_RESULTS=()
 
-    vps_registry_register_domain "system" "系统维护" "系统信息、账户、软件包与基础维护"
-    vps_registry_register_domain "service" "服务管理" "系统服务安装、配置与生命周期管理"
-    vps_registry_register_domain "deploy" "应用部署" "软件和应用部署"
-    vps_registry_register_domain "network" "网络管理" "网络、DNS、防火墙与连通性"
-    vps_registry_register_domain "security" "安全加固" "访问控制、审计、证书与系统加固"
-    vps_registry_register_domain "backup" "备份恢复" "备份、恢复与保留策略"
-    vps_registry_register_domain "monitoring" "监控诊断" "健康检查、资源观察与告警"
-
-    # Register feature commands below with vps_registry_register_command.
-    # No feature command is implemented in the current release.
+    # Register only user-approved domains and feature commands here.
+    # No domain or feature command is registered in the current release.
 }
 
 vps_registry_has_command() {

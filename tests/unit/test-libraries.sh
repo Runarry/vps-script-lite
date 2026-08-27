@@ -75,32 +75,45 @@ test_environment_detection() {
 test_registry() {
     vps_registry_init
 
-    test_assert_equal "7" "${#VPS_DOMAIN_IDS[@]}" "domain count"
+    test_assert_equal "0" "${#VPS_DOMAIN_IDS[@]}" "initial domain count"
     test_assert_equal "0" "${#VPS_COMMAND_KEYS[@]}" "initial command count"
 
+    vps_registry_register_domain \
+        "test" \
+        "Test" \
+        "Test-only domain"
+
     vps_registry_register_command \
-        "system" \
+        "test" \
         "inspect" \
         "Inspect" \
         "Read local system information" \
-        "commands/system/inspect.sh" \
+        "commands/test/inspect.sh" \
         "read-only" \
         "user" \
         "not-applicable" \
         "linux" \
         "experimental"
 
-    vps_registry_has_command "system:inspect" || test_fail "registered command is not discoverable"
-    test_assert_equal "commands/system/inspect.sh" "${VPS_COMMAND_PATH[system:inspect]}" "registered path"
+    vps_registry_has_command "test:inspect" || test_fail "registered command is not discoverable"
+    test_assert_equal "commands/test/inspect.sh" "${VPS_COMMAND_PATH[test:inspect]}" "registered path"
 
     if vps_registry_register_command \
-        "system" "unsafe" "Unsafe" "Unsafe path test" \
+        "test" "unsafe" "Unsafe" "Unsafe path test" \
         "../unsafe.sh" "read-only" "user" "not-applicable" "none" "experimental" 2>/dev/null; then
         test_fail "unsafe command path should be rejected"
     fi
 }
 
 test_ui_input() {
+    local output
+
+    vps_registry_init
+    output="$(vps_ui_main_menu)"
+    [[ "$output" == *"暂无已登记功能"* ]] || test_fail "empty menu should not invent feature categories"
+    [[ "$output" != *"环境详情"* ]] || test_fail "environment details option should not be present"
+    [[ "$output" != *"重新检测"* ]] || test_fail "environment refresh option should not be present"
+
     vps_ui_parse_index "1" "7" || test_fail "valid menu index should be accepted"
     test_assert_equal "0" "$VPS_UI_INDEX" "parsed menu index"
 
