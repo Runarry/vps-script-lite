@@ -1,0 +1,416 @@
+#!/usr/bin/env bash
+
+if ((BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4))); then
+    printf 'vpsctl requires Bash 4.4 or newer (current: %s).\n' "${BASH_VERSION:-unknown}" >&2
+    exit 3
+fi
+
+set -Eeuo pipefail
+IFS=$'\n\t'
+umask 022
+
+readonly VPSCTL_VERSION="0.1.0"
+
+VPSCTL_DRY_RUN=0
+VPSCTL_ASSUME_YES=0
+VPSCTL_NON_INTERACTIVE=0
+VPSCTL_QUIET=0
+VPSCTL_VERBOSE=0
+VPSCTL_NO_COLOR=0
+VPSCTL_CLEAR=1
+VPSCTL_MENU_STATUS=0
+
+vpsctl_resolve_project_root() {
+    local source_dir
+
+    source_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+    cd -- "${source_dir}/.." && pwd -P
+}
+
+readonly VPSCTL_PROJECT_ROOT="$(vpsctl_resolve_project_root)"
+
+vpsctl_load_library() {
+    local library_path="$1"
+
+    if [[ ! -r "$library_path" ]]; then
+        printf 'vpsctl: required library is not readable: %s\n' "$library_path" >&2
+        exit 3
+    fi
+
+    # shellcheck source=/dev/null
+    source "$library_path"
+}
+
+vpsctl_load_library "${VPSCTL_PROJECT_ROOT}/lib/environment.sh"
+vpsctl_load_library "${VPSCTL_PROJECT_ROOT}/lib/registry.sh"
+vpsctl_load_library "${VPSCTL_PROJECT_ROOT}/lib/ui.sh"
+
+vpsctl_usage() {
+    cat <<'EOF'
+VPS Script Lite - VPS deployment and maintenance console
+
+Usage:
+  vpsctl [global-options]
+  vpsctl [global-options] menu
+  vpsctl [global-options] env
+  vpsctl [global-options] list
+  vpsctl [global-options] <domain> <action> [command-options]
+
+Built-in commands:
+  menu                 Open the interactive management console
+  env                  Detect and display the local VPS environment
+  list                 List registered feature commands
+  help                 Show this help
+
+Global options:
+  --dry-run            Ask supported feature commands to plan without changing
+  --yes                Skip only confirmations that permit automatic approval
+  --non-interactive    Never read from the terminal
+  --quiet              Reduce non-essential feature-command output
+  --verbose            Enable additional diagnostics
+  --no-color           Disable ANSI colors
+  --no-clear           Preserve terminal scrollback in interactive menus
+  -h, --help           Show this help
+  -V, --version        Show the vpsctl version
+
+With no command, vpsctl opens the menu when attached to a terminal. Otherwise,
+it prints the environment dashboard once and exits.
+EOF
+}
+
+vpsctl_error() {
+    printf 'vpsctl: %s\n' "$1" >&2
+}
+
+vpsctl_handle_interrupt() {
+    printf '\nInterrupted.\n' >&2
+    exit 130
+}
+
+vpsctl_parse_global_options() {
+    VPSCTL_ARGS=()
+
+    while (($# > 0)); do
+        case "$1" in
+            --dry-run)
+                VPSCTL_DRY_RUN=1
+                ;;
+            --yes)
+                VPSCTL_ASSUME_YES=1
+                ;;
+            --non-interactive)
+                VPSCTL_NON_INTERACTIVE=1
+                ;;
+            --quiet)
+                VPSCTL_QUIET=1
+                ;;
+            --verbose)
+                VPSCTL_VERBOSE=1
+                ;;
+            --no-color)
+                VPSCTL_NO_COLOR=1
+                ;;
+            --no-clear)
+                VPSCTL_CLEAR=0
+                ;;
+            -h | --help)
+                VPSCTL_ARGS=("help")
+                return 0
+                ;;
+            -V | --version)
+                VPSCTL_ARGS=("version")
+                return 0
+                ;;
+            --)
+                shift
+                VPSCTL_ARGS=("$@")
+                return 0
+                ;;
+            -*)
+                vpsctl_error "unknown global option: $1"
+                return 2
+                ;;
+            *)
+                VPSCTL_ARGS=("$@")
+                return 0
+                ;;
+        esac
+        shift
+    done
+}
+
+vpsctl_export_context() {
+    export VPSCTL_PROJECT_ROOT VPSCTL_DRY_RUN VPSCTL_ASSUME_YES
+    export VPSCTL_NON_INTERACTIVE VPSCTL_QUIET VPSCTL_VERBOSE
+    export VPSCTL_ENV_OS_ID="${VPS_ENV[os_id]}"
+    export VPSCTL_ENV_OS_VERSION_ID="${VPS_ENV[os_version_id]}"
+    export VPSCTL_ENV_ARCH="${VPS_ENV[architecture]}"
+    export VPSCTL_ENV_INIT="${VPS_ENV[init_system]}"
+    export VPSCTL_ENV_PACKAGE_MANAGER="${VPS_ENV[package_manager]}"
+    export VPSCTL_ENV_VIRTUALIZATION="${VPS_ENV[virtualization]}"
+}
+
+vpsctl_validate_command_ready() {
+    local command_key="$1"
+    local privilege requirements
+
+    privilege="${VPS_COMMAND_PRIVILEGE[$command_key]}"
+    requirements="${VPS_COMMAND_REQUIREMENTS[$command_key]}"
+
+    if [[ "$privilege" == "root" && "${VPS_ENV[is_root]}" != "yes" ]]; then
+        vpsctl_error "${command_key} requires root privileges"
+        return 4
+    fi
+
+    if ! vps_env_requirements_met "$requirements"; then
+        vpsctl_error "${command_key} is unavailable; missing capabilities: ${VPS_ENV_MISSING_REQUIREMENTS}"
+        return 3
+    fi
+}
+
+vpsctl_dispatch() {
+    local domain="$1"
+    local action="$2"
+    shift 2
+
+    local command_key="${domain}:${action}"
+    local relative_path command_path validation_status
+
+    if ! vps_registry_has_command "$command_key"; then
+        vpsctl_error "unknown command: ${domain} ${action}"
+        return 2
+    fi
+
+    if vpsctl_validate_command_ready "$command_key"; then
+        :
+    else
+        validation_status=$?
+        return "$validation_status"
+    fi
+
+    relative_path="${VPS_COMMAND_PATH[$command_key]}"
+    command_path="${VPSCTL_PROJECT_ROOT}/${relative_path}"
+
+    if [[ -L "$command_path" ]]; then
+        vpsctl_error "registered command must not be a symbolic link: ${relative_path}"
+        return 3
+    fi
+    if [[ ! -f "$command_path" ]]; then
+        vpsctl_error "registered command file is missing: ${relative_path}"
+        return 3
+    fi
+    if [[ ! -x "$command_path" ]]; then
+        vpsctl_error "registered command is not executable: ${relative_path}"
+        return 3
+    fi
+
+    vpsctl_export_context
+    if "$command_path" "$@"; then
+        return 0
+    else
+        return $?
+    fi
+}
+
+vpsctl_show_command_screen() {
+    local command_key="$1"
+    local choice status
+
+    while true; do
+        vps_ui_clear_screen
+        vps_ui_header "命令详情"
+        vps_ui_command_details "$command_key"
+
+        if ! vpsctl_validate_command_ready "$command_key" 2>/dev/null; then
+            vps_ui_warning "当前环境不满足此命令的运行条件。"
+            vps_ui_pause
+            return 0
+        fi
+
+        printf '\n  [r] 无附加参数运行    [b] 返回\n\n'
+        vps_ui_read_choice "请选择" || return 0
+        choice="$VPS_UI_CHOICE"
+
+        case "$choice" in
+            r | R)
+                if vpsctl_dispatch "${VPS_COMMAND_DOMAIN[$command_key]}" "${VPS_COMMAND_ACTION[$command_key]}"; then
+                    status=0
+                else
+                    status=$?
+                fi
+                printf '\n命令已结束，退出码：%s\n' "$status"
+                vps_ui_pause
+                return "$status"
+                ;;
+            b | B | '')
+                return 0
+                ;;
+            *)
+                ;;
+        esac
+    done
+}
+
+vpsctl_run_domain_menu() {
+    local domain="$1"
+    local choice command_index command_key
+
+    while true; do
+        vps_registry_commands_for_domain "$domain"
+        vps_ui_clear_screen
+        vps_ui_header "${VPS_DOMAIN_LABEL[$domain]}"
+        vps_ui_domain_commands "$domain"
+
+        if ((${#VPS_REGISTRY_RESULTS[@]} == 0)); then
+            vps_ui_info "该分类暂未登记功能脚本。"
+            vps_ui_pause
+            return 0
+        fi
+
+        printf '\n  [b] 返回主菜单    [q] 退出\n\n'
+        vps_ui_read_choice "请选择功能" || return "$VPSCTL_MENU_STATUS"
+        choice="$VPS_UI_CHOICE"
+
+        case "$choice" in
+            b | B | '')
+                return 0
+                ;;
+            q | Q)
+                exit "$VPSCTL_MENU_STATUS"
+                ;;
+            *)
+                if vps_ui_parse_index "$choice" "${#VPS_REGISTRY_RESULTS[@]}"; then
+                    command_index="$VPS_UI_INDEX"
+                    command_key="${VPS_REGISTRY_RESULTS[$command_index]}"
+                    if vpsctl_show_command_screen "$command_key"; then
+                        VPSCTL_MENU_STATUS=0
+                    else
+                        VPSCTL_MENU_STATUS=$?
+                    fi
+                fi
+                ;;
+        esac
+    done
+}
+
+vpsctl_run_menu() {
+    local choice domain_index domain
+
+    if [[ "$VPSCTL_NON_INTERACTIVE" == "1" || ! -t 0 || ! -t 1 ]]; then
+        vpsctl_error "interactive menu requires a terminal and cannot be used with --non-interactive"
+        return 2
+    fi
+
+    vps_env_detect
+
+    while true; do
+        vps_ui_clear_screen
+        vps_ui_dashboard "$VPSCTL_VERSION"
+        vps_ui_main_menu
+        vps_ui_read_choice "请选择" || return "$VPSCTL_MENU_STATUS"
+        choice="$VPS_UI_CHOICE"
+
+        case "$choice" in
+            e | E)
+                vps_ui_clear_screen
+                vps_ui_header "环境详情"
+                vps_ui_environment_details
+                vps_ui_pause
+                ;;
+            r | R)
+                vps_env_detect
+                ;;
+            q | Q)
+                return "$VPSCTL_MENU_STATUS"
+                ;;
+            *)
+                if vps_ui_parse_index "$choice" "${#VPS_DOMAIN_IDS[@]}"; then
+                    domain_index="$VPS_UI_INDEX"
+                    domain="${VPS_DOMAIN_IDS[$domain_index]}"
+                    vpsctl_run_domain_menu "$domain"
+                fi
+                ;;
+        esac
+    done
+}
+
+vpsctl_show_environment() {
+    vps_env_detect
+    vps_ui_dashboard "$VPSCTL_VERSION"
+    printf '\n'
+    vps_ui_environment_details
+}
+
+vpsctl_show_registered_commands() {
+    vps_ui_header "已登记功能"
+    vps_ui_registered_commands
+}
+
+vpsctl_main() {
+    trap vpsctl_handle_interrupt INT TERM
+
+    if ! vpsctl_parse_global_options "$@"; then
+        vpsctl_usage >&2
+        return 2
+    fi
+
+    vps_registry_init
+    vps_ui_init
+
+    if ((${#VPSCTL_ARGS[@]} == 0)); then
+        if [[ "$VPSCTL_NON_INTERACTIVE" == "0" && -t 0 && -t 1 ]]; then
+            vpsctl_run_menu
+        else
+            vpsctl_show_environment
+        fi
+        return $?
+    fi
+
+    case "${VPSCTL_ARGS[0]}" in
+        help)
+            if ((${#VPSCTL_ARGS[@]} != 1)); then
+                vpsctl_error "help does not accept additional arguments"
+                return 2
+            fi
+            vpsctl_usage
+            ;;
+        version)
+            if ((${#VPSCTL_ARGS[@]} != 1)); then
+                vpsctl_error "version does not accept additional arguments"
+                return 2
+            fi
+            printf 'vpsctl %s\n' "$VPSCTL_VERSION"
+            ;;
+        menu)
+            if ((${#VPSCTL_ARGS[@]} != 1)); then
+                vpsctl_error "menu does not accept additional arguments"
+                return 2
+            fi
+            vpsctl_run_menu
+            ;;
+        env)
+            if ((${#VPSCTL_ARGS[@]} != 1)); then
+                vpsctl_error "env does not accept additional arguments"
+                return 2
+            fi
+            vpsctl_show_environment
+            ;;
+        list)
+            if ((${#VPSCTL_ARGS[@]} != 1)); then
+                vpsctl_error "list does not accept additional arguments"
+                return 2
+            fi
+            vpsctl_show_registered_commands
+            ;;
+        *)
+            if ((${#VPSCTL_ARGS[@]} < 2)); then
+                vpsctl_error "expected <domain> <action>"
+                return 2
+            fi
+            vps_env_detect
+            vpsctl_dispatch "${VPSCTL_ARGS[0]}" "${VPSCTL_ARGS[1]}" "${VPSCTL_ARGS[@]:2}"
+            ;;
+    esac
+}
+
+vpsctl_main "$@"
