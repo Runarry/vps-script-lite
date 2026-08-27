@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Test resets intentionally assign public globals from the sourced libraries.
-# shellcheck disable=SC2034
+# Test resets intentionally assign public globals from sourced libraries, and
+# command mocks are invoked indirectly by environment detection.
+# shellcheck disable=SC2034,SC2329
 
 set -Eeuo pipefail
 IFS=$'\n\t'
@@ -33,6 +34,19 @@ test_assert_nonempty() {
     [[ -n "$value" ]] || test_fail "${message}: value is empty"
 }
 
+test_assert_contains() {
+    local value="$1"
+    local expected="$2"
+    local message="$3"
+    [[ "$value" == *"$expected"* ]] || test_fail "${message}: missing '${expected}'"
+}
+
+test_assert_no_ansi() {
+    local value="$1"
+    local message="$2"
+    [[ "$value" != *$'\033['* ]] || test_fail "${message}: unexpected ANSI escape"
+}
+
 test_environment_detection() {
     vps_env_detect
 
@@ -49,11 +63,11 @@ test_environment_detection() {
     [[ "${VPS_ENV[root_disk_total]}" != "unknown" ]] || test_fail "root disk detection returned unknown"
 
     test_assert_equal "1.0 GiB" "$(vps_env_format_kib 1048576)" "KiB formatter"
-    test_assert_equal "1d 1h 1m" "$(vps_env_format_uptime 90060)" "uptime formatter"
+    test_assert_equal "1 天 1 小时 1 分钟" "$(vps_env_format_uptime 90060)" "uptime formatter"
     test_assert_equal "BBRv2" "$(vps_env_classify_bbr_version bbr2 '')" "BBRv2 classifier"
     test_assert_equal "BBRv3" "$(vps_env_classify_bbr_version bbr3 '')" "BBRv3 classifier"
-    test_assert_equal "kernel implementation (version not exposed)" "$(vps_env_classify_bbr_version bbr '')" "unversioned BBR classifier"
-    test_assert_equal "module 3.1" "$(vps_env_classify_bbr_version bbr 3.1)" "module version classifier"
+    test_assert_equal "内核实现（未公开版本）" "$(vps_env_classify_bbr_version bbr '')" "unversioned BBR classifier"
+    test_assert_equal "模块 3.1" "$(vps_env_classify_bbr_version bbr 3.1)" "module version classifier"
     vps_env_requirements_met "bash:4.4" || test_fail "current Bash capability should be available"
     if vps_env_requirements_met "capability:that-does-not-exist"; then
         test_fail "unknown capability should not be accepted"
@@ -73,6 +87,14 @@ test_environment_detection() {
     test_assert_equal "192.0.2.10" "${VPS_ENV[ipv4]}" "IPv4-only detection"
     test_assert_equal "unavailable" "${VPS_ENV[ipv6]}" "missing IPv6 detection"
     unset -f ip
+}
+
+test_environment_chinese_fallbacks() {
+    vps_env_read_os_release() {
+        return 0
+    }
+    vps_env_detect
+    test_assert_equal "未知 Linux 系统" "${VPS_ENV[os_pretty_name]}" "localized OS fallback"
 }
 
 test_registry() {
@@ -127,6 +149,62 @@ test_ui_input() {
     [[ "$output" == *"网络设置"* ]] || test_fail "registered network domain should be visible"
     [[ "$output" == *"(3 个功能)"* ]] || test_fail "network domain command count should be visible"
 
+    VPS_UI_GREEN="<绿>"
+    VPS_UI_YELLOW="<黄>"
+    VPS_UI_RED="<红>"
+    VPS_UI_CYAN="<青>"
+    VPS_UI_RESET="<重置>"
+    test_assert_equal "<绿>可用<重置>" "$(vps_ui_availability_label ready)" "ready label translation"
+    test_assert_equal "<黄>受限<重置>" "$(vps_ui_availability_label limited)" "limited label translation"
+    test_assert_equal "<黄>变更<重置>" "$(vps_ui_risk_label change)" "change risk translation"
+    test_assert_equal "<红>中断性<重置>" "$(vps_ui_risk_label disruptive)" "disruptive risk translation"
+    test_assert_equal "<黄>按需 root<重置>" "$(vps_ui_privilege_label optional-root)" "optional-root translation"
+    test_assert_equal "<绿>支持<重置>" "$(vps_ui_dry_run_label supported)" "dry-run translation"
+    test_assert_equal "<黄>实验性<重置>" "$(vps_ui_lifecycle_label experimental)" "lifecycle translation"
+    test_assert_equal "<黄>未知<重置>" "$(vps_ui_value_label unknown)" "unknown value translation"
+    test_assert_equal "<绿>已启用<重置>" "$(vps_ui_value_label enabled)" "enabled value translation"
+    test_assert_equal "<青>物理机<重置>" "$(vps_ui_value_label bare-metal)" "virtualization translation"
+    test_assert_equal "<青>WSL<重置>" "$(vps_ui_value_label wsl)" "WSL translation"
+    test_assert_equal "<绿>0<重置>" "$(vps_ui_exit_code 0)" "successful exit-code color"
+    test_assert_equal "<黄>30<重置>" "$(vps_ui_exit_code 30)" "partial exit-code color"
+    test_assert_equal "<红>20<重置>" "$(vps_ui_exit_code 20)" "failed exit-code color"
+
+    VPS_ENV[compatibility]="supported"
+    test_assert_equal "<绿>支持<重置>" "$(vps_ui_status_badge)" "supported badge translation"
+    VPS_ENV[compatibility]="limited"
+    test_assert_equal "<黄>受限<重置>" "$(vps_ui_status_badge)" "limited badge translation"
+    VPS_ENV[compatibility]="unsupported"
+    test_assert_equal "<红>不支持<重置>" "$(vps_ui_status_badge)" "unsupported badge translation"
+
+    output="$(vps_ui_command_details "network:bbr")"
+    test_assert_contains "$output" "命令" "localized command field"
+    test_assert_contains "$output" "network bbr" "technical command remains unchanged"
+    test_assert_contains "$output" "风险" "localized risk field"
+    test_assert_contains "$output" "<黄>变更<重置>" "localized colored risk value"
+    test_assert_contains "$output" "权限" "localized privilege field"
+    test_assert_contains "$output" "演练" "localized dry-run field"
+    test_assert_contains "$output" "生命周期" "localized lifecycle field"
+
+    VPS_UI_GREEN=$'\033[32m'
+    VPS_UI_RESET=$'\033[0m'
+    VPSCTL_NO_COLOR=1
+    NO_COLOR=""
+    vps_ui_init
+    test_assert_equal "" "$VPS_UI_GREEN" "--no-color resets existing colors"
+    test_assert_equal "" "$VPS_UI_RESET" "--no-color resets existing reset code"
+    output="$(vps_ui_info "测试")"
+    test_assert_no_ansi "$output" "--no-color UI output"
+
+    VPS_UI_RED=$'\033[31m'
+    VPSCTL_NO_COLOR=0
+    NO_COLOR=1
+    vps_ui_init
+    test_assert_equal "" "$VPS_UI_RED" "NO_COLOR resets existing colors"
+    output="$(vps_ui_clear_screen)"
+    test_assert_equal "" "$output" "NO_COLOR suppresses ANSI clear sequence"
+    unset NO_COLOR
+    VPSCTL_NO_COLOR=0
+
     VPS_DOMAIN_IDS=()
     VPS_DOMAIN_LABEL=()
     VPS_DOMAIN_DESCRIPTION=()
@@ -162,6 +240,7 @@ test_ui_input() {
 }
 
 test_environment_detection
+test_environment_chinese_fallbacks
 test_registry
 test_ui_input
 printf 'PASS: library tests\n'

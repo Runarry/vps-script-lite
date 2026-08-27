@@ -42,36 +42,36 @@ BBR_ORIGINAL_LIVE_QDISC=""
 
 bbr_usage() {
     cat <<'EOF'
-Manage TCP congestion control and the default queueing discipline.
+管理 TCP 拥塞控制算法与默认队列规则（qdisc）。
 
-Usage:
+用法：
   bbr.sh [global-options] status
   bbr.sh [global-options] enable [--algorithm ALG] [--qdisc QDISC] [--apply-live-qdisc]
   bbr.sh [global-options] set --algorithm ALG --qdisc QDISC [--apply-live-qdisc]
   bbr.sh [global-options] restore
 
-Actions:
-  status               Show the current kernel and saved configuration state
-  enable               Enable settings, defaulting to bbr with fq
-  set                  Select an available TCP algorithm and default qdisc
-  restore              Restore the state saved before the first change
+操作：
+  status               显示当前内核状态和已保存的配置状态
+  enable               启用配置，默认使用 bbr 与 fq
+  set                  选择当前内核可用的 TCP 算法与默认 qdisc
+  restore              恢复首次修改前保存的状态
 
-Options:
-  --algorithm ALG      TCP algorithm listed by the running kernel
-  --qdisc QDISC        Default queueing discipline (for example fq or fq_codel)
-  --apply-live-qdisc   Replace the root qdisc on the default-route interface
-  --dry-run            Show commands without changing the system
-  --yes                 Approve ordinary change confirmations
-  --non-interactive    Never read from the terminal
-  --quiet              Suppress non-essential informational messages
-  --verbose            Show additional diagnostics
-  --                    Stop option parsing
-  -h, --help           Show this help
+选项：
+  --algorithm ALG      指定当前内核列出的 TCP 算法
+  --qdisc QDISC        指定默认 qdisc（例如 fq 或 fq_codel）
+  --apply-live-qdisc   立即替换默认路由网卡的 root qdisc
+  --dry-run            仅显示计划，不修改系统
+  --yes                 自动同意普通确认提示
+  --non-interactive    禁止从终端读取输入
+  --quiet              隐藏非必要信息
+  --verbose            显示更多诊断信息
+  --no-color           禁用彩色输出
+  --                    停止解析选项
+  -h, --help           显示此帮助
 
-Changes affect only the currently running kernel. Persistent settings are
-written to /etc/sysctl.d/90-vpsctl-bbr.conf and
-/etc/modules-load.d/90-vpsctl-bbr.conf. Replacing a live root qdisc can briefly
-affect network traffic.
+本命令不会安装或切换内核，仅配置当前运行内核。持久化设置写入
+/etc/sysctl.d/90-vpsctl-bbr.conf 和
+/etc/modules-load.d/90-vpsctl-bbr.conf。立即替换 root qdisc 可能造成短暂网络波动。
 EOF
 }
 
@@ -82,7 +82,7 @@ bbr_die_usage() {
 
 bbr_require_linux() {
     [[ "${VPSCTL_TESTING:-0}" == "1" || "$(uname -s 2>/dev/null || true)" == "Linux" ]] && return 0
-    vps_cmd_error "network bbr is supported on Linux only"
+    vps_cmd_error "network bbr 仅支持 Linux"
     return 3
 }
 
@@ -110,15 +110,18 @@ bbr_parse_args() {
             --verbose)
                 VPSCTL_VERBOSE=1
                 ;;
+            --no-color)
+                VPSCTL_NO_COLOR=1
+                ;;
             -h | --help)
                 BBR_ACTION="help"
                 shift
-                (($# == 0)) || bbr_die_usage "--help does not accept additional arguments"
+                (($# == 0)) || bbr_die_usage "--help 不接受其他参数"
                 return $?
                 ;;
             --algorithm)
                 (($# >= 2)) || {
-                    bbr_die_usage "--algorithm requires a value"
+                    bbr_die_usage "--algorithm 缺少参数值"
                     return $?
                 }
                 BBR_ALGORITHM="$2"
@@ -126,7 +129,7 @@ bbr_parse_args() {
                 ;;
             --qdisc)
                 (($# >= 2)) || {
-                    bbr_die_usage "--qdisc requires a value"
+                    bbr_die_usage "--qdisc 缺少参数值"
                     return $?
                 }
                 BBR_QDISC="$2"
@@ -141,7 +144,7 @@ bbr_parse_args() {
                 break
                 ;;
             -*)
-                bbr_die_usage "unknown option: $1"
+                bbr_die_usage "未知选项：$1"
                 return $?
                 ;;
             *)
@@ -152,7 +155,7 @@ bbr_parse_args() {
     done
 
     ((${#positional[@]} <= 1)) || {
-        bbr_die_usage "unexpected argument: ${positional[1]}"
+        bbr_die_usage "多余参数：${positional[1]}"
         return $?
     }
     if ((${#positional[@]} == 1)); then
@@ -213,45 +216,59 @@ bbr_algorithm_available() {
 }
 
 bbr_status() {
-    local algorithm qdisc available module_state interface root_qdisc
+    local algorithm algorithm_style qdisc qdisc_style available available_style
+    local module_state module_style interface interface_style root_qdisc root_style
 
-    algorithm="$(bbr_current_algorithm 2>/dev/null || printf 'unknown')"
-    qdisc="$(bbr_current_qdisc 2>/dev/null || printf 'unknown')"
-    available="$(bbr_available_algorithms 2>/dev/null || printf 'unknown')"
+    algorithm="$(bbr_current_algorithm 2>/dev/null || printf '未知')"
+    qdisc="$(bbr_current_qdisc 2>/dev/null || printf '未知')"
+    available="$(bbr_available_algorithms 2>/dev/null || printf '未知')"
+    algorithm_style="emphasis"
+    qdisc_style="emphasis"
+    available_style="info"
+    [[ "$algorithm" != "未知" ]] || algorithm_style="error"
+    [[ "$qdisc" != "未知" ]] || qdisc_style="error"
+    [[ "$available" != "未知" ]] || available_style="warning"
 
     if [[ -d "$(vps_cmd_system_path /sys/module/tcp_bbr)" ]]; then
-        module_state="loaded"
+        module_state="已加载"
+        module_style="success"
     elif bbr_algorithm_available bbr; then
-        module_state="available"
+        module_state="可用"
+        module_style="info"
     else
-        module_state="unavailable"
+        module_state="不可用"
+        module_style="warning"
     fi
-    interface="$(bbr_default_interface 2>/dev/null || printf 'unavailable')"
-    root_qdisc="unavailable"
-    if [[ "$interface" != "unavailable" ]] && command -v tc >/dev/null 2>&1; then
-        root_qdisc="$(bbr_interface_root_qdisc "$interface" 2>/dev/null || printf 'unavailable')"
+    interface="$(bbr_default_interface 2>/dev/null || printf '不可用')"
+    interface_style="info"
+    [[ "$interface" != "不可用" ]] || interface_style="warning"
+    root_qdisc="不可用"
+    root_style="warning"
+    if [[ "$interface" != "不可用" ]] && command -v tc >/dev/null 2>&1; then
+        root_qdisc="$(bbr_interface_root_qdisc "$interface" 2>/dev/null || printf '不可用')"
+        [[ "$root_qdisc" == "不可用" ]] || root_style="emphasis"
     fi
 
-    printf 'algorithm: %s\n' "$algorithm"
-    printf 'qdisc: %s\n' "$qdisc"
-    printf 'available_algorithms: %s\n' "$available"
-    printf 'bbr_module: %s\n' "$module_state"
-    printf 'default_interface: %s\n' "$interface"
-    printf 'interface_root_qdisc: %s\n' "$root_qdisc"
+    vps_cmd_status "当前拥塞控制算法" "$algorithm" "$algorithm_style"
+    vps_cmd_status "默认 qdisc" "$qdisc" "$qdisc_style"
+    vps_cmd_status "内核可用算法" "$available" "$available_style"
+    vps_cmd_status "BBR 模块" "$module_state" "$module_style"
+    vps_cmd_status "默认路由网卡" "$interface" "$interface_style"
+    vps_cmd_status "网卡 root qdisc" "$root_qdisc" "$root_style"
     if [[ -f "$BBR_SYSCTL_FILE" ]]; then
-        printf 'persistent_sysctl: present\n'
+        vps_cmd_status "sysctl 持久化配置" "已存在" success
     else
-        printf 'persistent_sysctl: absent\n'
+        vps_cmd_status "sysctl 持久化配置" "缺失" warning
     fi
     if [[ -f "$BBR_MODULES_FILE" ]]; then
-        printf 'persistent_modules: present\n'
+        vps_cmd_status "modules-load 持久化配置" "已存在" success
     else
-        printf 'persistent_modules: absent\n'
+        vps_cmd_status "modules-load 持久化配置" "缺失" warning
     fi
     if [[ -f "$BBR_ORIGINAL_FILE" ]]; then
-        printf 'original_state: saved\n'
+        vps_cmd_status "原始状态" "已保存" success
     else
-        printf 'original_state: absent\n'
+        vps_cmd_status "原始状态" "未保存" warning
     fi
 }
 
@@ -271,7 +288,7 @@ bbr_atomic_write_path() {
     fi
     if [[ "${VPSCTL_DRY_RUN:-0}" == "1" ]]; then
         cat >/dev/null
-        vps_cmd_info "dry-run: would atomically write ${logical_path} with mode ${mode}"
+        vps_cmd_info "演练：将以权限 ${mode} 原子写入 ${logical_path}"
         return 0
     fi
     vps_cmd_atomic_write "$logical_path" "$mode"
@@ -357,7 +374,7 @@ bbr_backup_unmanaged_persistence() {
         if bbr_file_is_unmanaged "$path" && [[ -f "$path" && ! -L "$path" ]]; then
             logical_path="$(bbr_logical_path "$path")"
             if [[ "$VPSCTL_DRY_RUN" == "1" ]]; then
-                vps_cmd_info "dry-run: would back up unmanaged file before overwrite: ${logical_path}"
+                vps_cmd_info "演练：覆盖前将备份未受管文件 ${logical_path}"
             else
                 vps_cmd_backup_file bbr "$logical_path" >/dev/null || return $?
             fi
@@ -371,7 +388,7 @@ bbr_validate_restore_ownership() {
     for path in "$BBR_SYSCTL_FILE" "$BBR_MODULES_FILE"; do
         if bbr_file_is_unmanaged "$path"; then
             logical_path="$(bbr_logical_path "$path")"
-            vps_cmd_error "refusing to restore over a file no longer managed by vpsctl: ${logical_path}"
+            vps_cmd_error "文件已不再由 vpsctl 管理，拒绝覆盖恢复：${logical_path}"
             return 3
         fi
     done
@@ -411,11 +428,11 @@ bbr_begin_transaction() {
     BBR_TX_LIVE_INTERFACE=""
     BBR_TX_LIVE_QDISC=""
     BBR_TX_ALGORITHM="$(bbr_current_algorithm)" || {
-        vps_cmd_error "cannot read the current TCP congestion-control algorithm"
+        vps_cmd_error "无法读取当前 TCP 拥塞控制算法"
         return 3
     }
     BBR_TX_QDISC="$(bbr_current_qdisc)" || {
-        vps_cmd_error "cannot read the current default qdisc"
+        vps_cmd_error "无法读取当前默认 qdisc"
         return 3
     }
     bbr_snapshot_file "$BBR_SYSCTL_FILE" BBR_TX_SYSCTL_PRESENT BBR_TX_SYSCTL_B64 || return $?
@@ -428,7 +445,7 @@ bbr_rollback() {
     local failed=0
 
     [[ "$BBR_TX_ACTIVE" == "1" ]] || return 0
-    vps_cmd_warning "change failed; restoring the previous runtime and files"
+    vps_cmd_warning "变更失败，正在恢复此前的运行状态和文件"
     bbr_restore_file_snapshot "$BBR_SYSCTL_FILE" 0644 "$BBR_TX_SYSCTL_PRESENT" "$BBR_TX_SYSCTL_B64" || failed=1
     bbr_restore_file_snapshot "$BBR_MODULES_FILE" 0644 "$BBR_TX_MODULES_PRESENT" "$BBR_TX_MODULES_B64" || failed=1
     bbr_restore_file_snapshot "$BBR_ORIGINAL_FILE" 0600 "$BBR_TX_ORIGINAL_PRESENT" "$BBR_TX_ORIGINAL_B64" || failed=1
@@ -523,12 +540,12 @@ bbr_load_original() {
     BBR_ORIGINAL_LIVE_QDISC=""
 
     [[ -r "$BBR_ORIGINAL_FILE" ]] || {
-        vps_cmd_error "no original state has been saved"
+        vps_cmd_error "尚未保存原始状态"
         return 3
     }
     while IFS= read -r line; do
         [[ "$line" == *=* ]] || {
-            vps_cmd_error "saved original state contains a malformed line"
+            vps_cmd_error "已保存的原始状态含有格式错误的行"
             return 10
         }
         key="${line%%=*}"
@@ -536,12 +553,12 @@ bbr_load_original() {
         case "$key" in
             version | algorithm | qdisc | sysctl_present | sysctl_b64 | modules_present | modules_b64 | live_present | live_interface | live_qdisc) ;;
             *)
-                vps_cmd_error "saved original state contains an unknown key: ${key}"
+                vps_cmd_error "已保存的原始状态含有未知键：${key}"
                 return 10
                 ;;
         esac
         [[ -z "${seen[$key]+x}" ]] || {
-            vps_cmd_error "saved original state contains a duplicate key: ${key}"
+            vps_cmd_error "已保存的原始状态含有重复键：${key}"
             return 10
         }
         seen["$key"]=1
@@ -561,18 +578,18 @@ bbr_load_original() {
 
     for required in version algorithm qdisc sysctl_present sysctl_b64 modules_present modules_b64; do
         [[ -n "${seen[$required]+x}" ]] || {
-            vps_cmd_error "saved original state is missing key: ${required}"
+            vps_cmd_error "已保存的原始状态缺少键：${required}"
             return 10
         }
     done
     [[ "$BBR_ORIGINAL_VERSION" == "1" || "$BBR_ORIGINAL_VERSION" == "2" ]] || {
-        vps_cmd_error "saved original state has an unsupported format"
+        vps_cmd_error "已保存的原始状态格式版本不受支持"
         return 10
     }
     if [[ "$BBR_ORIGINAL_VERSION" == "1" ]]; then
         for required in live_present live_interface live_qdisc; do
             [[ -z "${seen[$required]+x}" ]] || {
-                vps_cmd_error "version 1 original state must not contain live qdisc keys"
+                vps_cmd_error "version=1 的原始状态不能包含 live qdisc 键"
                 return 10
             }
         done
@@ -582,39 +599,39 @@ bbr_load_original() {
     else
         for required in live_present live_interface live_qdisc; do
             [[ -n "${seen[$required]+x}" ]] || {
-                vps_cmd_error "saved original state is missing key: ${required}"
+                vps_cmd_error "已保存的原始状态缺少键：${required}"
                 return 10
             }
         done
     fi
     bbr_validate_name "$BBR_ORIGINAL_ALGORITHM" && bbr_validate_name "$BBR_ORIGINAL_QDISC" || {
-        vps_cmd_error "saved original state contains invalid kernel settings"
+        vps_cmd_error "已保存的原始状态含有无效内核设置"
         return 10
     }
     [[ "$BBR_ORIGINAL_SYSCTL_PRESENT" =~ ^[01]$ && "$BBR_ORIGINAL_MODULES_PRESENT" =~ ^[01]$ ]] || {
-        vps_cmd_error "saved original state contains invalid file metadata"
+        vps_cmd_error "已保存的原始状态含有无效文件元数据"
         return 10
     }
     bbr_validate_base64 "$BBR_ORIGINAL_SYSCTL_B64" && bbr_validate_base64 "$BBR_ORIGINAL_MODULES_B64" || {
-        vps_cmd_error "saved original state contains invalid base64 data"
+        vps_cmd_error "已保存的原始状态含有无效 base64 数据"
         return 10
     }
     if [[ "$BBR_ORIGINAL_SYSCTL_PRESENT" == "0" && -n "$BBR_ORIGINAL_SYSCTL_B64" ]] ||
         [[ "$BBR_ORIGINAL_MODULES_PRESENT" == "0" && -n "$BBR_ORIGINAL_MODULES_B64" ]]; then
-        vps_cmd_error "saved original state has content for an absent file"
+        vps_cmd_error "已保存的原始状态为缺失文件记录了内容"
         return 10
     fi
     [[ "$BBR_ORIGINAL_LIVE_PRESENT" =~ ^[01]$ ]] || {
-        vps_cmd_error "saved original state contains invalid live qdisc metadata"
+        vps_cmd_error "已保存的原始状态含有无效 live qdisc 元数据"
         return 10
     }
     if [[ "$BBR_ORIGINAL_LIVE_PRESENT" == "1" ]]; then
         bbr_validate_interface_name "$BBR_ORIGINAL_LIVE_INTERFACE" && bbr_validate_name "$BBR_ORIGINAL_LIVE_QDISC" || {
-            vps_cmd_error "saved original state contains invalid live qdisc values"
+            vps_cmd_error "已保存的原始状态含有无效 live qdisc 值"
             return 10
         }
     elif [[ -n "$BBR_ORIGINAL_LIVE_INTERFACE" || -n "$BBR_ORIGINAL_LIVE_QDISC" ]]; then
-        vps_cmd_error "saved original state has values for an absent live qdisc snapshot"
+        vps_cmd_error "已保存的原始状态为缺失的 live qdisc 快照记录了值"
         return 10
     fi
     BBR_ORIGINAL_LOADED=1
@@ -649,23 +666,23 @@ bbr_load_algorithm_module() {
 
     bbr_algorithm_available "$algorithm" && return 0
     if [[ "$algorithm" != "bbr" ]]; then
-        vps_cmd_error "TCP algorithm is not available in the running kernel: ${algorithm}"
+        vps_cmd_error "当前运行内核不可用 TCP 算法：${algorithm}"
         return 3
     fi
     command -v modprobe >/dev/null 2>&1 || {
-        vps_cmd_error "bbr is unavailable and modprobe is not installed"
+        vps_cmd_error "bbr 不可用，且系统未安装 modprobe"
         return 3
     }
     vps_cmd_run modprobe tcp_bbr || {
-        vps_cmd_error "failed to load tcp_bbr"
+        vps_cmd_error "加载 tcp_bbr 失败"
         return 20
     }
     if [[ "$VPSCTL_DRY_RUN" == "1" ]]; then
-        vps_cmd_info "dry-run cannot re-check algorithms after loading tcp_bbr"
+        vps_cmd_info "演练模式无法在加载 tcp_bbr 后重新检查算法"
         return 0
     fi
     bbr_algorithm_available "$algorithm" || {
-        vps_cmd_error "TCP algorithm is still unavailable after loading tcp_bbr: ${algorithm}"
+        vps_cmd_error "加载 tcp_bbr 后 TCP 算法仍不可用：${algorithm}"
         return 3
     }
 }
@@ -675,7 +692,7 @@ bbr_prepare_qdisc() {
 
     command -v modprobe >/dev/null 2>&1 || return 0
     if ! vps_cmd_run modprobe "sch_${qdisc}"; then
-        vps_cmd_verbose "sch_${qdisc} is built in or unavailable; sysctl validation will decide"
+        vps_cmd_verbose "sch_${qdisc} 可能已内置或不可用，将以 sysctl 校验结果为准"
     fi
 }
 
@@ -700,7 +717,7 @@ bbr_prepare_directories() {
     local directory
 
     for directory in "${BBR_SYSCTL_FILE%/*}" "${BBR_MODULES_FILE%/*}" "${BBR_ORIGINAL_FILE%/*}"; do
-        vps_cmd_require_no_symlink_components "$directory" || return $?
+        bbr_require_safe_system_path "$directory" || return $?
         vps_cmd_run mkdir -p -- "$directory" || return 20
     done
     vps_cmd_run chmod 0700 -- "${BBR_ORIGINAL_FILE%/*}" || return 20
@@ -710,8 +727,21 @@ bbr_validate_managed_paths() {
     local path
 
     for path in "$BBR_SYSCTL_FILE" "$BBR_MODULES_FILE" "$BBR_ORIGINAL_FILE"; do
-        vps_cmd_require_no_symlink_components "$path" || return $?
+        bbr_require_safe_system_path "$path" || return $?
     done
+}
+
+bbr_require_safe_system_path() {
+    local path="$1"
+    local status
+
+    if vps_cmd_require_no_symlink_components "$path" 2>/dev/null; then
+        return 0
+    else
+        status=$?
+    fi
+    vps_cmd_error "系统路径包含符号链接，拒绝继续：$(bbr_logical_path "$path")"
+    return "$status"
 }
 
 bbr_apply_runtime() {
@@ -772,19 +802,19 @@ bbr_interface_root_qdisc() {
 
 bbr_capture_live_qdisc() {
     command -v tc >/dev/null 2>&1 || {
-        vps_cmd_error "--apply-live-qdisc requires tc"
+        vps_cmd_error "--apply-live-qdisc 需要 tc"
         return 3
     }
     BBR_TX_LIVE_INTERFACE="$(bbr_default_interface)" || {
-        vps_cmd_error "cannot determine the default-route interface"
+        vps_cmd_error "无法确定默认路由网卡"
         return 3
     }
     BBR_TX_LIVE_QDISC="$(bbr_interface_root_qdisc "$BBR_TX_LIVE_INTERFACE")" || {
-        vps_cmd_error "cannot determine the current root qdisc on ${BBR_TX_LIVE_INTERFACE}"
+        vps_cmd_error "无法读取 ${BBR_TX_LIVE_INTERFACE} 当前的 root qdisc"
         return 3
     }
     bbr_validate_name "$BBR_TX_LIVE_QDISC" || {
-        vps_cmd_error "current root qdisc has an unsafe type: ${BBR_TX_LIVE_QDISC}"
+        vps_cmd_error "当前 root qdisc 类型不安全：${BBR_TX_LIVE_QDISC}"
         return 3
     }
     BBR_TX_LIVE_QDISC_CAPTURED=1
@@ -794,7 +824,7 @@ bbr_apply_live_qdisc() {
     local qdisc="$1"
 
     [[ "$BBR_TX_LIVE_QDISC_CAPTURED" == "1" ]] || {
-        vps_cmd_error "live qdisc state was not captured before replacement"
+        vps_cmd_error "替换前未记录 live qdisc 状态"
         return 70
     }
     vps_cmd_run tc qdisc replace dev "$BBR_TX_LIVE_INTERFACE" root "$qdisc"
@@ -803,15 +833,15 @@ bbr_apply_live_qdisc() {
 bbr_restore_saved_live_qdisc() {
     [[ "$BBR_ORIGINAL_LIVE_PRESENT" == "1" ]] || return 0
     command -v ip >/dev/null 2>&1 && command -v tc >/dev/null 2>&1 || {
-        vps_cmd_error "cannot restore saved live qdisc because ip or tc is unavailable"
+        vps_cmd_error "ip 或 tc 不可用，无法恢复已保存的 live qdisc"
         return 20
     }
     ip link show dev "$BBR_ORIGINAL_LIVE_INTERFACE" >/dev/null 2>&1 || {
-        vps_cmd_error "cannot restore saved live qdisc; interface disappeared: ${BBR_ORIGINAL_LIVE_INTERFACE}"
+        vps_cmd_error "网卡已消失，无法恢复已保存的 live qdisc：${BBR_ORIGINAL_LIVE_INTERFACE}"
         return 20
     }
     vps_cmd_run tc qdisc replace dev "$BBR_ORIGINAL_LIVE_INTERFACE" root "$BBR_ORIGINAL_LIVE_QDISC" || {
-        vps_cmd_error "failed to restore ${BBR_ORIGINAL_LIVE_INTERFACE} root qdisc to ${BBR_ORIGINAL_LIVE_QDISC}"
+        vps_cmd_error "无法将 ${BBR_ORIGINAL_LIVE_INTERFACE} 的 root qdisc 恢复为 ${BBR_ORIGINAL_LIVE_QDISC}"
         return 20
     }
 }
@@ -825,11 +855,11 @@ bbr_apply_settings() {
 
     vps_cmd_require_root || return $?
     bbr_validate_name "$algorithm" || {
-        vps_cmd_error "invalid TCP algorithm name: ${algorithm}"
+        vps_cmd_error "TCP 算法名称无效：${algorithm}"
         return 10
     }
     bbr_validate_name "$qdisc" || {
-        vps_cmd_error "invalid qdisc name: ${qdisc}"
+        vps_cmd_error "qdisc 名称无效：${qdisc}"
         return 10
     }
     if [[ -e "$BBR_ORIGINAL_FILE" ]]; then
@@ -838,24 +868,24 @@ bbr_apply_settings() {
         BBR_ORIGINAL_LOADED=0
     fi
     if bbr_has_unmanaged_persistence; then
-        vps_cmd_warning "existing unmanaged vpsctl BBR persistence files will be backed up and overwritten"
-        if vps_cmd_confirm "Back up and overwrite the existing BBR persistence files?"; then
+        vps_cmd_warning "检测到未受管的 vpsctl BBR 持久化文件，将先备份再覆盖"
+        if vps_cmd_confirm "是否备份并覆盖现有 BBR 持久化文件？"; then
             unmanaged_confirmed=1
         else
             status=$?
             if ((status == 1)); then
-                vps_cmd_info "no changes made"
+                vps_cmd_info "未进行任何更改"
                 return 0
             fi
             return "$status"
         fi
     fi
-    if vps_cmd_confirm "Apply TCP algorithm '${algorithm}' and default qdisc '${qdisc}'?"; then
+    if vps_cmd_confirm "是否应用 TCP 算法 '${algorithm}' 和默认 qdisc '${qdisc}'？"; then
         :
     else
         status=$?
         if ((status == 1)); then
-            vps_cmd_info "no changes made"
+            vps_cmd_info "未进行任何更改"
             return 0
         fi
         return "$status"
@@ -874,7 +904,7 @@ bbr_apply_settings() {
     fi
     if ((status == 0)) && bbr_has_unmanaged_persistence; then
         if ((unmanaged_confirmed == 0)); then
-            vps_cmd_error "unmanaged persistence appeared after confirmation; retry the operation"
+            vps_cmd_error "确认后出现未受管持久化文件，请重新执行操作"
             status=3
         else
             bbr_backup_unmanaged_persistence || status=$?
@@ -897,7 +927,7 @@ bbr_apply_settings() {
             :
         else
             status=$?
-            vps_cmd_error "failed to apply or verify runtime sysctl settings"
+            vps_cmd_error "应用或校验运行时 sysctl 设置失败"
         fi
     fi
     if ((status == 0)) && [[ "$BBR_APPLY_LIVE_QDISC" == "1" ]]; then
@@ -910,7 +940,7 @@ bbr_apply_settings() {
     BBR_TX_ACTIVE=0
     ((locked == 0)) || vps_cmd_unlock
     ((status == 0)) || return "$status"
-    vps_cmd_info "TCP algorithm is ${algorithm}; default qdisc is ${qdisc}"
+    vps_cmd_success "已应用 TCP 算法 ${algorithm}，默认 qdisc 为 ${qdisc}"
 }
 
 bbr_restore() {
@@ -923,15 +953,15 @@ bbr_restore() {
     bbr_validate_managed_paths || return $?
     bbr_validate_restore_ownership || return $?
     if bbr_persistence_matches_saved_original && bbr_runtime_matches_saved_original && bbr_live_matches_saved_original; then
-        vps_cmd_info "original TCP, qdisc, and persistence state is already restored"
+        vps_cmd_success "TCP、qdisc 和持久化配置已处于原始状态"
         return 0
     fi
-    if vps_cmd_confirm "Restore the first saved TCP and qdisc state?"; then
+    if vps_cmd_confirm "是否恢复首次保存的 TCP 与 qdisc 状态？"; then
         :
     else
         status=$?
         if ((status == 1)); then
-            vps_cmd_info "no changes made"
+            vps_cmd_info "未进行任何更改"
             return 0
         fi
         return "$status"
@@ -954,7 +984,7 @@ bbr_restore() {
             :
         else
             status=$?
-            vps_cmd_error "failed to restore or verify runtime sysctl settings"
+            vps_cmd_error "恢复或校验运行时 sysctl 设置失败"
         fi
     fi
 
@@ -968,20 +998,20 @@ bbr_restore() {
     ((locked == 0)) || vps_cmd_unlock
     ((status == 0)) || return "$status"
     ((partial_status == 0)) || return "$partial_status"
-    vps_cmd_info "restored TCP algorithm ${BBR_ORIGINAL_ALGORITHM} and qdisc ${BBR_ORIGINAL_QDISC}"
+    vps_cmd_success "已恢复 TCP 算法 ${BBR_ORIGINAL_ALGORITHM} 和 qdisc ${BBR_ORIGINAL_QDISC}"
 }
 
 bbr_interactive_menu() {
     local choice algorithm qdisc confirm_status
 
     while true; do
-        printf '\nNetwork BBR management\n'
-        printf '  1) Status\n'
-        printf '  2) Enable BBR + fq\n'
-        printf '  3) Custom algorithm and qdisc\n'
-        printf '  4) Restore original state\n'
-        printf '  q) Quit\n'
-        printf 'Choice: '
+        printf '\nBBR 网络管理\n'
+        printf '  1) 查看状态\n'
+        printf '  2) 启用 BBR + fq\n'
+        printf '  3) 自定义算法和 qdisc\n'
+        printf '  4) 恢复原始状态\n'
+        printf '  q) 退出\n'
+        printf '请选择：'
         IFS= read -r choice || return 0
         case "$choice" in
             1)
@@ -989,7 +1019,7 @@ bbr_interactive_menu() {
                 ;;
             2)
                 BBR_APPLY_LIVE_QDISC=0
-                if vps_cmd_confirm "Immediately replace the default interface root qdisc?"; then
+                if vps_cmd_confirm "是否立即替换默认路由网卡的 root qdisc？"; then
                     BBR_APPLY_LIVE_QDISC=1
                 else
                     confirm_status=$?
@@ -998,12 +1028,12 @@ bbr_interactive_menu() {
                 bbr_apply_settings bbr fq || true
                 ;;
             3)
-                printf 'TCP algorithm: '
+                printf 'TCP 算法：'
                 IFS= read -r algorithm || return 130
-                printf 'Default qdisc: '
+                printf '默认 qdisc：'
                 IFS= read -r qdisc || return 130
                 BBR_APPLY_LIVE_QDISC=0
-                if vps_cmd_confirm "Immediately replace the default interface root qdisc?"; then
+                if vps_cmd_confirm "是否立即替换默认路由网卡的 root qdisc？"; then
                     BBR_APPLY_LIVE_QDISC=1
                 else
                     confirm_status=$?
@@ -1018,7 +1048,7 @@ bbr_interactive_menu() {
                 return 0
                 ;;
             *)
-                vps_cmd_warning "unknown menu choice: ${choice}"
+                vps_cmd_warning "未知菜单选项：${choice}"
                 ;;
         esac
     done
@@ -1055,7 +1085,7 @@ bbr_main() {
     case "$BBR_ACTION" in
         status)
             [[ -z "$BBR_ALGORITHM" && -z "$BBR_QDISC" && "$BBR_APPLY_LIVE_QDISC" == "0" ]] || {
-                bbr_die_usage "status does not accept setting options"
+                bbr_die_usage "status 不接受设置选项"
                 return $?
             }
             bbr_status
@@ -1065,24 +1095,24 @@ bbr_main() {
             ;;
         set)
             [[ -n "$BBR_ALGORITHM" ]] || {
-                bbr_die_usage "set requires --algorithm"
+                bbr_die_usage "set 需要 --algorithm"
                 return $?
             }
             [[ -n "$BBR_QDISC" ]] || {
-                bbr_die_usage "set requires --qdisc"
+                bbr_die_usage "set 需要 --qdisc"
                 return $?
             }
             bbr_apply_settings "$BBR_ALGORITHM" "$BBR_QDISC"
             ;;
         restore)
             [[ -z "$BBR_ALGORITHM" && -z "$BBR_QDISC" && "$BBR_APPLY_LIVE_QDISC" == "0" ]] || {
-                bbr_die_usage "restore does not accept setting options"
+                bbr_die_usage "restore 不接受设置选项"
                 return $?
             }
             bbr_restore
             ;;
         *)
-            bbr_die_usage "unknown action: ${BBR_ACTION}"
+            bbr_die_usage "未知操作：${BBR_ACTION}"
             ;;
     esac
 }

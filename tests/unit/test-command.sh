@@ -25,6 +25,13 @@ test_assert_equal() {
     [[ "$expected" == "$actual" ]] || test_fail "${message}: expected '${expected}', got '${actual}'"
 }
 
+test_assert_no_ansi() {
+    local value="$1"
+    local message="$2"
+
+    [[ "$value" != *$'\033['* ]] || test_fail "${message}: non-TTY output contains ANSI escapes"
+}
+
 test_assert_file_mode() {
     local expected="$1"
     local path="$2"
@@ -93,21 +100,65 @@ test_logging_and_run() {
     local output
     local marker="${TEST_TEMP}/ran"
 
+    VPSCTL_NO_COLOR=0
+    NO_COLOR=""
+    TERM=xterm-256color
     output="$(vps_cmd_info hello world 2>&1)"
-    [[ "$output" == *'[INFO] test-command: hello world'* ]] || test_fail "info log format"
+    [[ "$output" == *'[信息] test-command: hello world'* ]] || test_fail "info log format"
+    test_assert_no_ansi "$output" "redirected info log"
     output="$(vps_cmd_verbose details 2>&1)"
-    [[ "$output" == *'[DEBUG] test-command: details'* ]] || test_fail "verbose log format"
+    [[ "$output" == *'[详细] test-command: details'* ]] || test_fail "verbose log format"
     output="$(vps_cmd_warning caution 2>&1)"
-    [[ "$output" == *'[WARN] test-command: caution'* ]] || test_fail "warning log format"
+    [[ "$output" == *'[警告] test-command: caution'* ]] || test_fail "warning log format"
     output="$(vps_cmd_error failure 2>&1)"
-    [[ "$output" == *'[ERROR] test-command: failure'* ]] || test_fail "error log format"
+    [[ "$output" == *'[错误] test-command: failure'* ]] || test_fail "error log format"
+    output="$(vps_cmd_success complete 2>&1)"
+    [[ "$output" == *'[成功] test-command: complete'* ]] || test_fail "success log format"
+    test_assert_no_ansi "$output" "redirected success log"
+    if command -v script >/dev/null 2>&1; then
+        output="$(
+            env -u TERM script -qec \
+                "bash -c 'source \"${TEST_ROOT}/lib/command.sh\"; VPSCTL_NO_COLOR=0; NO_COLOR=; vps_cmd_status 状态 就绪 success'" \
+                /dev/null
+        )"
+        test_assert_no_ansi "$output" "TTY output without TERM"
+    fi
+    output="$(vps_cmd_status 状态 就绪 success)"
+    test_assert_equal "状态：就绪" "$output" "status output"
+    test_assert_no_ansi "$output" "redirected status output"
+    output="$(
+        _vps_cmd_color_enabled() {
+            return 0
+        }
+        vps_cmd_success complete 2>&1
+    )"
+    [[ "$output" == *$'\033[32m[成功]\033[0m test-command: complete'* ]] || test_fail "success color"
+    output="$(
+        _vps_cmd_color_enabled() {
+            return 0
+        }
+        vps_cmd_status 状态 注意 warning
+    )"
+    test_assert_equal $'\033[36m状态\033[0m：\033[33m注意\033[0m' "$output" "status colors"
+    output="$(
+        _vps_cmd_color_enabled() {
+            return 0
+        }
+        vps_cmd_status 重点 BBR emphasis
+    )"
+    test_assert_equal $'\033[36m重点\033[0m：\033[1;35mBBR\033[0m' "$output" "emphasis color"
+    if vps_cmd_status 状态 未知 invalid >/dev/null 2>&1; then
+        test_fail "invalid status style was accepted"
+    fi
     VPSCTL_QUIET=1
     test_assert_equal "" "$(vps_cmd_info hidden 2>&1)" "quiet info"
+    test_assert_equal "" "$(vps_cmd_success hidden 2>&1)" "quiet success"
     VPSCTL_QUIET=0
 
     VPSCTL_DRY_RUN=1
     output="$(vps_cmd_run touch "$marker" 'argument with spaces' 2>&1)"
-    [[ "$output" == *'touch '* && "$output" == *'argument\ with\ spaces'* ]] || test_fail "dry-run escaping"
+    [[ "$output" == *'[演练] touch '* && "$output" == *'argument\ with\ spaces'* ]] || test_fail "dry-run escaping"
+    test_assert_no_ansi "$output" "redirected dry-run output"
     [[ ! -e "$marker" ]] || test_fail "dry-run executed its command"
     VPSCTL_DRY_RUN=0
     vps_cmd_run touch "$marker"
@@ -117,19 +168,19 @@ test_logging_and_run() {
 test_confirmation_guards() {
     VPSCTL_NON_INTERACTIVE=1
     VPSCTL_ASSUME_YES=1
-    vps_cmd_confirm "safe confirmation" || test_fail "--yes did not skip ordinary confirmation"
-    if vps_cmd_confirm_token "dangerous confirmation" ERASE 2>/dev/null; then
+    vps_cmd_confirm "安全确认" || test_fail "--yes did not skip ordinary confirmation"
+    if vps_cmd_confirm_token "危险确认" ERASE 2>/dev/null; then
         test_fail "--yes skipped token confirmation"
     fi
     VPSCTL_ASSUME_YES=0
-    if vps_cmd_confirm "non-interactive confirmation" 2>/dev/null; then
+    if vps_cmd_confirm "非交互确认" 2>/dev/null; then
         test_fail "non-interactive confirmation was accepted"
     fi
     VPSCTL_TESTING=0
     VPSCTL_DRY_RUN=1
     vps_cmd_require_root || test_fail "dry-run should not require root"
-    vps_cmd_confirm "dry-run confirmation" || test_fail "dry-run required ordinary confirmation"
-    vps_cmd_confirm_token "dry-run confirmation" ERASE || test_fail "dry-run required token confirmation"
+    vps_cmd_confirm "演练确认" || test_fail "dry-run required ordinary confirmation"
+    vps_cmd_confirm_token "演练确认" ERASE || test_fail "dry-run required token confirmation"
     VPSCTL_TESTING=1
     VPSCTL_DRY_RUN=0
     VPSCTL_NON_INTERACTIVE=0

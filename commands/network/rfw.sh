@@ -80,14 +80,16 @@ rfw_require_safe_managed_paths() {
     done
 }
 
-rfw_error() { printf 'rfw: %s\n' "$*" >&2; }
-rfw_info() { [[ "${VPSCTL_QUIET:-0}" == "1" ]] || printf '%s\n' "$*"; }
+rfw_error() { vps_cmd_error "$@"; }
+rfw_info() { vps_cmd_info "$@"; }
+rfw_success() { vps_cmd_success "$@"; }
+rfw_warning() { vps_cmd_warning "$@"; }
 
 rfw_usage() {
     cat <<'EOF'
-Manage the narwhal-cloud/rfw XDP firewall.
+管理 narwhal-cloud/rfw XDP 防火墙。
 
-Usage:
+用法：
   rfw [global-options] [status]
   rfw install [--force]
   rfw update [--force]
@@ -100,7 +102,7 @@ Usage:
   rfw logs [--follow] [--lines COUNT] [--since VALUE]
   rfw uninstall [--purge] [--confirm-purge]
 
-Configuration options (unspecified values keep their current setting):
+配置选项（未指定的值保持不变）：
   --iface NAME
   --geo-mode none|blocklist|whitelist
   --countries CC[,CC...]
@@ -110,13 +112,12 @@ Configuration options (unspecified values keep their current setting):
   --fet off|loose|strict     --xdp-mode auto|skb|drv|hw
   --log-port-access on|off   --rust-log LEVEL
 
-With no arguments a terminal gets a submenu; non-interactive use shows status.
-RFW currently filters IPv4 only. block-all and FET strict always require the
-  literal token APPLY-RFW in a terminal; non-interactive callers must pass the
-  explicit --confirm-disruptive flag. --yes never approves those settings.
+终端中无参数运行会打开子菜单；非交互运行会显示状态。
+RFW 当前仅过滤 IPv4。启用 block-all 或 FET strict 时，交互模式必须输入
+APPLY-RFW；非交互模式必须显式传入 --confirm-disruptive。--yes 不能绕过此确认。
 
-Global options (must precede the action):
-  --dry-run  --yes  --non-interactive  --quiet  --verbose  --
+全局选项（必须位于动作之前）：
+  --dry-run  --yes  --non-interactive  --quiet  --verbose  --no-color  --
 EOF
 }
 
@@ -151,19 +152,19 @@ rfw_platform_target() {
     arch="${VPSCTL_ENV_ARCH:-$(uname -m 2>/dev/null || true)}"
 
     [[ "$kernel" == "Linux" ]] || {
-        rfw_error "RFW is supported on Linux only"
+        rfw_error "RFW 仅支持 Linux"
         return 3
     }
     if [[ -n "${VPSCTL_ENV_INIT:-}" && "${VPSCTL_ENV_INIT}" != "systemd" ]]; then
-        rfw_error "RFW management requires systemd"
+        rfw_error "RFW 管理功能需要 systemd"
         return 3
     fi
     command -v systemctl >/dev/null 2>&1 || {
-        rfw_error "systemctl is required"
+        rfw_error "缺少必需命令 systemctl"
         return 3
     }
     if [[ -z "${VPSCTL_ENV_INIT:-}" && ! -d "$(system_path /run/systemd/system)" ]]; then
-        rfw_error "RFW management requires a running systemd instance"
+        rfw_error "RFW 管理功能需要正在运行的 systemd"
         return 3
     fi
 
@@ -171,7 +172,7 @@ rfw_platform_target() {
         x86_64 | amd64) printf 'x86_64-unknown-linux-musl\n' ;;
         aarch64 | arm64) printf 'aarch64-unknown-linux-musl\n' ;;
         *)
-            rfw_error "unsupported architecture: ${arch:-unknown} (expected x86_64 or aarch64)"
+            rfw_error "不支持的架构：${arch:-未知}（仅支持 x86_64 或 aarch64）"
             return 3
             ;;
     esac
@@ -186,9 +187,10 @@ rfw_parse_global_options() {
             --non-interactive) VPSCTL_NON_INTERACTIVE=1 ;;
             --quiet) VPSCTL_QUIET=1 ;;
             --verbose) VPSCTL_VERBOSE=1 ;;
+            --no-color) VPSCTL_NO_COLOR=1 ;;
             -h | --help)
                 (($# == 1)) || {
-                    rfw_error "$1 does not accept additional arguments"
+                    rfw_error "$1 不接受额外参数"
                     return 2
                 }
                 RFW_ARGS=(help)
@@ -200,7 +202,7 @@ rfw_parse_global_options() {
                 return 0
                 ;;
             -*)
-                rfw_error "unknown global option: $1"
+                rfw_error "未知全局选项：$1"
                 return 2
                 ;;
             *)
@@ -239,6 +241,41 @@ rfw_defaults() {
     RFW_CFG[RUST_LOG]="info"
 }
 
+rfw_display_switch() {
+    case "$1" in
+        on) printf '开启' ;;
+        off) printf '关闭' ;;
+        *) printf '%s' "$1" ;;
+    esac
+}
+
+rfw_display_geo_mode() {
+    case "$1" in
+        none) printf '关闭' ;;
+        blocklist) printf '黑名单' ;;
+        whitelist) printf '白名单' ;;
+        *) printf '%s' "$1" ;;
+    esac
+}
+
+rfw_display_fet() {
+    case "$1" in
+        off) printf '关闭' ;;
+        loose) printf '宽松' ;;
+        strict) printf '严格' ;;
+        *) printf '%s' "$1" ;;
+    esac
+}
+
+rfw_display_pending_reason() {
+    case "$1" in
+        install) printf '安装' ;;
+        update) printf '更新' ;;
+        configure) printf '配置' ;;
+        *) printf '%s' "$1" ;;
+    esac
+}
+
 rfw_valid_interface() { [[ "$1" =~ ^[A-Za-z0-9_.:-]{1,15}$ ]]; }
 rfw_valid_switch() { [[ "$1" == "on" || "$1" == "off" ]]; }
 rfw_valid_geo_mode() { [[ "$1" == "none" || "$1" == "blocklist" || "$1" == "whitelist" ]]; }
@@ -271,47 +308,47 @@ rfw_validate_config() {
     local key countries
     for key in interface geo_mode countries block_email block_http block_socks5 block_wireguard block_quic block_all fet xdp_mode log RUST_LOG; do
         [[ ${RFW_CFG[$key]+present} == present ]] || {
-            rfw_error "configuration is missing key: $key"
+            rfw_error "配置缺少键：$key"
             return 10
         }
     done
     rfw_valid_interface "${RFW_CFG[interface]}" || {
-        rfw_error "invalid interface: ${RFW_CFG[interface]}"
+        rfw_error "网络接口无效：${RFW_CFG[interface]}"
         return 10
     }
     rfw_valid_geo_mode "${RFW_CFG[geo_mode]}" || {
-        rfw_error "invalid geo_mode: ${RFW_CFG[geo_mode]}"
+        rfw_error "geo_mode 无效：${RFW_CFG[geo_mode]}"
         return 10
     }
     for key in block_email block_http block_socks5 block_wireguard block_quic block_all log; do
         rfw_valid_switch "${RFW_CFG[$key]}" || {
-            rfw_error "${key} must be on or off"
+            rfw_error "${key} 必须是 on 或 off"
             return 10
         }
     done
     rfw_valid_fet "${RFW_CFG[fet]}" || {
-        rfw_error "fet must be off, loose, or strict"
+        rfw_error "fet 必须是 off、loose 或 strict"
         return 10
     }
     rfw_valid_xdp "${RFW_CFG[xdp_mode]}" || {
-        rfw_error "xdp_mode must be auto, skb, drv, or hw"
+        rfw_error "xdp_mode 必须是 auto、skb、drv 或 hw"
         return 10
     }
     rfw_valid_rust_log "${RFW_CFG[RUST_LOG]}" || {
-        rfw_error "invalid RUST_LOG expression"
+        rfw_error "RUST_LOG 表达式无效"
         return 10
     }
     countries="$(rfw_normalize_countries "${RFW_CFG[countries]}")" || {
-        rfw_error "countries must be unique comma-separated ISO alpha-2 codes"
+        rfw_error "countries 必须是以逗号分隔且不重复的 ISO 3166-1 alpha-2 国家代码"
         return 10
     }
     RFW_CFG[countries]="$countries"
     if [[ "${RFW_CFG[geo_mode]}" == "none" && -n "$countries" ]]; then
-        rfw_error "countries must be empty when geo_mode is none"
+        rfw_error "geo_mode=none 时 countries 必须为空"
         return 10
     fi
     if [[ "${RFW_CFG[geo_mode]}" != "none" && -z "$countries" ]]; then
-        rfw_error "countries is required for blocklist and whitelist modes"
+        rfw_error "geo_mode 为 blocklist 或 whitelist 时必须设置 countries"
         return 10
     fi
 }
@@ -322,15 +359,15 @@ rfw_load_config_file() {
     rfw_defaults
     [[ -r "$file" ]] || return 1
     [[ ! -L "$file" ]] || {
-        rfw_error "configuration must not be a symbolic link: $file"
+        rfw_error "配置文件不能是符号链接：$file"
         return 10
     }
     IFS= read -r first <"$file" || {
-        rfw_error "configuration is empty: $file"
+        rfw_error "配置文件为空：$file"
         return 10
     }
     [[ "${first%$'\r'}" == "$RFW_MANAGED_MARKER" ]] || {
-        rfw_error "configuration is not vpsctl-managed: $file"
+        rfw_error "配置文件不受 vpsctl 管理：$file"
         return 10
     }
 
@@ -339,7 +376,7 @@ rfw_load_config_file() {
         line="${line%$'\r'}"
         [[ -z "$line" || "$line" == \#* ]] && continue
         if [[ ! "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)=([^[:space:]]*)$ ]]; then
-            rfw_error "invalid configuration syntax at ${file}:${line_number}"
+            rfw_error "配置语法无效：${file}:${line_number}"
             return 10
         fi
         key="${BASH_REMATCH[1]}"
@@ -347,12 +384,12 @@ rfw_load_config_file() {
         case "$key" in
             interface | geo_mode | countries | block_email | block_http | block_socks5 | block_wireguard | block_quic | block_all | fet | xdp_mode | log | RUST_LOG) ;;
             *)
-                rfw_error "unknown configuration key '${key}' at ${file}:${line_number}"
+                rfw_error "未知配置键 '${key}'：${file}:${line_number}"
                 return 10
                 ;;
         esac
         [[ ${seen[$key]+present} != present ]] || {
-            rfw_error "duplicate configuration key '${key}'"
+            rfw_error "配置键 '${key}' 重复"
             return 10
         }
         seen[$key]=1
@@ -360,7 +397,7 @@ rfw_load_config_file() {
     done <"$file"
     for required in interface geo_mode countries block_email block_http block_socks5 block_wireguard block_quic block_all fet xdp_mode log RUST_LOG; do
         [[ ${seen[$required]+present} == present ]] || {
-            rfw_error "configuration is missing key: $required"
+            rfw_error "配置缺少键：$required"
             return 10
         }
     done
@@ -371,7 +408,7 @@ rfw_load_config() {
     rfw_load_config_file "$RFW_CONFIG" || {
         local status=$?
         if [[ "$status" == "1" ]]; then
-            rfw_error "RFW configuration is not installed"
+            rfw_error "尚未安装 RFW 配置"
             return 3
         fi
         return "$status"
@@ -392,13 +429,13 @@ rfw_kernel_supported() {
     release="${VPSCTL_ENV_KERNEL_RELEASE:-$(uname -r 2>/dev/null || true)}"
     release="${release%%-*}"
     if [[ ! "$release" =~ ^([0-9]+)\.([0-9]+)(\.[0-9]+)?$ ]]; then
-        rfw_error "unable to validate kernel release: ${release:-unknown}"
+        rfw_error "无法验证内核版本：${release:-未知}"
         return 3
     fi
     major="${BASH_REMATCH[1]}"
     minor="${BASH_REMATCH[2]}"
     if ((major < 5 || (major == 5 && minor < 15))); then
-        rfw_error "RFW requires Linux kernel 5.15 or newer (found ${release})"
+        rfw_error "RFW 需要 Linux 内核 5.15 或更高版本（当前 ${release}）"
         return 3
     fi
 }
@@ -407,20 +444,20 @@ rfw_runtime_preflight() {
     rfw_platform_target >/dev/null || return
     rfw_kernel_supported || return
     command -v ip >/dev/null 2>&1 || {
-        rfw_error "ip is required to validate the configured interface"
+        rfw_error "验证网络接口需要 ip 命令"
         return 3
     }
     ip link show dev "${RFW_CFG[interface]}" >/dev/null 2>&1 || {
-        rfw_error "configured interface does not exist: ${RFW_CFG[interface]}"
+        rfw_error "配置的网络接口不存在：${RFW_CFG[interface]}"
         return 3
     }
     if [[ "${RFW_CFG[log]}" == "on" ]]; then
         command -v mountpoint >/dev/null 2>&1 || {
-            rfw_error "mountpoint is required to validate bpffs"
+            rfw_error "验证 bpffs 需要 mountpoint 命令"
             return 3
         }
         mountpoint -q "$(system_path /sys/fs/bpf)" || {
-            rfw_error "port logging requires bpffs mounted at /sys/fs/bpf"
+            rfw_error "端口访问日志要求在 /sys/fs/bpf 挂载 bpffs"
             return 3
         }
     fi
@@ -439,7 +476,7 @@ rfw_valid_ipv4() {
 
 rfw_emit_config() {
     printf '%s\n' "$RFW_MANAGED_MARKER"
-    printf '# Values are parsed as data; this file is never sourced.\n'
+    printf '# 以下内容仅按数据解析，绝不会被 source。\n'
     printf 'interface=%s\n' "${RFW_CFG[interface]}"
     printf 'geo_mode=%s\n' "${RFW_CFG[geo_mode]}"
     printf 'countries=%s\n' "${RFW_CFG[countries]}"
@@ -481,7 +518,7 @@ rfw_emit_unit() {
     cat <<EOF
 ${RFW_MANAGED_MARKER}
 [Unit]
-Description=RFW eBPF/XDP Firewall
+Description=RFW eBPF/XDP 防火墙
 Documentation=https://github.com/narwhal-cloud/rfw
 Wants=network-online.target
 After=network-online.target
@@ -560,7 +597,7 @@ rfw_is_managed_install() {
 
 rfw_require_managed_install() {
     rfw_is_managed_install && return 0
-    rfw_error "a complete vpsctl-managed RFW installation is required"
+    rfw_error "需要完整且由 vpsctl 管理的 RFW 安装"
     return 3
 }
 
@@ -597,16 +634,16 @@ rfw_confirm_overwrite() {
         return 0
     fi
     if [[ "${VPSCTL_NON_INTERACTIVE:-0}" == "1" || ! -t 0 ]]; then
-        rfw_error "refusing to overwrite unmanaged RFW files; pass --force explicitly"
+        rfw_error "拒绝覆盖不受管的 RFW 文件；如确需覆盖，请显式传入 --force"
         return 3
     fi
-    if confirm_token "Unmanaged RFW files exist. Type OVERWRITE-RFW to replace them" "OVERWRITE-RFW"; then
+    if confirm_token "检测到不受管的 RFW 文件；确认覆盖" "OVERWRITE-RFW"; then
         RFW_CONFIRM_APPROVED=1
         return 0
     fi
     status=$?
     [[ "$status" == "130" ]] && return 130
-    rfw_info "Installation cancelled; no files were changed."
+    rfw_info "已取消安装，未更改任何文件。"
     return 0
 }
 
@@ -616,11 +653,11 @@ rfw_release_tag() {
     draft="$(sed -n 's/.*"draft"[[:space:]]*:[[:space:]]*\(true\|false\).*/\1/p' "$json_file" | head -n 1)"
     prerelease="$(sed -n 's/.*"prerelease"[[:space:]]*:[[:space:]]*\(true\|false\).*/\1/p' "$json_file" | head -n 1)"
     [[ "$draft" == "false" && "$prerelease" == "false" ]] || {
-        rfw_error "latest release metadata is missing stable draft/prerelease assertions"
+        rfw_error "最新 Release 元数据缺少 draft=false 或 prerelease=false 的稳定版声明"
         return 20
     }
     [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
-        rfw_error "latest stable release has an invalid tag: ${tag:-missing}"
+        rfw_error "最新稳定 Release 的 tag 无效：${tag:-缺失}"
         return 20
     }
     printf '%s\n' "$tag"
@@ -635,7 +672,7 @@ rfw_expected_checksum() {
             name="${BASH_REMATCH[2]}"
             if [[ "$name" == "$asset" ]]; then
                 [[ -z "$found" ]] || {
-                    rfw_error "duplicate checksum entry for ${asset}"
+                    rfw_error "checksums.txt 中 ${asset} 的 checksum 条目重复"
                     return 20
                 }
                 found="$hash"
@@ -643,7 +680,7 @@ rfw_expected_checksum() {
         fi
     done <"$checksums"
     [[ -n "$found" ]] || {
-        rfw_error "checksums.txt has no exact entry for ${asset}"
+        rfw_error "checksums.txt 中没有 ${asset} 的精确 checksum 条目"
         return 20
     }
     printf '%s\n' "$found"
@@ -652,11 +689,11 @@ rfw_expected_checksum() {
 rfw_fetch_binary() {
     local output="$1" target tag tag_version binary_version asset expected actual tmp_dir json checksums version_output
     command -v curl >/dev/null 2>&1 || {
-        rfw_error "curl is required"
+        rfw_error "缺少必需命令 curl"
         return 3
     }
     command -v sha256sum >/dev/null 2>&1 || {
-        rfw_error "sha256sum is required"
+        rfw_error "缺少必需命令 sha256sum"
         return 3
     }
     target="$(rfw_platform_target)" || return
@@ -666,44 +703,44 @@ rfw_fetch_binary() {
     checksums="${tmp_dir}/checksums.txt"
 
     curl -fsSL --proto '=https' --proto-redir '=https' --retry 3 --connect-timeout 15 --max-time 120 -o "$json" "$RFW_RELEASE_API" || {
-        rfw_error "failed to query latest RFW release"
+        rfw_error "查询最新 RFW Release 失败"
         return 20
     }
     tag="$(rfw_release_tag "$json")" || return
     curl -fsSL --proto '=https' --proto-redir '=https' --retry 3 --connect-timeout 15 --max-time 300 -o "$output" \
         "https://github.com/${RFW_REPOSITORY}/releases/download/${tag}/${asset}" || {
-        rfw_error "failed to download ${asset}"
+        rfw_error "下载 ${asset} 失败"
         return 20
     }
     curl -fsSL --proto '=https' --proto-redir '=https' --retry 3 --connect-timeout 15 --max-time 120 -o "$checksums" \
         "https://github.com/${RFW_REPOSITORY}/releases/download/${tag}/checksums.txt" || {
-        rfw_error "failed to download checksums.txt"
+        rfw_error "下载 checksums.txt 失败"
         return 20
     }
     expected="$(rfw_expected_checksum "$checksums" "$asset")" || return
     actual="$(sha256sum "$output")" || {
-        rfw_error "sha256sum failed"
+        rfw_error "执行 sha256sum 失败"
         return 20
     }
     actual="${actual%%[[:space:]]*}"
     actual="${actual,,}"
     if [[ ! "$actual" =~ ^[0-9a-f]{64}$ || "$actual" != "$expected" ]]; then
-        rfw_error "checksum verification failed for ${asset}"
+        rfw_error "${asset} 的 checksum 校验失败"
         return 20
     fi
     chmod 0755 -- "$output" || {
-        rfw_error "failed to make downloaded RFW executable"
+        rfw_error "无法为下载的 RFW 添加可执行权限"
         return 20
     }
     version_output="$("$output" --version 2>/dev/null)" || {
-        rfw_error "downloaded RFW failed its --version smoke test"
+        rfw_error "下载的 RFW 未通过 --version 冒烟测试"
         return 20
     }
     binary_version="$(sed -n 's/.*\(^\|[^0-9]\)\(v\{0,1\}[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)\([^0-9].*\|$\)/\2/p' <<<"$version_output" | head -n 1)"
     tag_version="${tag#v}"
     binary_version="${binary_version#v}"
     [[ -n "$binary_version" && "$binary_version" == "$tag_version" ]] || {
-        rfw_error "downloaded binary version '${binary_version:-unknown}' does not match release ${tag}"
+        rfw_error "下载的二进制版本 '${binary_version:-未知}' 与 Release ${tag} 不一致"
         return 20
     }
     RFW_FETCHED_TAG="$tag"
@@ -715,7 +752,7 @@ rfw_write_pending() {
     local reason="$1" binary_backup="${2:-}" config_backup="${3:-}" metadata_backup="${4:-}"
     run mkdir -p "$RFW_STATE_DIR"
     if [[ "${VPSCTL_DRY_RUN:-0}" == "1" ]]; then
-        rfw_info "DRY-RUN: mark RFW changes pending (${reason})"
+        rfw_info "演练：将 RFW 更改标记为待重启（$(rfw_display_pending_reason "$reason")）"
         return 0
     fi
     {
@@ -782,7 +819,7 @@ rfw_write_config_and_unit() {
     rfw_validate_config || return
     run mkdir -p "$(dirname -- "$RFW_CONFIG")" "$(dirname -- "$RFW_UNIT")" || return 20
     if [[ "${VPSCTL_DRY_RUN:-0}" == "1" ]]; then
-        rfw_info "DRY-RUN: write validated configuration and systemd unit"
+        rfw_info "演练：写入已验证的配置和 systemd 单元"
         [[ "$reload" == "0" ]] || run systemctl daemon-reload
         return 0
     fi
@@ -806,7 +843,7 @@ rfw_install_or_update() {
                 return 0
                 ;;
             *)
-                rfw_error "unknown ${action} option: $arg"
+                rfw_error "${action} 的未知选项：$arg"
                 return 2
                 ;;
         esac
@@ -815,11 +852,11 @@ rfw_install_or_update() {
     rfw_require_root || return
     rfw_platform_target >/dev/null || return
     if [[ "$action" == "install" ]] && rfw_is_managed_install; then
-        rfw_info "RFW is already installed and verified; no changes are required."
+        rfw_success "RFW 已安装并通过验证，无需更改。"
         return 0
     fi
     if [[ -L "$RFW_BINARY" || -L "$RFW_CONFIG" || -L "$RFW_UNIT" ]]; then
-        rfw_error "refusing to operate on symbolic-link RFW artifacts"
+        rfw_error "拒绝操作包含符号链接的 RFW 文件"
         return 3
     fi
     if [[ "$action" == "update" ]]; then
@@ -829,20 +866,20 @@ rfw_install_or_update() {
         rfw_confirm_overwrite "$force" || return
         [[ "$RFW_CONFIRM_APPROVED" == "1" ]] || return 0
         if [[ "$force" == "0" ]] && rfw_install_owned && [[ -e "$RFW_BINARY" && -e "$RFW_UNIT" && -e "$RFW_CONFIG" ]]; then
-            rfw_error "RFW is already installed; use update to replace the managed binary"
+            rfw_error "RFW 已安装；如需替换受管二进制，请使用 update"
             return 3
         fi
     fi
 
     rfw_take_lock
     if [[ "${VPSCTL_DRY_RUN:-0}" == "1" ]]; then
-        rfw_info "DRY-RUN: fetch, verify, and atomically install the latest RFW release"
-        rfw_info "DRY-RUN: write ${RFW_CONFIG} and ${RFW_UNIT}; service state is unchanged"
+        rfw_info "演练：获取、验证并原子安装最新 RFW 发布版本"
+        rfw_info "演练：将写入 ${RFW_CONFIG} 和 ${RFW_UNIT}；服务状态不会改变"
         return 0
     fi
 
     tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/vpsctl-rfw.XXXXXX")" || {
-        rfw_error "failed to create a temporary download directory"
+        rfw_error "创建临时下载目录失败"
         return 20
     }
     RFW_TMP_DIR="$tmp_dir"
@@ -865,7 +902,7 @@ rfw_install_or_update() {
         if [[ "$RFW_META_TAG" == "$RFW_FETCHED_TAG" && "$RFW_META_SHA256" == "$RFW_FETCHED_SHA256" ]]; then
             rfw_cleanup_tmp
             trap rfw_unlock EXIT
-            rfw_info "RFW ${RFW_META_TAG} is already current; no changes are required."
+            rfw_success "RFW ${RFW_META_TAG} 已是最新版本，无需更改。"
             return 0
         fi
     fi
@@ -953,15 +990,15 @@ rfw_install_or_update() {
     fi
     rfw_cleanup_tmp
     trap rfw_unlock EXIT
-    rfw_info "RFW ${RFW_FETCHED_TAG} installed atomically. The service was not started or restarted."
-    [[ -n "$binary_backup" ]] && rfw_info "Previous binary preserved at: $binary_backup"
+    rfw_success "RFW ${RFW_FETCHED_TAG} 已原子安装；服务未启动或重启。"
+    [[ -n "$binary_backup" ]] && rfw_info "旧二进制已保留在：$binary_backup"
     return 0
 }
 
 rfw_prompt_value() {
     local key="$1" prompt="$2" current value
     current="${RFW_CFG[$key]}"
-    printf '%s [%s]: ' "$prompt" "${current:-empty}"
+    printf '%s [%s]：' "$prompt" "${current:-空}"
     IFS= read -r value || return 1
     if [[ "$value" == "-" ]]; then
         RFW_CFG[$key]=""
@@ -971,20 +1008,20 @@ rfw_prompt_value() {
 }
 
 rfw_configure_wizard() {
-    rfw_info "RFW configuration wizard. Press Enter to keep the displayed value."
-    rfw_prompt_value interface "Network interface" || return
-    rfw_prompt_value geo_mode "Geo mode (none/blocklist/whitelist)" || return
-    rfw_prompt_value countries "Countries (comma-separated; '-' clears)" || return
-    rfw_prompt_value block_email "Block outbound email (on/off)" || return
-    rfw_prompt_value block_http "Block HTTP (on/off)" || return
-    rfw_prompt_value block_socks5 "Block SOCKS5 (on/off)" || return
-    rfw_prompt_value block_wireguard "Block WireGuard (on/off)" || return
-    rfw_prompt_value block_quic "Block QUIC (on/off)" || return
-    rfw_prompt_value block_all "Block all inbound traffic (on/off)" || return
-    rfw_prompt_value fet "FET mode (off/loose/strict)" || return
-    rfw_prompt_value xdp_mode "XDP mode (auto/skb/drv/hw)" || return
-    rfw_prompt_value log "Port access logging (on/off)" || return
-    rfw_prompt_value RUST_LOG "Rust log level" || return
+    rfw_info "RFW 配置向导：直接按 Enter 保留当前值。"
+    rfw_prompt_value interface "网络接口" || return
+    rfw_prompt_value geo_mode "Geo 模式 (none/blocklist/whitelist)" || return
+    rfw_prompt_value countries "国家代码（逗号分隔，输入 '-' 清空）" || return
+    rfw_prompt_value block_email "阻止外发邮件 (on/off)" || return
+    rfw_prompt_value block_http "阻止 HTTP (on/off)" || return
+    rfw_prompt_value block_socks5 "阻止 SOCKS5 (on/off)" || return
+    rfw_prompt_value block_wireguard "阻止 WireGuard (on/off)" || return
+    rfw_prompt_value block_quic "阻止 QUIC (on/off)" || return
+    rfw_prompt_value block_all "阻止全部入站流量 (on/off)" || return
+    rfw_prompt_value fet "FET 模式 (off/loose/strict)" || return
+    rfw_prompt_value xdp_mode "XDP 模式 (auto/skb/drv/hw)" || return
+    rfw_prompt_value log "端口访问日志 (on/off)" || return
+    rfw_prompt_value RUST_LOG "Rust 日志级别" || return
 }
 
 rfw_configure() {
@@ -1000,7 +1037,7 @@ rfw_configure() {
         case "$key" in
             --iface | --geo-mode | --countries | --block-email | --block-http | --block-socks5 | --block-wireguard | --block-quic | --block-all | --fet | --xdp-mode | --log-port-access | --rust-log)
                 (($# >= 2)) || {
-                    rfw_error "missing value for $key"
+                    rfw_error "$key 缺少参数值"
                     return 2
                 }
                 value="$2"
@@ -1027,18 +1064,18 @@ rfw_configure() {
                 return 0
                 ;;
             *)
-                rfw_error "unknown configure option: $key"
+                rfw_error "configure 的未知选项：$key"
                 return 2
                 ;;
         esac
     done
     if [[ "$changed" == "0" ]]; then
         if [[ "${VPSCTL_NON_INTERACTIVE:-0}" == "1" || ! -t 0 ]]; then
-            rfw_error "configure without options requires an interactive terminal"
+            rfw_error "无选项运行 configure 需要交互式终端"
             return 2
         fi
         if ! rfw_configure_wizard; then
-            rfw_info "Configuration cancelled; no files were changed."
+            rfw_info "已取消配置，未更改任何文件。"
             return 0
         fi
     fi
@@ -1046,7 +1083,7 @@ rfw_configure() {
     new_config="$(rfw_emit_config)"
     new_unit="$(rfw_emit_unit)"
     if cmp -s <(printf '%s\n' "$new_config") "$RFW_CONFIG" && cmp -s <(printf '%s\n' "$new_unit") "$RFW_UNIT"; then
-        rfw_info "RFW configuration already matches the requested values; no changes are required."
+        rfw_success "RFW 配置已符合要求，无需更改。"
         return 0
     fi
     rfw_take_lock
@@ -1054,15 +1091,15 @@ rfw_configure() {
     previous_config_backup="$(rfw_pending_value config_backup 2>/dev/null || true)"
     previous_metadata_backup="$(rfw_pending_value metadata_backup 2>/dev/null || true)"
     if [[ -n "$previous_binary_backup" ]] && ! rfw_safe_backup_file "$previous_binary_backup"; then
-        rfw_error "pending binary backup is outside the managed backup root or unsafe"
+        rfw_error "待重启二进制备份不在受管备份目录内或不安全"
         return 3
     fi
     if [[ -n "$previous_config_backup" ]] && ! rfw_safe_backup_file "$previous_config_backup"; then
-        rfw_error "pending configuration backup is outside the managed backup root or unsafe"
+        rfw_error "待重启配置备份不在受管备份目录内或不安全"
         return 3
     fi
     if [[ -n "$previous_metadata_backup" ]] && ! rfw_safe_backup_file "$previous_metadata_backup"; then
-        rfw_error "pending metadata backup is outside the managed backup root or unsafe"
+        rfw_error "待重启元数据备份不在受管备份目录内或不安全"
         return 3
     fi
     if [[ "${VPSCTL_DRY_RUN:-0}" != "1" ]]; then
@@ -1076,7 +1113,7 @@ rfw_configure() {
     if ! rfw_write_pending "configure" "$previous_binary_backup" "$pending_config_backup" "$previous_metadata_backup"; then
         if [[ "${VPSCTL_DRY_RUN:-0}" == "1" ]] || rfw_rollback_config_unit "$config_backup" "$unit_backup"; then return 20; else return 30; fi
     fi
-    rfw_info "RFW configuration saved. Restart is pending; the running service was not changed."
+    rfw_success "RFW 配置已保存；需要重启后生效，当前运行中的服务未改变。"
 }
 
 rfw_is_disruptive() {
@@ -1099,23 +1136,23 @@ rfw_require_disruptive_confirmation() {
             RFW_CONFIRM_APPROVED=1
             return 0
         fi
-        rfw_error "disruptive policy requires the explicit --confirm-disruptive flag"
+        rfw_error "高风险策略要求显式传入 --confirm-disruptive"
         return 3
     fi
-    if confirm_token "This policy can block legitimate or all inbound traffic. Type APPLY-RFW" "APPLY-RFW"; then
+    if confirm_token "此策略可能阻断正常流量或全部入站流量；确认应用" "APPLY-RFW"; then
         RFW_CONFIRM_APPROVED=1
         return 0
     fi
     status=$?
     [[ "$status" == "130" ]] && return 130
-    rfw_info "Start cancelled; no service state was changed."
+    rfw_info "已取消启动，服务状态未改变。"
     return 0
 }
 
 rfw_save_lkg() {
     run mkdir -p "$RFW_STATE_DIR"
     if [[ "${VPSCTL_DRY_RUN:-0}" == "1" ]]; then
-        rfw_info "DRY-RUN: record last-known-good RFW configuration and clear pending marker"
+        rfw_info "演练：记录 RFW 最近一次成功配置并清除待重启标记"
         return 0
     fi
     atomic_write "$RFW_LKG_CONFIG" 0600 <"$RFW_CONFIG" || return 20
@@ -1126,43 +1163,43 @@ rfw_validate_pending_backups() {
     local backup binary_backup metadata_backup reason
     [[ ! -e "$RFW_PENDING" ]] && return 0
     [[ -f "$RFW_PENDING" && ! -L "$RFW_PENDING" ]] || {
-        rfw_error "pending marker is unsafe"
+        rfw_error "待重启标记不安全"
         return 3
     }
     reason="$(rfw_pending_value reason 2>/dev/null)" || {
-        rfw_error "pending marker is invalid"
+        rfw_error "待重启标记无效"
         return 3
     }
     binary_backup="$(rfw_pending_value binary_backup 2>/dev/null)" || {
-        rfw_error "pending marker is invalid"
+        rfw_error "待重启标记无效"
         return 3
     }
     [[ -z "$binary_backup" ]] || rfw_safe_backup_file "$binary_backup" || {
-        rfw_error "pending binary backup is unsafe"
+        rfw_error "待重启二进制备份不安全"
         return 3
     }
     backup="$(rfw_pending_value config_backup 2>/dev/null)" || {
-        rfw_error "pending marker is invalid"
+        rfw_error "待重启标记无效"
         return 3
     }
     [[ -z "$backup" ]] || rfw_safe_backup_file "$backup" || {
-        rfw_error "pending configuration backup is unsafe"
+        rfw_error "待重启配置备份不安全"
         return 3
     }
     metadata_backup="$(rfw_pending_value metadata_backup 2>/dev/null)" || {
-        rfw_error "pending marker is invalid"
+        rfw_error "待重启标记无效"
         return 3
     }
     [[ -z "$metadata_backup" ]] || rfw_safe_backup_file "$metadata_backup" || {
-        rfw_error "pending metadata backup is unsafe"
+        rfw_error "待重启元数据备份不安全"
         return 3
     }
     if [[ "$reason" == "update" && (-z "$binary_backup" || -z "$metadata_backup") ]]; then
-        rfw_error "update pending marker lacks binary or metadata rollback state"
+        rfw_error "update 待重启标记缺少二进制或元数据回滚状态"
         return 3
     fi
     if [[ (-n "$binary_backup" && -z "$metadata_backup") || (-z "$binary_backup" && -n "$metadata_backup") ]]; then
-        rfw_error "pending binary/metadata rollback state is inconsistent"
+        rfw_error "待重启二进制与元数据回滚状态不一致"
         return 3
     fi
 }
@@ -1220,7 +1257,7 @@ rfw_service_start() {
                 shift
                 ;;
             *)
-                rfw_error "unknown start option: $arg"
+                rfw_error "start 的未知选项：$arg"
                 return 2
                 ;;
         esac
@@ -1229,13 +1266,13 @@ rfw_service_start() {
     rfw_require_managed_install || return
     rfw_load_config || return
     rfw_has_effective_policy || {
-        rfw_error "refusing to start without any filtering rule or port logging enabled"
+        rfw_error "未启用任何过滤规则或端口日志，拒绝启动"
         return 3
     }
     rfw_runtime_preflight || return
     rfw_validate_pending_backups || return
     if systemctl is-active --quiet rfw.service && [[ -e "$RFW_PENDING" ]]; then
-        rfw_error "RFW is already active with pending changes; use restart to apply them safely"
+        rfw_error "RFW 正在运行且存在待生效更改；请使用 restart 安全应用"
         return 3
     fi
     rfw_require_disruptive_confirmation "$confirmed" || return
@@ -1245,7 +1282,7 @@ rfw_service_start() {
         if ((enable)) && ! systemctl is-enabled --quiet rfw.service; then
             run systemctl enable rfw.service || return 20
         fi
-        rfw_info "RFW is already active; no restart was performed."
+        rfw_success "RFW 已在运行，未执行重复启动。"
         return 0
     fi
     if [[ "${VPSCTL_DRY_RUN:-0}" == "1" ]]; then
@@ -1269,7 +1306,7 @@ rfw_service_start() {
         return 20
     fi
     if ! rfw_save_lkg; then return 30; fi
-    rfw_info "RFW started successfully."
+    rfw_success "RFW 启动成功。"
 }
 
 rfw_service_stop() {
@@ -1278,7 +1315,7 @@ rfw_service_stop() {
         case "$1" in
             --disable) disable=1 ;;
             *)
-                rfw_error "unknown stop option: $1"
+                rfw_error "stop 的未知选项：$1"
                 return 2
                 ;;
         esac
@@ -1291,7 +1328,7 @@ rfw_service_stop() {
     if ((disable)); then
         run systemctl disable rfw.service || return 20
     fi
-    rfw_info "RFW stopped."
+    rfw_success "RFW 已停止。"
 }
 
 rfw_service_restart() {
@@ -1304,7 +1341,7 @@ rfw_service_restart() {
                 shift
                 ;;
             *)
-                rfw_error "unknown restart option: $arg"
+                rfw_error "restart 的未知选项：$arg"
                 return 2
                 ;;
         esac
@@ -1313,7 +1350,7 @@ rfw_service_restart() {
     rfw_require_managed_install || return
     rfw_load_config || return
     rfw_has_effective_policy || {
-        rfw_error "refusing to restart without any filtering rule or port logging enabled"
+        rfw_error "未启用任何过滤规则或端口日志，拒绝重启"
         return 3
     }
     rfw_runtime_preflight || return
@@ -1330,51 +1367,105 @@ rfw_service_restart() {
     run systemctl daemon-reload || return 20
     if run systemctl restart rfw.service && systemctl is-active --quiet rfw.service; then
         if ! rfw_save_lkg; then return 30; fi
-        rfw_info "RFW restarted; pending configuration and binary are now active."
+        rfw_success "RFW 重启成功；待生效配置和二进制现已应用。"
     else
         if [[ -e "$RFW_PENDING" ]]; then
             if rfw_restore_pending restart; then
-                rfw_error "restart failed; restored and started the previous RFW version"
+                rfw_error "重启失败；已恢复并启动上一版 RFW"
                 return 20
             fi
-            rfw_error "restart failed and rollback was incomplete"
+            rfw_error "重启失败，且回滚未完整完成"
             return 30
         fi
         if systemctl is-active --quiet rfw.service; then
             return 20
         fi
-        rfw_error "restart failed and RFW is now inactive"
+        rfw_error "重启失败，RFW 当前未运行"
         return 30
     fi
 }
 
 rfw_status() {
-    local version="not installed or unmanaged" active="not installed" enabled="not installed" pending="no" config="not installed" pending_reason=""
+    local version="未安装或不受管" active="未安装" enabled="未安装" pending="否" config="未安装" pending_reason=""
+    local countries_display
+    local active_style="muted" enabled_style="muted" pending_style="success" config_style="muted"
     if rfw_is_managed_install; then
-        version="$("$RFW_BINARY" --version 2>/dev/null | head -n 1 || printf 'installed (version unavailable)') [${RFW_META_TAG}]"
+        version="$("$RFW_BINARY" --version 2>/dev/null | head -n 1 || printf '已安装（无法获取版本）') [${RFW_META_TAG}]"
         active="$(systemctl is-active rfw.service 2>/dev/null || true)"
         enabled="$(systemctl is-enabled rfw.service 2>/dev/null || true)"
         [[ -n "$active" ]] || active="unknown"
         [[ -n "$enabled" ]] || enabled="unknown"
+        case "$active" in
+            active)
+                active="运行中"
+                active_style="success"
+                ;;
+            inactive)
+                active="未运行"
+                active_style="error"
+                ;;
+            failed)
+                active="运行失败"
+                active_style="error"
+                ;;
+            activating)
+                active="正在启动"
+                active_style="warning"
+                ;;
+            deactivating)
+                active="正在停止"
+                active_style="warning"
+                ;;
+            *)
+                active="未知"
+                active_style="warning"
+                ;;
+        esac
+        case "$enabled" in
+            enabled)
+                enabled="已启用"
+                enabled_style="success"
+                ;;
+            disabled)
+                enabled="未启用"
+                enabled_style="warning"
+                ;;
+            static)
+                enabled="静态单元"
+                enabled_style="info"
+                ;;
+            masked)
+                enabled="已屏蔽"
+                enabled_style="error"
+                ;;
+            *)
+                enabled="未知"
+                enabled_style="warning"
+                ;;
+        esac
     fi
     if [[ -e "$RFW_PENDING" ]]; then
         pending_reason="$(rfw_pending_value reason 2>/dev/null || true)"
-        pending="yes${pending_reason:+ (${pending_reason})}"
+        pending="是${pending_reason:+（$(rfw_display_pending_reason "$pending_reason")）}"
+        pending_style="warning"
     fi
     if rfw_is_managed_file "$RFW_CONFIG"; then
         if rfw_load_config_file "$RFW_CONFIG" 2>/dev/null; then
-            config="interface=${RFW_CFG[interface]}, geo=${RFW_CFG[geo_mode]}${RFW_CFG[countries]:+(${RFW_CFG[countries]})}, email=${RFW_CFG[block_email]}, http=${RFW_CFG[block_http]}, socks5=${RFW_CFG[block_socks5]}, wireguard=${RFW_CFG[block_wireguard]}, quic=${RFW_CFG[block_quic]}, all=${RFW_CFG[block_all]}, fet=${RFW_CFG[fet]}, xdp=${RFW_CFG[xdp_mode]}, log=${RFW_CFG[log]}, RUST_LOG=${RFW_CFG[RUST_LOG]}"
+            countries_display="${RFW_CFG[countries]:-无}"
+            config="网卡=${RFW_CFG[interface]}，GeoIP=$(rfw_display_geo_mode "${RFW_CFG[geo_mode]}")，国家=${countries_display}，邮件=$(rfw_display_switch "${RFW_CFG[block_email]}")，HTTP=$(rfw_display_switch "${RFW_CFG[block_http]}")，SOCKS5=$(rfw_display_switch "${RFW_CFG[block_socks5]}")，WireGuard=$(rfw_display_switch "${RFW_CFG[block_wireguard]}")，QUIC=$(rfw_display_switch "${RFW_CFG[block_quic]}")，全部入站=$(rfw_display_switch "${RFW_CFG[block_all]}")，FET=$(rfw_display_fet "${RFW_CFG[fet]}")，XDP=${RFW_CFG[xdp_mode]}，访问日志=$(rfw_display_switch "${RFW_CFG[log]}")，RUST_LOG=${RFW_CFG[RUST_LOG]}"
+            config_style="info"
         else
-            config="invalid"
+            config="无效"
+            config_style="error"
         fi
     fi
-    printf 'RFW status\n'
-    printf '  Version:   %s\n' "$version"
-    printf '  Service:   %s\n' "$active"
-    printf '  Autostart: %s\n' "$enabled"
-    printf '  Pending:   %s\n' "$pending"
-    printf '  Config:    %s\n' "$config"
-    printf '  Warning: RFW filters IPv4 only; IPv6 traffic is not protected.\n'
+    printf 'RFW 状态\n'
+    vps_cmd_status "版本" "$version" "info"
+    vps_cmd_status "运行状态" "$active" "$active_style"
+    vps_cmd_status "开机启动" "$enabled" "$enabled_style"
+    vps_cmd_status "待重启" "$pending" "$pending_style"
+    vps_cmd_status "配置" "$config" "$config_style"
+    vps_cmd_status "IPv6 警告" "RFW 仅过滤 IPv4，IPv6 流量不受保护" "warning"
 }
 
 rfw_stats() {
@@ -1384,12 +1475,12 @@ rfw_stats() {
     rfw_platform_target >/dev/null || return
     rfw_require_managed_install || return
     systemctl is-active --quiet rfw.service || {
-        rfw_error "RFW service must be active to read statistics"
+        rfw_error "查看统计信息前，rfw.service 必须处于运行状态"
         return 3
     }
     rfw_load_config || return
     [[ "${RFW_CFG[log]}" == "on" ]] || {
-        rfw_error "statistics require log-port-access=on"
+        rfw_error "统计信息要求 log-port-access=on"
         return 3
     }
     while (($#)); do
@@ -1397,11 +1488,11 @@ rfw_stats() {
         case "$arg" in
             --port)
                 (($# >= 2)) || {
-                    rfw_error "--port requires a value"
+                    rfw_error "--port 需要参数值"
                     return 2
                 }
                 [[ "$2" =~ ^[0-9]+$ ]] && ((10#$2 >= 1 && 10#$2 <= 65535)) || {
-                    rfw_error "invalid port: $2"
+                    rfw_error "端口无效：$2"
                     return 2
                 }
                 args+=(--port "$2")
@@ -1409,11 +1500,11 @@ rfw_stats() {
                 ;;
             --ip)
                 (($# >= 2)) || {
-                    rfw_error "--ip requires a value"
+                    rfw_error "--ip 需要参数值"
                     return 2
                 }
                 rfw_valid_ipv4 "$2" || {
-                    rfw_error "invalid IPv4 address: $2"
+                    rfw_error "IPv4 地址无效：$2"
                     return 2
                 }
                 args+=(--ip "$2")
@@ -1434,13 +1525,13 @@ rfw_stats() {
                 shift
                 ;;
             *)
-                rfw_error "unknown stats option: $arg"
+                rfw_error "stats 的未知选项：$arg"
                 return 2
                 ;;
         esac
     done
     ((blocked == 0 || allowed == 0)) || {
-        rfw_error "--blocked-only and --allowed-only are mutually exclusive"
+        rfw_error "--blocked-only 与 --allowed-only 不能同时使用"
         return 2
     }
     "$RFW_BINARY" "${args[@]}" || return 20
@@ -1459,11 +1550,11 @@ rfw_logs() {
                 ;;
             -n | --lines)
                 (($# >= 2)) || {
-                    rfw_error "$arg requires a value"
+                    rfw_error "$arg 需要参数值"
                     return 2
                 }
                 [[ "$2" =~ ^[0-9]+$ ]] || {
-                    rfw_error "invalid line count: $2"
+                    rfw_error "日志行数无效：$2"
                     return 2
                 }
                 args+=(-n "$2")
@@ -1471,18 +1562,18 @@ rfw_logs() {
                 ;;
             --since)
                 (($# >= 2)) || {
-                    rfw_error "--since requires a value"
+                    rfw_error "--since 需要参数值"
                     return 2
                 }
                 [[ "$2" != *$'\n'* ]] || {
-                    rfw_error "invalid --since value"
+                    rfw_error "--since 参数值无效"
                     return 2
                 }
                 args+=(--since "$2")
                 shift 2
                 ;;
             *)
-                rfw_error "unknown logs option: $arg"
+                rfw_error "logs 的未知选项：$arg"
                 return 2
                 ;;
         esac
@@ -1502,16 +1593,16 @@ rfw_confirm_purge() {
             RFW_CONFIRM_APPROVED=1
             return 0
         fi
-        rfw_error "--purge requires the explicit --confirm-purge flag"
+        rfw_error "彻底清除要求显式传入 --confirm-purge"
         return 3
     fi
-    if confirm_token "Purge permanently deletes the RFW configuration. Type PURGE-RFW" "PURGE-RFW"; then
+    if confirm_token "彻底清除会永久删除 RFW 配置、状态与备份；确认清除" "PURGE-RFW"; then
         RFW_CONFIRM_APPROVED=1
         return 0
     fi
     status=$?
     [[ "$status" == "130" ]] && return 130
-    rfw_info "Purge cancelled; no files were changed."
+    rfw_info "已取消彻底清除，未更改任何文件。"
     return 0
 }
 
@@ -1529,7 +1620,7 @@ rfw_uninstall() {
                 shift
                 ;;
             *)
-                rfw_error "unknown uninstall option: $arg"
+                rfw_error "uninstall 的未知选项：$arg"
                 return 2
                 ;;
         esac
@@ -1541,15 +1632,15 @@ rfw_uninstall() {
         [[ "$RFW_CONFIRM_APPROVED" == "1" ]] || return 0
     fi
     if [[ -e "$RFW_UNIT" ]] && ! rfw_is_managed_file "$RFW_UNIT"; then
-        rfw_error "refusing to uninstall an unmanaged rfw.service unit"
+        rfw_error "拒绝卸载不受管的 rfw.service 单元"
         return 3
     fi
     if [[ -e "$RFW_BINARY" && ! -e "$RFW_UNIT" ]]; then
-        rfw_error "refusing to remove an unowned RFW binary"
+        rfw_error "拒绝删除不受管的 RFW 二进制"
         return 3
     fi
     if ((purge)) && [[ -e "$RFW_CONFIG" ]] && ! rfw_is_managed_file "$RFW_CONFIG"; then
-        rfw_error "refusing to purge an unmanaged RFW configuration"
+        rfw_error "拒绝彻底清除不受管的 RFW 配置"
         return 3
     fi
     rfw_take_lock
@@ -1563,9 +1654,9 @@ rfw_uninstall() {
     fi
     run systemctl daemon-reload || failed=1
     if ((purge)); then
-        rfw_info "RFW binary, unit, configuration, and managed state removed."
+        rfw_success "RFW 二进制、systemd 单元、配置、受管状态与备份已清除。"
     else
-        rfw_info "RFW binary and unit removed; configuration, state, and backups were retained."
+        rfw_success "RFW 二进制和 systemd 单元已删除；配置、状态与备份均已保留。"
     fi
     ((failed == 0)) || return 30
 }
@@ -1575,13 +1666,13 @@ rfw_menu() {
     while true; do
         cat <<'EOF'
 
-RFW management
-  1) Status       2) Install      3) Update
-  4) Configure    5) Start        6) Stop
-  7) Restart      8) Stats        9) Logs
- 10) Uninstall    q) Quit
+RFW 管理
+  1) 查看状态     2) 安装          3) 更新
+  4) 配置         5) 启动          6) 停止
+  7) 重启         8) 访问统计      9) 日志
+ 10) 卸载         q) 退出
 EOF
-        printf 'Choice: '
+        printf '请选择：'
         IFS= read -r choice || return 0
         case "$choice" in
             1) rfw_status ;;
@@ -1595,7 +1686,7 @@ EOF
             9) rfw_logs -n 100 ;;
             10) rfw_uninstall ;;
             q | Q) return 0 ;;
-            *) rfw_error "invalid menu choice" ;;
+            *) rfw_error "菜单选项无效" ;;
         esac
     done
 }
@@ -1617,7 +1708,7 @@ rfw_main() {
     case "$action" in
         status)
             (($# == 0)) || {
-                rfw_error "status accepts no options"
+                rfw_error "status 不接受选项"
                 return 2
             }
             rfw_status
@@ -1633,7 +1724,7 @@ rfw_main() {
         uninstall) rfw_uninstall "$@" ;;
         help | -h | --help) rfw_usage ;;
         *)
-            rfw_error "unknown action: $action"
+            rfw_error "未知动作：$action"
             rfw_usage >&2
             return 2
             ;;

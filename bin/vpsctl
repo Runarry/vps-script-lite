@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 if ((BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4))); then
-    printf 'vpsctl requires Bash 4.4 or newer (current: %s).\n' "${BASH_VERSION:-unknown}" >&2
+    printf 'vpsctl 需要 Bash 4.4 或更高版本（当前：%s）。\n' "${BASH_VERSION:-未知}" >&2
     exit 3
 fi
 
@@ -34,7 +34,7 @@ vpsctl_load_library() {
     local library_path="$1"
 
     if [[ ! -r "$library_path" ]]; then
-        printf 'vpsctl: required library is not readable: %s\n' "$library_path" >&2
+        printf 'vpsctl：无法读取必需的库：%s\n' "$library_path" >&2
         exit 3
     fi
 
@@ -48,43 +48,54 @@ vpsctl_load_library "${VPSCTL_PROJECT_ROOT}/lib/ui.sh"
 
 vpsctl_usage() {
     cat <<'EOF'
-VPS Script Lite - VPS deployment and maintenance console
+VPS Script Lite - VPS 部署与维护控制台
 
-Usage:
+用法：
   vpsctl [global-options]
   vpsctl [global-options] menu
   vpsctl [global-options] env
   vpsctl [global-options] list
   vpsctl [global-options] <domain> <action> [command-options]
 
-Built-in commands:
-  menu                 Open the interactive management console
-  env                  Detect and display the local VPS environment
-  list                 List registered feature commands
-  help                 Show this help
+内置命令：
+  menu                 打开交互式管理控制台
+  env                  检测并显示本机 VPS 环境
+  list                 列出已登记的功能命令
+  help                 显示此帮助
 
-Global options:
-  --dry-run            Ask supported feature commands to plan without changing
-  --yes                Skip only confirmations that permit automatic approval
-  --non-interactive    Never read from the terminal
-  --quiet              Reduce non-essential feature-command output
-  --verbose            Enable additional diagnostics
-  --no-color           Disable ANSI colors
-  --no-clear           Preserve terminal scrollback in interactive menus
-  -h, --help           Show this help
-  -V, --version        Show the vpsctl version
+全局选项：
+  --dry-run            让支持演练的功能只显示计划，不执行变更
+  --yes                仅跳过允许自动确认的普通提示
+  --non-interactive    禁止从终端读取输入
+  --quiet              减少功能命令的非必要输出
+  --verbose            启用附加诊断信息
+  --no-color           禁用 ANSI 颜色
+  --no-clear           在交互菜单中保留终端回滚内容
+  -h, --help           显示此帮助
+  -V, --version        显示 vpsctl 版本
 
-With no command, vpsctl opens the menu when attached to a terminal. Otherwise,
-it prints the environment dashboard once and exits.
+未指定命令时，如果连接到终端，vpsctl 会打开菜单；否则只输出一次环境面板并退出。
 EOF
 }
 
 vpsctl_error() {
-    printf 'vpsctl: %s\n' "$1" >&2
+    local red="" reset=""
+
+    if [[ "${VPSCTL_NO_COLOR:-0}" == "0" && -t 2 && "${TERM:-dumb}" != "dumb" && -z "${NO_COLOR:-}" ]]; then
+        red=$'\033[31m'
+        reset=$'\033[0m'
+    fi
+    printf 'vpsctl：%s错误%s：%s\n' "$red" "$reset" "$1" >&2
 }
 
 vpsctl_handle_interrupt() {
-    printf '\nInterrupted.\n' >&2
+    local cyan="" reset=""
+
+    if [[ "${VPSCTL_NO_COLOR:-0}" == "0" && -t 2 && "${TERM:-dumb}" != "dumb" && -z "${NO_COLOR:-}" ]]; then
+        cyan=$'\033[36m'
+        reset=$'\033[0m'
+    fi
+    printf '\n%s操作已中断%s。\n' "$cyan" "$reset" >&2
     exit 130
 }
 
@@ -128,7 +139,7 @@ vpsctl_parse_global_options() {
                 return 0
                 ;;
             -*)
-                vpsctl_error "unknown global option: $1"
+                vpsctl_error "未知全局选项：$1"
                 return 2
                 ;;
             *)
@@ -159,12 +170,12 @@ vpsctl_validate_command_ready() {
     requirements="${VPS_COMMAND_REQUIREMENTS[$command_key]}"
 
     if [[ "$privilege" == "root" && "${VPS_ENV[is_root]}" != "yes" ]]; then
-        vpsctl_error "${command_key} requires root privileges"
+        vpsctl_error "${command_key} 需要 root 权限"
         return 4
     fi
 
     if ! vps_env_requirements_met "$requirements"; then
-        vpsctl_error "${command_key} is unavailable; missing capabilities: ${VPS_ENV_MISSING_REQUIREMENTS}"
+        vpsctl_error "${command_key} 当前不可用；缺少能力：${VPS_ENV_MISSING_REQUIREMENTS}"
         return 3
     fi
 }
@@ -179,7 +190,7 @@ vpsctl_dispatch() {
     local -a path_components=()
 
     if ! vps_registry_has_command "$command_key"; then
-        vpsctl_error "unknown command: ${domain} ${action}"
+        vpsctl_error "未知命令：${domain} ${action}"
         return 2
     fi
 
@@ -198,16 +209,16 @@ vpsctl_dispatch() {
     for path_component in "${path_components[@]}"; do
         checked_path="${checked_path}/${path_component}"
         if [[ -L "$checked_path" ]]; then
-            vpsctl_error "registered command path must not contain symbolic links: ${relative_path}"
+            vpsctl_error "已登记命令路径不能包含符号链接：${relative_path}"
             return 3
         fi
     done
     if [[ ! -f "$command_path" ]]; then
-        vpsctl_error "registered command file is missing: ${relative_path}"
+        vpsctl_error "已登记命令文件不存在：${relative_path}"
         return 3
     fi
     if [[ ! -r "$command_path" ]]; then
-        vpsctl_error "registered command is not readable: ${relative_path}"
+        vpsctl_error "无法读取已登记命令：${relative_path}"
         return 3
     fi
 
@@ -245,7 +256,9 @@ vpsctl_show_command_screen() {
                 else
                     status=$?
                 fi
-                printf '\n命令已结束，退出码：%s\n' "$status"
+                printf '\n%s重要提示%s：命令已结束，退出码：' "$VPS_UI_CYAN" "$VPS_UI_RESET"
+                vps_ui_exit_code "$status"
+                printf '\n'
                 vps_ui_pause
                 return "$status"
                 ;;
@@ -303,7 +316,7 @@ vpsctl_run_menu() {
     local choice domain_index domain
 
     if [[ "$VPSCTL_NON_INTERACTIVE" == "1" || ! -t 0 || ! -t 1 ]]; then
-        vpsctl_error "interactive menu requires a terminal and cannot be used with --non-interactive"
+        vpsctl_error "交互菜单需要终端，且不能与 --non-interactive 同时使用"
         return 2
     fi
 
@@ -369,42 +382,42 @@ vpsctl_main() {
     case "${VPSCTL_ARGS[0]}" in
         help)
             if ((${#VPSCTL_ARGS[@]} != 1)); then
-                vpsctl_error "help does not accept additional arguments"
+                vpsctl_error "help 不接受额外参数"
                 return 2
             fi
             vpsctl_usage
             ;;
         version)
             if ((${#VPSCTL_ARGS[@]} != 1)); then
-                vpsctl_error "version does not accept additional arguments"
+                vpsctl_error "version 不接受额外参数"
                 return 2
             fi
             printf 'vpsctl %s\n' "$VPSCTL_VERSION"
             ;;
         menu)
             if ((${#VPSCTL_ARGS[@]} != 1)); then
-                vpsctl_error "menu does not accept additional arguments"
+                vpsctl_error "menu 不接受额外参数"
                 return 2
             fi
             vpsctl_run_menu
             ;;
         env)
             if ((${#VPSCTL_ARGS[@]} != 1)); then
-                vpsctl_error "env does not accept additional arguments"
+                vpsctl_error "env 不接受额外参数"
                 return 2
             fi
             vpsctl_show_environment
             ;;
         list)
             if ((${#VPSCTL_ARGS[@]} != 1)); then
-                vpsctl_error "list does not accept additional arguments"
+                vpsctl_error "list 不接受额外参数"
                 return 2
             fi
             vpsctl_show_registered_commands
             ;;
         *)
             if ((${#VPSCTL_ARGS[@]} < 2)); then
-                vpsctl_error "expected <domain> <action>"
+                vpsctl_error "需要指定 <domain> <action>"
                 return 2
             fi
             vps_env_detect

@@ -43,14 +43,34 @@ test_address_validation() {
 
 test_standalone_globals() {
     VPSCTL_DRY_RUN=0 VPSCTL_ASSUME_YES=0 VPSCTL_NON_INTERACTIVE=0 VPSCTL_QUIET=0 VPSCTL_VERBOSE=0
-    vps_dns_parse_standalone_globals --dry-run --yes --non-interactive --quiet --verbose -- set --server 1.1.1.1
+    vps_dns_parse_standalone_globals --dry-run --yes --non-interactive --quiet --verbose --no-color -- set --server 1.1.1.1
     assert_equal 1 "$VPSCTL_DRY_RUN" "standalone dry-run"
     assert_equal 1 "$VPSCTL_ASSUME_YES" "standalone yes"
     assert_equal 1 "$VPSCTL_NON_INTERACTIVE" "standalone non-interactive"
     assert_equal 1 "$VPSCTL_QUIET" "standalone quiet"
     assert_equal 1 "$VPSCTL_VERBOSE" "standalone verbose"
+    assert_equal 1 "$VPSCTL_NO_COLOR" "standalone no-color"
     assert_equal set "${VPS_DNS_ARGS[0]}" "standalone option terminator"
     VPSCTL_DRY_RUN=0 VPSCTL_ASSUME_YES=1 VPSCTL_NON_INTERACTIVE=1 VPSCTL_QUIET=1 VPSCTL_VERBOSE=0
+}
+
+test_chinese_status_without_ansi() {
+    local output help_output
+    VPSCTL_QUIET=0 VPSCTL_NO_COLOR=1 VPSCTL_NON_INTERACTIVE=1
+    vps_dns_detect_backend() {
+        VPS_DNS_BACKEND=plain
+        VPS_DNS_NM_CONNECTION=""
+        VPS_DNS_NM_DEVICE=""
+    }
+    vps_dns_effective_servers() { printf '1.1.1.1\n2606:4700:4700::1111\n'; }
+    output="$(vps_dns_show)"
+    assert_contains "$output" 'DNS 后端：静态 /etc/resolv.conf' "Chinese backend status"
+    assert_contains "$output" '活动服务器：1.1.1.1' "Chinese server status"
+    assert_not_contains "$output" $'\033[' "no ANSI in non-color status"
+    help_output="$(vps_dns_usage)"
+    assert_contains "$help_output" '动作：' "Chinese help"
+    assert_contains "$help_output" '--no-color' "standalone no-color help"
+    VPSCTL_QUIET=1
 }
 
 test_backend_detection() {
@@ -349,4 +369,5 @@ test_explicit_restore_is_confined
 test_refresh_failure_after_write_returns_30
 test_restore_metadata_trust_boundary
 test_nm_restore_rejects_unknown_property
+test_chinese_status_without_ansi
 printf 'PASS: network DNS tests\n'

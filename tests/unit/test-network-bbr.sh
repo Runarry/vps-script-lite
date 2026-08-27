@@ -122,7 +122,7 @@ export VPSCTL_ASSUME_YES=0
 export VPSCTL_NON_INTERACTIVE=1
 export VPSCTL_QUIET=0
 export VPSCTL_VERBOSE=0
-export VPSCTL_NO_COLOR=1
+export VPSCTL_NO_COLOR=0
 export PATH="${TEST_FAKE_BIN}:${PATH}"
 
 RUN_STATUS=0
@@ -138,16 +138,21 @@ run_bbr() {
 test_status_and_arguments() {
     run_bbr
     test_assert_equal 0 "$RUN_STATUS" "non-interactive default exit code"
-    test_assert_contains "$RUN_OUTPUT" "algorithm: cubic" "non-interactive default status"
+    test_assert_contains "$RUN_OUTPUT" "当前拥塞控制算法" "non-interactive default status label"
+    test_assert_contains "$RUN_OUTPUT" "cubic" "non-interactive default status value"
+    [[ "$RUN_OUTPUT" != *$'\033['* ]] || test_fail "non-TTY status emitted ANSI escapes"
 
     run_bbr status
     test_assert_equal 0 "$RUN_STATUS" "status exit code"
-    test_assert_contains "$RUN_OUTPUT" "algorithm: cubic" "status algorithm"
-    test_assert_contains "$RUN_OUTPUT" "qdisc: fq_codel" "status qdisc"
-    test_assert_contains "$RUN_OUTPUT" "available_algorithms: reno cubic bbr" "available algorithms"
-    test_assert_contains "$RUN_OUTPUT" "bbr_module: available" "BBR module state"
-    test_assert_contains "$RUN_OUTPUT" "default_interface: eth0" "default interface"
-    test_assert_contains "$RUN_OUTPUT" "interface_root_qdisc: fq_codel" "interface root qdisc"
+    test_assert_contains "$RUN_OUTPUT" "当前拥塞控制算法" "status algorithm label"
+    test_assert_contains "$RUN_OUTPUT" "默认 qdisc" "status qdisc label"
+    test_assert_contains "$RUN_OUTPUT" "reno cubic bbr" "available algorithms"
+    test_assert_contains "$RUN_OUTPUT" "BBR 模块" "BBR module label"
+    test_assert_contains "$RUN_OUTPUT" "可用" "BBR module state"
+    test_assert_contains "$RUN_OUTPUT" "默认路由网卡" "default interface label"
+    test_assert_contains "$RUN_OUTPUT" "eth0" "default interface value"
+    test_assert_contains "$RUN_OUTPUT" "网卡 root qdisc" "interface root qdisc label"
+    test_assert_contains "$RUN_OUTPUT" "fq_codel" "interface root qdisc value"
 
     run_bbr -- status
     test_assert_equal 0 "$RUN_STATUS" "option terminator exit code"
@@ -155,10 +160,15 @@ test_status_and_arguments() {
     test_assert_equal 0 "$RUN_STATUS" "quiet option exit code"
     run_bbr --verbose status
     test_assert_equal 0 "$RUN_STATUS" "verbose option exit code"
+    run_bbr --no-color status
+    test_assert_equal 0 "$RUN_STATUS" "no-color option exit code"
+    [[ "$RUN_OUTPUT" != *$'\033['* ]] || test_fail "--no-color status emitted ANSI escapes"
 
     run_bbr --help
     test_assert_equal 0 "$RUN_STATUS" "help exit code"
     test_assert_contains "$RUN_OUTPUT" "set --algorithm ALG --qdisc QDISC" "help syntax"
+    test_assert_contains "$RUN_OUTPUT" "管理 TCP 拥塞控制算法" "Chinese help heading"
+    test_assert_contains "$RUN_OUTPUT" "--no-color" "no-color help option"
 
     run_bbr status --bogus
     test_assert_equal 2 "$RUN_STATUS" "unknown option exit code"
@@ -173,7 +183,7 @@ test_status_and_arguments() {
 test_dry_run() {
     run_bbr --dry-run --yes set --algorithm bbr --qdisc fq
     test_assert_equal 0 "$RUN_STATUS" "dry-run exit code"
-    test_assert_contains "$RUN_OUTPUT" "[DRY-RUN]" "dry-run plan"
+    test_assert_contains "$RUN_OUTPUT" "[演练]" "dry-run plan"
     test_assert_equal cubic "$(<"${TEST_SYSTEM_ROOT}/proc/sys/net/ipv4/tcp_congestion_control")" "dry-run algorithm"
     test_assert_equal fq_codel "$(<"${TEST_SYSTEM_ROOT}/proc/sys/net/core/default_qdisc")" "dry-run qdisc"
     [[ ! -e "${TEST_SYSTEM_ROOT}/etc/sysctl.d/90-vpsctl-bbr.conf" ]] || test_fail "dry-run wrote sysctl config"
@@ -230,7 +240,7 @@ test_symlink_guards() {
 test_unavailable_algorithm() {
     run_bbr --yes set --algorithm vegas --qdisc fq
     test_assert_equal 3 "$RUN_STATUS" "unavailable algorithm exit code"
-    test_assert_contains "$RUN_OUTPUT" "not available" "unavailable algorithm message"
+    test_assert_contains "$RUN_OUTPUT" "当前运行内核不可用" "unavailable algorithm message"
     test_assert_equal cubic "$(<"${TEST_SYSTEM_ROOT}/proc/sys/net/ipv4/tcp_congestion_control")" "algorithm after rejection"
     [[ ! -e "${TEST_SYSTEM_ROOT}/etc/sysctl.d/90-vpsctl-bbr.conf" ]] || test_fail "unavailable algorithm wrote persistence"
 }
@@ -305,12 +315,12 @@ modules_b64=
 EOF
     run_bbr --yes restore
     test_assert_equal 0 "$RUN_STATUS" "version 1 compatibility exit code"
-    test_assert_contains "$RUN_OUTPUT" "already restored" "version 1 compatibility behavior"
+    test_assert_contains "$RUN_OUTPUT" "已处于原始状态" "version 1 compatibility behavior"
 
     printf 'algorithm=reno\n' >>"$original_path"
     run_bbr --yes restore
     test_assert_equal 10 "$RUN_STATUS" "duplicate original-state key exit code"
-    test_assert_contains "$RUN_OUTPUT" "duplicate key" "duplicate original-state key message"
+    test_assert_contains "$RUN_OUTPUT" "重复键" "duplicate original-state key message"
 
     cat >"$original_path" <<'EOF'
 version=1
@@ -323,7 +333,7 @@ modules_b64=
 EOF
     run_bbr --yes restore
     test_assert_equal 10 "$RUN_STATUS" "invalid original-state base64 exit code"
-    test_assert_contains "$RUN_OUTPUT" "invalid base64" "invalid original-state base64 message"
+    test_assert_contains "$RUN_OUTPUT" "无效 base64" "invalid original-state base64 message"
 
     cat >"$original_path" <<'EOF'
 version=1
@@ -337,7 +347,7 @@ unknown_key=value
 EOF
     run_bbr --yes restore
     test_assert_equal 10 "$RUN_STATUS" "unknown original-state key exit code"
-    test_assert_contains "$RUN_OUTPUT" "unknown key" "unknown original-state key message"
+    test_assert_contains "$RUN_OUTPUT" "未知键" "unknown original-state key message"
     rm -f -- "$original_path"
 }
 
@@ -355,7 +365,8 @@ test_persistence_and_restore() {
 
     run_bbr --yes enable --apply-live-qdisc
     test_assert_equal 0 "$RUN_STATUS" "enable exit code"
-    test_assert_contains "$RUN_OUTPUT" "backed up and overwritten" "unmanaged overwrite warning"
+    test_assert_contains "$RUN_OUTPUT" "先备份再覆盖" "unmanaged overwrite warning"
+    test_assert_contains "$RUN_OUTPUT" "已应用 TCP 算法" "Chinese apply success"
     mapfile -t backup_files < <(find "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/backups/network/bbr" -type f -name '90-vpsctl-bbr.conf' -print)
     ((${#backup_files[@]} == 2)) || test_fail "both unmanaged persistence files were not backed up"
     test_assert_equal bbr "$(<"${TEST_SYSTEM_ROOT}/proc/sys/net/ipv4/tcp_congestion_control")" "enabled algorithm"
@@ -376,7 +387,7 @@ test_persistence_and_restore() {
     printf '# administrator takeover\n' >"$sysctl_path"
     run_bbr --yes restore
     test_assert_equal 3 "$RUN_STATUS" "restore unmanaged-file exit code"
-    test_assert_contains "$RUN_OUTPUT" "no longer managed" "restore unmanaged-file message"
+    test_assert_contains "$RUN_OUTPUT" "不再由 vpsctl 管理" "restore unmanaged-file message"
     test_assert_equal "# administrator takeover" "$(<"$sysctl_path")" "administrator-owned sysctl file"
     printf '%s\n' "$managed_sysctl" >"$sysctl_path"
 
@@ -391,14 +402,14 @@ test_persistence_and_restore() {
 
     run_bbr --yes restore
     test_assert_equal 0 "$RUN_STATUS" "repeated restore exit code"
-    test_assert_contains "$RUN_OUTPUT" "already restored" "repeated restore idempotent message"
+    test_assert_contains "$RUN_OUTPUT" "已处于原始状态" "repeated restore idempotent message"
 
     printf 'fq\n' >"${TEST_SYSTEM_ROOT}/tc-root-qdisc"
     : >"${TEST_SYSTEM_ROOT}/missing-eth0"
     run_bbr --yes restore
     rm -f -- "${TEST_SYSTEM_ROOT}/missing-eth0"
     test_assert_equal 30 "$RUN_STATUS" "missing saved live interface exit code"
-    test_assert_contains "$RUN_OUTPUT" "interface disappeared" "missing saved live interface message"
+    test_assert_contains "$RUN_OUTPUT" "网卡已消失" "missing saved live interface message"
     test_assert_equal cubic "$(<"${TEST_SYSTEM_ROOT}/proc/sys/net/ipv4/tcp_congestion_control")" "partial restore algorithm"
     run_bbr --yes restore
     test_assert_equal 0 "$RUN_STATUS" "live-only restore exit code"
@@ -414,7 +425,7 @@ test_persistence_and_restore() {
     printf '# administrator takeover after restore\n' >"$sysctl_path"
     run_bbr --yes enable
     test_assert_equal 0 "$RUN_STATUS" "enable after administrator takeover exit code"
-    test_assert_contains "$RUN_OUTPUT" "backed up and overwritten" "post-restore takeover warning"
+    test_assert_contains "$RUN_OUTPUT" "先备份再覆盖" "post-restore takeover warning"
     mapfile -t takeover_backups < <(grep -R -l -F '# administrator takeover after restore' "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/backups/network/bbr")
     ((${#takeover_backups[@]} == 1)) || test_fail "post-restore administrator file was not backed up exactly once"
     test_assert_contains "$(<"$sysctl_path")" "# Managed by vpsctl network bbr." "managed marker after takeover overwrite"

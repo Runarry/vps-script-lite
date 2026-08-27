@@ -19,6 +19,12 @@ test_contains() {
     [[ "$output" == *"$expected"* ]] || test_fail "${message}: missing '${expected}'"
 }
 
+test_no_ansi() {
+    local output="$1"
+    local message="$2"
+    [[ "$output" != *$'\033['* ]] || test_fail "${message}: unexpected ANSI escape"
+}
+
 test_cli() {
     local output status
 
@@ -27,16 +33,25 @@ test_cli() {
 
     output="$("${VPSCTL[@]}" --help)"
     test_contains "$output" "<domain> <action>" "help command model"
+    test_contains "$output" "用法" "localized usage heading"
+    test_contains "$output" "内置命令" "localized built-in heading"
+    test_no_ansi "$output" "--no-color help output"
 
     output="$("${VPSCTL[@]}" env)"
     test_contains "$output" "VPS Script Lite" "environment header"
-    test_contains "$output" "System" "environment system field"
-    test_contains "$output" "BBR status" "BBR status field"
-    test_contains "$output" "BBR version" "BBR version field"
-    test_contains "$output" "CC algorithm" "congestion-control algorithm field"
-    test_contains "$output" "Compatibility" "environment compatibility field"
+    test_contains "$output" "系统" "environment system field"
+    test_contains "$output" "BBR 状态" "BBR status field"
+    test_contains "$output" "BBR 版本" "BBR version field"
+    test_contains "$output" "拥塞控制" "congestion-control algorithm field"
+    test_contains "$output" "兼容性" "environment compatibility field"
+    test_no_ansi "$output" "--no-color environment output"
     [[ "$output" != *"Init / Packages"* ]] || test_fail "removed Init / Packages field is still visible"
     [[ "$output" != *"Session"* ]] || test_fail "removed Session field is still visible"
+
+    output="$(TERM=xterm bash "${TEST_ROOT}/bin/vpsctl" env)"
+    test_no_ansi "$output" "non-TTY environment output"
+    output="$(NO_COLOR=1 TERM=xterm bash "${TEST_ROOT}/bin/vpsctl" env)"
+    test_no_ansi "$output" "NO_COLOR environment output"
 
     output="$("${VPSCTL[@]}" list)"
     test_contains "$output" "network bbr" "BBR command listing"
@@ -44,12 +59,16 @@ test_cli() {
     test_contains "$output" "network rfw" "RFW command listing"
 
     status=0
-    "${VPSCTL[@]}" system missing >/dev/null 2>&1 || status=$?
+    output="$("${VPSCTL[@]}" system missing 2>&1)" || status=$?
     [[ "$status" == "2" ]] || test_fail "unknown command should return 2, got ${status}"
+    test_contains "$output" "未知命令" "localized unknown-command error"
+    test_no_ansi "$output" "--no-color unknown-command error"
 
     status=0
-    "${VPSCTL[@]}" --unknown >/dev/null 2>&1 || status=$?
+    output="$("${VPSCTL[@]}" --unknown 2>&1)" || status=$?
     [[ "$status" == "2" ]] || test_fail "unknown option should return 2, got ${status}"
+    test_contains "$output" "未知全局选项" "localized unknown-option error"
+    test_no_ansi "$output" "--no-color unknown-option error"
 }
 
 test_dispatch_security() {

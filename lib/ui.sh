@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Terminal UI for vpsctl. The interface intentionally uses an ASCII layout so
 # it remains readable in basic SSH terminals and serial consoles.
 
@@ -14,6 +15,14 @@ declare -g VPS_UI_CYAN=""
 
 vps_ui_init() {
     local detected_width="${COLUMNS:-}"
+
+    VPS_UI_RESET=""
+    VPS_UI_BOLD=""
+    VPS_UI_DIM=""
+    VPS_UI_GREEN=""
+    VPS_UI_YELLOW=""
+    VPS_UI_RED=""
+    VPS_UI_CYAN=""
 
     if [[ ! "$detected_width" =~ ^[0-9]+$ ]] && command -v tput >/dev/null 2>&1; then
         detected_width="$(tput cols 2>/dev/null || true)"
@@ -48,7 +57,7 @@ vps_ui_rule() {
 }
 
 vps_ui_clear_screen() {
-    if [[ "${VPSCTL_CLEAR:-1}" == "1" && -t 1 && "${TERM:-dumb}" != "dumb" ]]; then
+    if [[ "${VPSCTL_CLEAR:-1}" == "1" && "${VPSCTL_NO_COLOR:-0}" == "0" && -z "${NO_COLOR:-}" && -t 1 && "${TERM:-dumb}" != "dumb" ]]; then
         printf '\033[2J\033[H'
     fi
 }
@@ -62,15 +71,89 @@ vps_ui_header() {
 
 vps_ui_kv() {
     local label="$1"
-    local value="${2:-unknown}"
-    printf '  %-16s %s\n' "$label" "$value"
+    local value="${2:-未知}"
+    printf '  %s：%s\n' "$label" "$(vps_ui_value_label "$value")"
+}
+
+vps_ui_value_label() {
+    case "$1" in
+        unknown) printf '%s未知%s' "$VPS_UI_YELLOW" "$VPS_UI_RESET" ;;
+        unavailable | 'not available') printf '%s不可用%s' "$VPS_UI_YELLOW" "$VPS_UI_RESET" ;;
+        enabled) printf '%s已启用%s' "$VPS_UI_GREEN" "$VPS_UI_RESET" ;;
+        disabled) printf '%s未启用%s' "$VPS_UI_YELLOW" "$VPS_UI_RESET" ;;
+        yes) printf '%s是%s' "$VPS_UI_GREEN" "$VPS_UI_RESET" ;;
+        no) printf '%s否%s' "$VPS_UI_YELLOW" "$VPS_UI_RESET" ;;
+        bare-metal) printf '%s物理机%s' "$VPS_UI_CYAN" "$VPS_UI_RESET" ;;
+        wsl) printf '%sWSL%s' "$VPS_UI_CYAN" "$VPS_UI_RESET" ;;
+        docker) printf '%sDocker%s' "$VPS_UI_CYAN" "$VPS_UI_RESET" ;;
+        lxc) printf '%sLXC%s' "$VPS_UI_CYAN" "$VPS_UI_RESET" ;;
+        container) printf '%s容器%s' "$VPS_UI_CYAN" "$VPS_UI_RESET" ;;
+        local) printf '%s本地%s' "$VPS_UI_CYAN" "$VPS_UI_RESET" ;;
+        *) printf '%s' "$1" ;;
+    esac
 }
 
 vps_ui_status_badge() {
     case "${VPS_ENV[compatibility]}" in
-        supported) printf '%sSUPPORTED%s' "$VPS_UI_GREEN" "$VPS_UI_RESET" ;;
-        limited) printf '%sLIMITED%s' "$VPS_UI_YELLOW" "$VPS_UI_RESET" ;;
-        *) printf '%sUNSUPPORTED%s' "$VPS_UI_RED" "$VPS_UI_RESET" ;;
+        supported) printf '%s支持%s' "$VPS_UI_GREEN" "$VPS_UI_RESET" ;;
+        limited) printf '%s受限%s' "$VPS_UI_YELLOW" "$VPS_UI_RESET" ;;
+        *) printf '%s不支持%s' "$VPS_UI_RED" "$VPS_UI_RESET" ;;
+    esac
+}
+
+vps_ui_availability_label() {
+    case "$1" in
+        ready) printf '%s可用%s' "$VPS_UI_GREEN" "$VPS_UI_RESET" ;;
+        *) printf '%s受限%s' "$VPS_UI_YELLOW" "$VPS_UI_RESET" ;;
+    esac
+}
+
+vps_ui_risk_label() {
+    case "$1" in
+        read-only) printf '%s只读%s' "$VPS_UI_GREEN" "$VPS_UI_RESET" ;;
+        change) printf '%s变更%s' "$VPS_UI_YELLOW" "$VPS_UI_RESET" ;;
+        disruptive) printf '%s中断性%s' "$VPS_UI_RED" "$VPS_UI_RESET" ;;
+        destructive) printf '%s破坏性%s' "$VPS_UI_RED" "$VPS_UI_RESET" ;;
+        *) printf '%s%s%s' "$VPS_UI_CYAN" "$1" "$VPS_UI_RESET" ;;
+    esac
+}
+
+vps_ui_privilege_label() {
+    case "$1" in
+        user) printf '%s普通用户%s' "$VPS_UI_GREEN" "$VPS_UI_RESET" ;;
+        optional-root) printf '%s按需 root%s' "$VPS_UI_YELLOW" "$VPS_UI_RESET" ;;
+        root) printf '%s必须 root%s' "$VPS_UI_RED" "$VPS_UI_RESET" ;;
+        *) printf '%s%s%s' "$VPS_UI_CYAN" "$1" "$VPS_UI_RESET" ;;
+    esac
+}
+
+vps_ui_dry_run_label() {
+    case "$1" in
+        supported) printf '%s支持%s' "$VPS_UI_GREEN" "$VPS_UI_RESET" ;;
+        not-applicable) printf '%s不适用%s' "$VPS_UI_CYAN" "$VPS_UI_RESET" ;;
+        unsupported) printf '%s不支持%s' "$VPS_UI_RED" "$VPS_UI_RESET" ;;
+        *) printf '%s%s%s' "$VPS_UI_CYAN" "$1" "$VPS_UI_RESET" ;;
+    esac
+}
+
+vps_ui_lifecycle_label() {
+    case "$1" in
+        stable) printf '%s稳定%s' "$VPS_UI_GREEN" "$VPS_UI_RESET" ;;
+        experimental) printf '%s实验性%s' "$VPS_UI_YELLOW" "$VPS_UI_RESET" ;;
+        deprecated) printf '%s已弃用%s' "$VPS_UI_YELLOW" "$VPS_UI_RESET" ;;
+        removed) printf '%s已移除%s' "$VPS_UI_RED" "$VPS_UI_RESET" ;;
+        *) printf '%s%s%s' "$VPS_UI_CYAN" "$1" "$VPS_UI_RESET" ;;
+    esac
+}
+
+vps_ui_exit_code() {
+    local status="$1"
+
+    case "$status" in
+        0) printf '%s%s%s' "$VPS_UI_GREEN" "$status" "$VPS_UI_RESET" ;;
+        30) printf '%s%s%s' "$VPS_UI_YELLOW" "$status" "$VPS_UI_RESET" ;;
+        130) printf '%s%s%s' "$VPS_UI_CYAN" "$status" "$VPS_UI_RESET" ;;
+        *) printf '%s%s%s' "$VPS_UI_RED" "$status" "$VPS_UI_RESET" ;;
     esac
 }
 
@@ -78,39 +161,39 @@ vps_ui_dashboard() {
     local version="$1"
     local cpu_summary disk_summary network_summary
 
-    cpu_summary="${VPS_ENV[cpu_cores]} core(s) / ${VPS_ENV[memory_total]}"
-    disk_summary="${VPS_ENV[root_disk_available]} free of ${VPS_ENV[root_disk_total]} (${VPS_ENV[root_disk_used_percent]} used)"
-    network_summary="IPv4 ${VPS_ENV[ipv4]} / IPv6 ${VPS_ENV[ipv6]}"
+    cpu_summary="$(vps_ui_value_label "${VPS_ENV[cpu_cores]}") 核 / $(vps_ui_value_label "${VPS_ENV[memory_total]}")"
+    disk_summary="可用 $(vps_ui_value_label "${VPS_ENV[root_disk_available]}") / 总计 $(vps_ui_value_label "${VPS_ENV[root_disk_total]}")（已用 $(vps_ui_value_label "${VPS_ENV[root_disk_used_percent]}")）"
+    network_summary="IPv4 $(vps_ui_value_label "${VPS_ENV[ipv4]}") / IPv6 $(vps_ui_value_label "${VPS_ENV[ipv6]}")"
     vps_ui_rule '='
     printf ' %sVPS Script Lite%s  v%s\n' "$VPS_UI_BOLD" "$VPS_UI_RESET" "$version"
-    printf ' Host: %s    Status: ' "${VPS_ENV[hostname]}"
+    printf ' 主机：%s    状态：' "${VPS_ENV[hostname]}"
     vps_ui_status_badge
     printf '\n'
     vps_ui_rule '-'
     printf ' %s基础环境%s\n' "$VPS_UI_CYAN" "$VPS_UI_RESET"
-    vps_ui_kv "System" "${VPS_ENV[os_pretty_name]}"
-    vps_ui_kv "Kernel" "${VPS_ENV[kernel_name]} ${VPS_ENV[kernel_release]}"
-    vps_ui_kv "Architecture" "${VPS_ENV[architecture]}"
-    vps_ui_kv "Virtualization" "${VPS_ENV[virtualization]}"
-    vps_ui_kv "CPU / Memory" "$cpu_summary"
-    vps_ui_kv "Root disk" "$disk_summary"
-    vps_ui_kv "Network" "$network_summary"
-    vps_ui_kv "BBR status" "${VPS_ENV[bbr_status]}"
-    vps_ui_kv "BBR version" "${VPS_ENV[bbr_version]}"
-    vps_ui_kv "CC algorithm" "${VPS_ENV[congestion_control]}"
+    vps_ui_kv "系统" "${VPS_ENV[os_pretty_name]}"
+    vps_ui_kv "内核" "${VPS_ENV[kernel_name]} ${VPS_ENV[kernel_release]}"
+    vps_ui_kv "架构" "${VPS_ENV[architecture]}"
+    vps_ui_kv "虚拟化" "${VPS_ENV[virtualization]}"
+    vps_ui_kv "CPU / 内存" "$cpu_summary"
+    vps_ui_kv "根分区" "$disk_summary"
+    vps_ui_kv "网络" "$network_summary"
+    vps_ui_kv "BBR 状态" "${VPS_ENV[bbr_status]}"
+    vps_ui_kv "BBR 版本" "${VPS_ENV[bbr_version]}"
+    vps_ui_kv "拥塞控制" "${VPS_ENV[congestion_control]}"
     vps_ui_rule '-'
 }
 
 vps_ui_environment_details() {
     printf ' %s系统与能力%s\n' "$VPS_UI_CYAN" "$VPS_UI_RESET"
-    vps_ui_kv "OS ID" "${VPS_ENV[os_id]}"
-    vps_ui_kv "OS family" "${VPS_ENV[os_id_like]:-unknown}"
-    vps_ui_kv "OS version" "${VPS_ENV[os_version_id]}"
-    vps_ui_kv "Codename" "${VPS_ENV[os_codename]:-unknown}"
-    vps_ui_kv "CPU model" "${VPS_ENV[cpu_model]}"
+    vps_ui_kv "系统 ID" "${VPS_ENV[os_id]}"
+    vps_ui_kv "系统族" "${VPS_ENV[os_id_like]:-未知}"
+    vps_ui_kv "系统版本" "${VPS_ENV[os_version_id]}"
+    vps_ui_kv "代号" "${VPS_ENV[os_codename]:-未知}"
+    vps_ui_kv "CPU 型号" "${VPS_ENV[cpu_model]}"
     vps_ui_kv "Bash" "${VPS_ENV[bash_version]}"
-    vps_ui_kv "Available CC" "${VPS_ENV[available_congestion_controls]}"
-    vps_ui_kv "Compatibility" "${VPS_ENV[compatibility_detail]}"
+    vps_ui_kv "可用拥塞控制" "${VPS_ENV[available_congestion_controls]}"
+    vps_ui_kv "兼容性" "${VPS_ENV[compatibility_detail]}"
 }
 
 vps_ui_main_menu() {
@@ -137,9 +220,9 @@ vps_ui_domain_commands() {
     for ((index = 0; index < ${#VPS_REGISTRY_RESULTS[@]}; index++)); do
         command_key="${VPS_REGISTRY_RESULTS[$index]}"
         if vps_env_requirements_met "${VPS_COMMAND_REQUIREMENTS[$command_key]}"; then
-            ready_label="${VPS_UI_GREEN}ready${VPS_UI_RESET}"
+            ready_label="$(vps_ui_availability_label ready)"
         else
-            ready_label="${VPS_UI_YELLOW}limited${VPS_UI_RESET}"
+            ready_label="$(vps_ui_availability_label limited)"
         fi
         printf '  [%d] %s  [%b]\n' "$((index + 1))" "${VPS_COMMAND_LABEL[$command_key]}" "$ready_label"
         printf '      %s\n' "${VPS_COMMAND_SUMMARY[$command_key]}"
@@ -150,13 +233,13 @@ vps_ui_command_details() {
     local command_key="$1"
 
     printf ' %s%s%s\n\n' "$VPS_UI_BOLD" "${VPS_COMMAND_LABEL[$command_key]}" "$VPS_UI_RESET"
-    vps_ui_kv "Command" "${VPS_COMMAND_DOMAIN[$command_key]} ${VPS_COMMAND_ACTION[$command_key]}"
-    vps_ui_kv "Summary" "${VPS_COMMAND_SUMMARY[$command_key]}"
-    vps_ui_kv "Risk" "${VPS_COMMAND_RISK[$command_key]}"
-    vps_ui_kv "Privilege" "${VPS_COMMAND_PRIVILEGE[$command_key]}"
-    vps_ui_kv "Dry-run" "${VPS_COMMAND_DRY_RUN[$command_key]}"
-    vps_ui_kv "Requirements" "${VPS_COMMAND_REQUIREMENTS[$command_key]:-none}"
-    vps_ui_kv "Lifecycle" "${VPS_COMMAND_LIFECYCLE[$command_key]}"
+    vps_ui_kv "命令" "${VPS_COMMAND_DOMAIN[$command_key]} ${VPS_COMMAND_ACTION[$command_key]}"
+    vps_ui_kv "摘要" "${VPS_COMMAND_SUMMARY[$command_key]}"
+    vps_ui_kv "风险" "$(vps_ui_risk_label "${VPS_COMMAND_RISK[$command_key]}")"
+    vps_ui_kv "权限" "$(vps_ui_privilege_label "${VPS_COMMAND_PRIVILEGE[$command_key]}")"
+    vps_ui_kv "演练" "$(vps_ui_dry_run_label "${VPS_COMMAND_DRY_RUN[$command_key]}")"
+    vps_ui_kv "能力要求" "${VPS_COMMAND_REQUIREMENTS[$command_key]:-无}"
+    vps_ui_kv "生命周期" "$(vps_ui_lifecycle_label "${VPS_COMMAND_LIFECYCLE[$command_key]}")"
 }
 
 vps_ui_registered_commands() {
@@ -173,16 +256,16 @@ vps_ui_registered_commands() {
 }
 
 vps_ui_info() {
-    printf '\n  %sINFO%s  %s\n' "$VPS_UI_CYAN" "$VPS_UI_RESET" "$1"
+    printf '\n  %s提示%s  %s\n' "$VPS_UI_CYAN" "$VPS_UI_RESET" "$1"
 }
 
 vps_ui_warning() {
-    printf '\n  %sWARN%s  %s\n' "$VPS_UI_YELLOW" "$VPS_UI_RESET" "$1"
+    printf '\n  %s警告%s  %s\n' "$VPS_UI_YELLOW" "$VPS_UI_RESET" "$1"
 }
 
 vps_ui_read_choice() {
     local prompt="$1"
-    printf ' %s > ' "$prompt"
+    printf ' %s%s%s > ' "$VPS_UI_CYAN" "$prompt" "$VPS_UI_RESET"
     if IFS= read -r VPS_UI_CHOICE; then
         VPS_UI_CHOICE="$(vps_env_trim "$VPS_UI_CHOICE")"
         return 0
@@ -201,11 +284,13 @@ vps_ui_parse_index() {
 
     numeric_value=$((10#$choice))
     ((numeric_value >= 1 && numeric_value <= item_count)) || return 1
+    # Consumed by the menu controller in bin/vpsctl.
+    # shellcheck disable=SC2034
     VPS_UI_INDEX=$((numeric_value - 1))
 }
 
 vps_ui_pause() {
-    local ignored
-    printf '\n 按 Enter 返回...'
-    IFS= read -r ignored || true
+    local _pause_input
+    printf '\n %s按 Enter 返回...%s' "$VPS_UI_CYAN" "$VPS_UI_RESET"
+    IFS= read -r _pause_input || true
 }

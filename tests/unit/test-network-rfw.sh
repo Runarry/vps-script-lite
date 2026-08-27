@@ -250,6 +250,7 @@ test_default_config_unit_and_pending() {
     assert_file_contains "$config" "block_http=off" "safe default HTTP rule"
     assert_file_contains "$config" "log=off" "safe default logging"
     assert_file_contains "$unit" "ExecStart=/usr/local/bin/rfw --iface ens3 --xdp-mode auto" "fixed ExecStart"
+    assert_file_contains "$unit" "Description=RFW eBPF/XDP 防火墙" "localized systemd description"
     if grep -Fq -- "--block-" "$unit" || grep -Fq -- "--log-port-access" "$unit"; then
         fail "safe default unit unexpectedly enabled filtering or logging"
     fi
@@ -286,7 +287,8 @@ test_config_parser_and_preservation() {
     rfw status >/dev/null 2>&1 || status=$?
     assert_status 0 "$status" "status handles invalid configuration"
     output="$(rfw status)"
-    assert_contains "$output" "Config:    invalid" "strict parser rejection"
+    assert_contains "$output" "配置" "strict parser status label"
+    assert_contains "$output" "无效" "strict parser rejection"
 
     reset_case
     rfw install
@@ -377,8 +379,12 @@ test_managed_ancestor_symlink_guard() {
 test_global_options_and_release_validation() {
     local output status=0
     reset_case
-    output="$(rfw --quiet --verbose --non-interactive status)"
-    assert_contains "$output" "RFW status" "global options before action"
+    output="$(rfw --quiet --verbose --non-interactive --no-color status)"
+    assert_contains "$output" "RFW 状态" "global options before action"
+    [[ "$output" != *$'\033['* ]] || fail "non-TTY status emitted ANSI color"
+    output="$(rfw help)"
+    assert_contains "$output" "管理 narwhal-cloud/rfw XDP 防火墙" "localized help summary"
+    assert_contains "$output" "全局选项" "localized global-options heading"
     rfw -- --not-an-action >/dev/null 2>&1 || status=$?
     assert_status 2 "$status" "global option delimiter"
     status=0
@@ -442,7 +448,7 @@ printf 'UNMANAGED-EXECUTED\n' >> "$MOCK_LOG"
 EOF
     chmod +x "$binary"
     output="$(rfw status)"
-    assert_contains "$output" "not installed or unmanaged" "unmanaged status label"
+    assert_contains "$output" "未安装或不受管" "unmanaged status label"
     if grep -Fq "UNMANAGED-EXECUTED" "$MOCK_LOG"; then fail "status executed unmanaged binary"; fi
     status=0
     rfw configure --block-http on >/dev/null 2>&1 || status=$?
@@ -456,11 +462,11 @@ printf 'TAMPERED-EXECUTED\n' >> "$MOCK_LOG"
 EOF
     chmod +x "$binary"
     output="$(rfw status)"
-    assert_contains "$output" "not installed or unmanaged" "tampered binary status label"
+    assert_contains "$output" "未安装或不受管" "tampered binary status label"
     if grep -Fq "TAMPERED-EXECUTED" "$MOCK_LOG"; then fail "status executed checksum-mismatched binary"; fi
     rfw install --force
     output="$(rfw status)"
-    assert_contains "$output" "Version:   rfw 1.2.3 [v1.2.3]" "forced repair of a tampered managed binary"
+    assert_contains "$output" "rfw 1.2.3 [v1.2.3]" "forced repair of a tampered managed binary"
     reset_case
     rfw install
     status=0
@@ -604,10 +610,13 @@ test_stats_logs_status_and_ipv6_warning() {
     mkdir -p "${SYSTEM_ROOT}/proc/net"
     printf 'ipv6-present\n' >"${SYSTEM_ROOT}/proc/net/if_inet6"
     output="$(rfw status)"
-    assert_contains "$output" "Version:   rfw 1.2.3" "status version"
-    assert_contains "$output" "Service:   active" "status service"
-    assert_contains "$output" "Autostart: disabled" "status autostart"
-    assert_contains "$output" "IPv4 only" "IPv6 warning"
+    assert_contains "$output" "rfw 1.2.3" "status version"
+    assert_contains "$output" "运行中" "status service"
+    assert_contains "$output" "未启用" "status autostart"
+    assert_contains "$output" "网卡=ens3" "localized config interface"
+    assert_contains "$output" "访问日志=开启" "localized config switch"
+    [[ "$output" != *"interface=ens3"* ]] || fail "status leaked English configuration labels"
+    assert_contains "$output" "IPv6 流量不受保护" "IPv6 warning"
 }
 
 test_uninstall_boundaries() {

@@ -29,7 +29,7 @@ vps_dns_atomic_write() {
     local target="$1" mode="$2" mapped parent
     if [[ "${VPSCTL_DRY_RUN:-0}" == "1" ]]; then
         cat >/dev/null
-        vps_cmd_info "dry-run: would replace $target (mode $mode)"
+        vps_cmd_info "演练：将替换 $target（权限 $mode）"
         return 0
     fi
     mapped="$(vps_dns_path "$target")" || return $?
@@ -51,11 +51,11 @@ vps_dns_require_writable_target() {
             [[ -n "$probe" ]] || probe=/
         done
         if options="$(findmnt -no OPTIONS --target "$probe" 2>/dev/null)"; then :; else
-            vps_cmd_error "cannot determine mount options for $logical"
+            vps_cmd_error "无法确定 $logical 所在文件系统的挂载选项"
             return 20
         fi
         if [[ ",$options," == *,ro,* ]]; then
-            vps_cmd_error "managed DNS target is on a read-only mount: $logical"
+            vps_cmd_error "受管 DNS 目标位于只读挂载点：$logical"
             return 3
         fi
     fi
@@ -63,29 +63,38 @@ vps_dns_require_writable_target() {
 
 vps_dns_usage() {
     cat <<'EOF'
-Usage: vpsctl [global-options] network dns [action] [options]
+用法：vpsctl [全局选项] network dns [动作] [选项]
 
-Actions:
-  show                         Show the active DNS backend and servers
-  test --server IP [...]       Query a domain through every named server
-  set --server IP [...]        Replace DNS after all candidates pass testing
-  refresh                      Reload the owning DNS backend and caches
-  verify                       Verify configured servers and system resolution
-  restore [--backup PATH]      Restore the latest (or selected) backup
-  help                         Show this help
+动作：
+  show                         显示当前 DNS 后端与服务器
+  test --server IP [...]       通过每个指定服务器查询域名
+  set --server IP [...]        所有候选服务器测试通过后替换 DNS
+  refresh                      重新加载权威 DNS 后端并刷新缓存
+  verify                       验证已配置服务器和系统解析
+  restore [--backup PATH]      恢复最新备份或指定备份
+  help                         显示此帮助
 
-Options for test/set:
-  --server IP                  Candidate DNS server; may be repeated
-  --test-domain DOMAIN         Query name used for testing (default: example.com)
-  --install-deps               Explicitly allow installing a DNS query tool
+test/set 选项：
+  --server IP                  候选 DNS 服务器，可重复指定
+  --test-domain DOMAIN         测试查询域名（默认：example.com）
+  --install-deps               明确允许安装 DNS 查询工具
 
-With no action, a terminal gets a submenu; otherwise the command behaves as show.
+可直接运行脚本时使用的全局选项：
+  --dry-run                    仅演练，不写入系统
+  --yes                        自动同意普通确认
+  --non-interactive            禁止读取终端输入
+  --quiet                      减少非必要输出
+  --verbose                    显示详细诊断
+  --no-color                   禁用 ANSI 颜色
+  --                           结束全局选项解析
+
+未指定动作时，TTY 中显示子菜单；非交互环境等同于 show。
 EOF
 }
 
 vps_dns_require_linux() {
     [[ "${VPSCTL_TESTING:-0}" == "1" || "$(uname -s 2>/dev/null || true)" == "Linux" ]] && return 0
-    vps_cmd_error "network dns is supported on Linux only"
+    vps_cmd_error "network dns 仅支持 Linux"
     return 3
 }
 
@@ -141,18 +150,18 @@ vps_dns_parse_servers() {
         case "$1" in
             --server)
                 (($# >= 2)) || {
-                    vps_cmd_error "--server requires an address"
+                    vps_cmd_error "--server 需要 IP 地址"
                     return 2
                 }
                 vps_dns_validate_server "$2" || {
-                    vps_cmd_error "invalid DNS server address: $2"
+                    vps_cmd_error "DNS 服务器地址无效：$2"
                     return 2
                 }
                 local existing duplicate=0
                 for existing in "${VPS_DNS_SERVERS[@]}"; do [[ "$existing" == "$2" ]] && duplicate=1; done
                 if ((duplicate == 0)); then
                     ((${#VPS_DNS_SERVERS[@]} < 3)) || {
-                        vps_cmd_error "at most three distinct --server values are allowed"
+                        vps_cmd_error "最多允许三个不同的 --server 值"
                         return 2
                     }
                     VPS_DNS_SERVERS+=("$2")
@@ -161,11 +170,11 @@ vps_dns_parse_servers() {
                 ;;
             --test-domain)
                 (($# >= 2)) || {
-                    vps_cmd_error "--test-domain requires a value"
+                    vps_cmd_error "--test-domain 需要域名"
                     return 2
                 }
                 [[ "$2" =~ ^([A-Za-z0-9_][A-Za-z0-9_-]{0,62}\.)*[A-Za-z0-9_][A-Za-z0-9_-]{0,62}\.?$ ]] || {
-                    vps_cmd_error "invalid test domain: $2"
+                    vps_cmd_error "测试域名无效：$2"
                     return 2
                 }
                 VPS_DNS_TEST_DOMAIN="$2"
@@ -180,13 +189,13 @@ vps_dns_parse_servers() {
                 return 64
                 ;;
             *)
-                vps_cmd_error "unknown option: $1"
+                vps_cmd_error "未知选项：$1"
                 return 2
                 ;;
         esac
     done
     ((${#VPS_DNS_SERVERS[@]} > 0)) || {
-        vps_cmd_error "at least one --server is required"
+        vps_cmd_error "至少需要一个 --server"
         return 2
     }
 }
@@ -205,15 +214,15 @@ vps_dns_query_tool() {
 vps_dns_install_query_tool() {
     local manager="" package="" status
     if [[ "${VPSCTL_NON_INTERACTIVE:-0}" == "1" && "$VPS_DNS_INSTALL_DEPS" != "1" ]]; then
-        vps_cmd_error "no dig, drill, or nslookup found; rerun with --install-deps"
+        vps_cmd_error "未找到 dig、drill 或 nslookup；请使用 --install-deps 重试"
         return 3
     fi
     if [[ "$VPS_DNS_INSTALL_DEPS" != "1" ]]; then
         [[ "${VPSCTL_DRY_RUN:-0}" != "1" ]] || {
-            vps_cmd_error "dry-run needs --install-deps to plan dependency installation"
+            vps_cmd_error "演练依赖安装时需要显式指定 --install-deps"
             return 3
         }
-        if vps_cmd_confirm "Install a DNS query tool?"; then :; else
+        if vps_cmd_confirm "是否安装 DNS 查询工具？"; then :; else
             status=$?
             [[ "$status" == 1 ]] && return 64
             return "$status"
@@ -225,7 +234,7 @@ vps_dns_install_query_tool() {
         manager=""
     done
     [[ -n "$manager" ]] || {
-        vps_cmd_error "no supported package manager found"
+        vps_cmd_error "未找到受支持的软件包管理器"
         return 3
     }
     case "$manager" in
@@ -255,7 +264,7 @@ vps_dns_install_query_tool() {
         return 0
     fi
     vps_dns_query_tool >/dev/null || {
-        vps_cmd_error "installation completed but no query tool is available"
+        vps_cmd_error "安装已结束，但 DNS 查询工具仍不可用"
         return 3
     }
 }
@@ -286,15 +295,15 @@ vps_dns_test_candidates() {
         if vps_dns_install_query_tool; then :; else return $?; fi
         tool="$(vps_dns_query_tool 2>/dev/null || true)"
         if [[ -z "$tool" && "${VPSCTL_DRY_RUN:-0}" == "1" ]]; then
-            vps_cmd_info "dry-run: candidate queries would run after dependency installation"
+            vps_cmd_info "演练：安装依赖后将查询候选 DNS 服务器"
             return 0
         fi
     fi
     for server in "${VPS_DNS_SERVERS[@]}"; do
         if vps_dns_query "$tool" "$server" "$VPS_DNS_TEST_DOMAIN"; then
-            vps_cmd_info "$server answered for $VPS_DNS_TEST_DOMAIN via $tool"
+            vps_cmd_success "$server 已通过 $tool 正确响应 $VPS_DNS_TEST_DOMAIN"
         else
-            vps_cmd_error "$server failed the directed query for $VPS_DNS_TEST_DOMAIN"
+            vps_cmd_error "$server 对 $VPS_DNS_TEST_DOMAIN 的定向查询失败"
             failed=1
         fi
     done
@@ -399,16 +408,31 @@ vps_dns_read_servers() {
     done <"$file"
 }
 
+vps_dns_backend_display() {
+    case "$1" in
+        networkmanager) printf 'NetworkManager' ;;
+        systemd-resolved) printf 'systemd-resolved' ;;
+        openresolv) printf 'openresolv' ;;
+        debian-resolvconf) printf '旧版 Debian resolvconf（仅支持查看和刷新）' ;;
+        plain) printf '静态 /etc/resolv.conf' ;;
+        conflict) printf 'DNS 所有权冲突' ;;
+        unsafe-symlink) printf '不安全的 resolv.conf 符号链接' ;;
+        *) printf '%s' "$1" ;;
+    esac
+}
+
 vps_dns_show() {
-    local servers
+    local servers server
     vps_dns_detect_backend
     if servers="$(vps_dns_effective_servers)"; then :; else return 20; fi
-    printf 'DNS backend: %s\n' "$VPS_DNS_BACKEND"
-    [[ -z "$VPS_DNS_NM_CONNECTION" ]] || printf 'Default connection: %s\n' "$VPS_DNS_NM_CONNECTION"
+    vps_cmd_status "DNS 后端" "$(vps_dns_backend_display "$VPS_DNS_BACKEND")" emphasis
+    [[ -z "$VPS_DNS_NM_CONNECTION" ]] || vps_cmd_status "默认连接" "$VPS_DNS_NM_CONNECTION" info
     if [[ -n "$servers" ]]; then
-        printf 'Active servers:\n%s\n' "$servers"
+        while IFS= read -r server; do
+            [[ -n "$server" ]] && vps_cmd_status "活动服务器" "$server" emphasis
+        done <<<"$servers"
     else
-        printf 'Active servers: none detected\n'
+        vps_cmd_status "活动服务器" "未检测到" warning
     fi
 }
 
@@ -423,7 +447,7 @@ vps_dns_backup_current() {
         *) source="/etc/resolv.conf" ;;
     esac
     if [[ "${VPSCTL_DRY_RUN:-0}" == "1" ]]; then
-        vps_cmd_info "dry-run: would back up DNS state for $backend"
+        vps_cmd_info "演练：将备份 $backend 的 DNS 状态"
         return 0
     fi
     vps_cmd_require_no_symlink_components "$root" || return $?
@@ -566,7 +590,7 @@ vps_dns_refresh_backend() {
     case "$backend" in
         networkmanager)
             [[ -n "$VPS_DNS_NM_DEVICE" ]] || {
-                vps_cmd_error "NetworkManager default device is unknown"
+                vps_cmd_error "NetworkManager 默认设备未知"
                 return 3
             }
             vps_cmd_run nmcli connection reload || return 20
@@ -575,7 +599,7 @@ vps_dns_refresh_backend() {
         systemd-resolved) vps_cmd_run systemctl restart systemd-resolved || return 20 ;;
         openresolv) vps_cmd_run resolvconf -u || return 20 ;;
         debian-resolvconf | conflict | unsafe-symlink)
-            vps_cmd_error "DNS backend ownership is unsafe for refresh"
+            vps_cmd_error "DNS 后端所有权不明确，无法安全刷新"
             return 3
             ;;
         plain) : ;;
@@ -630,7 +654,7 @@ vps_dns_verify_servers() {
         found=0
         while IFS= read -r line; do [[ "$line" == "$server" ]] && found=1; done <<<"$actual"
         if ((found == 0)); then
-            vps_cmd_error "configured server is not active: $server"
+            vps_cmd_error "已配置的服务器未生效：$server"
             missing=1
         fi
     done
@@ -641,7 +665,7 @@ vps_dns_verify_servers() {
         found=0
         for expected in "${VPS_DNS_SERVERS[@]}"; do [[ "$line" == "$expected" ]] && found=1; done
         if ((found == 0)); then
-            vps_cmd_error "unexpected active upstream DNS server: $line"
+            vps_cmd_error "检测到非预期的活动上游 DNS 服务器：$line"
             extra=1
         fi
     done <<<"$actual"
@@ -668,15 +692,15 @@ vps_dns_verify() {
         while IFS= read -r server; do [[ -n "$server" ]] && VPS_DNS_SERVERS+=("$server"); done <<<"$effective"
     fi
     ((${#VPS_DNS_SERVERS[@]} > 0)) || {
-        vps_cmd_error "no active DNS servers detected"
+        vps_cmd_error "未检测到活动 DNS 服务器"
         return 10
     }
     vps_dns_verify_servers || return 20
     vps_dns_verify_system_resolution || {
-        vps_cmd_error "system resolution failed for $VPS_DNS_TEST_DOMAIN"
+        vps_cmd_error "系统解析 $VPS_DNS_TEST_DOMAIN 失败"
         return 20
     }
-    vps_cmd_info "DNS servers and system resolution verified"
+    vps_cmd_success "DNS 服务器与系统解析验证通过"
 }
 
 vps_dns_set() {
@@ -684,17 +708,17 @@ vps_dns_set() {
     if vps_dns_test_candidates; then :; else
         status=$?
         [[ "$status" == 64 ]] && {
-            vps_cmd_info "DNS operation cancelled"
+            vps_cmd_info "DNS 操作已取消，未做更改"
             return 0
         }
-        vps_cmd_error "candidate testing failed; no configuration was written"
+        vps_cmd_error "候选服务器测试失败，未写入任何配置"
         return "$status"
     fi
     if [[ "${VPSCTL_DRY_RUN:-0}" != "1" ]]; then
-        if vps_cmd_confirm "Replace the system DNS configuration with the tested servers?"; then :; else
+        if vps_cmd_confirm "是否使用已通过测试的服务器替换系统 DNS 配置？"; then :; else
             status=$?
             if [[ "$status" == 1 ]]; then
-                vps_cmd_info "DNS change cancelled"
+                vps_cmd_info "DNS 更改已取消，未做更改"
                 return 0
             fi
             return "$status"
@@ -705,11 +729,11 @@ vps_dns_set() {
     backend="$VPS_DNS_BACKEND"
     case "$backend" in
         debian-resolvconf)
-            vps_cmd_error "legacy Debian resolvconf ownership detected; refusing an unsafe modification"
+            vps_cmd_error "检测到旧版 Debian resolvconf 所有权，拒绝不安全的修改"
             return 3
             ;;
         conflict | unsafe-symlink)
-            vps_cmd_error "conflicting or unknown resolv.conf ownership; refusing modification"
+            vps_cmd_error "resolv.conf 所有权冲突或未知，拒绝修改"
             return 3
             ;;
     esac
@@ -720,12 +744,12 @@ vps_dns_set() {
     esac
     if [[ "$backend" == systemd-resolved ]]; then
         command -v resolvectl >/dev/null 2>&1 && command -v systemctl >/dev/null 2>&1 || {
-            vps_cmd_error "systemd-resolved ownership requires resolvectl and systemctl"
+            vps_cmd_error "systemd-resolved 后端需要 resolvectl 和 systemctl"
             return 3
         }
     fi
     if [[ -n "$managed_target" && -L "$(vps_dns_path "$managed_target")" ]]; then
-        vps_cmd_error "managed DNS target is a symlink; refusing to replace it: $managed_target"
+        vps_cmd_error "受管 DNS 目标是符号链接，拒绝替换：$managed_target"
         return 3
     fi
     if [[ -n "$managed_target" ]]; then vps_dns_require_writable_target "$managed_target" || return $?; fi
@@ -741,12 +765,12 @@ vps_dns_set() {
         plain) vps_dns_write_plain || return 20 ;;
     esac
     if ! vps_dns_refresh_backend "$backend"; then
-        vps_cmd_error "DNS was written but refresh failed; restore with: vpsctl network dns restore"
+        vps_cmd_error "DNS 已写入但刷新失败；可执行恢复命令：vpsctl network dns restore"
         return 30
     fi
     if [[ "${VPSCTL_DRY_RUN:-0}" != "1" ]] && ! vps_dns_verify; then
-        vps_cmd_error "post-change verification failed; the new configuration was retained"
-        vps_cmd_error "restore it with: vpsctl network dns restore"
+        vps_cmd_warning "更改后验证失败，新配置已保留"
+        vps_cmd_error "可执行恢复命令：vpsctl network dns restore"
         return 30
     fi
     return 0
@@ -763,14 +787,14 @@ vps_dns_restore() {
         case "$1" in
             --backup)
                 (($# >= 2)) || {
-                    vps_cmd_error "--backup requires a path"
+                    vps_cmd_error "--backup 需要路径"
                     return 2
                 }
                 selected="$2"
                 shift 2
                 ;;
             *)
-                vps_cmd_error "unknown restore option: $1"
+                vps_cmd_error "未知 restore 选项：$1"
                 return 2
                 ;;
         esac
@@ -780,7 +804,7 @@ vps_dns_restore() {
     record="${root}/latest"
     if [[ -z "$selected" ]]; then
         [[ -f "$record" && ! -L "$record" ]] || {
-            vps_cmd_error "latest DNS backup metadata is missing or unsafe"
+            vps_cmd_error "最新 DNS 备份元数据缺失或不安全"
             return 10
         }
         while IFS='=' read -r key value; do
@@ -809,23 +833,23 @@ vps_dns_restore() {
         backup="$selected"
     fi
     [[ "$backup" == /* && -f "$backup" && ! -L "$backup" ]] || {
-        vps_cmd_error "backup file is missing or unsafe"
+        vps_cmd_error "备份文件缺失或不安全"
         return 10
     }
     [[ -d "$root" && ! -L "$root" ]] || {
-        vps_cmd_error "DNS backup root is missing or unsafe"
+        vps_cmd_error "DNS 备份根目录缺失或不安全"
         return 10
     }
     root_real="$(cd -- "$root" && pwd -P)" || return 10
     selected_parent="$(cd -- "${backup%/*}" && pwd -P)" || return 10
     [[ "$selected_parent" == "$root_real"/* ]] || {
-        vps_cmd_error "backup escapes the DNS backup root"
+        vps_cmd_error "备份路径超出固定 DNS 备份根目录"
         return 10
     }
     backup="${selected_parent}/${backup##*/}"
     metadata="${selected_parent}/metadata"
     [[ -f "$metadata" && ! -L "$metadata" ]] || {
-        vps_cmd_error "backup metadata is missing or unsafe"
+        vps_cmd_error "备份元数据缺失或不安全"
         return 10
     }
     backend_count=0 kind_count=0 target_count=0 backup_count=0
@@ -857,22 +881,22 @@ vps_dns_restore() {
     case "$saved_backend:$kind:$target" in
         networkmanager:networkmanager:@networkmanager | systemd-resolved:file:/etc/systemd/resolved.conf.d/90-vpsctl-dns.conf | systemd-resolved:absent:/etc/systemd/resolved.conf.d/90-vpsctl-dns.conf | openresolv:file:/etc/resolvconf.conf | openresolv:absent:/etc/resolvconf.conf | plain:file:/etc/resolv.conf | plain:absent:/etc/resolv.conf) ;;
         *)
-            vps_cmd_error "invalid DNS backup metadata tuple"
+            vps_cmd_error "DNS 备份元数据组合无效"
             return 10
             ;;
     esac
     vps_dns_detect_backend
     current_backend="$VPS_DNS_BACKEND"
     [[ "$current_backend" == "$saved_backend" ]] || {
-        vps_cmd_error "current DNS owner does not match backup backend"
+        vps_cmd_error "当前 DNS 权威后端与备份后端不匹配"
         return 3
     }
     if [[ "$target" == /* ]]; then vps_dns_require_writable_target "$target" || return $?; fi
     if [[ "${VPSCTL_DRY_RUN:-0}" != "1" ]]; then
-        if vps_cmd_confirm "Restore DNS configuration from $backup?"; then :; else
+        if vps_cmd_confirm "是否从 $backup 恢复 DNS 配置？"; then :; else
             status=$?
             if [[ "$status" == 1 ]]; then
-                vps_cmd_info "DNS restore cancelled"
+                vps_cmd_info "DNS 恢复已取消，未做更改"
                 return 0
             fi
             return "$status"
@@ -903,11 +927,11 @@ vps_dns_restore() {
                 esac
             done <"$backup"
             [[ "${nm_seen[connection]:-}" == 1 && "${nm_seen[device]:-}" == 1 ]] && vps_dns_valid_nm_identity "$connection" "$device" || {
-                vps_cmd_error "NetworkManager backup has an invalid connection or device"
+                vps_cmd_error "NetworkManager 备份中的 connection 或 device 无效"
                 return 10
             }
             for property in "${nm_properties[@]}"; do [[ "${nm_seen[$property]:-}" == 1 ]] || {
-                vps_cmd_error "NetworkManager backup lacks $property"
+                vps_cmd_error "NetworkManager 备份缺少 $property"
                 return 10
             }; done
             VPS_DNS_NM_CONNECTION="$connection"
@@ -925,23 +949,24 @@ vps_dns_restore() {
             ;;
     esac
     if ! vps_dns_refresh_backend "$saved_backend"; then
-        vps_cmd_error "DNS was restored but refresh failed; retry with: vpsctl network dns restore --backup $backup"
+        vps_cmd_warning "DNS 已恢复，但刷新失败"
+        vps_cmd_error "可执行重试命令：vpsctl network dns restore --backup $backup"
         return 30
     fi
-    vps_cmd_info "DNS configuration restored from $backup"
+    vps_cmd_success "已从 $backup 恢复 DNS 配置"
 }
 
 vps_dns_menu() {
     local choice raw token status
     local -a tokens=() args=()
     while true; do
-        printf '\nDNS management\n  1) Show\n  2) Test servers\n  3) Set servers\n  4) Verify\n  5) Refresh\n  6) Restore latest\n  q) Quit\n\nChoice: '
+        printf '\nDNS 管理\n  1) 显示状态\n  2) 测试服务器\n  3) 设置服务器\n  4) 验证配置\n  5) 刷新后端\n  6) 恢复最新备份\n  q) 退出\n\n请选择：'
         IFS= read -r choice || return 0
         case "$choice" in
             1) vps_dns_show ;;
             2 | 3)
-                vps_cmd_warning "Use only DNS server IP addresses you trust. Enter one to three addresses."
-                printf 'Servers (comma or space separated): '
+                vps_cmd_warning "请仅使用可信的 DNS 服务器 IP 地址，并输入一至三个地址。"
+                printf '服务器（使用逗号或空格分隔）：'
                 IFS= read -r raw || continue
                 raw="${raw//,/ }"
                 IFS=$' \t' read -r -a tokens <<<"$raw"
@@ -972,6 +997,7 @@ vps_dns_parse_standalone_globals() {
             --non-interactive) VPSCTL_NON_INTERACTIVE=1 ;;
             --quiet) VPSCTL_QUIET=1 ;;
             --verbose) VPSCTL_VERBOSE=1 ;;
+            --no-color) VPSCTL_NO_COLOR=1 ;;
             --)
                 shift
                 VPS_DNS_ARGS=("$@")
@@ -993,7 +1019,7 @@ vps_dns_main() {
     action="${1:-}"
     if [[ "$action" == help || "$action" == -h || "$action" == --help ]]; then
         (($# == 1)) || {
-            vps_cmd_error "help accepts no additional arguments"
+            vps_cmd_error "help 不接受额外参数"
             return 2
         }
         vps_dns_usage
@@ -1008,7 +1034,7 @@ vps_dns_main() {
     case "$action" in
         show)
             (($# == 0)) || {
-                vps_cmd_error "show accepts no options"
+                vps_cmd_error "show 不接受选项"
                 return 2
             }
             vps_dns_show
@@ -1035,14 +1061,14 @@ vps_dns_main() {
             ;;
         refresh)
             (($# == 0)) || {
-                vps_cmd_error "refresh accepts no options"
+                vps_cmd_error "refresh 不接受选项"
                 return 2
             }
             vps_cmd_require_root && vps_dns_refresh_backend
             ;;
         verify)
             (($# == 0)) || {
-                vps_cmd_error "verify accepts no options"
+                vps_cmd_error "verify 不接受选项"
                 return 2
             }
             VPS_DNS_SERVERS=()
@@ -1050,7 +1076,7 @@ vps_dns_main() {
             ;;
         restore) vps_dns_restore "$@" ;;
         *)
-            vps_cmd_error "unknown DNS action: $action"
+            vps_cmd_error "未知 DNS 动作：$action"
             vps_dns_usage >&2
             return 2
             ;;

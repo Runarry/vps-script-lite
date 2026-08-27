@@ -1,3 +1,5 @@
+# shellcheck shell=bash
+# shellcheck disable=SC2034
 # Environment detection for vpsctl. This file is a library and has no side effects
 # beyond defining functions and data structures when sourced.
 
@@ -17,7 +19,7 @@ vps_env_format_kib() {
     local unit divisor whole decimal
 
     if [[ ! "$kib" =~ ^[0-9]+$ ]]; then
-        printf 'unknown'
+        printf '未知'
         return 0
     fi
 
@@ -49,9 +51,9 @@ vps_env_format_uptime() {
     hours=$(((seconds % 86400) / 3600))
     minutes=$(((seconds % 3600) / 60))
 
-    ((days > 0)) && result+="${days}d "
-    ((hours > 0 || days > 0)) && result+="${hours}h "
-    result+="${minutes}m"
+    ((days > 0)) && result+="${days} 天 "
+    ((hours > 0 || days > 0)) && result+="${hours} 小时 "
+    result+="${minutes} 分钟"
     printf '%s' "$result"
 }
 
@@ -75,7 +77,7 @@ vps_env_read_os_release() {
             VERSION_CODENAME) VPS_ENV[os_codename]="$value" ;;
             PRETTY_NAME) VPS_ENV[os_pretty_name]="$value" ;;
         esac
-    done < /etc/os-release
+    done </etc/os-release
 }
 
 vps_env_detect_package_manager() {
@@ -96,7 +98,7 @@ vps_env_detect_init() {
     local init_name="unknown"
 
     if [[ -r /proc/1/comm ]]; then
-        IFS= read -r init_name < /proc/1/comm || true
+        IFS= read -r init_name </proc/1/comm || true
         init_name="$(vps_env_trim "$init_name")"
     fi
     [[ "$init_name" == init\(* ]] && init_name="init"
@@ -136,7 +138,7 @@ vps_env_detect_virtualization() {
     fi
 
     if [[ -z "$detected" && -r /proc/1/cgroup ]]; then
-        cgroup="$(< /proc/1/cgroup)"
+        cgroup="$(</proc/1/cgroup)"
         case "$cgroup" in
             *docker*) detected="docker" ;;
             *lxc*) detected="lxc" ;;
@@ -166,7 +168,7 @@ vps_env_detect_cpu() {
                     [[ -n "$model" ]] && break
                     ;;
             esac
-        done < /proc/cpuinfo
+        done </proc/cpuinfo
     fi
 
     VPS_ENV[cpu_cores]="$cores"
@@ -184,7 +186,7 @@ vps_env_detect_memory() {
             VPS_ENV[memory_total]="$(vps_env_format_kib "$value")"
             return 0
         fi
-    done < /proc/meminfo
+    done </proc/meminfo
 }
 
 vps_env_detect_disk() {
@@ -254,15 +256,15 @@ vps_env_classify_bbr_version() {
     local module_version="${2:-}"
 
     if [[ -n "$module_version" ]]; then
-        printf 'module %s' "$module_version"
+        printf '模块 %s' "$module_version"
         return 0
     fi
 
     case "$algorithm" in
         bbr3) printf 'BBRv3' ;;
         bbr2) printf 'BBRv2' ;;
-        bbr) printf 'kernel implementation (version not exposed)' ;;
-        *) printf 'not available' ;;
+        bbr) printf '内核实现（未公开版本）' ;;
+        *) printf '不可用' ;;
     esac
 }
 
@@ -275,13 +277,13 @@ vps_env_detect_bbr() {
     local -a algorithm_list=()
 
     if [[ -r /proc/sys/net/ipv4/tcp_congestion_control ]]; then
-        IFS= read -r current_algorithm < /proc/sys/net/ipv4/tcp_congestion_control || true
+        IFS= read -r current_algorithm </proc/sys/net/ipv4/tcp_congestion_control || true
         current_algorithm="$(vps_env_trim "$current_algorithm")"
         [[ -n "$current_algorithm" ]] || current_algorithm="unknown"
     fi
 
     if [[ -r /proc/sys/net/ipv4/tcp_available_congestion_control ]]; then
-        IFS= read -r available_algorithms < /proc/sys/net/ipv4/tcp_available_congestion_control || true
+        IFS= read -r available_algorithms </proc/sys/net/ipv4/tcp_available_congestion_control || true
         available_algorithms="$(vps_env_trim "$available_algorithms")"
         [[ -n "$available_algorithms" ]] || available_algorithms="unknown"
     fi
@@ -299,7 +301,7 @@ vps_env_detect_bbr() {
     esac
 
     if [[ "$available_algorithms" != "unknown" ]]; then
-        IFS=$' \t' read -r -a algorithm_list <<< "$available_algorithms"
+        IFS=$' \t' read -r -a algorithm_list <<<"$available_algorithms"
         for algorithm in "${algorithm_list[@]}"; do
             case "$algorithm" in
                 bbr3)
@@ -320,7 +322,7 @@ vps_env_detect_bbr() {
     fi
 
     if [[ -n "$detected_bbr_algorithm" && -r /sys/module/tcp_bbr/version ]]; then
-        IFS= read -r module_version < /sys/module/tcp_bbr/version || true
+        IFS= read -r module_version </sys/module/tcp_bbr/version || true
         module_version="$(vps_env_trim "$module_version")"
     elif [[ -n "$detected_bbr_algorithm" ]] && command -v modinfo >/dev/null 2>&1; then
         module_version="$(modinfo -F version tcp_bbr 2>/dev/null || true)"
@@ -336,22 +338,22 @@ vps_env_detect_bbr() {
 vps_env_set_compatibility() {
     if [[ "${VPS_ENV[kernel_name]}" != "Linux" ]]; then
         VPS_ENV[compatibility]="unsupported"
-        VPS_ENV[compatibility_detail]="This release supports Linux only."
+        VPS_ENV[compatibility_detail]="此版本仅支持 Linux。"
     elif [[ "${VPS_ENV[os_id]}" == "unknown" ]]; then
         VPS_ENV[compatibility]="limited"
-        VPS_ENV[compatibility_detail]="Linux detected, but the distribution is unknown."
+        VPS_ENV[compatibility_detail]="已检测到 Linux，但无法识别发行版。"
     elif [[ "${VPS_ENV[os_id]}" == "alpine" ]]; then
         VPS_ENV[compatibility]="limited"
-        VPS_ENV[compatibility_detail]="Alpine was detected, but this release targets GNU userland and is not yet validated on Alpine."
+        VPS_ENV[compatibility_detail]="已检测到 Alpine；当前版本面向 GNU 用户空间，尚未在 Alpine 上完成验证。"
     elif [[ "${VPS_ENV[virtualization]}" =~ ^(docker|lxc|container|wsl)$ ]]; then
         VPS_ENV[compatibility]="limited"
-        VPS_ENV[compatibility_detail]="A container or compatibility layer was detected; host-level commands may be unavailable."
+        VPS_ENV[compatibility_detail]="已检测到容器或兼容层；主机级命令可能不可用。"
     elif [[ "${VPS_ENV[package_manager]}" == "unknown" || "${VPS_ENV[service_manager]}" == "unknown" ]]; then
         VPS_ENV[compatibility]="limited"
-        VPS_ENV[compatibility_detail]="Core system detected; some management capabilities are unavailable."
+        VPS_ENV[compatibility_detail]="已检测到核心系统，但部分管理能力不可用。"
     else
         VPS_ENV[compatibility]="supported"
-        VPS_ENV[compatibility_detail]="Core environment is ready for registered compatible commands."
+        VPS_ENV[compatibility_detail]="核心环境已就绪，可以运行满足能力要求的已登记命令。"
     fi
 }
 
@@ -370,12 +372,12 @@ vps_env_detect() {
     VPS_ENV[os_id_like]=""
     VPS_ENV[os_version_id]="unknown"
     VPS_ENV[os_codename]=""
-    VPS_ENV[os_pretty_name]="Unknown Linux"
+    VPS_ENV[os_pretty_name]="未知 Linux 系统"
     VPS_ENV[service_manager]="unknown"
 
     hostname_value="$(hostname 2>/dev/null || true)"
     if [[ -z "$hostname_value" && -r /etc/hostname ]]; then
-        IFS= read -r hostname_value < /etc/hostname || true
+        IFS= read -r hostname_value </etc/hostname || true
     fi
     VPS_ENV[hostname]="${hostname_value:-unknown}"
 
@@ -417,7 +419,7 @@ vps_env_detect() {
 
     uptime_seconds=0
     if [[ -r /proc/uptime ]]; then
-        IFS=' ' read -r uptime_raw _ < /proc/uptime || true
+        IFS=' ' read -r uptime_raw _ </proc/uptime || true
         uptime_seconds="${uptime_raw%%.*}"
     fi
     VPS_ENV[uptime]="$(vps_env_format_uptime "$uptime_seconds")"
@@ -445,7 +447,7 @@ vps_env_requirements_met() {
 
     local old_ifs="$IFS"
     IFS=','
-    read -r -a requirement_list <<< "$requirements"
+    read -r -a requirement_list <<<"$requirements"
     IFS="$old_ifs"
 
     for requirement in "${requirement_list[@]}"; do
