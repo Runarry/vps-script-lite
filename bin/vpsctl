@@ -162,12 +162,70 @@ vpsctl_export_context() {
     export VPSCTL_ENV_VIRTUALIZATION="${VPS_ENV[virtualization]}"
 }
 
+vpsctl_invocation_may_omit_requirement() {
+    local command_key="$1"
+    local requirement="$2"
+    shift 2
+
+    case "${command_key}:${requirement}" in
+        network:rfw:init:systemd)
+            (($# == 1)) || return 1
+            case "$1" in
+                help | -h | --help | status) return 0 ;;
+            esac
+            ;;
+        service:proxy:service:any)
+            if (($# == 1)); then
+                case "$1" in
+                    help | -h | --help | profiles | status) return 0 ;;
+                esac
+            elif (($# == 2)) && [[ "$1" == "time" && "$2" == "status" ]]; then
+                return 0
+            elif (($# == 3)) && [[ "$1" == "time" && "$2" == "status" && "$3" == "--json" ]]; then
+                return 0
+            fi
+            ;;
+    esac
+    return 1
+}
+
+vpsctl_invocation_requirements() {
+    local command_key="$1"
+    shift
+
+    local registered_requirements requirement joined=""
+    local -a requirement_list=()
+
+    registered_requirements="${VPS_COMMAND_REQUIREMENTS[$command_key]}"
+    if [[ -z "$registered_requirements" || "$registered_requirements" == "none" ]]; then
+        printf 'none'
+        return 0
+    fi
+
+    local old_ifs="$IFS"
+    IFS=','
+    read -r -a requirement_list <<<"$registered_requirements"
+    IFS="$old_ifs"
+
+    for requirement in "${requirement_list[@]}"; do
+        requirement="$(vps_env_trim "$requirement")"
+        [[ -n "$requirement" ]] || continue
+        if vpsctl_invocation_may_omit_requirement "$command_key" "$requirement" "$@"; then
+            continue
+        fi
+        [[ -n "$joined" ]] && joined+=","
+        joined+="$requirement"
+    done
+    printf '%s' "${joined:-none}"
+}
+
 vpsctl_validate_command_ready() {
     local command_key="$1"
+    shift
     local privilege requirements
 
     privilege="${VPS_COMMAND_PRIVILEGE[$command_key]}"
-    requirements="${VPS_COMMAND_REQUIREMENTS[$command_key]}"
+    requirements="$(vpsctl_invocation_requirements "$command_key" "$@")"
 
     if [[ "$privilege" == "root" && "${VPS_ENV[is_root]}" != "yes" ]]; then
         vpsctl_error "${command_key} 需要 root 权限"
@@ -194,7 +252,7 @@ vpsctl_dispatch() {
         return 2
     fi
 
-    if vpsctl_validate_command_ready "$command_key"; then
+    if vpsctl_validate_command_ready "$command_key" "$@"; then
         :
     else
         validation_status=$?
@@ -355,6 +413,7 @@ vpsctl_show_environment() {
 }
 
 vpsctl_show_registered_commands() {
+    vps_env_detect
     vps_ui_header "已登记功能"
     vps_ui_registered_commands
 }

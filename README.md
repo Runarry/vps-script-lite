@@ -54,12 +54,12 @@ bash bin/vpsctl service proxy profiles
 
 ```text
 bash bin/vpsctl --dry-run network bbr enable
-bash bin/vpsctl --dry-run network dns set --server 1.1.1.1 --server 1.0.0.1
+bash bin/vpsctl --dry-run network dns set --server 1.1.1.1 --server 1.0.0.1 --install-deps
 bash bin/vpsctl --dry-run network rfw install
 bash bin/vpsctl --dry-run service proxy install --core sing-box
 ```
 
-全局选项写在领域之前；子动作及选项见[网络设置](docs/network-settings.md)和[代理管理](docs/proxy-management.md)。上例中的 `--core` 是脚本和非交互调用保留的高级消歧参数：只有一个符合条件的内核时通常可自动解析，存在多个候选时应显式指定。`--yes` 只跳过允许自动确认的提示，不能绕过 RFW 中断性操作、代理重启、外部二进制更新或彻底清除的强确认。
+全局选项写在领域之前；子动作及选项见[网络设置](docs/network-settings.md)和[代理管理](docs/proxy-management.md)。DNS 示例显式带上 `--install-deps`，因此即使系统缺少 `dig`、`drill` 和 `nslookup` 也能展示依赖安装及后续完整计划；与 `--dry-run` 组合时只演练这些步骤，不会实际安装依赖。上例中的 `--core` 是脚本和非交互调用保留的高级消歧参数：只有一个符合条件的内核时通常可自动解析，存在多个候选时应显式指定。`--yes` 只跳过允许自动确认的提示，不能绕过 RFW 中断性操作、代理重启、外部二进制更新或彻底清除的强确认。
 
 ## 当前状态
 

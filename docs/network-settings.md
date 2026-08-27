@@ -13,12 +13,12 @@
 全局选项必须位于领域前，例如：
 
 ```text
-bash bin/vpsctl --dry-run network dns set --server 1.1.1.1
+bash bin/vpsctl --dry-run network dns set --server 1.1.1.1 --install-deps
 ```
 
 三项功能的公共约定如下：
 
-- `--dry-run` 展示检测结果和计划，不写系统、不安装依赖、不改变服务状态。
+- `--dry-run` 展示检测结果和计划，不写系统、不安装依赖、不改变服务状态。上述 DNS 示例显式授权演练依赖安装，因此在缺少 `dig`、`drill` 和 `nslookup` 时仍会继续展示完整计划，但不会实际安装。
 - `--yes` 只跳过允许自动同意的普通提示，不绕过能力检查、写前验证或 RFW 的中断性操作强确认。
 - `--non-interactive` 禁止读取终端；缺少必要参数或必要的强确认时立即失败。
 - 修改操作分别使用 `/run/vpsctl/network-bbr.lock`、`/run/vpsctl/network-dns.lock` 和 `/run/vpsctl/network-rfw.lock`，阻止同一功能的并发事务互相覆盖。

@@ -243,7 +243,7 @@ vps_ui_command_details() {
 }
 
 vps_ui_registered_commands() {
-    local command_key
+    local command_key availability
 
     if ((${#VPS_COMMAND_KEYS[@]} == 0)); then
         vps_ui_info "当前尚无已实现的功能命令。环境检测和管理 UI 已可使用。"
@@ -251,7 +251,15 @@ vps_ui_registered_commands() {
     fi
 
     for command_key in "${VPS_COMMAND_KEYS[@]}"; do
-        printf '  %-28s %s\n' "${VPS_COMMAND_DOMAIN[$command_key]} ${VPS_COMMAND_ACTION[$command_key]}" "${VPS_COMMAND_SUMMARY[$command_key]}"
+        if vps_env_requirements_met "${VPS_COMMAND_REQUIREMENTS[$command_key]}"; then
+            availability="$(vps_ui_availability_label ready)"
+        else
+            availability="$(vps_ui_availability_label limited)"
+        fi
+        printf '  %-28s [%b] %s\n' \
+            "${VPS_COMMAND_DOMAIN[$command_key]} ${VPS_COMMAND_ACTION[$command_key]}" \
+            "$availability" \
+            "${VPS_COMMAND_SUMMARY[$command_key]}"
     done
 }
 

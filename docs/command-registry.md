@@ -36,6 +36,8 @@
 
 `optional-root` 表示只读查询、帮助或部分计划阶段可以普通用户运行；实际系统变更仍须 root 或在具体步骤提权。`--dry-run` 只生成计划，不写配置、不安装依赖、不启动或重启服务。
 
+入口按“命令 + 完整子参数形状”计算本次调用的能力要求。`network rfw` 的无附加参数 `help`/`--help`/`-h` 与 `status` 在 Linux 上不要求 `init:systemd`；`service proxy` 的无附加参数 `help`/`--help`/`-h`、`profiles`、`status`，以及 `time status [--json]` 在 Linux 上不要求 `service:any`。这些是显式白名单中的只读例外，不会扩大到多余参数、安装、更新、卸载、服务控制、节点写操作、时间同步或它们的 `--dry-run` 调用；后者仍按完整注册能力门控。
+
 `service proxy` 的 `service:any` 能力要求由入口解析为可用服务管理器，功能脚本会进一步限制为 systemd 或 OpenRC。注册表只登记公开入口 `commands/service/proxy.sh`；其 `commands/service/proxy/` 子模块是固定加载的私有实现，不单独登记，也不构成可直接分发的命令。交互菜单统一展示双核状态并按能力分组，通过状态筛选、枚举和编号选择解析内核或节点；直接命令与非交互模式保留 `--core` 和 `--id` 作为精确消歧接口。帮助、协议矩阵和系统时间状态可由普通用户执行；内核状态与节点/订阅会读取受限状态文件，因此和安装、更新、卸载、服务控制、节点写操作及时间同步一样要求 root。重启、外部二进制原地更新与 `--purge` 另有不能被 `--yes` 绕过的强确认。完整接口见[代理管理](proxy-management.md)。
 
 ## 3. 单命令说明模板

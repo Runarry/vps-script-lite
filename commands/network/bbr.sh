@@ -23,6 +23,7 @@ BBR_MODULES_FILE=""
 BBR_ORIGINAL_FILE=""
 
 BBR_TX_ACTIVE=0
+BBR_TX_ROLLBACK_NEEDED=0
 BBR_TX_ALGORITHM=""
 BBR_TX_QDISC=""
 BBR_TX_SYSCTL_PRESENT=0
@@ -424,6 +425,7 @@ bbr_restore_file_snapshot() {
 }
 
 bbr_begin_transaction() {
+    BBR_TX_ROLLBACK_NEEDED=0
     BBR_TX_LIVE_QDISC_CAPTURED=0
     BBR_TX_LIVE_INTERFACE=""
     BBR_TX_LIVE_QDISC=""
@@ -441,10 +443,18 @@ bbr_begin_transaction() {
     BBR_TX_ACTIVE=1
 }
 
+bbr_mark_transaction_dirty() {
+    [[ "$BBR_TX_ACTIVE" == "1" ]] || return 70
+    # Loaded kernel modules can be shared by other users and are intentionally
+    # not unloaded on rollback. Mark only before changing vpsctl-managed files
+    # or sysctl/qdisc state; dry-run never creates state that needs restoring.
+    [[ "$VPSCTL_DRY_RUN" == "1" ]] || BBR_TX_ROLLBACK_NEEDED=1
+}
+
 bbr_rollback() {
     local failed=0
 
-    [[ "$BBR_TX_ACTIVE" == "1" ]] || return 0
+    [[ "$BBR_TX_ACTIVE" == "1" && "$BBR_TX_ROLLBACK_NEEDED" == "1" ]] || return 0
     vps_cmd_warning "变更失败，正在恢复此前的运行状态和文件"
     bbr_restore_file_snapshot "$BBR_SYSCTL_FILE" 0644 "$BBR_TX_SYSCTL_PRESENT" "$BBR_TX_SYSCTL_B64" || failed=1
     bbr_restore_file_snapshot "$BBR_MODULES_FILE" 0644 "$BBR_TX_MODULES_PRESENT" "$BBR_TX_MODULES_B64" || failed=1
@@ -455,6 +465,7 @@ bbr_rollback() {
         vps_cmd_run tc qdisc replace dev "$BBR_TX_LIVE_INTERFACE" root "$BBR_TX_LIVE_QDISC" || failed=1
     fi
     BBR_TX_ACTIVE=0
+    BBR_TX_ROLLBACK_NEEDED=0
     ((failed == 0))
 }
 
@@ -916,6 +927,7 @@ bbr_apply_settings() {
     if ((status == 0)) && [[ "$BBR_APPLY_LIVE_QDISC" == "1" ]]; then
         bbr_capture_live_qdisc || status=$?
     fi
+    ((status != 0)) || bbr_mark_transaction_dirty || status=$?
     ((status != 0)) || bbr_prepare_directories || status=$?
     ((status != 0)) || bbr_save_original || status=$?
     if ((status == 0)) && [[ "$BBR_APPLY_LIVE_QDISC" == "1" && "$BBR_ORIGINAL_LOADED" == "1" ]]; then
@@ -934,10 +946,11 @@ bbr_apply_settings() {
         bbr_apply_live_qdisc "$qdisc" || status=$?
     fi
 
-    if ((status != 0)) && [[ "$BBR_TX_ACTIVE" == "1" ]]; then
+    if ((status != 0)) && [[ "$BBR_TX_ROLLBACK_NEEDED" == "1" ]]; then
         bbr_rollback || status=30
     fi
     BBR_TX_ACTIVE=0
+    BBR_TX_ROLLBACK_NEEDED=0
     ((locked == 0)) || vps_cmd_unlock
     ((status == 0)) || return "$status"
     vps_cmd_success "已应用 TCP 算法 ${algorithm}，默认 qdisc 为 ${qdisc}"
@@ -976,6 +989,7 @@ bbr_restore() {
     ((status != 0)) || bbr_begin_transaction || status=$?
     ((status != 0)) || bbr_load_algorithm_module "$BBR_ORIGINAL_ALGORITHM" || status=$?
     ((status != 0)) || bbr_prepare_qdisc "$BBR_ORIGINAL_QDISC" || status=$?
+    ((status != 0)) || bbr_mark_transaction_dirty || status=$?
     ((status != 0)) || bbr_prepare_directories || status=$?
     ((status != 0)) || bbr_restore_file_snapshot "$BBR_SYSCTL_FILE" 0644 "$BBR_ORIGINAL_SYSCTL_PRESENT" "$BBR_ORIGINAL_SYSCTL_B64" || status=$?
     ((status != 0)) || bbr_restore_file_snapshot "$BBR_MODULES_FILE" 0644 "$BBR_ORIGINAL_MODULES_PRESENT" "$BBR_ORIGINAL_MODULES_B64" || status=$?
@@ -988,10 +1002,11 @@ bbr_restore() {
         fi
     fi
 
-    if ((status != 0)) && [[ "$BBR_TX_ACTIVE" == "1" ]]; then
+    if ((status != 0)) && [[ "$BBR_TX_ROLLBACK_NEEDED" == "1" ]]; then
         bbr_rollback || status=30
     fi
     BBR_TX_ACTIVE=0
+    BBR_TX_ROLLBACK_NEEDED=0
     if ((status == 0)) && [[ "$BBR_ORIGINAL_LIVE_PRESENT" == "1" ]]; then
         bbr_restore_saved_live_qdisc || partial_status=30
     fi

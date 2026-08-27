@@ -183,6 +183,14 @@ test_ui_input() {
     VPS_ENV[compatibility]="unsupported"
     test_assert_equal "<红>不支持<重置>" "$(vps_ui_status_badge)" "unsupported badge translation"
 
+    VPS_CAPABILITY=()
+    VPS_CAPABILITY[linux]=1
+    output="$(vps_ui_registered_commands)"
+    test_assert_contains "$output" "network bbr" "registered command listing"
+    test_assert_contains "$output" "<绿>可用<重置>" "ready command listing marker"
+    test_assert_contains "$output" "network rfw" "limited command listing"
+    test_assert_contains "$output" "<黄>受限<重置>" "limited command listing marker"
+
     output="$(vps_ui_command_details "network:bbr")"
     test_assert_contains "$output" "命令" "localized command field"
     test_assert_contains "$output" "network bbr" "technical command remains unchanged"

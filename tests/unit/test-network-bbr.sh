@@ -8,7 +8,11 @@ TEST_TEMP="$(mktemp -d)"
 readonly TEST_ROOT TEST_TEMP
 readonly TEST_SYSTEM_ROOT="${TEST_TEMP}/system"
 readonly TEST_FAKE_BIN="${TEST_TEMP}/bin"
+readonly TEST_NO_MODPROBE_BIN="${TEST_TEMP}/bin-no-modprobe"
 readonly TEST_BBR="${TEST_ROOT}/commands/network/bbr.sh"
+readonly TEST_BASH="$(command -v bash)"
+readonly TEST_CAT="$(command -v cat)"
+readonly TEST_DIRNAME="$(command -v dirname)"
 trap 'rm -rf -- "$TEST_TEMP"' EXIT
 
 test_fail() {
@@ -30,8 +34,16 @@ test_assert_contains() {
     [[ "$haystack" == *"$needle"* ]] || test_fail "${message}: missing '${needle}'"
 }
 
+test_assert_not_contains() {
+    local haystack="$1"
+    local needle="$2"
+    local message="$3"
+    [[ "$haystack" != *"$needle"* ]] || test_fail "${message}: unexpectedly found '${needle}'"
+}
+
 mkdir -p \
     "${TEST_FAKE_BIN}" \
+    "${TEST_NO_MODPROBE_BIN}" \
     "${TEST_SYSTEM_ROOT}/proc/sys/net/ipv4" \
     "${TEST_SYSTEM_ROOT}/proc/sys/net/core" \
     "${TEST_SYSTEM_ROOT}/etc/sysctl.d" \
@@ -114,6 +126,10 @@ chmod +x \
     "${TEST_FAKE_BIN}/ip" \
     "${TEST_FAKE_BIN}/tc" \
     "${TEST_FAKE_BIN}/flock"
+ln -s "$TEST_BASH" "${TEST_NO_MODPROBE_BIN}/bash"
+ln -s "$TEST_CAT" "${TEST_NO_MODPROBE_BIN}/cat"
+ln -s "$TEST_DIRNAME" "${TEST_NO_MODPROBE_BIN}/dirname"
+ln -s "${TEST_FAKE_BIN}/sysctl" "${TEST_NO_MODPROBE_BIN}/sysctl"
 
 export VPSCTL_TESTING=1
 export VPSCTL_SYSTEM_ROOT="$TEST_SYSTEM_ROOT"
@@ -128,7 +144,7 @@ export PATH="${TEST_FAKE_BIN}:${PATH}"
 RUN_STATUS=0
 RUN_OUTPUT=""
 run_bbr() {
-    if RUN_OUTPUT="$(bash "$TEST_BBR" "$@" 2>&1)"; then
+    if RUN_OUTPUT="$(PATH="${RUN_BBR_PATH:-$PATH}" "$TEST_BASH" "$TEST_BBR" "$@" 2>&1)"; then
         RUN_STATUS=0
     else
         RUN_STATUS=$?
@@ -181,6 +197,8 @@ test_status_and_arguments() {
 }
 
 test_dry_run() {
+    local available_path="${TEST_SYSTEM_ROOT}/proc/sys/net/ipv4/tcp_available_congestion_control"
+
     run_bbr --dry-run --yes set --algorithm bbr --qdisc fq
     test_assert_equal 0 "$RUN_STATUS" "dry-run exit code"
     test_assert_contains "$RUN_OUTPUT" "[演练]" "dry-run plan"
@@ -193,6 +211,20 @@ test_dry_run() {
     run_bbr --dry-run --yes set --algorithm cubic --qdisc fq_codel --apply-live-qdisc
     test_assert_equal 0 "$RUN_STATUS" "non-interactive live-qdisc dry-run exit code"
     test_assert_contains "$RUN_OUTPUT" "tc qdisc replace dev eth0 root fq_codel" "live qdisc plan"
+
+    printf 'reno cubic\n' >"$available_path"
+    RUN_BBR_PATH="$TEST_NO_MODPROBE_BIN" run_bbr --dry-run --yes set --algorithm bbr --qdisc fq
+    test_assert_equal 3 "$RUN_STATUS" "missing modprobe dry-run exit code"
+    test_assert_contains "$RUN_OUTPUT" "系统未安装 modprobe" "missing modprobe dry-run message"
+    test_assert_not_contains "$RUN_OUTPUT" "变更失败，正在恢复" "missing modprobe dry-run rollback warning"
+    test_assert_not_contains "$RUN_OUTPUT" "net.ipv4.tcp_congestion_control=cubic" "missing modprobe dry-run rollback plan"
+
+    run_bbr --dry-run --yes set --algorithm vegas --qdisc fq
+    test_assert_equal 3 "$RUN_STATUS" "unavailable algorithm dry-run exit code"
+    test_assert_contains "$RUN_OUTPUT" "当前运行内核不可用" "unavailable algorithm dry-run message"
+    test_assert_not_contains "$RUN_OUTPUT" "变更失败，正在恢复" "unavailable algorithm dry-run rollback warning"
+    test_assert_not_contains "$RUN_OUTPUT" "net.ipv4.tcp_congestion_control=cubic" "unavailable algorithm dry-run rollback plan"
+    printf 'reno cubic bbr\n' >"$available_path"
 }
 
 test_symlink_guards() {
@@ -241,6 +273,7 @@ test_unavailable_algorithm() {
     run_bbr --yes set --algorithm vegas --qdisc fq
     test_assert_equal 3 "$RUN_STATUS" "unavailable algorithm exit code"
     test_assert_contains "$RUN_OUTPUT" "当前运行内核不可用" "unavailable algorithm message"
+    test_assert_not_contains "$RUN_OUTPUT" "变更失败，正在恢复" "unavailable algorithm rollback warning"
     test_assert_equal cubic "$(<"${TEST_SYSTEM_ROOT}/proc/sys/net/ipv4/tcp_congestion_control")" "algorithm after rejection"
     [[ ! -e "${TEST_SYSTEM_ROOT}/etc/sysctl.d/90-vpsctl-bbr.conf" ]] || test_fail "unavailable algorithm wrote persistence"
 }
@@ -254,6 +287,7 @@ test_transaction_rollback() {
     run_bbr --yes set --algorithm cubic --qdisc cake
     rm -f -- "${TEST_SYSTEM_ROOT}/fail-qdisc"
     test_assert_equal 20 "$RUN_STATUS" "failed transaction exit code"
+    test_assert_contains "$RUN_OUTPUT" "变更失败，正在恢复" "failed transaction rollback warning"
     test_assert_equal cubic "$(<"${TEST_SYSTEM_ROOT}/proc/sys/net/ipv4/tcp_congestion_control")" "rolled-back algorithm"
     test_assert_equal fq_codel "$(<"${TEST_SYSTEM_ROOT}/proc/sys/net/core/default_qdisc")" "rolled-back qdisc"
     [[ ! -e "$sysctl_path" && ! -e "$modules_path" && ! -e "$original_path" ]] || test_fail "failed transaction left persistent files"
@@ -268,6 +302,7 @@ test_live_qdisc_rollback() {
     run_bbr --yes enable --apply-live-qdisc
     rm -f -- "${TEST_SYSTEM_ROOT}/fail-live-qdisc"
     test_assert_equal 20 "$RUN_STATUS" "failed live qdisc exit code"
+    test_assert_contains "$RUN_OUTPUT" "变更失败，正在恢复" "failed live qdisc rollback warning"
     test_assert_equal cubic "$(<"${TEST_SYSTEM_ROOT}/proc/sys/net/ipv4/tcp_congestion_control")" "algorithm after live qdisc failure"
     test_assert_equal fq_codel "$(<"${TEST_SYSTEM_ROOT}/proc/sys/net/core/default_qdisc")" "default qdisc after live failure"
     test_assert_equal fq_codel "$(<"${TEST_SYSTEM_ROOT}/tc-root-qdisc")" "restored interface root qdisc"
