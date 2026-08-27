@@ -9,7 +9,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 umask 022
 
-readonly VPSCTL_VERSION="0.1.0"
+readonly VPSCTL_VERSION="0.2.0"
 
 VPSCTL_DRY_RUN=0
 VPSCTL_ASSUME_YES=0
@@ -27,7 +27,8 @@ vpsctl_resolve_project_root() {
     cd -- "${source_dir}/.." && pwd -P
 }
 
-readonly VPSCTL_PROJECT_ROOT="$(vpsctl_resolve_project_root)"
+VPSCTL_PROJECT_ROOT="$(vpsctl_resolve_project_root)"
+readonly VPSCTL_PROJECT_ROOT
 
 vpsctl_load_library() {
     local library_path="$1"
@@ -141,7 +142,7 @@ vpsctl_parse_global_options() {
 
 vpsctl_export_context() {
     export VPSCTL_PROJECT_ROOT VPSCTL_DRY_RUN VPSCTL_ASSUME_YES
-    export VPSCTL_NON_INTERACTIVE VPSCTL_QUIET VPSCTL_VERBOSE
+    export VPSCTL_NON_INTERACTIVE VPSCTL_QUIET VPSCTL_VERBOSE VPSCTL_NO_COLOR VPSCTL_CLEAR
     export VPSCTL_ENV_OS_ID="${VPS_ENV[os_id]}"
     export VPSCTL_ENV_OS_VERSION_ID="${VPS_ENV[os_version_id]}"
     export VPSCTL_ENV_ARCH="${VPS_ENV[architecture]}"
@@ -174,7 +175,8 @@ vpsctl_dispatch() {
     shift 2
 
     local command_key="${domain}:${action}"
-    local relative_path command_path validation_status
+    local relative_path command_path validation_status path_component checked_path
+    local -a path_components=()
 
     if ! vps_registry_has_command "$command_key"; then
         vpsctl_error "unknown command: ${domain} ${action}"
@@ -191,21 +193,26 @@ vpsctl_dispatch() {
     relative_path="${VPS_COMMAND_PATH[$command_key]}"
     command_path="${VPSCTL_PROJECT_ROOT}/${relative_path}"
 
-    if [[ -L "$command_path" ]]; then
-        vpsctl_error "registered command must not be a symbolic link: ${relative_path}"
-        return 3
-    fi
+    checked_path="$VPSCTL_PROJECT_ROOT"
+    IFS='/' read -r -a path_components <<<"$relative_path"
+    for path_component in "${path_components[@]}"; do
+        checked_path="${checked_path}/${path_component}"
+        if [[ -L "$checked_path" ]]; then
+            vpsctl_error "registered command path must not contain symbolic links: ${relative_path}"
+            return 3
+        fi
+    done
     if [[ ! -f "$command_path" ]]; then
         vpsctl_error "registered command file is missing: ${relative_path}"
         return 3
     fi
-    if [[ ! -x "$command_path" ]]; then
-        vpsctl_error "registered command is not executable: ${relative_path}"
+    if [[ ! -r "$command_path" ]]; then
+        vpsctl_error "registered command is not readable: ${relative_path}"
         return 3
     fi
 
     vpsctl_export_context
-    if "$command_path" "$@"; then
+    if BASH_ENV='' ENV='' bash --noprofile --norc "$command_path" "$@"; then
         return 0
     else
         return $?
@@ -245,8 +252,7 @@ vpsctl_show_command_screen() {
             b | B | '')
                 return 0
                 ;;
-            *)
-                ;;
+            *) ;;
         esac
     done
 }
@@ -319,6 +325,9 @@ vpsctl_run_menu() {
                     domain_index="$VPS_UI_INDEX"
                     domain="${VPS_DOMAIN_IDS[$domain_index]}"
                     vpsctl_run_domain_menu "$domain"
+                    # Feature commands run in child processes. Refresh the parent
+                    # snapshot so dashboard fields such as BBR reflect changes.
+                    vps_env_detect
                 fi
                 ;;
         esac

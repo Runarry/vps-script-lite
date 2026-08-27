@@ -1,3 +1,5 @@
+# shellcheck shell=bash
+# shellcheck disable=SC2034
 # Fixed command registry for vpsctl. Feature scripts are never discovered by
 # scanning the filesystem; each command must be explicitly registered here.
 
@@ -101,8 +103,46 @@ vps_registry_init() {
     VPS_COMMAND_LIFECYCLE=()
     VPS_REGISTRY_RESULTS=()
 
-    # Register only user-approved domains and feature commands here.
-    # No domain or feature command is registered in the current release.
+    vps_registry_register_domain \
+        "network" \
+        "网络设置" \
+        "BBR、本机 DNS 与 RFW 网络防护管理"
+
+    vps_registry_register_command \
+        "network" \
+        "bbr" \
+        "BBR 设置" \
+        "查看、启用和调整当前内核提供的拥塞控制与 qdisc" \
+        "commands/network/bbr.sh" \
+        "change" \
+        "optional-root" \
+        "supported" \
+        "linux" \
+        "experimental"
+
+    vps_registry_register_command \
+        "network" \
+        "dns" \
+        "本机 DNS" \
+        "查看、测试、替换、刷新和验证本机 DNS 服务器" \
+        "commands/network/dns.sh" \
+        "disruptive" \
+        "optional-root" \
+        "supported" \
+        "linux" \
+        "experimental"
+
+    vps_registry_register_command \
+        "network" \
+        "rfw" \
+        "RFW 管理" \
+        "安装、更新、配置和管理基于 XDP 的 RFW 服务" \
+        "commands/network/rfw.sh" \
+        "disruptive" \
+        "optional-root" \
+        "supported" \
+        "linux,init:systemd" \
+        "experimental"
 }
 
 vps_registry_has_command() {

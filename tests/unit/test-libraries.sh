@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
+# Test resets intentionally assign public globals from the sourced libraries.
+# shellcheck disable=SC2034
 
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-readonly TEST_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)"
+TEST_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)"
+readonly TEST_ROOT
 
 # shellcheck source=/dev/null
 source "${TEST_ROOT}/lib/environment.sh"
@@ -75,8 +78,19 @@ test_environment_detection() {
 test_registry() {
     vps_registry_init
 
-    test_assert_equal "0" "${#VPS_DOMAIN_IDS[@]}" "initial domain count"
-    test_assert_equal "0" "${#VPS_COMMAND_KEYS[@]}" "initial command count"
+    test_assert_equal "1" "${#VPS_DOMAIN_IDS[@]}" "registered domain count"
+    test_assert_equal "3" "${#VPS_COMMAND_KEYS[@]}" "registered command count"
+    test_assert_equal "network" "${VPS_DOMAIN_IDS[0]}" "network domain id"
+    test_assert_equal "commands/network/bbr.sh" "${VPS_COMMAND_PATH["network:bbr"]}" "BBR command path"
+    test_assert_equal "commands/network/dns.sh" "${VPS_COMMAND_PATH["network:dns"]}" "DNS command path"
+    test_assert_equal "commands/network/rfw.sh" "${VPS_COMMAND_PATH["network:rfw"]}" "RFW command path"
+    test_assert_equal "change" "${VPS_COMMAND_RISK["network:bbr"]}" "BBR risk"
+    test_assert_equal "disruptive" "${VPS_COMMAND_RISK["network:dns"]}" "DNS risk"
+    test_assert_equal "disruptive" "${VPS_COMMAND_RISK["network:rfw"]}" "RFW risk"
+    test_assert_equal "optional-root" "${VPS_COMMAND_PRIVILEGE["network:bbr"]}" "BBR privilege"
+    test_assert_equal "supported" "${VPS_COMMAND_DRY_RUN["network:dns"]}" "DNS dry-run"
+    test_assert_equal "linux,init:systemd" "${VPS_COMMAND_REQUIREMENTS["network:rfw"]}" "RFW requirements"
+    test_assert_equal "experimental" "${VPS_COMMAND_LIFECYCLE["network:rfw"]}" "RFW lifecycle"
 
     vps_registry_register_domain \
         "test" \
@@ -96,7 +110,7 @@ test_registry() {
         "experimental"
 
     vps_registry_has_command "test:inspect" || test_fail "registered command is not discoverable"
-    test_assert_equal "commands/test/inspect.sh" "${VPS_COMMAND_PATH[test:inspect]}" "registered path"
+    test_assert_equal "commands/test/inspect.sh" "${VPS_COMMAND_PATH["test:inspect"]}" "registered path"
 
     if vps_registry_register_command \
         "test" "unsafe" "Unsafe" "Unsafe path test" \
@@ -109,6 +123,25 @@ test_ui_input() {
     local output
 
     vps_registry_init
+    output="$(vps_ui_main_menu)"
+    [[ "$output" == *"网络设置"* ]] || test_fail "registered network domain should be visible"
+    [[ "$output" == *"(3 个功能)"* ]] || test_fail "network domain command count should be visible"
+
+    VPS_DOMAIN_IDS=()
+    VPS_DOMAIN_LABEL=()
+    VPS_DOMAIN_DESCRIPTION=()
+    VPS_COMMAND_KEYS=()
+    VPS_COMMAND_DOMAIN=()
+    VPS_COMMAND_ACTION=()
+    VPS_COMMAND_LABEL=()
+    VPS_COMMAND_SUMMARY=()
+    VPS_COMMAND_PATH=()
+    VPS_COMMAND_RISK=()
+    VPS_COMMAND_PRIVILEGE=()
+    VPS_COMMAND_DRY_RUN=()
+    VPS_COMMAND_REQUIREMENTS=()
+    VPS_COMMAND_LIFECYCLE=()
+    VPS_REGISTRY_RESULTS=()
     output="$(vps_ui_main_menu)"
     [[ "$output" == *"暂无已登记功能"* ]] || test_fail "empty menu should not invent feature categories"
     [[ "$output" != *"环境详情"* ]] || test_fail "environment details option should not be present"

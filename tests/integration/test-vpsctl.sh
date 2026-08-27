@@ -3,7 +3,8 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-readonly TEST_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)"
+TEST_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)"
+readonly TEST_ROOT
 readonly VPSCTL=(bash "${TEST_ROOT}/bin/vpsctl" --no-color --no-clear)
 
 test_fail() {
@@ -22,7 +23,7 @@ test_cli() {
     local output status
 
     output="$("${VPSCTL[@]}" --version)"
-    test_contains "$output" "vpsctl 0.1.0" "version output"
+    test_contains "$output" "vpsctl 0.2.0" "version output"
 
     output="$("${VPSCTL[@]}" --help)"
     test_contains "$output" "<domain> <action>" "help command model"
@@ -38,7 +39,9 @@ test_cli() {
     [[ "$output" != *"Session"* ]] || test_fail "removed Session field is still visible"
 
     output="$("${VPSCTL[@]}" list)"
-    test_contains "$output" "当前尚无已实现的功能命令" "empty command list"
+    test_contains "$output" "network bbr" "BBR command listing"
+    test_contains "$output" "network dns" "DNS command listing"
+    test_contains "$output" "network rfw" "RFW command listing"
 
     status=0
     "${VPSCTL[@]}" system missing >/dev/null 2>&1 || status=$?
@@ -49,5 +52,38 @@ test_cli() {
     [[ "$status" == "2" ]] || test_fail "unknown option should return 2, got ${status}"
 }
 
+test_dispatch_security() {
+    local sandbox output status marker
+
+    [[ "$(uname -s)" == "Linux" ]] || return 0
+    sandbox="$(mktemp -d)"
+    mkdir -p "$sandbox/bin" "$sandbox/lib" "$sandbox/commands/network"
+    cp "$TEST_ROOT/bin/vpsctl" "$sandbox/bin/vpsctl"
+    cp "$TEST_ROOT"/lib/*.sh "$sandbox/lib/"
+    cat >"$sandbox/commands/network/bbr.sh" <<'EOF'
+#!/usr/bin/env bash
+printf 'no_color=%s\n' "${VPSCTL_NO_COLOR:-missing}"
+EOF
+    chmod 0644 "$sandbox/commands/network/bbr.sh"
+
+    output="$(bash "$sandbox/bin/vpsctl" --no-color network bbr status)"
+    test_contains "$output" "no_color=1" "no-color child context"
+
+    rm -rf -- "$sandbox/commands/network"
+    mkdir -p "$sandbox/outside"
+    marker="$sandbox/executed"
+    cat >"$sandbox/outside/bbr.sh" <<EOF
+#!/usr/bin/env bash
+touch "$marker"
+EOF
+    ln -s ../outside "$sandbox/commands/network"
+    status=0
+    bash "$sandbox/bin/vpsctl" network bbr status >/dev/null 2>&1 || status=$?
+    [[ "$status" == "3" ]] || test_fail "symlinked command ancestor should return 3, got ${status}"
+    [[ ! -e "$marker" ]] || test_fail "symlinked command ancestor was executed"
+    rm -rf -- "$sandbox"
+}
+
 test_cli
+test_dispatch_security
 printf 'PASS: vpsctl integration tests\n'

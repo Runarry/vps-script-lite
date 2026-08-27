@@ -33,7 +33,7 @@ vps-script-lite/
 └── docs/                   # 架构、开发和命令登记规范
 ```
 
-空目录暂以 `.gitkeep` 保存；它们不包含实际功能。
+尚未实现功能的空目录暂以 `.gitkeep` 保存；`commands/network/` 已包含 0.2.0 的网络功能脚本。
 
 ## 3. 组件职责
 

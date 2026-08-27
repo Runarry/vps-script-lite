@@ -1,6 +1,6 @@
 # 命令登记规范
 
-管理入口未来只能分发已经登记的命令。登记信息应是固定、可审查的数据，不得通过执行未知脚本来动态生成。
+管理入口只能分发已经登记的命令。登记信息是固定、可审查的数据，不得通过执行未知脚本来动态生成。
 
 当前固定注册表位于 `lib/registry.sh`；领域菜单和命令列表均由它生成。
 
@@ -23,14 +23,17 @@
 | 恢复 | 失败或中断后的检查与恢复入口 |
 | 负责人 | 维护该命令的团队或角色 |
 
-## 2. 命令清单模板
+## 2. 已登记命令清单
 
-实现第一个命令时，应在本节下方新增清单；每行只登记已经存在并通过验收的命令。
+0.2.0 登记以下网络入口。状态列描述接口生命周期，不表示已经完成真实 VPS 或 VM 验证；隔离环境验收要求见[网络设置](network-settings.md)。
 
-| 命令 | 文件 | 摘要 | 风险 | 权限 | 状态 |
-| --- | --- | --- | --- | --- | --- |
+| 命令 | 文件 | 摘要 | 风险 | 权限 | 演练 | 能力要求 | 状态 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `network bbr` | `commands/network/bbr.sh` | 查看、启用、设置或恢复 BBR 与队列规则 | `change` | `optional-root` | `supported` | `linux` | `experimental` |
+| `network dns` | `commands/network/dns.sh` | 检测、测试、设置、刷新、验证或恢复 DNS | `disruptive` | `optional-root` | `supported` | `linux` | `experimental` |
+| `network rfw` | `commands/network/rfw.sh` | 安装、配置和管理 RFW systemd 服务 | `disruptive` | `optional-root` | `supported` | `linux, init:systemd` | `experimental` |
 
-当前没有已实现命令。
+`optional-root` 表示只读查询、帮助或部分计划阶段可以普通用户运行；实际系统变更仍须 root 或在具体步骤提权。`--dry-run` 只生成计划，不写配置、不安装依赖、不启动或重启服务。
 
 ## 3. 单命令说明模板
 
