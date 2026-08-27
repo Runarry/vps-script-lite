@@ -108,6 +108,11 @@ vps_registry_init() {
         "网络设置" \
         "BBR、本机 DNS 与 RFW 网络防护管理"
 
+    vps_registry_register_domain \
+        "service" \
+        "服务管理" \
+        "按需安装并管理长期运行的系统服务"
+
     vps_registry_register_command \
         "network" \
         "bbr" \
@@ -142,6 +147,18 @@ vps_registry_init() {
         "optional-root" \
         "supported" \
         "linux,init:systemd" \
+        "experimental"
+
+    vps_registry_register_command \
+        "service" \
+        "proxy" \
+        "代理管理" \
+        "平级管理 Xray 与 sing-box 内核、节点、日志和时间同步" \
+        "commands/service/proxy.sh" \
+        "disruptive" \
+        "optional-root" \
+        "supported" \
+        "linux,service:any" \
         "experimental"
 }
 

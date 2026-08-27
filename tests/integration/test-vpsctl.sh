@@ -29,7 +29,7 @@ test_cli() {
     local output status
 
     output="$("${VPSCTL[@]}" --version)"
-    test_contains "$output" "vpsctl 0.2.0" "version output"
+    test_contains "$output" "vpsctl 0.3.0" "version output"
 
     output="$("${VPSCTL[@]}" --help)"
     test_contains "$output" "<domain> <action>" "help command model"
@@ -57,6 +57,7 @@ test_cli() {
     test_contains "$output" "network bbr" "BBR command listing"
     test_contains "$output" "network dns" "DNS command listing"
     test_contains "$output" "network rfw" "RFW command listing"
+    test_contains "$output" "service proxy" "proxy command listing"
 
     status=0
     output="$("${VPSCTL[@]}" system missing 2>&1)" || status=$?
@@ -76,7 +77,7 @@ test_dispatch_security() {
 
     [[ "$(uname -s)" == "Linux" ]] || return 0
     sandbox="$(mktemp -d)"
-    mkdir -p "$sandbox/bin" "$sandbox/lib" "$sandbox/commands/network"
+    mkdir -p "$sandbox/bin" "$sandbox/lib" "$sandbox/commands/network" "$sandbox/commands/service/proxy"
     cp "$TEST_ROOT/bin/vpsctl" "$sandbox/bin/vpsctl"
     cp "$TEST_ROOT"/lib/*.sh "$sandbox/lib/"
     cat >"$sandbox/commands/network/bbr.sh" <<'EOF'
@@ -85,8 +86,21 @@ printf 'no_color=%s\n' "${VPSCTL_NO_COLOR:-missing}"
 EOF
     chmod 0644 "$sandbox/commands/network/bbr.sh"
 
+    cat >"$sandbox/commands/service/proxy.sh" <<'EOF'
+#!/usr/bin/env bash
+printf 'proxy_no_color=%s\n' "${VPSCTL_NO_COLOR:-missing}"
+EOF
+    for module in common protocols-sing-box protocols-xray nodes core time; do
+        printf '# safe proxy module fixture: %s\n' "$module" >"$sandbox/commands/service/proxy/${module}.sh"
+        chmod 0644 "$sandbox/commands/service/proxy/${module}.sh"
+    done
+    chmod 0644 "$sandbox/commands/service/proxy.sh"
+
     output="$(bash "$sandbox/bin/vpsctl" --no-color network bbr status)"
     test_contains "$output" "no_color=1" "no-color child context"
+
+    output="$(bash "$sandbox/bin/vpsctl" --no-color service proxy status)"
+    test_contains "$output" "proxy_no_color=1" "proxy no-color child context"
 
     rm -rf -- "$sandbox/commands/network"
     mkdir -p "$sandbox/outside"

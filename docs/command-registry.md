@@ -25,15 +25,18 @@
 
 ## 2. 已登记命令清单
 
-0.2.0 登记以下网络入口。状态列描述接口生命周期，不表示已经完成真实 VPS 或 VM 验证；隔离环境验收要求见[网络设置](network-settings.md)。
+0.3.0 登记以下网络与服务入口。状态列描述接口生命周期，不表示已经完成真实 VPS 或 VM 验证；隔离环境验收要求见[网络设置](network-settings.md)和[代理管理](proxy-management.md)。
 
 | 命令 | 文件 | 摘要 | 风险 | 权限 | 演练 | 能力要求 | 状态 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `network bbr` | `commands/network/bbr.sh` | 查看、启用、设置或恢复 BBR 与队列规则 | `change` | `optional-root` | `supported` | `linux` | `experimental` |
 | `network dns` | `commands/network/dns.sh` | 检测、测试、设置、刷新、验证或恢复 DNS | `disruptive` | `optional-root` | `supported` | `linux` | `experimental` |
-| `network rfw` | `commands/network/rfw.sh` | 安装、配置和管理 RFW systemd 服务 | `disruptive` | `optional-root` | `supported` | `linux, init:systemd` | `experimental` |
+| `network rfw` | `commands/network/rfw.sh` | 安装、配置和管理 RFW systemd 服务 | `disruptive` | `optional-root` | `supported` | `linux,init:systemd` | `experimental` |
+| `service proxy` | `commands/service/proxy.sh` | 平级管理 Xray 与 sing-box 内核、节点、日志和时间同步 | `disruptive` | `optional-root` | `supported` | `linux,service:any` | `experimental` |
 
 `optional-root` 表示只读查询、帮助或部分计划阶段可以普通用户运行；实际系统变更仍须 root 或在具体步骤提权。`--dry-run` 只生成计划，不写配置、不安装依赖、不启动或重启服务。
+
+`service proxy` 的 `service:any` 能力要求由入口解析为可用服务管理器，功能脚本会进一步限制为 systemd 或 OpenRC。注册表只登记公开入口 `commands/service/proxy.sh`；其 `commands/service/proxy/` 子模块是固定加载的私有实现，不单独登记，也不构成可直接分发的命令。帮助、协议矩阵和系统时间状态可由普通用户执行；内核状态与节点/订阅会读取受限状态文件，因此和安装、更新、卸载、服务控制、节点写操作及时间同步一样要求 root。重启、外部二进制原地更新与 `--purge` 另有不能被 `--yes` 绕过的强确认。完整接口见[代理管理](proxy-management.md)。
 
 ## 3. 单命令说明模板
 

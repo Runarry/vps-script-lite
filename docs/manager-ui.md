@@ -43,13 +43,22 @@ UI 显示以下摘要：
 ```text
 环境摘要 + 兼容状态
 └── 主菜单
-    └── 网络设置（network）
-        ├── BBR 管理（bbr）
-        ├── DNS 管理（dns）
-        └── RFW 管理（rfw）
+    ├── 网络设置（network）
+    │   ├── BBR 管理（bbr）
+    │   ├── DNS 管理（dns）
+    │   └── RFW 管理（rfw）
+    └── 服务管理（service）
+        └── 代理管理（proxy）
+            ├── 安装 / 更新 / 卸载内核
+            ├── 启动 / 停止 / 重启内核
+            ├── 添加 / 查看 / 修改 / 删除节点
+            ├── 输出订阅 / 查看日志
+            └── 同步系统时间 / 查看支持协议
 ```
 
-主菜单不会扫描目录或推测功能分类，只显示固定注册表中已经登记的真实功能。0.2.0 登记一个 `network` 领域和 `bbr`、`dns`、`rfw` 三个入口。环境详情仍可通过非菜单命令 `vpsctl env` 查看。
+主菜单不会扫描目录或推测功能分类，只显示固定注册表中已经登记的真实功能。0.3.0 登记 `network` 与 `service` 两个领域，以及 `bbr`、`dns`、`rfw`、`proxy` 四个入口。环境详情仍可通过非菜单命令 `vpsctl env` 查看。
+
+`service proxy` 是一个公开登记入口，进入后使用自己的三级操作菜单。Xray 与 sing-box 在该菜单中平级展示并按需安装；代理菜单展示内核状态后提供生命周期、节点、订阅、日志、时间同步和协议列表操作。其 `commands/service/proxy/` 私有模块不会作为额外菜单项出现。
 
 菜单中的命令详情同时显示风险等级、权限、演练支持、能力要求和生命周期。展示层将注册值翻译为中文，但底层值和命令接口保持不变：`change` 显示为黄色“变更”，`disruptive` 显示为红色“中断性”，`optional-root` 显示为黄色“按需 root”，`supported` 演练显示为绿色“支持”，`experimental` 显示为黄色“实验性”。满足能力要求的命令标为绿色“可用”，否则标为黄色“受限”。能力标识只是入口层的快速拦截，功能脚本仍会再次验证内核、DNS 后端、CPU 架构、IPv4 等具体条件。
 
@@ -63,7 +72,7 @@ UI 使用 ASCII 边框和可选 ANSI 语义色，适合普通 SSH 终端：青�
 
 新增功能时：
 
-1. 在 `commands/<domain>/<action>.sh` 实现并测试独立脚本。
+1. 在 `commands/<domain>/<action>.sh` 实现并测试公开入口脚本；复杂入口可按架构规范拆分同名私有子模块。
 2. 在 `vps_registry_init` 中调用 `vps_registry_register_command`，登记标签、摘要、固定路径、风险、权限、演练支持、能力要求和生命周期。
 3. 更新 `docs/command-registry.md` 的公开命令清单和详细说明。
 4. 运行 `bash tests/run.sh`。
@@ -72,12 +81,13 @@ UI 使用 ASCII 边框和可选 ANSI 语义色，适合普通 SSH 终端：青�
 
 ## 5. 当前边界
 
-0.2.0 的管理入口已登记网络首版功能。UI 只负责展示元数据、收集用户选择并分发，不实现 BBR、DNS 或 RFW 业务逻辑。
+0.3.0 的管理入口已登记网络功能与代理管理。UI 只负责展示元数据、收集用户选择并分发，不实现 BBR、DNS、RFW 或代理业务逻辑。
 
 网络功能的当前边界为：
 
 - BBR 只管理拥塞控制、队列规则及其持久化配置，不负责升级或替换内核。
 - DNS 只修改检测到的权威 DNS 后端；候选解析器必须先通过前测，写后验证失败会保留新配置并返回部分完成状态，以便按备份恢复。
 - RFW 只支持 systemd、`x86_64`/`aarch64` 和 IPv4；安装只使用官方最新稳定 release 并校验 checksum。配置和更新不会自行重启服务，实际应用危险规则必须显式强确认。
+- 代理管理支持 systemd 与 OpenRC，平级管理 Xray 和 sing-box；配置与内核更新不会自行重启正在运行的服务，卸载默认保留配置，彻底清除、外部二进制原地更新和中断性重启均有独立强确认。
 
-详细子动作、路径、恢复和验收要求见 [`docs/network-settings.md`](network-settings.md)。
+详细子动作、路径、恢复和验收要求见 [`docs/network-settings.md`](network-settings.md)与 [`docs/proxy-management.md`](proxy-management.md)。
