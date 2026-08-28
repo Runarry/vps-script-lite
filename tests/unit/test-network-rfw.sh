@@ -837,6 +837,45 @@ test_uninstall_boundaries() {
     [[ -e "$unit" && -e "$binary" ]] || fail "uninstall removed unmanaged files"
 }
 
+test_lock_failure_and_menu_release() (
+    local status=0
+    reset_case
+    rfw install
+    rfw configure --block-http on
+    : >"$MOCK_LOG"
+
+    PATH="${MOCK_BIN}:$PATH"
+    VPSCTL_PROJECT_ROOT="$TEST_ROOT"
+    VPSCTL_TESTING=1
+    VPSCTL_SYSTEM_ROOT="$SYSTEM_ROOT"
+    VPSCTL_ENV_KERNEL_NAME=Linux
+    VPSCTL_ENV_KERNEL_RELEASE=6.1.0
+    VPSCTL_ENV_ARCH=x86_64
+    VPSCTL_ENV_INIT=systemd
+    VPSCTL_NON_INTERACTIVE=1
+    VPSCTL_NO_COLOR=1
+    export PATH VPSCTL_PROJECT_ROOT VPSCTL_TESTING VPSCTL_SYSTEM_ROOT
+    export VPSCTL_ENV_KERNEL_NAME VPSCTL_ENV_KERNEL_RELEASE VPSCTL_ENV_ARCH VPSCTL_ENV_INIT
+    export VPSCTL_NON_INTERACTIVE VPSCTL_NO_COLOR
+    # shellcheck source=../../commands/network/rfw.sh
+    source "$RFW_SCRIPT" help >/dev/null
+
+    VPS_CMD_LOCK_FD=999
+    VPS_CMD_LOCK_PATH="${SYSTEM_ROOT}/run/vpsctl/network-rfw.lock"
+    rfw_service_start --enable >/dev/null 2>&1 || status=$?
+    assert_status 70 "$status" "pre-held lock propagation"
+    if grep -Eq 'systemctl (daemon-reload|start|enable) rfw\.service' "$MOCK_LOG"; then
+        fail "lock failure allowed service side effects"
+    fi
+
+    VPS_CMD_LOCK_FD=""
+    VPS_CMD_LOCK_PATH=""
+    rfw_menu_action rfw_take_lock
+    [[ "$RFW_LOCKED" == "0" && -z "${VPS_CMD_LOCK_FD:-}" ]] || fail "menu action retained command lock"
+    rfw_menu_action rfw_take_lock
+    [[ "$RFW_LOCKED" == "0" && -z "${VPS_CMD_LOCK_FD:-}" ]] || fail "second menu action retained command lock"
+)
+
 test_interactive_ui() (
     local output capture="${TEST_TMP}/rfw-interactive-output"
 
@@ -937,5 +976,6 @@ test_restart_rollback
 test_transaction_rollbacks
 test_stats_logs_status_and_ipv6_warning
 test_uninstall_boundaries
+test_lock_failure_and_menu_release
 test_interactive_ui
 printf 'PASS: network rfw tests\n'

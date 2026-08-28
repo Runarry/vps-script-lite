@@ -937,7 +937,7 @@ rfw_install_or_update() {
         rfw_require_managed_install || return
     fi
 
-    rfw_take_lock
+    rfw_take_lock || return
     if [[ "${VPSCTL_DRY_RUN:-0}" == "1" ]]; then
         rfw_info "演练：获取、验证并原子安装最新 RFW 发布版本"
         rfw_info "演练：将写入 ${RFW_CONFIG} 和 ${RFW_UNIT}；服务状态不会改变"
@@ -1214,7 +1214,7 @@ rfw_configure() {
         rfw_success "RFW 配置已符合要求，无需更改。"
         return 0
     fi
-    rfw_take_lock
+    rfw_take_lock || return
     previous_binary_backup="$(rfw_pending_value binary_backup 2>/dev/null || true)"
     previous_config_backup="$(rfw_pending_value config_backup 2>/dev/null || true)"
     previous_metadata_backup="$(rfw_pending_value metadata_backup 2>/dev/null || true)"
@@ -1419,7 +1419,7 @@ rfw_service_start() {
     fi
     rfw_require_disruptive_confirmation "$confirmed" || return
     [[ "$RFW_CONFIRM_APPROVED" == "1" ]] || return 0
-    rfw_take_lock
+    rfw_take_lock || return
     if systemctl is-active --quiet rfw.service; then
         if ((enable)) && ! systemctl is-enabled --quiet rfw.service; then
             run systemctl enable rfw.service || return 20
@@ -1471,7 +1471,7 @@ rfw_service_stop() {
             return 0
         fi
     fi
-    rfw_take_lock
+    rfw_take_lock || return
     run systemctl stop rfw.service || return 20
     if ((disable)); then
         run systemctl disable rfw.service || return 20
@@ -1511,7 +1511,7 @@ rfw_service_restart() {
     rfw_runtime_preflight || return
     rfw_require_disruptive_confirmation "$confirmed" || return
     [[ "$RFW_CONFIRM_APPROVED" == "1" ]] || return 0
-    rfw_take_lock
+    rfw_take_lock || return
     if [[ "${VPSCTL_DRY_RUN:-0}" == "1" ]]; then
         run systemctl daemon-reload
         run systemctl restart rfw.service
@@ -1822,7 +1822,7 @@ rfw_uninstall() {
             return 0
         fi
     fi
-    rfw_take_lock
+    rfw_take_lock || return
     if systemctl is-active --quiet rfw.service >/dev/null 2>&1; then run systemctl stop rfw.service || failed=1; fi
     if systemctl is-enabled --quiet rfw.service >/dev/null 2>&1; then run systemctl disable rfw.service || failed=1; fi
     if ((cleanup_port_access_pin)); then run rm -f -- "$RFW_PORT_ACCESS_PIN" || failed=1; fi
@@ -1951,6 +1951,7 @@ rfw_menu_uninstall() {
 rfw_menu_action() {
     local status=0
     "$@" || status=$?
+    rfw_unlock
     [[ "$status" == "130" ]] && return 0
     return "$status"
 }
