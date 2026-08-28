@@ -47,11 +47,13 @@ backup_file() {
 readonly RFW_REPOSITORY="narwhal-cloud/rfw"
 readonly RFW_RELEASE_API="https://api.github.com/repos/${RFW_REPOSITORY}/releases/latest"
 readonly RFW_MANAGED_MARKER="# Managed by vpsctl (rfw)"
+readonly RFW_PORT_ACCESS_PIN_LOGICAL="/sys/fs/bpf/rfw_port_access_log"
 RFW_BINARY="$(system_path /usr/local/bin/rfw)"
 RFW_CONFIG="$(system_path /etc/vpsctl/rfw.conf)"
 RFW_UNIT="$(system_path /etc/systemd/system/rfw.service)"
 RFW_STATE_DIR="$(system_path /var/lib/vpsctl/network/rfw)"
-readonly RFW_BINARY RFW_CONFIG RFW_UNIT RFW_STATE_DIR
+RFW_PORT_ACCESS_PIN="$(system_path "$RFW_PORT_ACCESS_PIN_LOGICAL")"
+readonly RFW_BINARY RFW_CONFIG RFW_UNIT RFW_STATE_DIR RFW_PORT_ACCESS_PIN
 readonly RFW_PENDING="${RFW_STATE_DIR}/pending"
 readonly RFW_LKG_CONFIG="${RFW_STATE_DIR}/rfw.conf.last-known-good"
 readonly RFW_METADATA="${RFW_STATE_DIR}/install.meta"
@@ -557,7 +559,17 @@ After=network-online.target
 [Service]
 Type=simple
 Environment=RUST_LOG=${RFW_CFG[RUST_LOG]}
+EOF
+    if [[ "${RFW_CFG[log]}" == "on" ]]; then
+        printf 'ExecStartPre=/usr/bin/rm -f -- %s\n' "$RFW_PORT_ACCESS_PIN_LOGICAL"
+    fi
+    cat <<EOF
 ExecStart=${exec_start}
+EOF
+    if [[ "${RFW_CFG[log]}" == "on" ]]; then
+        printf 'ExecStopPost=/usr/bin/rm -f -- %s\n' "$RFW_PORT_ACCESS_PIN_LOGICAL"
+    fi
+    cat <<EOF
 KillSignal=SIGINT
 Restart=on-failure
 RestartSec=3s
@@ -571,6 +583,11 @@ EOF
 rfw_is_managed_file() {
     local file="$1"
     [[ -f "$file" && ! -L "$file" ]] && IFS= read -r line <"$file" && [[ "$line" == "$RFW_MANAGED_MARKER" ]]
+}
+
+rfw_unit_uses_port_access_log() {
+    rfw_is_managed_file "$RFW_UNIT" &&
+        grep -Eq '^ExecStart=.*[[:space:]]--log-port-access([[:space:]]|$)' "$RFW_UNIT"
 }
 
 rfw_load_metadata() {
@@ -1760,7 +1777,7 @@ rfw_confirm_purge() {
 }
 
 rfw_uninstall() {
-    local purge=0 confirmed=0 arg failed=0
+    local purge=0 confirmed=0 arg failed=0 cleanup_port_access_pin=0
     while (($#)); do
         arg="$1"
         case "$arg" in
@@ -1796,6 +1813,9 @@ rfw_uninstall() {
         rfw_error "拒绝彻底清除不受管的 RFW 配置"
         return 3
     fi
+    if [[ -e "$RFW_UNIT" ]] && rfw_unit_uses_port_access_log; then
+        cleanup_port_access_pin=1
+    fi
     if [[ "${VPSCTL_DRY_RUN:-0}" != "1" ]]; then
         rfw_ensure_dependencies flock || return
         if rfw_stop_after_dependency_plan; then
@@ -1805,6 +1825,7 @@ rfw_uninstall() {
     rfw_take_lock
     if systemctl is-active --quiet rfw.service >/dev/null 2>&1; then run systemctl stop rfw.service || failed=1; fi
     if systemctl is-enabled --quiet rfw.service >/dev/null 2>&1; then run systemctl disable rfw.service || failed=1; fi
+    if ((cleanup_port_access_pin)); then run rm -f -- "$RFW_PORT_ACCESS_PIN" || failed=1; fi
     run rm -f "$RFW_UNIT" "$RFW_BINARY" || failed=1
     if ((purge)); then
         run rm -f "$RFW_CONFIG" "$RFW_METADATA" "$RFW_PENDING" "$RFW_LKG_CONFIG" || failed=1

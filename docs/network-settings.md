@@ -154,8 +154,13 @@ RFW 会在参数校验以及 Linux、systemd、架构和内核版本门禁通过
 | `/usr/local/bin/rfw` | 校验后安装的 RFW 二进制 |
 | `/etc/vpsctl/rfw.conf` | 项目管理的 RFW 配置 |
 | `/etc/systemd/system/rfw.service` | 项目管理的 systemd 单元 |
+| `/sys/fs/bpf/rfw_port_access_log` | 启用端口访问日志时由受管服务独占的固定 BPF pin；不是跨重启持久状态 |
 | `/var/lib/vpsctl/network/rfw/` | 安装元数据、版本/checksum 记录及恢复所需状态 |
 | `/var/lib/vpsctl/backups/network/rfw/` | 更新、配置和失败恢复使用的上一版本备份 |
+
+启用端口访问日志时，受管 systemd 单元会在每次启动前删除遗留的固定 pin，并在进程退出后再次清理；卸载也只在受管单元实际包含 `--log-port-access` 时清理它。该 pin 由运行中的受管 RFW 服务独占，不应被其他程序复用，也不得在服务仍运行时手工删除。因为启动前会重建 BPF map，所以启动或重启服务后，端口访问统计会从零重新累计。
+
+若日志中出现创建该 pin 失败的 `EEXIST`，先执行 `systemctl stop rfw.service`，再用 `systemctl is-active rfw.service` 确认服务已经停止。随后检查 `/etc/systemd/system/rfw.service` 仍带项目管理标记且 `ExecStart` 包含 `--log-port-access`；仅在这两个条件都满足时，执行 `/usr/bin/rm -f -- /sys/fs/bpf/rfw_port_access_log`，最后用 `systemctl start rfw.service` 重新启动。若单元不受管或未启用端口访问日志，应保留该 pin 并先查明其所有者，避免破坏其他 BPF 程序。
 
 替换二进制、配置和单元前必须保留可识别的上一版本状态。安装、更新或卸载发生部分完成时返回 `30`，输出当前二进制版本、服务是否仍运行、哪些路径已改变，以及恢复上一文件或重新安装校验过版本的步骤。`uninstall` 默认保留配置和恢复状态；只有显式 `--purge` 才删除项目管理的数据，而且不得删除范围外文件。清除操作在交互模式要求输入 `PURGE-RFW`，在非交互模式要求额外提供无值标志 `--confirm-purge`；`--yes` 同样不能替代这一确认。
 

@@ -39,6 +39,12 @@ assert_file_contains() {
     grep -Fq -- "$expected" "$file" || fail "${message}: missing '${expected}'"
 }
 
+assert_file_not_contains() {
+    local file="$1" unexpected="$2" message="$3"
+    [[ -f "$file" ]] || fail "${message}: file missing: ${file}"
+    ! grep -Fq -- "$unexpected" "$file" || fail "${message}: unexpectedly found '${unexpected}'"
+}
+
 assert_status() {
     local expected="$1" actual="$2" message="$3"
     [[ "$actual" == "$expected" ]] || fail "${message}: expected status ${expected}, got ${actual}"
@@ -289,6 +295,8 @@ test_default_config_unit_and_pending() {
     if grep -Fq -- "--block-" "$unit" || grep -Fq -- "--log-port-access" "$unit"; then
         fail "safe default unit unexpectedly enabled filtering or logging"
     fi
+    assert_file_not_contains "$unit" "ExecStartPre=/usr/bin/rm -f -- /sys/fs/bpf/rfw_port_access_log" "log-off unit start cleanup"
+    assert_file_not_contains "$unit" "ExecStopPost=/usr/bin/rm -f -- /sys/fs/bpf/rfw_port_access_log" "log-off unit stop cleanup"
     assert_file_contains "$unit" "KillSignal=SIGINT" "graceful systemd stop"
     assert_file_contains "$unit" "LimitMEMLOCK=infinity" "memlock limit"
     assert_file_contains "$unit" "After=network-online.target" "network ordering"
@@ -312,7 +320,13 @@ test_config_parser_and_preservation() {
     assert_file_contains "$unit" "--allow-only-countries US,JP" "whitelist unit mapping"
     assert_file_contains "$unit" "--block-fet-loose" "loose FET unit mapping"
     if grep -Fq -- "--block-http" "$unit"; then fail "disabled HTTP rule remained in unit"; fi
+    assert_file_not_contains "$unit" "ExecStartPre=/usr/bin/rm -f -- /sys/fs/bpf/rfw_port_access_log" "explicit log-off unit start cleanup"
+    assert_file_not_contains "$unit" "ExecStopPost=/usr/bin/rm -f -- /sys/fs/bpf/rfw_port_access_log" "explicit log-off unit stop cleanup"
     [[ -f "${SYSTEM_ROOT}/var/lib/vpsctl/network/rfw/pending" ]] || fail "configure did not create pending marker"
+
+    rfw configure --log-port-access on
+    assert_file_contains "$unit" "ExecStartPre=/usr/bin/rm -f -- /sys/fs/bpf/rfw_port_access_log" "log-on unit start cleanup"
+    assert_file_contains "$unit" "ExecStopPost=/usr/bin/rm -f -- /sys/fs/bpf/rfw_port_access_log" "log-on unit stop cleanup"
 
     printf 'BAD=$(touch /tmp/should-not-run)\n' >>"$config"
     status=0
@@ -769,7 +783,7 @@ test_stats_logs_status_and_ipv6_warning() {
 }
 
 test_uninstall_boundaries() {
-    local status=0 config unit binary
+    local status=0 config unit binary pin
     reset_case
     rfw install
     config="${SYSTEM_ROOT}/etc/vpsctl/rfw.conf"
@@ -788,6 +802,30 @@ test_uninstall_boundaries() {
     rfw uninstall --purge --confirm-purge
     [[ ! -e "$config" ]] || fail "purge retained configuration"
     [[ ! -e "${SYSTEM_ROOT}/var/lib/vpsctl/backups/network/rfw" ]] || fail "purge retained RFW backups"
+
+    reset_case
+    rfw install
+    config="${SYSTEM_ROOT}/etc/vpsctl/rfw.conf"
+    unit="${SYSTEM_ROOT}/etc/systemd/system/rfw.service"
+    pin="${SYSTEM_ROOT}/sys/fs/bpf/rfw_port_access_log"
+    rfw configure --log-port-access on
+    sed -i 's/^log=on$/log=off/' "$config"
+    mkdir -p -- "$(dirname -- "$pin")"
+    printf 'stale pin\n' >"$pin"
+    rfw uninstall
+    [[ ! -e "$pin" ]] || fail "uninstall retained pin referenced by managed logging unit"
+
+    reset_case
+    rfw install
+    config="${SYSTEM_ROOT}/etc/vpsctl/rfw.conf"
+    unit="${SYSTEM_ROOT}/etc/systemd/system/rfw.service"
+    binary="${SYSTEM_ROOT}/usr/local/bin/rfw"
+    pin="${SYSTEM_ROOT}/sys/fs/bpf/rfw_port_access_log"
+    sed -i 's/^log=off$/log=on/' "$config"
+    mkdir -p -- "$(dirname -- "$pin")"
+    printf 'foreign pin\n' >"$pin"
+    rfw uninstall
+    [[ -e "$pin" ]] || fail "uninstall removed pin not referenced by managed unit"
 
     reset_case
     mkdir -p "$(dirname -- "$unit")" "$(dirname -- "$binary")"
