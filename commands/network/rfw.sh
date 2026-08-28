@@ -1630,7 +1630,7 @@ rfw_status() {
 }
 
 rfw_stats() {
-    local arg blocked=0 allowed=0
+    local arg blocked=0 allowed=0 output
     local -a args=(stats)
     while (($#)); do
         arg="$1"
@@ -1700,7 +1700,13 @@ rfw_stats() {
         return 0
     fi
     rfw_require_managed_install || return
-    "$RFW_BINARY" "${args[@]}" || return 20
+    if output="$("$RFW_BINARY" "${args[@]}")"; then
+        output="${output//提示: 请确保 rfw 使用 --log-port-access 参数运行/提示: 端口访问日志已启用，当前筛选条件下尚无访问记录}"
+        [[ -z "$output" ]] || printf '%s\n' "$output"
+    else
+        [[ -z "$output" ]] || printf '%s\n' "$output"
+        return 20
+    fi
 }
 
 rfw_logs() {

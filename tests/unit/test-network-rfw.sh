@@ -102,6 +102,11 @@ case "$url" in
 #!/usr/bin/env bash
 printf 'binary %s\n' "${1:-none}" >> "${MOCK_LOG}"
 if [[ "${1:-}" == "--version" ]]; then printf 'rfw %s\n' "${MOCK_BINARY_VERSION:-1.2.3}"; exit 0; fi
+if [[ "${1:-}" == "stats" && "${MOCK_STATS_EMPTY:-0}" == "1" ]]; then
+    printf '没有找到匹配的访问记录\n'
+    printf '提示: 请确保 rfw 使用 --log-port-access 参数运行\n'
+    exit 0
+fi
 printf 'mock-rfw'
 printf ' %s' "$@"
 printf '\n'
@@ -254,6 +259,7 @@ rfw() {
         MOCK_PRERELEASE="${MOCK_PRERELEASE:-false}" \
         MOCK_RELEASE_TAG="${MOCK_RELEASE_TAG:-v1.2.3}" \
         MOCK_BINARY_VERSION="${MOCK_BINARY_VERSION:-1.2.3}" \
+        MOCK_STATS_EMPTY="${MOCK_STATS_EMPTY:-0}" \
         "$TEST_BASH" "${shell_args[@]}" "$RFW_SCRIPT" "$@"
 }
 
@@ -768,6 +774,10 @@ test_stats_logs_status_and_ipv6_warning() {
     rfw start
     output="$(rfw stats --port 443 --blocked-only --group-by-port)"
     assert_contains "$output" "stats --port 443 --blocked-only --group-by-port" "stats argument mapping"
+    output="$(MOCK_STATS_EMPTY=1 rfw stats)"
+    assert_contains "$output" "没有找到匹配的访问记录" "empty stats result"
+    assert_contains "$output" "端口访问日志已启用，当前筛选条件下尚无访问记录" "empty stats guidance"
+    assert_not_contains "$output" "请确保 rfw 使用 --log-port-access 参数运行" "misleading empty stats guidance"
     rfw logs --lines 25 --since today
     assert_file_contains "$MOCK_LOG" "journalctl -u rfw.service --no-pager -n 25 --since today" "journal mapping"
     mkdir -p "${SYSTEM_ROOT}/proc/net"
