@@ -69,4 +69,4 @@ bash bin/vpsctl --dry-run --install-deps service proxy install --core sing-box
 - 管理入口：提供环境检测、终端 UI、固定注册表和安全分发。
 - 功能命令：提供 `network bbr`、`network dns`、`network rfw` 和 `service proxy`；均处于 `experimental` 生命周期。
 - 公共函数库：提供环境检测、命令注册、终端 UI 及网络和服务命令所需公共能力。
-- 验收说明：仓库中的自动化检查不等同于真实 VPS 或 VM 验证；发布前仍须按对应功能文档在隔离环境完成验收。
+- 验收说明：所有项目测试与验证统一通过 `ssh host-vps-scripts` 在专用真实环境中执行；不得在当前系统或 WSL 中测试。发布前仍须按对应功能文档完成真实环境验收。
