@@ -743,7 +743,7 @@ proxy_node_add() (
         proxy_cleanup_orphan_certs "$core" >/dev/null 2>&1 || true
         return 20
     }
-    candidate_config="$(mktemp --tmpdir="$PROXY_STATE_DIR" .config.add.XXXXXX)" || {
+    candidate_config="$(mktemp --tmpdir="$PROXY_STATE_DIR" .config.add.XXXXXX.json)" || {
         rm -f -- "$candidate_manifest"
         proxy_cleanup_orphan_certs "$core" >/dev/null 2>&1 || true
         return 20
@@ -1329,7 +1329,7 @@ proxy_node_edit() (
         proxy_cleanup_orphan_certs "$core" >/dev/null 2>&1 || true
         return 20
     }
-    candidate_config="$(mktemp --tmpdir="$PROXY_STATE_DIR" .config.edit.XXXXXX)" || {
+    candidate_config="$(mktemp --tmpdir="$PROXY_STATE_DIR" .config.edit.XXXXXX.json)" || {
         rm -f -- "$candidate_manifest"
         proxy_cleanup_orphan_certs "$core" >/dev/null 2>&1 || true
         return 20
@@ -1411,7 +1411,7 @@ proxy_node_delete() (
         return 3
     }
     candidate_manifest="$(mktemp --tmpdir="$PROXY_STATE_DIR" .nodes.delete.XXXXXX)" || return 20
-    candidate_config="$(mktemp --tmpdir="$PROXY_STATE_DIR" .config.delete.XXXXXX)" || { rm -f "$candidate_manifest"; return 20; }
+    candidate_config="$(mktemp --tmpdir="$PROXY_STATE_DIR" .config.delete.XXXXXX.json)" || { rm -f "$candidate_manifest"; return 20; }
     trap 'rm -f -- "$candidate_manifest" "$candidate_config"; vps_cmd_unlock' EXIT
     if ! jq --arg id "$id" 'del(.nodes[] | select(.id == $id))' "$PROXY_MANIFEST" >"$candidate_manifest"; then
         status=10
@@ -1507,7 +1507,7 @@ proxy_purge_core_nodes() {
     proxy_core_valid "$core" || return 2
     [[ -f "$PROXY_MANIFEST" ]] || return 0
     candidate_manifest="$(mktemp --tmpdir="$PROXY_STATE_DIR" .nodes.purge.XXXXXX)" || return 20
-    candidate_config="$(mktemp --tmpdir="$PROXY_STATE_DIR" .config.purge.XXXXXX)" || { rm -f "$candidate_manifest"; return 20; }
+    candidate_config="$(mktemp --tmpdir="$PROXY_STATE_DIR" .config.purge.XXXXXX.json)" || { rm -f "$candidate_manifest"; return 20; }
     if ! jq --arg core "$core" 'del(.nodes[] | select(.core == $core))' "$PROXY_MANIFEST" >"$candidate_manifest"; then
         status=10
     fi

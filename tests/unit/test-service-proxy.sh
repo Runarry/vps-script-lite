@@ -129,7 +129,8 @@ write_core_binary() {
     mkdir -p "${path%/*}"
     printf '%s\n' '#!/usr/bin/env bash' \
         'core="${0##*/}"' \
-        '[[ ! -e "${VPSCTL_SYSTEM_ROOT}/run/fail-core-validation" ]] || { case "$*" in *" -c "*|*" -test "*) exit 10;; esac; }' \
+        '[[ ! -e "${VPSCTL_SYSTEM_ROOT}/run/fail-core-validation" ]] || { case "$*" in *" -c "*|*" -test "*) printf "fixture core validation rejected:%0600d\\n" 0 >&2; exit 10;; esac; }' \
+        '[[ "$core" != xray || "$*" != "run -test -c "* || "${*: -1}" == *.json ]] || { printf "Xray fixture requires a .json config path\\n" >&2; exit 10; }' \
         'case "$core:$*" in' \
         '  "sing-box:version") printf "sing-box version 1.11.0\\n" ;;' \
         '  "sing-box:generate uuid") printf "11111111-1111-4111-8111-111111111111\\n" ;;' \
@@ -324,7 +325,7 @@ test_core_choice_crud_pending_and_validation() {
     run_proxy node add --profile shadowsocks-aes-256-gcm --name x-one --port 19001 --address proxy.example
     assert_equal 0 "$RUN_STATUS" "single installed core choice"
     assert_equal xray "$(jq -r '.nodes[0].core' "$(manifest_path)")" "single core selected"
-    local id secret before list_json uri subscription decoded
+    local id secret before list_json uri subscription decoded validation_detail
     id="$(node_id_by_name x-one)"
     secret="$(jq -r '.nodes[0].credentials.password' "$(manifest_path)")"
     [[ -n "$secret" ]] || fail "CRUD node secret missing"
@@ -369,6 +370,10 @@ test_core_choice_crud_pending_and_validation() {
     touch "${TEST_SYSTEM_ROOT}/run/fail-core-validation"
     run_proxy node edit --id "$id" --name rejected
     assert_equal 10 "$RUN_STATUS" "binary config validation failure"
+    assert_contains "$RUN_OUTPUT" "fixture core validation rejected" "binary config validation detail"
+    validation_detail="$(awk -F 'Xray 校验详情：' 'NF > 1 { print $2; exit }' <<<"$RUN_OUTPUT")"
+    assert_equal 512 "${#validation_detail}" "binary config validation detail limit"
+    assert_contains "$validation_detail" "..." "binary config validation detail truncation marker"
     rm -f "${TEST_SYSTEM_ROOT}/run/fail-core-validation"
     assert_equal "$before" "$(sha256sum "$(manifest_path)" | awk '{print $1}')" "failed validation commit"
 

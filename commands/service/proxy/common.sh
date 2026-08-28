@@ -652,7 +652,7 @@ proxy_render_config() {
 }
 
 proxy_validate_config_with_binary() {
-    local core="$1" config="$2" binary
+    local core="$1" config="$2" binary validation_output="" validation_detail=""
     binary="$(proxy_core_binary_path "$core")" || return 3
     [[ -x "$binary" ]] || {
         vps_cmd_error "$(proxy_core_label "$core") 二进制不可执行：$binary"
@@ -670,8 +670,14 @@ proxy_validate_config_with_binary() {
             }
             ;;
         xray)
-            "$binary" run -test -c "$config" >/dev/null 2>&1 || {
+            validation_output="$("$binary" run -test -c "$config" 2>&1)" || {
+                validation_detail="$(awk 'NF { detail=$0 } END { print detail }' <<<"$validation_output")"
+                validation_detail="${validation_detail%$'\r'}"
+                if ((${#validation_detail} > 512)); then
+                    validation_detail="${validation_detail:0:509}..."
+                fi
                 vps_cmd_error "Xray 拒绝生成的配置"
+                [[ -z "$validation_detail" ]] || vps_cmd_error "Xray 校验详情：$validation_detail"
                 return 10
             }
             ;;
