@@ -55,10 +55,16 @@ _proxy_core_binary_version() {
         vps_cmd_error "$(proxy_core_label "$core") 未通过版本冒烟测试"
         return 20
     }
-    version="$(printf '%s\n' "$output" | sed -nE 's/.*[^0-9]v?([0-9]+\.[0-9]+\.[0-9]+([._+-][0-9A-Za-z.-]+)?).*/\1/p' | head -n 1)"
-    if [[ -z "$version" ]]; then
-        version="$(printf '%s\n' "$output" | sed -nE 's/^v?([0-9]+\.[0-9]+\.[0-9]+([._+-][0-9A-Za-z.-]+)?).*/\1/p' | head -n 1)"
-    fi
+    case "$core" in
+        sing-box)
+            version="$(printf '%s\n' "$output" | sed -nE \
+                's/^sing-box[[:space:]]+version[[:space:]]+v?([0-9]+\.[0-9]+\.[0-9]+([._+-][0-9A-Za-z.-]+)?)([[:space:]].*)?$/\1/p')"
+            ;;
+        xray)
+            version="$(printf '%s\n' "$output" | sed -nE \
+                's/^Xray[[:space:]]+v?([0-9]+\.[0-9]+\.[0-9]+([._+-][0-9A-Za-z.-]+)?)([[:space:]].*)?$/\1/p')"
+            ;;
+    esac
     [[ -n "$version" && "$version" != *$'\n'* ]] || {
         vps_cmd_error "无法识别 $(proxy_core_label "$core") 的版本输出"
         return 20

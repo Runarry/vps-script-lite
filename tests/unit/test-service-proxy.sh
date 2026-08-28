@@ -184,6 +184,16 @@ test_arguments_dry_run_and_time() {
     assert_file_contains "$MOCK_LOG" "timedatectl set-ntp true" "time sync routing"
     run_proxy time status extra
     assert_equal 2 "$RUN_STATUS" "time status arguments"
+
+    reset_root
+    write_core_binary xray
+    run_proxy install --core xray --version v25.1.1
+    assert_equal 0 "$RUN_STATUS" "external Xray version matches v-prefixed tag"
+
+    reset_root
+    write_core_binary xray
+    run_proxy install --core xray --version 25.1.1
+    assert_equal 0 "$RUN_STATUS" "external Xray version matches unprefixed tag"
 }
 
 test_dependency_install_plans() {
@@ -636,6 +646,42 @@ test_protocol_matrix() {
     source "${TEST_ROOT}/commands/service/proxy/nodes.sh"
     source "${TEST_ROOT}/commands/service/proxy/core.sh"
     proxy_common_init
+
+    local version_binary="${TEST_TEMP}/version-core" parsed_version version_status=0
+    printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\n" "$VERSION_FIXTURE_OUTPUT"' >"$version_binary"
+    chmod +x "$version_binary"
+
+    export VERSION_FIXTURE_OUTPUT=$'Xray 26.3.27 (Xray, Penetrates Everything.)\nCompiled with go1.26.1 linux/amd64'
+    parsed_version="$(_proxy_core_binary_version xray "$version_binary")"
+    assert_equal 26.3.27 "$parsed_version" "Xray product version before later Go version"
+
+    export VERSION_FIXTURE_OUTPUT='Xray 26.3.27 go1.26.1 linux/amd64'
+    parsed_version="$(_proxy_core_binary_version xray "$version_binary")"
+    assert_equal 26.3.27 "$parsed_version" "Xray product version before same-line Go version"
+
+    export VERSION_FIXTURE_OUTPUT='sing-box version 1.13.12'
+    parsed_version="$(_proxy_core_binary_version sing-box "$version_binary")"
+    assert_equal 1.13.12 "$parsed_version" "standard sing-box product version"
+
+    export VERSION_FIXTURE_OUTPUT=$'Xray development build\nCompiled with go1.26.1 linux/amd64'
+    version_status=0
+    _proxy_core_binary_version xray "$version_binary" >/dev/null 2>&1 || version_status=$?
+    assert_equal 20 "$version_status" "Xray output without product version rejection"
+
+    export VERSION_FIXTURE_OUTPUT='sing-box version 26.3.27'
+    version_status=0
+    _proxy_core_binary_version xray "$version_binary" >/dev/null 2>&1 || version_status=$?
+    assert_equal 20 "$version_status" "wrong Xray product prefix rejection"
+
+    export VERSION_FIXTURE_OUTPUT='Xray version 26.3.27'
+    version_status=0
+    _proxy_core_binary_version xray "$version_binary" >/dev/null 2>&1 || version_status=$?
+    assert_equal 20 "$version_status" "unexpected Xray version format rejection"
+
+    export VERSION_FIXTURE_OUTPUT=$'Xray 26.3.27\nXray 26.3.28'
+    version_status=0
+    _proxy_core_binary_version xray "$version_binary" >/dev/null 2>&1 || version_status=$?
+    assert_equal 20 "$version_status" "ambiguous Xray product versions rejection"
 
     local cert_dir="${TEST_TEMP}/cert" profile label supported node rendered uri id profile_obfs port=20000 count=0
     local profile_count=0 sb_count=0 xray_count=0 overlap_count=0 sb_only_count=0 xray_only_count=0
