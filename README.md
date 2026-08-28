@@ -48,7 +48,7 @@ bash bin/vpsctl service proxy status
 bash bin/vpsctl service proxy profiles
 ```
 
-直接运行 `bash bin/vpsctl service proxy` 会进入统一代理界面。界面首先同时显示 Xray 与 sing-box 的安装/运行状态、配置路径、各自节点数和节点总数，再按内核生命周期、服务控制、节点管理、查看输出和系统工具等能力分组提供操作。交互过程使用枚举和编号选择内核或节点，不要求输入 `--core`。
+直接运行 `bash bin/vpsctl service proxy` 会进入统一代理界面。界面首先同时显示 Xray 与 sing-box 的安装/运行状态、配置路径、各自节点数和节点总数，再按内核生命周期、服务控制、节点管理、查看输出和系统工具等能力分组提供操作。交互过程对内核、节点、模式和开关等固定值统一使用编号选择；地址、端口、名称等开放值则在输入后立即校验，不要求输入 `--core` 等 CLI 参数。订阅可按编号选择全部节点，或只输出当前确有节点的 sing-box/Xray 范围。
 
 先查看变更计划的示例：
 
@@ -59,7 +59,9 @@ bash bin/vpsctl --dry-run --install-deps network rfw install
 bash bin/vpsctl --dry-run --install-deps service proxy install --core sing-box
 ```
 
-全局选项写在领域之前；子动作及选项见[网络设置](docs/network-settings.md)和[代理管理](docs/proxy-management.md)。`--install-deps` 是安装缺失系统工具的显式授权，支持 `apt-get`、`dnf5`、`dnf`、`yum`、`apk`、`pacman` 和 `zypper`；未提供时只报告缺失项，实际安装需要 root。它与 `--dry-run` 组合时只展示固定的软件包安装命令，不实际安装，部分动作会在依赖计划后安全停止并提示安装后重跑。该选项不会绕过 Linux、init 系统、CPU 架构、内核版本、XDP/BPF 或功能本体等平台门禁。上例中的 `--core` 是脚本和非交互调用保留的高级消歧参数：只有一个符合条件的内核时通常可自动解析，存在多个候选时应显式指定。`--yes` 只跳过允许自动确认的提示，不能绕过 RFW 中断性操作、代理重启、外部二进制更新或彻底清除的强确认。
+在主管理菜单中选择 BBR、DNS、RFW 或代理管理后会直接进入对应功能 UI，不再经过“命令详情”或输入 `r` 才运行的中间页；菜单选项执行的是真实动作，不提供演练、依赖授权、自动同意、非交互、静默或详细日志等执行型全局参数开关。`--dry-run`、`--install-deps`、`--yes`、`--non-interactive`、`--quiet`、`--verbose` 只用于直接功能 CLI，并写在领域之前；子动作及选项见[网络设置](docs/network-settings.md)和[代理管理](docs/proxy-management.md)。机器可读格式开关、`--force` 和 `--confirm-*` 确认标志同样只用于直接 CLI，菜单中的危险动作改用明确的交互提示和必要的强确认短语。
+
+依赖检查按用户当前选择的动作延迟执行：只有该动作实际缺少可安装工具时，真实执行的交互流程才询问是否安装，不会为其他菜单动作预装依赖；非交互调用和 `--dry-run` 依赖计划仍必须显式提供 `--install-deps`。该授权支持 `apt-get`、`dnf5`、`dnf`、`yum`、`apk`、`pacman` 和 `zypper`，实际安装需要 root，也不会绕过 Linux、init 系统、CPU 架构、内核版本、XDP/BPF 或功能本体等平台门禁。它与 `--dry-run` 组合时只展示固定的软件包安装命令，不实际安装，部分动作会在依赖计划后安全停止并提示安装后重跑。上例中的 `--core` 是直接命令和非交互调用保留的高级消歧参数：只有一个符合条件的内核时通常可自动解析，存在多个候选时应显式指定。
 
 ## 当前状态
 

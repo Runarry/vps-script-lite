@@ -23,7 +23,9 @@ bash bin/vpsctl service proxy node add --profile hysteria2 --core sing-box --por
 bash bin/vpsctl service proxy start --core sing-box --enable
 ```
 
-不带动作时，交互终端进入代理菜单；非交互环境显示全部内核状态。交互菜单不要求用户输入 `--core` 或节点 ID，而是根据当前状态列出有效候选并使用编号选择。命令模式保留 `--core sing-box|xray|all` 作为高级消歧接口：只有一个符合动作要求的候选时可以自动选中，存在多个候选时，非交互调用必须显式指定适用的单个内核或 `all`。
+不带动作时，交互终端进入代理菜单；非交互环境显示全部内核状态。交互菜单不要求用户输入 `--core`、节点 ID 或内部枚举，而是根据当前状态列出有效候选并使用编号选择；地址、端口、名称等开放值在输入后校验。命令模式保留 `--core sing-box|xray|all` 作为高级消歧接口：只有一个符合动作要求的候选时可以自动选中，存在多个候选时，非交互调用必须显式指定适用的单个内核或 `all`。
+
+`--dry-run`、`--install-deps`、`--yes`、`--non-interactive`、`--quiet` 和 `--verbose` 等执行型全局参数只用于直接功能 CLI；菜单始终执行真实动作。`--json` 等机器可读格式开关、`--force` 和 `--confirm-*` 确认标志同样只属于 CLI。菜单中的中断性或不可逆动作仍会展示影响并要求相应的交互确认或强确认短语，不通过参数开关绕过。
 
 ## 2. 统一交互、状态与路径
 
@@ -119,7 +121,7 @@ vpsctl service proxy node delete --id NODE_ID [--confirm-delete]
 vpsctl service proxy subscription [--core CORE|all]
 ```
 
-`profiles` 列出 profile ID、名称和支持它的内核。`node list` 可按内核筛选；`node show --uri` 输出单节点分享 URI；`subscription` 将全部或指定内核的分享 URI 按清单顺序拼接并输出单行 Base64 订阅内容。节点 ID、UUID、密码、Reality 密钥和需要的混淆密码由命令安全生成，编辑接口不直接接受替换凭据。
+`profiles` 列出 profile ID、名称和支持它的内核。`node list` 可按内核筛选；`node show --uri` 输出单节点分享 URI；`subscription` 将全部或指定内核的分享 URI 按清单顺序拼接并输出单行 Base64 订阅内容。交互菜单生成订阅前先用编号选择“全部”，或选择当前确有节点的 sing-box/Xray 范围；没有节点的内核不显示为候选。直接命令仍以 `--core CORE|all` 指定范围。节点 ID、UUID、密码、Reality 密钥和需要的混淆密码由命令安全生成，编辑接口不直接接受替换凭据。
 
 交互式添加节点时，先用编号选择 profile 和适用内核，并填写监听端口与客户端连接地址，再选择“快速向导”或“自定义向导”。快速向导就此采用界面显示的推荐设置；自定义向导继续询问该 profile 支持的可调字段。profile、目标内核以及证书模式、混淆方式、拥塞控制等枚举值都通过编号选择，不要求记忆或手工输入内部枚举字符串；凭据在两种向导中都由命令安全生成。
 
@@ -176,7 +178,7 @@ vpsctl service proxy time status [--json]
 vpsctl service proxy time sync
 ```
 
-`time status` 只读显示当前 UTC 时间、时区、NTP 是否启用、是否已同步以及检测到的后端；JSON 使用 `schema_version: 1`。`time sync` 是 root 变更：systemd 优先使用 `timedatectl` 和已有 timesyncd/chrony，OpenRC 使用 chrony；确实没有可用后端时，提供 `--install-deps` 才会按检测到的包管理器安装 chrony，随后持久启用并启动服务。若 `chronyc` 可用，会执行 `makestep`，随后最多等待 30 秒确认同步。
+`time status` 只读显示当前 UTC 时间、时区、NTP 是否启用、是否已同步以及检测到的后端；JSON 使用 `schema_version: 1`。`time sync` 是 root 变更：systemd 优先使用 `timedatectl` 和已有 timesyncd/chrony，OpenRC 使用 chrony；确实没有可用后端时，真实执行的交互流程询问是否安装 chrony，非交互调用则必须提供 `--install-deps`，随后才会持久启用并启动服务。若 `chronyc` 可用，会执行 `makestep`，随后最多等待 30 秒确认同步。
 
 时间同步不使用 HTTP `Date`、网页时间解析或 `date -s`，也不会修改 DNS。
 
@@ -195,6 +197,6 @@ vpsctl service proxy time sync
 
 ## 8. 依赖、演练与退出码
 
-支持的平台范围是 Linux、systemd 或 OpenRC，以及 `x86_64`/`amd64`、`aarch64`/`arm64`、`armv7l`/`armv7` 架构。状态、清单和配置渲染依赖 `jq`；端口检查与订阅输出使用 `ss`、`base64` 和 `tr`；证书操作依赖 `openssl` 与 `sha256sum`；受管变更使用 `flock` 加锁；官方 Release 安装还依赖 `curl` 以及 Xray 的 `unzip` 或 sing-box 的 `tar`。提供 `--install-deps` 后，当前动作可通过 `apt-get`、`dnf5`、`dnf`、`yum`、`apk`、`pacman` 或 `zypper` 补齐这些缺失工具；时间同步只在缺少可用 NTP 后端时补齐 chrony。systemd 的 `journalctl`、OpenRC 的 `tail`、服务管理器和 CPU 架构属于平台前置条件，不由该选项安装或绕过。
+支持的平台范围是 Linux、systemd 或 OpenRC，以及 `x86_64`/`amd64`、`aarch64`/`arm64`、`armv7l`/`armv7` 架构。状态、清单和配置渲染依赖 `jq`；端口检查与订阅输出使用 `ss`、`base64` 和 `tr`；证书操作依赖 `openssl` 与 `sha256sum`；受管变更使用 `flock` 加锁；官方 Release 安装还依赖 `curl` 以及 Xray 的 `unzip` 或 sing-box 的 `tar`。功能只在当前动作实际需要时检查对应工具：真实执行的交互环境发现缺失后才列出缺失项并询问是否安装，不会在进入代理菜单时预装所有工具；非交互调用和 `--dry-run` 依赖计划仍必须提供 `--install-deps`。获得授权后，当前动作可通过 `apt-get`、`dnf5`、`dnf`、`yum`、`apk`、`pacman` 或 `zypper` 补齐缺失工具；时间同步只在缺少可用 NTP 后端时补齐 chrony。systemd 的 `journalctl`、OpenRC 的 `tail`、服务管理器和 CPU 架构属于平台前置条件，不由该选项安装或绕过。
 
 `--dry-run` 会展示安装、写入、服务控制和时间同步命令，不下载、不写受管配置、不安装包，也不启停服务。与 `--install-deps` 组合且发现工具缺失时，会先展示固定的软件包安装计划，再安全停止并提示安装后重跑完整计划。常见退出码遵循项目统一约定：`2` 为参数错误，`3` 为前置条件或依赖不满足，`4` 为权限不足，`10` 为配置或证书校验失败，`20` 为外部命令或远端服务失败，`30` 为部分完成、同步确认超时或需要人工恢复，`130` 为用户中断。发生 `30` 时先查看 `status`、待重启记录和服务日志，不要直接删除状态或备份文件。

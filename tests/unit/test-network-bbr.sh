@@ -212,6 +212,78 @@ test_status_and_arguments() {
     test_assert_equal 2 "$RUN_STATUS" "extra action exit code"
 }
 
+test_interactive_menu() (
+    local menu_marker="${TEST_SYSTEM_ROOT}/bbr-menu-marker"
+    local captured status=0 failure_marker="${TEST_SYSTEM_ROOT}/bbr-menu-failure-marker"
+
+    # shellcheck source=../../commands/network/bbr.sh
+    source "$TEST_BBR"
+    bbr_available_algorithms() { printf 'reno cubic bbr\n'; }
+    bbr_current_algorithm() { printf 'cubic\n'; }
+    bbr_current_qdisc() { printf 'fq_codel\n'; }
+    vps_cmd_prompt_select() {
+        case "$1" in
+            "BBR 网络管理")
+                test_assert_equal status "$2" "BBR menu default action"
+                test_assert_equal set "$7" "BBR menu set action value"
+                test_assert_equal "选择算法和 qdisc" "$8" "BBR menu set action label"
+                if [[ -e "$menu_marker" ]]; then
+                    printf quit
+                else
+                    : >"$menu_marker"
+                    printf set
+                fi
+                ;;
+            "选择 TCP 拥塞控制算法")
+                test_assert_equal cubic "$2" "current algorithm is menu default"
+                test_assert_equal reno "$3" "first available algorithm value"
+                test_assert_equal cubic "$5" "current available algorithm value"
+                test_assert_equal "cubic（当前）" "$6" "current algorithm label"
+                test_assert_equal bbr "$7" "last available algorithm value"
+                printf bbr
+                ;;
+            "选择默认 qdisc")
+                test_assert_equal fq_codel "$2" "current qdisc is menu default"
+                test_assert_equal fq "$3" "fq qdisc option"
+                test_assert_equal fq_codel "$5" "fq_codel qdisc option"
+                test_assert_equal manual "$7" "manual qdisc option"
+                test_assert_equal 8 "$#" "current qdisc is deduplicated"
+                printf manual
+                ;;
+            "是否立即应用到默认路由网卡的 root qdisc")
+                test_assert_equal keep "$2" "live qdisc safe default"
+                test_assert_equal apply "$5" "live qdisc explicit apply value"
+                printf apply
+                ;;
+            *) test_fail "unexpected select prompt: $1" ;;
+        esac
+    }
+    vps_cmd_prompt_value() {
+        test_assert_equal "输入默认 qdisc" "$1" "manual qdisc prompt"
+        test_assert_equal fq_codel "$2" "manual qdisc current default"
+        printf cake
+    }
+    vps_cmd_confirm() {
+        test_assert_contains "$1" "确认承担风险" "live qdisc risk confirmation"
+        return 0
+    }
+    bbr_apply_settings() {
+        printf '%s|%s|%s\n' "$1" "$2" "$BBR_APPLY_LIVE_QDISC" >"${TEST_SYSTEM_ROOT}/bbr-menu-captured"
+    }
+
+    bbr_interactive_menu
+    captured="$(<"${TEST_SYSTEM_ROOT}/bbr-menu-captured")"
+    test_assert_equal 'bbr|cake|1' "$captured" "interactive BBR selections"
+
+    vps_cmd_prompt_select() {
+        [[ "$1" == "BBR 网络管理" ]] || test_fail "unexpected failure-path prompt: $1"
+        if [[ -e "$failure_marker" ]]; then printf quit; else : >"$failure_marker"; printf status; fi
+    }
+    bbr_status() { return 3; }
+    bbr_interactive_menu >/dev/null 2>&1 || status=$?
+    test_assert_equal 3 "$status" "interactive BBR failure status propagation"
+)
+
 test_dry_run() {
     local available_path="${TEST_SYSTEM_ROOT}/proc/sys/net/ipv4/tcp_available_congestion_control"
 
@@ -494,6 +566,7 @@ test_persistence_and_restore() {
 }
 
 test_status_and_arguments
+test_interactive_menu
 test_dry_run
 test_symlink_guards
 test_unavailable_algorithm

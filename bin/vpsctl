@@ -293,49 +293,9 @@ vpsctl_dispatch() {
     fi
 }
 
-vpsctl_show_command_screen() {
-    local command_key="$1"
-    local choice status
-
-    while true; do
-        vps_ui_clear_screen
-        vps_ui_header "命令详情"
-        vps_ui_command_details "$command_key"
-
-        if ! vpsctl_validate_command_ready "$command_key" 2>/dev/null; then
-            vps_ui_warning "当前环境不满足此命令的运行条件。"
-            vps_ui_pause
-            return 0
-        fi
-
-        printf '\n  [r] 无附加参数运行    [b] 返回\n\n'
-        vps_ui_read_choice "请选择" || return 0
-        choice="$VPS_UI_CHOICE"
-
-        case "$choice" in
-            r | R)
-                if vpsctl_dispatch "${VPS_COMMAND_DOMAIN[$command_key]}" "${VPS_COMMAND_ACTION[$command_key]}"; then
-                    status=0
-                else
-                    status=$?
-                fi
-                printf '\n%s重要提示%s：命令已结束，退出码：' "$VPS_UI_CYAN" "$VPS_UI_RESET"
-                vps_ui_exit_code "$status"
-                printf '\n'
-                vps_ui_pause
-                return "$status"
-                ;;
-            b | B | '')
-                return 0
-                ;;
-            *) ;;
-        esac
-    done
-}
-
 vpsctl_run_domain_menu() {
     local domain="$1"
-    local choice command_index command_key
+    local choice command_index command_key status
 
     while true; do
         vps_registry_commands_for_domain "$domain"
@@ -364,22 +324,48 @@ vpsctl_run_domain_menu() {
                 if vps_ui_parse_index "$choice" "${#VPS_REGISTRY_RESULTS[@]}"; then
                     command_index="$VPS_UI_INDEX"
                     command_key="${VPS_REGISTRY_RESULTS[$command_index]}"
-                    if vpsctl_show_command_screen "$command_key"; then
-                        VPSCTL_MENU_STATUS=0
+                    if vpsctl_dispatch "${VPS_COMMAND_DOMAIN[$command_key]}" "${VPS_COMMAND_ACTION[$command_key]}"; then
+                        status=0
                     else
-                        VPSCTL_MENU_STATUS=$?
+                        status=$?
                     fi
+                    VPSCTL_MENU_STATUS="$status"
+                    printf '\n%s重要提示%s：命令已结束，退出码：' "$VPS_UI_CYAN" "$VPS_UI_RESET"
+                    vps_ui_exit_code "$status"
+                    printf '\n'
+                    vps_ui_pause
                 fi
                 ;;
         esac
     done
 }
 
+vpsctl_validate_menu_options() {
+    local invalid="" option
+
+    for option in \
+        "${VPSCTL_DRY_RUN}:--dry-run" \
+        "${VPSCTL_INSTALL_DEPS}:--install-deps" \
+        "${VPSCTL_ASSUME_YES}:--yes" \
+        "${VPSCTL_NON_INTERACTIVE}:--non-interactive" \
+        "${VPSCTL_QUIET}:--quiet" \
+        "${VPSCTL_VERBOSE}:--verbose"; do
+        [[ "${option%%:*}" == "1" ]] || continue
+        [[ -z "$invalid" ]] || invalid+=", "
+        invalid+="${option#*:}"
+    done
+    [[ -z "$invalid" ]] || {
+        vpsctl_error "交互菜单不能使用执行型全局选项：${invalid}"
+        return 2
+    }
+}
+
 vpsctl_run_menu() {
     local choice domain_index domain
 
-    if [[ "$VPSCTL_NON_INTERACTIVE" == "1" || ! -t 0 || ! -t 1 ]]; then
-        vpsctl_error "交互菜单需要终端，且不能与 --non-interactive 同时使用"
+    vpsctl_validate_menu_options || return $?
+    if [[ ! -t 0 || ! -t 1 ]]; then
+        vpsctl_error "交互菜单需要终端"
         return 2
     fi
 

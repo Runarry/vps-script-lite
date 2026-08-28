@@ -55,17 +55,19 @@ test_standalone_globals() {
     VPSCTL_DRY_RUN=0 VPSCTL_INSTALL_DEPS=0 VPSCTL_ASSUME_YES=1 VPSCTL_NON_INTERACTIVE=1 VPSCTL_QUIET=1 VPSCTL_VERBOSE=0
 }
 
-test_dependency_authorization() (
+test_shared_dependency_handling() (
     local calls=0 status=0
 
     VPSCTL_DRY_RUN=0
     VPSCTL_NON_INTERACTIVE=1
     VPSCTL_INSTALL_DEPS=1
-    VPS_DNS_INSTALL_DEPS=0
     vps_cmd_ensure_tools() {
         assert_equal 1 "$VPSCTL_INSTALL_DEPS" "global dependency authorization passed to shared helper"
+        assert_equal network-dns "$1" "shared dependency feature"
+        assert_equal dns-query "$2" "shared DNS query dependency"
         calls=$((calls + 1))
     }
+    vps_cmd_confirm() { fail "DNS dependency handling must not ask a dedicated install question"; }
     vps_dns_install_query_tool
     assert_equal 1 "$calls" "global dependency authorization call count"
     assert_equal 1 "$VPSCTL_INSTALL_DEPS" "global dependency authorization preserved"
@@ -73,19 +75,13 @@ test_dependency_authorization() (
     calls=0
     VPSCTL_INSTALL_DEPS=0
     vps_dns_parse_servers --server 1.1.1.1 --install-deps
-    assert_equal 1 "$VPS_DNS_INSTALL_DEPS" "action dependency authorization"
+    assert_equal 1 "$VPSCTL_INSTALL_DEPS" "legacy action dependency option maps to global authorization"
     vps_dns_install_query_tool
     assert_equal 1 "$calls" "action dependency authorization call count"
-    assert_equal 0 "$VPSCTL_INSTALL_DEPS" "action authorization must not leak globally"
-
-    vps_dns_ensure_action_tools network-dns flock
-    assert_equal 2 "$calls" "action authorization covers transaction dependencies"
-    assert_equal 0 "$VPSCTL_INSTALL_DEPS" "transaction dependency authorization must not leak globally"
 
     calls=0
     status=0
     VPSCTL_INSTALL_DEPS=1
-    VPS_DNS_INSTALL_DEPS=0
     vps_cmd_ensure_tools() {
         calls=$((calls + 1))
         return 20
@@ -98,10 +94,66 @@ test_dependency_authorization() (
     calls=0
     status=0
     VPSCTL_INSTALL_DEPS=0
-    VPS_DNS_INSTALL_DEPS=0
+    vps_cmd_ensure_tools() {
+        calls=$((calls + 1))
+        return 3
+    }
     vps_dns_install_query_tool >/dev/null 2>&1 || status=$?
     assert_equal 3 "$status" "missing DNS dependency authorization status"
-    assert_equal 0 "$calls" "unauthorized DNS dependency helper call count"
+    assert_equal 1 "$calls" "unauthorized DNS dependency is delegated to shared helper"
+)
+
+test_interactive_menu_inputs() (
+    local menu_marker="${TEST_SYSTEM_ROOT}/dns-menu-marker" captured status=0
+    local failure_marker="${TEST_SYSTEM_ROOT}/dns-menu-failure-marker"
+
+    VPSCTL_NON_INTERACTIVE=0
+    vps_cmd_prompt_select() {
+        case "$1" in
+            "DNS 管理")
+                assert_equal show "$2" "DNS menu default action"
+                assert_equal test "$5" "DNS menu test action value"
+                assert_equal "测试服务器" "$6" "DNS menu test action label"
+                assert_equal set "$7" "DNS menu set action value"
+                assert_equal "设置服务器" "$8" "DNS menu set action label"
+                if [[ -e "$menu_marker" ]]; then
+                    printf quit
+                else
+                    : >"$menu_marker"
+                    printf test
+                fi
+                ;;
+            "选择测试域名")
+                assert_equal example "$2" "test domain default choice"
+                assert_equal custom "$5" "custom domain choice value"
+                assert_equal "输入自定义域名" "$6" "custom domain choice label"
+                printf custom
+                ;;
+            *) fail "unexpected select prompt: $1" ;;
+        esac
+    }
+    vps_cmd_prompt_value() {
+        case "$1" in
+            "输入一至三个 DNS 服务器"*) printf '1.1.1.1, 9.9.9.9' ;;
+            "输入测试域名") printf 'resolver.example' ;;
+            *) fail "unexpected value prompt: $1" ;;
+        esac
+    }
+    vps_dns_test_candidates() {
+        printf '%s|%s\n' "$(vps_dns_join_servers)" "$VPS_DNS_TEST_DOMAIN" >"${TEST_SYSTEM_ROOT}/dns-menu-captured"
+    }
+
+    vps_dns_menu
+    captured="$(<"${TEST_SYSTEM_ROOT}/dns-menu-captured")"
+    assert_equal '1.1.1.1 9.9.9.9|resolver.example' "$captured" "interactive DNS server and custom domain collection"
+
+    vps_cmd_prompt_select() {
+        [[ "$1" == "DNS 管理" ]] || fail "unexpected failure-path prompt: $1"
+        if [[ -e "$failure_marker" ]]; then printf quit; else : >"$failure_marker"; printf show; fi
+    }
+    vps_dns_show() { return 20; }
+    vps_dns_menu >/dev/null 2>&1 || status=$?
+    assert_equal 20 "$status" "interactive DNS failure status propagation"
 )
 
 test_dry_run_dependency_and_dns_plan() (
@@ -437,8 +489,9 @@ test_nm_restore_rejects_unknown_property() {
 
 test_address_validation
 test_standalone_globals
-test_dependency_authorization
+test_shared_dependency_handling
 test_dry_run_dependency_and_dns_plan
+test_interactive_menu_inputs
 test_backend_detection
 test_preflight_failure_does_not_write
 test_plain_replacement_preserves_directives

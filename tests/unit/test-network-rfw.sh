@@ -457,6 +457,7 @@ test_dependency_install_controls() {
     output="$(RFW_TEST_PATH="$NO_DOWNLOAD_DEPS_BIN" rfw install 2>&1)" || status=$?
     assert_status 3 "$status" "install missing download tools without authorization"
     assert_contains "$output" "--install-deps" "missing download tools authorization hint"
+    [[ "$(grep -o -- '--install-deps' <<<"$output" | wc -l)" == "1" ]] || fail "missing dependency guidance was duplicated"
     assert_not_contains "$output" "apt-get" "unauthorized dependency installation"
     [[ ! -e "${SYSTEM_ROOT}/usr/local/bin/rfw" ]] || fail "missing tools install wrote binary"
     [[ ! -e "${SYSTEM_ROOT}/etc/vpsctl/rfw.conf" ]] || fail "missing tools install wrote configuration"
@@ -747,6 +748,82 @@ test_uninstall_boundaries() {
     [[ -e "$unit" && -e "$binary" ]] || fail "uninstall removed unmanaged files"
 }
 
+test_interactive_ui() (
+    local output capture="${TEST_TMP}/rfw-interactive-output"
+
+    reset_case
+    PATH="${MOCK_BIN}:$PATH"
+    VPSCTL_PROJECT_ROOT="$TEST_ROOT"
+    VPSCTL_TESTING=1
+    VPSCTL_SYSTEM_ROOT="$SYSTEM_ROOT"
+    VPSCTL_ENV_KERNEL_NAME=Linux
+    VPSCTL_ENV_KERNEL_RELEASE=6.1.0
+    VPSCTL_ENV_ARCH=x86_64
+    VPSCTL_ENV_INIT=systemd
+    VPSCTL_NON_INTERACTIVE=0
+    VPSCTL_NO_COLOR=1
+    export PATH VPSCTL_PROJECT_ROOT VPSCTL_TESTING VPSCTL_SYSTEM_ROOT
+    export VPSCTL_ENV_KERNEL_NAME VPSCTL_ENV_KERNEL_RELEASE VPSCTL_ENV_ARCH VPSCTL_ENV_INIT
+    export VPSCTL_NON_INTERACTIVE VPSCTL_NO_COLOR
+    # shellcheck source=../../commands/network/rfw.sh
+    source "$RFW_SCRIPT" help >/dev/null
+
+    vps_cmd_confirm() {
+        local prompt="$1" reply
+        printf 'CONFIRM:%s\n' "$prompt"
+        IFS= read -r reply || return 130
+        [[ "$reply" == y ]]
+    }
+
+    rfw_defaults
+    RFW_CFG[geo_mode]=blocklist
+    RFW_CFG[countries]=US
+    rfw_configure_wizard <<< $'bad interface\nens5\n1\n2\n\n\n\n\n\n\n2\n3\n5\ny' >"$capture" 2>&1
+    output="$(<"$capture")"
+    assert_contains "$output" "网络接口格式无效" "wizard interface validation"
+    assert_contains "$output" "即将保存的 RFW 配置" "wizard save summary"
+    assert_contains "$output" "确认保存以上配置" "wizard summary confirmation"
+    [[ "${RFW_CFG[interface]}" == "ens5" ]] || fail "wizard did not save validated interface"
+    [[ "${RFW_CFG[geo_mode]}" == "none" && -z "${RFW_CFG[countries]}" ]] || fail "geo none did not clear countries"
+    [[ "${RFW_CFG[block_email]}" == "on" ]] || fail "wizard numbered switch selection"
+    [[ "${RFW_CFG[fet]}" == "loose" ]] || fail "wizard numbered FET selection"
+    [[ "${RFW_CFG[xdp_mode]}" == "drv" ]] || fail "wizard numbered XDP selection"
+    [[ "${RFW_CFG[RUST_LOG]}" == "debug" ]] || fail "wizard numbered log-level selection"
+
+    RFW_CFG[countries]=""
+    rfw_prompt_countries <<< $'ZZ\nus,ca' >"$capture" 2>&1
+    output="$(<"$capture")"
+    assert_contains "$output" "ISO 3166-1" "wizard country validation"
+    [[ "${RFW_CFG[countries]}" == "US,CA" ]] || fail "wizard did not normalize country codes"
+
+    rfw_service_start() { printf 'start'; printf ' %s' "$@"; printf '\n'; }
+    rfw_service_stop() { printf 'stop'; printf ' %s' "$@"; printf '\n'; }
+    rfw_stats() { printf 'stats'; printf ' %s' "$@"; printf '\n'; }
+    rfw_logs() { printf 'logs'; printf ' %s' "$@"; printf '\n'; }
+    rfw_uninstall() { printf 'uninstall'; printf ' %s' "$@"; printf '\n'; }
+
+    output="$(rfw_menu_start <<<2 2>&1)"
+    assert_contains "$output" "start --enable" "menu start and enable mapping"
+    output="$(rfw_menu_stop <<<2 2>&1)"
+    assert_contains "$output" "stop --disable" "menu stop and disable mapping"
+    output="$(rfw_menu_stats <<< $'3\n2\n70000\n443\n2\n999.1.2.3\n192.0.2.8\n2' 2>&1)"
+    assert_contains "$output" "端口无效" "menu stats port validation"
+    assert_contains "$output" "IPv4 地址无效" "menu stats IP validation"
+    assert_contains "$output" "stats --allowed-only --port 443 --ip 192.0.2.8 --group-by-port" "menu stats argument mapping"
+    output="$(rfw_menu_logs <<< $'5\n1000001\n25\n2\n2\n1 hour ago' 2>&1)"
+    assert_contains "$output" "日志行数无效" "menu logs line validation"
+    assert_contains "$output" "logs --lines 25 --follow --since 1 hour ago" "menu logs argument mapping"
+    output="$(rfw_menu_uninstall <<<2 2>&1)"
+    assert_contains "$output" "uninstall --purge" "menu purge mapping"
+    assert_not_contains "$output" "--confirm-purge" "menu exposed purge confirmation bypass"
+
+    output="$(rfw_menu <<<q 2>&1)"
+    assert_contains "$output" "访问统计" "numbered RFW main menu"
+    assert_not_contains "$output" "--force" "menu exposed force option"
+    assert_not_contains "$output" "--install-deps" "menu repeated dependency option"
+    assert_not_contains "$output" "--confirm" "menu exposed confirmation option"
+)
+
 write_mocks
 if [[ -n "${RFW_TEST_ONLY:-}" ]]; then
     "$RFW_TEST_ONLY"
@@ -770,4 +847,5 @@ test_restart_rollback
 test_transaction_rollbacks
 test_stats_logs_status_and_ipv6_warning
 test_uninstall_boundaries
+test_interactive_ui
 printf 'PASS: network rfw tests\n'

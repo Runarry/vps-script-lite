@@ -19,17 +19,9 @@ PROXY_PACKAGE_MANAGER="unknown"
 PROXY_ARCH="unknown"
 
 proxy_ensure_tools() {
-    local feature="${1:-}" status=0
+    local feature="${1:-}"
     shift || return 2
-    if vps_cmd_ensure_tools "proxy-${feature}" "$@"; then
-        return 0
-    else
-        status=$?
-    fi
-    if ((status == 3)) && [[ "${VPSCTL_INSTALL_DEPS:-0}" != "1" ]]; then
-        vps_cmd_error "缺少必需的系统工具；请使用 --install-deps 明确允许安装依赖"
-    fi
-    return "$status"
+    vps_cmd_ensure_tools "proxy-${feature}" "$@"
 }
 
 proxy_ensure_mutation_tools() {
@@ -76,6 +68,10 @@ proxy_prompt_select() {
     local -a values=() labels=()
     shift 2 || return 2
     [[ -n "$prompt" ]] && (($# >= 2 && $# % 2 == 0)) || return 2
+    if declare -F vps_cmd_prompt_select >/dev/null 2>&1; then
+        vps_cmd_prompt_select "$prompt" "$default_value" "$@"
+        return
+    fi
     while (($#)); do
         values+=("$1")
         labels+=("$2")

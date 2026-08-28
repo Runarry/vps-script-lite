@@ -18,12 +18,14 @@ bash bin/vpsctl --dry-run --install-deps network dns set --server 1.1.1.1
 
 三项功能的公共约定如下：
 
-- `--install-deps` 明确允许按当前动作安装缺失的系统工具；未提供时只报告缺失项。它支持 `apt-get`、`dnf5`、`dnf`、`yum`、`apk`、`pacman` 与 `zypper`，但不安装或绕过内核、init 系统、CPU 架构、XDP/BPF 等平台能力。
+- `--install-deps` 为非交互调用和 `--dry-run` 依赖计划明确授权按当前动作安装缺失的系统工具；真实执行的交互流程则只在当前动作确有缺失时询问。它支持 `apt-get`、`dnf5`、`dnf`、`yum`、`apk`、`pacman` 与 `zypper`，但不安装或绕过内核、init 系统、CPU 架构、XDP/BPF 等平台能力。
 - `--dry-run` 展示检测结果和计划，不写系统、不安装依赖、不改变服务状态。与 `--install-deps` 组合时会展示包管理器命令；DNS 可继续展示后续计划，BBR 和 RFW 在缺失工具妨碍安全验证时会提示安装后重跑。
 - `--yes` 只跳过允许自动同意的普通提示，不绕过能力检查、写前验证或 RFW 的中断性操作强确认。
 - `--non-interactive` 禁止读取终端；缺少必要参数或必要的强确认时立即失败。
 - 修改操作分别使用 `/run/vpsctl/network-bbr.lock`、`/run/vpsctl/network-dns.lock` 和 `/run/vpsctl/network-rfw.lock`，阻止同一功能的并发事务互相覆盖。
 - 普通用户可运行帮助和可读取的状态查询；写 `/etc`、`/usr/local`、systemd 单元或持久状态时需要 root。
+
+这些执行型全局参数只用于直接功能 CLI；主管理菜单进入 BBR、DNS 或 RFW UI 后执行真实动作，不提供演练、依赖授权、自动同意、非交互、静默或详细日志开关。机器可读输出选项、`--force` 与 `--confirm-*` 确认标志也只在直接 CLI 暴露；菜单用编号选择固定值，用经校验的文本输入收集开放值，并在危险动作前执行对应交互确认。
 
 ## 2. BBR
 
@@ -110,7 +112,7 @@ RFW 入口仅支持以下组合：
 
 `install` 和 `update` 只从 [narwhal-cloud/rfw 官方 Releases](https://github.com/narwhal-cloud/rfw/releases)解析最新稳定 release，拒绝 prerelease、草稿、非 HTTPS 下载和无法匹配本机架构的资产。下载的二进制必须按官方 checksum 验证并核对版本后才能替换；校验信息缺失、不匹配或含糊时安全失败，不安装未验证资产。
 
-RFW 会在参数校验以及 Linux、systemd、架构和内核版本门禁通过后，按动作补齐 `curl`、`sha256sum`、`flock`、`ip`，以及启用端口日志时所需的 `mountpoint`。`systemctl`、`journalctl`、XDP、BPF 文件系统和 RFW 二进制能力仍按平台或功能前置条件处理，不作为通用软件包自动安装。
+RFW 会在参数校验以及 Linux、systemd、架构和内核版本门禁通过后，只检查当前动作实际需要的 `curl`、`sha256sum`、`flock`、`ip`，以及启用端口日志时所需的 `mountpoint`。真实执行的交互环境发现这些可安装工具缺失时才列出缺失项并询问是否安装；非交互调用和 `--dry-run` 依赖计划仍需预先提供 `--install-deps`，否则返回依赖缺失。`systemctl`、`journalctl`、XDP、BPF 文件系统和 RFW 二进制能力仍按平台或功能前置条件处理，不作为通用软件包自动安装。
 
 ### 4.2 子动作和选项
 
@@ -128,6 +130,14 @@ RFW 会在参数校验以及 Linux、systemd、架构和内核版本门禁通过
 | `uninstall` | 停止并移除项目安装的组件 | `--purge` 同时移除项目配置、状态和 RFW 备份；非交互清除还需 `--confirm-purge` |
 
 `configure` 的规则开关均使用明确的 `on` 或 `off`，不得用是否出现参数来表达含糊的继承状态。`--countries CSV` 必须与地理模式一致，并在写入前规范化和校验国家代码。
+
+交互 UI 不要求输入这些 CLI 枚举。配置向导将 Geo 模式、邮件/HTTP/SOCKS5/WireGuard/QUIC/全量拦截开关、FET、XDP 模式、端口访问日志和日志级别列为编号选项；接口、国家代码等开放值输入后再校验。其他动作提供以下交互分支：
+
+- 启动：仅启动，或启动并启用开机启动。
+- 停止：仅停止，或停止并禁用开机启动。
+- 统计：全部、仅拦截或仅允许；端口、IP 为可选过滤条件，并可选择是否按端口分组。
+- 日志：输入并校验行数，选择是否持续跟随，可选填写 `since`。
+- 卸载：保留配置与状态，或彻底清除。彻底清除仍要求输入 `PURGE-RFW` 强确认短语。
 
 首次安装生成的配置将所有过滤规则、FET 和访问日志设为 `off`，不会自动启动服务；至少显式配置一项过滤规则或访问日志后才能启动。上游的 `--block-email` 针对 SMTP 发送流量，其他协议开关和 `--block-all` 针对相应的 IPv4 入站流量。
 

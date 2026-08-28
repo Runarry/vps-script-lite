@@ -233,6 +233,79 @@ vps_cmd_is_interactive() {
     [[ "${VPSCTL_NON_INTERACTIVE:-0}" != "1" && -t 0 && -t 1 ]]
 }
 
+vps_cmd_prompt_select() {
+    local prompt="${1:-}" default_value="${2:-}" choice value label index
+    local -a values=() labels=()
+
+    (($# >= 4 && ($# - 2) % 2 == 0)) || {
+        vps_cmd_error "vps_cmd_prompt_select 需要 PROMPT、DEFAULT 和至少一组 VALUE/LABEL"
+        return 2
+    }
+    [[ -n "$prompt" ]] || {
+        vps_cmd_error "vps_cmd_prompt_select 的 PROMPT 不能为空"
+        return 2
+    }
+    shift 2
+    while (($# > 0)); do
+        values+=("$1")
+        labels+=("$2")
+        shift 2
+    done
+
+    while true; do
+        printf '%s\n' "$prompt" >&2
+        for ((index = 0; index < ${#values[@]}; index++)); do
+            value="${values[$index]}"
+            label="${labels[$index]}"
+            if [[ -n "$default_value" && "$value" == "$default_value" ]]; then
+                printf '  [%d] %s（默认）\n' "$((index + 1))" "$label" >&2
+            else
+                printf '  [%d] %s\n' "$((index + 1))" "$label" >&2
+            fi
+        done
+        printf '  [q] 返回\n选择：' >&2
+        IFS= read -r choice || return 130
+        choice="$(vps_cmd_trim "$choice")"
+        case "$choice" in
+            q | Q | 0) return 130 ;;
+            '')
+                if [[ -n "$default_value" ]]; then
+                    printf '%s' "$default_value"
+                    return 0
+                fi
+                ;;
+            *)
+                if [[ "$choice" =~ ^[1-9][0-9]{0,3}$ ]] && ((10#$choice <= ${#values[@]})); then
+                    printf '%s' "${values[$((10#$choice - 1))]}"
+                    return 0
+                fi
+                ;;
+        esac
+        vps_cmd_warning "选择无效，请输入列表中的编号"
+    done
+}
+
+vps_cmd_prompt_value() {
+    local prompt="${1:-}" default_value="${2:-}" value
+
+    (($# == 2)) || {
+        vps_cmd_error "vps_cmd_prompt_value 需要 PROMPT 和 DEFAULT"
+        return 2
+    }
+    [[ -n "$prompt" ]] || {
+        vps_cmd_error "vps_cmd_prompt_value 的 PROMPT 不能为空"
+        return 2
+    }
+    if [[ -n "$default_value" ]]; then
+        printf '%s [%s]：' "$prompt" "$default_value" >&2
+    else
+        printf '%s：' "$prompt" >&2
+    fi
+    IFS= read -r value || return 130
+    value="$(vps_cmd_trim "$value")"
+    printf '%s' "${value:-$default_value}"
+}
+
 vps_cmd_require_root() {
     if [[ "${VPSCTL_DRY_RUN:-0}" == "1" || "${VPSCTL_TESTING:-0}" == "1" ]] || ((EUID == 0)); then
         return 0
@@ -451,9 +524,21 @@ _vps_cmd_tool_available() {
     fi
 }
 
+_vps_cmd_confirm_dependency_install() {
+    local reply
+
+    printf '是否安装这些依赖？ [是/否，输入 y 确认] ' >&2
+    IFS= read -r reply || return 130
+    reply="$(vps_cmd_trim "$reply")"
+    case "$reply" in
+        y | Y | yes | YES) return 0 ;;
+        *) return 3 ;;
+    esac
+}
+
 vps_cmd_ensure_tools() {
     local feature="${1:-}"
-    local manager package tool missing_join packages_join
+    local manager package tool missing_join packages_join confirm_status
     local -a missing=() packages=()
     local -A package_seen=()
 
@@ -471,14 +556,18 @@ vps_cmd_ensure_tools() {
             vps_cmd_error "无效的工具名称：${tool:-<空>}"
             return 2
         }
-        vps_cmd_package_for_tool apt-get "$tool" >/dev/null || return $?
         _vps_cmd_tool_available "$tool" || missing+=("$tool")
     done
     ((${#missing[@]} > 0)) || return 0
-    missing_join="$(IFS=' '; printf '%s' "${missing[*]}")"
-    if [[ "${VPSCTL_INSTALL_DEPS:-0}" != 1 ]]; then
-        vps_cmd_error "${feature} 缺少工具：${missing_join}；请添加 --install-deps 允许安装依赖"
-        return 3
+    missing_join="$(
+        IFS=' '
+        printf '%s' "${missing[*]}"
+    )"
+    if [[ "${VPSCTL_INSTALL_DEPS:-0}" != "1" ]]; then
+        if [[ "${VPSCTL_DRY_RUN:-0}" == "1" ]] || ! vps_cmd_is_interactive; then
+            vps_cmd_error "${feature} 缺少工具：${missing_join}；请添加 --install-deps 允许安装依赖"
+            return 3
+        fi
     fi
     manager="$(vps_cmd_detect_package_manager)" || return $?
     for tool in "${missing[@]}"; do
@@ -488,7 +577,19 @@ vps_cmd_ensure_tools() {
             packages+=("$package")
         fi
     done
-    packages_join="$(IFS=' '; printf '%s' "${packages[*]}")"
+    packages_join="$(
+        IFS=' '
+        printf '%s' "${packages[*]}"
+    )"
+    if [[ "${VPSCTL_INSTALL_DEPS:-0}" != 1 ]]; then
+        vps_cmd_warning "${feature} 缺少工具：${missing_join}；需要安装软件包：${packages_join}"
+        if _vps_cmd_confirm_dependency_install; then
+            :
+        else
+            confirm_status=$?
+            return "$confirm_status"
+        fi
+    fi
     vps_cmd_info "${feature} 缺少工具：${missing_join}；将安装软件包：${packages_join}"
     vps_cmd_install_packages "$manager" "${packages[@]}" || return $?
     if [[ "${VPSCTL_DRY_RUN:-0}" == 1 ]]; then

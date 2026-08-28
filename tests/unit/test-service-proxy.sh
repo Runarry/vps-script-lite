@@ -14,11 +14,12 @@ TEST_DEP_BIN="${TEST_TEMP}/bin-dependencies"
 MOCK_LOG="${TEST_TEMP}/mock.log"
 readonly TEST_SYSTEM_ROOT TEST_FAKE_BIN TEST_DEP_BIN MOCK_LOG
 REAL_BASH="$(command -v bash)"
+REAL_CAT="$(command -v cat)"
 REAL_DIRNAME="$(command -v dirname)"
 REAL_GREP="$(command -v grep)"
 REAL_SHA256SUM="$(command -v sha256sum)"
 REAL_JQ="$(command -v jq)"
-readonly REAL_BASH REAL_DIRNAME REAL_GREP REAL_SHA256SUM REAL_JQ
+readonly REAL_BASH REAL_CAT REAL_DIRNAME REAL_GREP REAL_SHA256SUM REAL_JQ
 trap 'rm -rf -- "$TEST_TEMP"' EXIT
 
 fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
@@ -84,6 +85,7 @@ make_mock jq 'set -o pipefail; "$REAL_JQ" "$@" | tr -d "\r"; exit "${PIPESTATUS[
 make_mock apt-get 'printf "apt-get %s\n" "$*" >>"$MOCK_LOG"'
 
 ln -s "$REAL_BASH" "${TEST_DEP_BIN}/bash"
+ln -s "$REAL_CAT" "${TEST_DEP_BIN}/cat"
 ln -s "$REAL_DIRNAME" "${TEST_DEP_BIN}/dirname"
 ln -s "$REAL_GREP" "${TEST_DEP_BIN}/grep"
 ln -s "${TEST_FAKE_BIN}/systemctl" "${TEST_DEP_BIN}/systemctl"
@@ -185,6 +187,7 @@ test_arguments_dry_run_and_time() {
 }
 
 test_dependency_install_plans() {
+    local hint_count
     reset_root
 
     RUN_PROXY_PATH="$TEST_DEP_BIN" run_proxy --install-deps --help
@@ -195,6 +198,8 @@ test_dependency_install_plans() {
     assert_equal 3 "$RUN_STATUS" "status missing jq"
     assert_contains "$RUN_OUTPUT" "jq" "status missing jq tool"
     assert_contains "$RUN_OUTPUT" "--install-deps" "status missing jq hint"
+    hint_count="$(grep -o -- '--install-deps' <<<"$RUN_OUTPUT" | wc -l | tr -d ' ')"
+    assert_equal 1 "$hint_count" "status has one centralized install-deps hint"
 
     RUN_PROXY_PATH="$TEST_DEP_BIN" run_proxy --dry-run --install-deps install --core sing-box
     assert_equal 0 "$RUN_STATUS" "sing-box dependency dry-run"
@@ -442,9 +447,10 @@ test_tls_certificate_transaction() {
 }
 
 test_unified_interactive_api() (
-    local output selected status=0 menu_line status_line install_marker
+    local output selected status=0 menu_line status_line install_marker subscription decoded
     local selector_stderr="${TEST_TEMP}/selector.stderr"
     local guided_stderr="${TEST_TEMP}/guided.stderr"
+    local subscription_stderr="${TEST_TEMP}/subscription.stderr"
 
     reset_root
     # Source the production entry point once with a harmless action so its
@@ -463,6 +469,26 @@ test_unified_interactive_api() (
     status=0
     proxy_prompt_select "selector quit" quick quick "Quick" custom "Custom" <<<q >/dev/null 2>&1 || status=$?
     assert_equal 130 "$status" "selector q quit"
+    selected="$(
+        vps_cmd_prompt_select() {
+            [[ "${PROXY_INTERACTIVE:-0}" == "1" ]] || return 99
+            [[ "$1" == "delegated select" && "$2" == "first" && "$3" == "first" && "$4" == "First" ]] || return 98
+            printf 'delegated-select'
+        }
+        PROXY_INTERACTIVE=1
+        proxy_prompt_select "delegated select" first first First
+    )"
+    assert_equal delegated-select "$selected" "selector delegates with captured interactive state"
+    selected="$(
+        vps_cmd_prompt_value() {
+            [[ "${PROXY_INTERACTIVE:-0}" == "1" ]] || return 99
+            [[ "$1" == "delegated value" && "$2" == "fallback" ]] || return 98
+            printf 'delegated-value'
+        }
+        PROXY_INTERACTIVE=1
+        proxy_prompt_value "delegated value" fallback
+    )"
+    assert_equal delegated-value "$selected" "value prompt delegates with captured interactive state"
     proxy_test_cancel_action() { return 130; }
     proxy_test_fail_action() { return 3; }
     status=0
@@ -518,6 +544,18 @@ test_unified_interactive_api() (
     assert_contains "$output" "名称：numbered-two" "interactive numbered details selection"
     output="$(proxy_node_view_interactive <<< $'1\n2' 2>&1)"
     assert_contains "$output" "ss://" "interactive numbered URI action"
+
+    subscription="$(proxy_subscription_interactive <<<2 2>"$subscription_stderr")"
+    output="$(<"$subscription_stderr")"
+    assert_contains "$output" "全部节点" "subscription range includes all nodes"
+    assert_contains "$output" "Xray（2 个节点）" "subscription range includes installed core with nodes"
+    assert_not_contains "$output" "sing-box（" "subscription range filters core without nodes"
+    decoded="$(printf '%s' "$subscription" | base64 -d)"
+    assert_contains "$decoded" "numbered-one" "interactive core subscription first URI"
+    assert_contains "$decoded" "numbered-two" "interactive core subscription second URI"
+    status=0
+    proxy_subscription_interactive <<<3 >/dev/null 2>&1 || status=$?
+    assert_equal 130 "$status" "subscription range can return to node menu"
 
     reset_root
     install_marker="${TEST_SYSTEM_ROOT}/run/stub-installed"

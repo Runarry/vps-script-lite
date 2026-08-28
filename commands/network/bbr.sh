@@ -1073,54 +1073,132 @@ bbr_restore() {
     vps_cmd_success "已恢复 TCP 算法 ${BBR_ORIGINAL_ALGORITHM} 和 qdisc ${BBR_ORIGINAL_QDISC}"
 }
 
+bbr_prompt_algorithm() {
+    local available current item label default_algorithm
+    local -a algorithms=() options=()
+
+    available="$(bbr_available_algorithms)" || {
+        vps_cmd_error "无法读取当前内核可用的 TCP 算法"
+        return 3
+    }
+    IFS=' ' read -r -a algorithms <<<"$available"
+    ((${#algorithms[@]} > 0)) || {
+        vps_cmd_error "当前内核没有报告可用的 TCP 算法"
+        return 3
+    }
+    current="$(bbr_current_algorithm 2>/dev/null || true)"
+    default_algorithm="${algorithms[0]}"
+    for item in "${algorithms[@]}"; do
+        [[ "$item" == "$current" ]] && default_algorithm="$item"
+        label="$item"
+        [[ "$item" != "$current" ]] || label+="（当前）"
+        options+=("$item" "$label")
+    done
+    vps_cmd_prompt_select "选择 TCP 拥塞控制算法" "$default_algorithm" "${options[@]}"
+}
+
+bbr_prompt_qdisc() {
+    local current default_qdisc selected item label
+    local -a qdiscs=(fq fq_codel) options=()
+
+    current="$(bbr_current_qdisc 2>/dev/null || true)"
+    if [[ -n "$current" && "$current" != "fq" && "$current" != "fq_codel" ]] && bbr_validate_name "$current"; then
+        qdiscs+=("$current")
+    fi
+    default_qdisc="fq"
+    for item in "${qdiscs[@]}"; do
+        [[ "$item" == "$current" ]] && default_qdisc="$item"
+        label="$item"
+        [[ "$item" != "$current" ]] || label+="（当前）"
+        options+=("$item" "$label")
+    done
+    options+=(manual "手动输入")
+    selected="$(vps_cmd_prompt_select "选择默认 qdisc" "$default_qdisc" "${options[@]}")" || return $?
+    if [[ "$selected" == "manual" ]]; then
+        vps_cmd_prompt_value "输入默认 qdisc" "${current:-fq}"
+    else
+        printf '%s\n' "$selected"
+    fi
+}
+
+bbr_prompt_live_qdisc() {
+    local choice status
+
+    BBR_APPLY_LIVE_QDISC=0
+    choice="$(vps_cmd_prompt_select \
+        "是否立即应用到默认路由网卡的 root qdisc" keep \
+        keep "不立即应用（仅修改默认值）" \
+        apply "立即应用 root qdisc")" || return $?
+    [[ "$choice" == "apply" ]] || return 0
+    vps_cmd_warning "立即替换 root qdisc 可能造成短暂网络波动或连接中断。"
+    if vps_cmd_confirm "确认承担风险并立即替换 root qdisc？"; then
+        BBR_APPLY_LIVE_QDISC=1
+        return 0
+    else
+        status=$?
+    fi
+    ((status == 1)) && return 0
+    return "$status"
+}
+
 bbr_interactive_menu() {
-    local choice algorithm qdisc confirm_status
+    local choice algorithm qdisc status=0 prompt_status action_status
 
     while true; do
-        printf '\nBBR 网络管理\n'
-        printf '  1) 查看状态\n'
-        printf '  2) 启用 BBR + fq\n'
-        printf '  3) 自定义算法和 qdisc\n'
-        printf '  4) 恢复原始状态\n'
-        printf '  q) 退出\n'
-        printf '请选择：'
-        IFS= read -r choice || return 0
+        choice="$(vps_cmd_prompt_select \
+            "BBR 网络管理" status \
+            status "查看状态" \
+            enable "启用 BBR + fq" \
+            set "选择算法和 qdisc" \
+            restore "恢复原始状态" \
+            quit "退出")" || {
+                prompt_status=$?
+                ((prompt_status == 130)) && return "$status"
+                return "$prompt_status"
+            }
         case "$choice" in
-            1)
-                bbr_status || true
+            status)
+                bbr_status || status=$?
                 ;;
-            2)
-                BBR_APPLY_LIVE_QDISC=0
-                if vps_cmd_confirm "是否立即替换默认路由网卡的 root qdisc？"; then
-                    BBR_APPLY_LIVE_QDISC=1
+            enable)
+                if bbr_prompt_live_qdisc; then
+                    bbr_apply_settings bbr fq || status=$?
                 else
-                    confirm_status=$?
-                    ((confirm_status == 1)) || return "$confirm_status"
+                    action_status=$?
+                    [[ "$action_status" == "130" ]] || status="$action_status"
                 fi
-                bbr_apply_settings bbr fq || true
                 ;;
-            3)
-                printf 'TCP 算法：'
-                IFS= read -r algorithm || return 130
-                printf '默认 qdisc：'
-                IFS= read -r qdisc || return 130
-                BBR_APPLY_LIVE_QDISC=0
-                if vps_cmd_confirm "是否立即替换默认路由网卡的 root qdisc？"; then
-                    BBR_APPLY_LIVE_QDISC=1
+            set)
+                if algorithm="$(bbr_prompt_algorithm)"; then
+                    :
                 else
-                    confirm_status=$?
-                    ((confirm_status == 1)) || return "$confirm_status"
+                    action_status=$?
+                    [[ "$action_status" == "130" ]] || status="$action_status"
+                    continue
                 fi
-                bbr_apply_settings "$algorithm" "$qdisc" || true
+                if qdisc="$(bbr_prompt_qdisc)"; then
+                    :
+                else
+                    action_status=$?
+                    [[ "$action_status" == "130" ]] || status="$action_status"
+                    continue
+                fi
+                if bbr_prompt_live_qdisc; then
+                    bbr_apply_settings "$algorithm" "$qdisc" || status=$?
+                else
+                    action_status=$?
+                    [[ "$action_status" == "130" ]] || status="$action_status"
+                fi
                 ;;
-            4)
-                bbr_restore || true
+            restore)
+                bbr_restore || status=$?
                 ;;
-            q | Q | '')
-                return 0
+            quit)
+                return "$status"
                 ;;
             *)
-                vps_cmd_warning "未知菜单选项：${choice}"
+                vps_cmd_error "交互选择返回了未知 BBR 动作：${choice}"
+                return 70
                 ;;
         esac
     done

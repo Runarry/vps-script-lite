@@ -15,7 +15,6 @@ VPS_DNS_BACKEND=""
 VPS_DNS_NM_CONNECTION=""
 VPS_DNS_NM_DEVICE=""
 VPS_DNS_TEST_DOMAIN="example.com"
-VPS_DNS_INSTALL_DEPS=0
 declare -a VPS_DNS_SERVERS=()
 
 vps_dns_path() { vps_cmd_system_path "$1"; }
@@ -77,7 +76,6 @@ vps_dns_usage() {
 test/set 选项：
   --server IP                  候选 DNS 服务器，可重复指定
   --test-domain DOMAIN         测试查询域名（默认：example.com）
-  --install-deps               明确允许安装 DNS 查询工具
 
 可直接运行脚本时使用的全局选项：
   --dry-run                    仅演练，不写入系统
@@ -146,7 +144,6 @@ vps_dns_validate_server() {
 vps_dns_parse_servers() {
     VPS_DNS_SERVERS=()
     VPS_DNS_TEST_DOMAIN="example.com"
-    VPS_DNS_INSTALL_DEPS=0
     while (($# > 0)); do
         case "$1" in
             --server)
@@ -182,7 +179,8 @@ vps_dns_parse_servers() {
                 shift 2
                 ;;
             --install-deps)
-                VPS_DNS_INSTALL_DEPS=1
+                # 兼容旧的动作级写法；依赖授权统一使用公共全局标志。
+                VPSCTL_INSTALL_DEPS=1
                 shift
                 ;;
             -h | --help)
@@ -212,46 +210,8 @@ vps_dns_query_tool() {
     return 1
 }
 
-vps_dns_ensure_action_tools() {
-    local saved_authorization="${VPSCTL_INSTALL_DEPS:-0}" status=0
-
-    if [[ "${VPS_DNS_INSTALL_DEPS:-0}" == "1" ]]; then
-        VPSCTL_INSTALL_DEPS=1
-    fi
-    if vps_cmd_ensure_tools "$@"; then
-        status=0
-    else
-        status=$?
-    fi
-    VPSCTL_INSTALL_DEPS="$saved_authorization"
-    return "$status"
-}
-
 vps_dns_install_query_tool() {
-    local status saved_authorization="${VPSCTL_INSTALL_DEPS:-0}"
-    if [[ "${VPSCTL_NON_INTERACTIVE:-0}" == "1" && "$VPS_DNS_INSTALL_DEPS" != "1" && "$saved_authorization" != "1" ]]; then
-        vps_cmd_error "未找到 dig、drill 或 nslookup；请使用 --install-deps 重试"
-        return 3
-    fi
-    if [[ "$VPS_DNS_INSTALL_DEPS" != "1" && "$saved_authorization" != "1" ]]; then
-        [[ "${VPSCTL_DRY_RUN:-0}" != "1" ]] || {
-            vps_cmd_error "演练依赖安装时需要显式指定 --install-deps"
-            return 3
-        }
-        if vps_cmd_confirm "是否安装 DNS 查询工具？"; then :; else
-            status=$?
-            [[ "$status" == 1 ]] && return 64
-            return "$status"
-        fi
-    fi
-    VPSCTL_INSTALL_DEPS=1
-    if vps_cmd_ensure_tools network-dns dns-query; then
-        status=0
-    else
-        status=$?
-    fi
-    VPSCTL_INSTALL_DEPS="$saved_authorization"
-    return "$status"
+    vps_cmd_ensure_tools network-dns dns-query
 }
 
 vps_dns_query() {
@@ -752,7 +712,7 @@ vps_dns_set() {
     fi
     if [[ -n "$managed_target" ]]; then vps_dns_require_writable_target "$managed_target" || return $?; fi
     if [[ "${VPSCTL_DRY_RUN:-0}" != "1" ]]; then
-        vps_dns_ensure_action_tools network-dns flock || return $?
+        vps_cmd_ensure_tools network-dns flock || return $?
         vps_cmd_lock "network-dns" || return $?
         trap 'vps_cmd_unlock; trap - RETURN' RETURN
         vps_dns_backup_current "$backend" || return 20
@@ -892,7 +852,7 @@ vps_dns_restore() {
     }
     if [[ "$target" == /* ]]; then vps_dns_require_writable_target "$target" || return $?; fi
     if [[ "${VPSCTL_DRY_RUN:-0}" != "1" ]]; then
-        vps_dns_ensure_action_tools network-dns flock || return $?
+        vps_cmd_ensure_tools network-dns flock || return $?
         if vps_cmd_confirm "是否从 $backup 恢复 DNS 配置？"; then :; else
             status=$?
             if [[ "$status" == 1 ]]; then
@@ -956,34 +916,77 @@ vps_dns_restore() {
     vps_cmd_success "已从 $backup 恢复 DNS 配置"
 }
 
-vps_dns_menu() {
-    local choice raw token status
+vps_dns_prompt_test_args() {
+    local raw token domain_choice domain
     local -a tokens=() args=()
+
+    vps_cmd_warning "请仅使用可信的 DNS 服务器 IP 地址。"
+    raw="$(vps_cmd_prompt_value "输入一至三个 DNS 服务器（空格或逗号分隔）" "1.1.1.1 8.8.8.8")" || return $?
+    raw="${raw//,/ }"
+    IFS=$' \t' read -r -a tokens <<<"$raw"
+    for token in "${tokens[@]}"; do
+        [[ -n "$token" ]] && args+=(--server "$token")
+    done
+    domain_choice="$(vps_cmd_prompt_select \
+        "选择测试域名" example \
+        example "使用 example.com" \
+        custom "输入自定义域名")" || return $?
+    if [[ "$domain_choice" == "custom" ]]; then
+        domain="$(vps_cmd_prompt_value "输入测试域名" example.com)" || return $?
+        args+=(--test-domain "$domain")
+    fi
+    vps_dns_parse_servers "${args[@]}"
+}
+
+vps_dns_menu() {
+    local choice status=0 prompt_status action_status
+
     while true; do
-        printf '\nDNS 管理\n  1) 显示状态\n  2) 测试服务器\n  3) 设置服务器\n  4) 验证配置\n  5) 刷新后端\n  6) 恢复最新备份\n  q) 退出\n\n请选择：'
-        IFS= read -r choice || return 0
+        choice="$(vps_cmd_prompt_select \
+            "DNS 管理" show \
+            show "显示状态" \
+            test "测试服务器" \
+            set "设置服务器" \
+            verify "验证配置" \
+            refresh "刷新后端" \
+            restore "恢复最新备份" \
+            quit "退出")" || {
+                prompt_status=$?
+                ((prompt_status == 130)) && return "$status"
+                return "$prompt_status"
+            }
         case "$choice" in
-            1) vps_dns_show ;;
-            2 | 3)
-                vps_cmd_warning "请仅使用可信的 DNS 服务器 IP 地址，并输入一至三个地址。"
-                printf '服务器（使用逗号或空格分隔）：'
-                IFS= read -r raw || continue
-                raw="${raw//,/ }"
-                IFS=$' \t' read -r -a tokens <<<"$raw"
-                args=()
-                for token in "${tokens[@]}"; do [[ -n "$token" ]] && args+=(--server "$token"); done
-                if vps_dns_parse_servers "${args[@]}"; then
-                    if [[ "$choice" == 2 ]]; then vps_dns_test_candidates || true; else vps_dns_set || true; fi
+            show) vps_dns_show || status=$? ;;
+            test | set)
+                if vps_dns_prompt_test_args; then
+                    if [[ "$choice" == test ]]; then
+                        vps_dns_test_candidates || status=$?
+                    else
+                        vps_dns_set || status=$?
+                    fi
+                else
+                    action_status=$?
+                    [[ "$action_status" == "130" ]] || status="$action_status"
                 fi
                 ;;
-            4)
+            verify)
                 VPS_DNS_SERVERS=()
                 VPS_DNS_BACKEND=""
-                vps_dns_verify || true
+                vps_dns_verify || status=$?
                 ;;
-            5) vps_cmd_require_root && vps_dns_refresh_backend || true ;;
-            6) vps_dns_restore || true ;;
-            q | Q | '') return 0 ;;
+            refresh)
+                if vps_cmd_require_root; then
+                    vps_dns_refresh_backend || status=$?
+                else
+                    status=$?
+                fi
+                ;;
+            restore) vps_dns_restore || status=$? ;;
+            quit) return "$status" ;;
+            *)
+                vps_cmd_error "交互选择返回了未知 DNS 动作：${choice}"
+                return 70
+                ;;
         esac
     done
 }

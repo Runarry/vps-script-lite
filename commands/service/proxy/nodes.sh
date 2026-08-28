@@ -170,6 +170,10 @@ proxy_prompt_profile() {
 
 proxy_prompt_value() {
     local prompt="$1" default="${2:-}" value
+    if declare -F vps_cmd_prompt_value >/dev/null 2>&1; then
+        vps_cmd_prompt_value "$prompt" "$default"
+        return
+    fi
     if [[ -n "$default" ]]; then
         printf '%s [%s]：' "$prompt" "$default" >&2
     else
@@ -567,7 +571,7 @@ proxy_node_add() (
             *) vps_cmd_error "node add 的未知选项：$arg"; return 2 ;;
         esac
     done
-    if [[ -z "$profile" && proxy_is_interactive ]]; then
+    if [[ -z "$profile" ]] && proxy_is_interactive; then
         profile="$(proxy_prompt_profile)" || return $?
     fi
     [[ -n "$profile" ]] || { vps_cmd_error "node add 需要 --profile"; return 2; }
@@ -907,7 +911,7 @@ proxy_node_show() {
         vps_cmd_error "node show 需要有效 --id"
         return 2
     fi
-    if [[ -z "$id" && ! proxy_is_interactive ]]; then
+    if [[ -z "$id" ]] && ! proxy_is_interactive; then
         vps_cmd_error "node show 需要有效 --id"
         return 2
     fi
@@ -967,12 +971,32 @@ proxy_subscription() {
     printf '%s\n' "$encoded"
 }
 
+proxy_subscription_interactive() {
+    local core count selected
+    local -a choices=(all "全部节点")
+    proxy_require_state_access || return $?
+    proxy_ensure_tools subscription jq base64 tr || return $?
+    if proxy_stop_after_dependency_plan; then return 0; fi
+    [[ -f "$PROXY_MANIFEST" ]] || { vps_cmd_error "当前没有节点"; return 3; }
+    proxy_manifest_validate_file "$PROXY_MANIFEST" || return $?
+    for core in sing-box xray; do
+        proxy_core_registered "$core" || continue
+        count="$(proxy_manifest_count "$core")" || return $?
+        [[ "$count" =~ ^[1-9][0-9]*$ ]] || continue
+        choices+=("$core" "$(proxy_core_label "$core")（${count} 个节点）")
+    done
+    choices+=(back "返回节点菜单")
+    selected="$(proxy_prompt_select "请选择订阅节点范围" all "${choices[@]}")" || return $?
+    [[ "$selected" == back ]] && return 130
+    proxy_subscription --core "$selected"
+}
+
 proxy_node_menu_run() {
     local action status=0 prompt_status=0 ignored
     while true; do
         action="$(proxy_prompt_select "节点管理" view \
             add "添加节点" view "查看节点" edit "编辑节点" delete "删除节点" \
-            subscription "输出全部节点订阅" back "返回代理管理")" || prompt_status=$?
+            subscription "输出节点订阅" back "返回代理管理")" || prompt_status=$?
         if ((prompt_status != 0)); then
             [[ "$prompt_status" == "130" ]] && return "$status"
             return "$prompt_status"
@@ -982,7 +1006,7 @@ proxy_node_menu_run() {
             view) proxy_menu_action proxy_node_view_interactive || status=$? ;;
             edit) proxy_menu_action proxy_node_edit || status=$? ;;
             delete) proxy_menu_action proxy_node_delete || status=$? ;;
-            subscription) proxy_menu_action proxy_subscription || status=$? ;;
+            subscription) proxy_menu_action proxy_subscription_interactive || status=$? ;;
             back) return "$status" ;;
         esac
         printf '\n按 Enter 返回节点菜单...' >&2
@@ -1025,7 +1049,7 @@ proxy_node_edit() (
         vps_cmd_error "node edit 需要有效 --id"
         return 2
     fi
-    if [[ -z "$id" && ! proxy_is_interactive ]]; then
+    if [[ -z "$id" ]] && ! proxy_is_interactive; then
         vps_cmd_error "node edit 需要有效 --id"
         return 2
     fi
@@ -1051,7 +1075,7 @@ proxy_node_edit() (
     proxy_ensure_mutation_tools node-edit jq || return $?
     if proxy_stop_after_dependency_plan; then return 0; fi
     proxy_prepare_manifest_state || return $?
-    if [[ -z "$id" && proxy_is_interactive ]]; then
+    if [[ -z "$id" ]] && proxy_is_interactive; then
         id="$(proxy_node_select_interactive "请选择要编辑的节点")" || return $?
     fi
     [[ "$id" =~ ^node-[a-f0-9]{16}$ ]] || { vps_cmd_error "node edit 需要有效 --id"; return 2; }
@@ -1346,7 +1370,7 @@ proxy_node_delete() (
         vps_cmd_error "node delete 需要有效 --id"
         return 2
     fi
-    if [[ -z "$id" && ! proxy_is_interactive ]]; then
+    if [[ -z "$id" ]] && ! proxy_is_interactive; then
         vps_cmd_error "node delete 需要有效 --id"
         return 2
     fi

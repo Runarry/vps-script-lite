@@ -102,7 +102,7 @@ test_init_and_paths() {
 }
 
 test_dependency_installation() (
-    local manager calls expected status output_file marker
+    local manager calls expected status output_file marker installed output
     local -a managers=(apt-get dnf5 dnf yum apk pacman zypper)
     local -A expected_calls=(
         [apt-get]=$'apt-get update\napt-get install -y --no-install-recommends curl jq\n'
@@ -147,6 +147,13 @@ test_dependency_installation() (
     test_assert_equal util-linux-misc "$(vps_cmd_package_for_tool apk mountpoint)" "Alpine mountpoint package"
     test_assert_equal chrony "$(vps_cmd_package_for_tool apt-get chronyc)" "chronyc package"
 
+    VPSCTL_ASSUME_YES=1
+    status=0
+    _vps_cmd_confirm_dependency_install <<<n >/dev/null 2>&1 || status=$?
+    test_assert_equal 3 "$status" "dependency confirmation must ignore --yes"
+    _vps_cmd_confirm_dependency_install <<<y >/dev/null 2>&1 || test_fail "dependency confirmation rejected y"
+    VPSCTL_ASSUME_YES=0
+
     # Restore helper definitions after the argv-capture stubs above.
     source "${TEST_ROOT}/lib/command.sh"
     VPSCTL_DRY_RUN=1
@@ -168,7 +175,91 @@ test_dependency_installation() (
     status=0
     vps_cmd_ensure_tools test-feature curl >/dev/null 2>&1 || status=$?
     test_assert_equal 3 "$status" "dependency installation authorization status"
+
+    # Available tools require no package mapping or installation work.
+    _vps_cmd_tool_available() { return 0; }
+    vps_cmd_detect_package_manager() {
+        test_fail "package manager was detected for an available tool"
+    }
+    vps_cmd_ensure_tools test-feature custom-available-tool || test_fail "available custom tool was rejected"
+
+    # A real interactive invocation can authorize this one installation without
+    # mutating the exported authorization used by later dependency checks.
+    _vps_cmd_tool_available() { [[ "$installed" == "1" ]]; }
+    vps_cmd_detect_package_manager() { printf 'apt-get\n'; }
+    vps_cmd_is_interactive() { return 0; }
+    vps_cmd_install_packages() {
+        local IFS=' '
+        calls="$*"
+        installed=1
+    }
+    _vps_cmd_confirm_dependency_install() { return 0; }
+    VPSCTL_DRY_RUN=0
+    VPSCTL_INSTALL_DEPS=0
+    calls=""
+    installed=0
+    output_file="${TEST_TEMP}/dependency-interactive-output"
+    vps_cmd_ensure_tools test-feature curl >"$output_file" 2>&1
+    output="$(<"$output_file")"
+    [[ "$output" == *'缺少工具：curl'* && "$output" == *'需要安装软件包：curl'* ]] || test_fail "interactive dependency summary"
+    test_assert_equal "apt-get curl" "$calls" "interactive dependency install"
+    test_assert_equal 0 "$VPSCTL_INSTALL_DEPS" "interactive authorization must not leak"
+
+    _vps_cmd_confirm_dependency_install() { return 3; }
+    calls=""
+    installed=0
+    status=0
+    vps_cmd_ensure_tools test-feature curl >/dev/null 2>&1 || status=$?
+    test_assert_equal 3 "$status" "declined dependency status"
+    test_assert_equal "" "$calls" "declined dependency must not install"
+    test_assert_equal 0 "$VPSCTL_INSTALL_DEPS" "declined authorization must not leak"
+
+    VPSCTL_DRY_RUN=1
+    _vps_cmd_confirm_dependency_install() { test_fail "dry-run dependency check prompted"; }
+    status=0
+    output_file="${TEST_TEMP}/dependency-unauthorized-dry-run-output"
+    vps_cmd_ensure_tools test-feature curl >"$output_file" 2>&1 || status=$?
+    test_assert_equal 3 "$status" "unauthorized dry-run dependency status"
+    output="$(<"$output_file")"
+    [[ "$output" == *'--install-deps'* ]] || test_fail "unauthorized dry-run dependency hint"
+    test_assert_equal "" "$calls" "unauthorized dry-run must not install"
+
+    VPSCTL_DRY_RUN=0
+    VPSCTL_ASSUME_YES=1
+    _vps_cmd_confirm_dependency_install() { return 3; }
+    status=0
+    vps_cmd_ensure_tools test-feature curl >/dev/null 2>&1 || status=$?
+    test_assert_equal 3 "$status" "--yes must not authorize dependency installation"
+    test_assert_equal "" "$calls" "--yes must not install dependencies"
 )
+
+test_prompt_helpers() {
+    local selected value status output_file
+
+    output_file="${TEST_TEMP}/prompt-select-output"
+    selected="$(vps_cmd_prompt_select "选择模式" quick quick "快速" custom "自定义" 2>"$output_file" <<<"")"
+    test_assert_equal quick "$selected" "selection default"
+    [[ "$(<"$output_file")" == *'快速（默认）'* ]] || test_fail "selection default marker"
+
+    selected="$(vps_cmd_prompt_select "选择模式" quick quick "快速" custom "自定义" 2>"$output_file" <<< $'99\n2')"
+    test_assert_equal custom "$selected" "selection retry"
+    [[ "$(<"$output_file")" == *'选择无效'* ]] || test_fail "selection retry warning"
+
+    status=0
+    vps_cmd_prompt_select "选择模式" quick quick "快速" custom "自定义" <<<q >/dev/null 2>&1 || status=$?
+    test_assert_equal 130 "$status" "selection quit status"
+    status=0
+    vps_cmd_prompt_select "选择模式" quick quick "快速" custom "自定义" </dev/null >/dev/null 2>&1 || status=$?
+    test_assert_equal 130 "$status" "selection EOF status"
+
+    value="$(vps_cmd_prompt_value "监听端口" 443 2>"$output_file" <<<"")"
+    test_assert_equal 443 "$value" "open input default"
+    value="$(vps_cmd_prompt_value "监听端口" 443 2>"$output_file" <<<"8443")"
+    test_assert_equal 8443 "$value" "open input value"
+    status=0
+    vps_cmd_prompt_value "监听端口" 443 </dev/null >/dev/null 2>&1 || status=$?
+    test_assert_equal 130 "$status" "open input EOF status"
+}
 
 test_logging_and_run() {
     local output
@@ -330,6 +421,7 @@ test_internal_symlink_component_guard() {
 
 test_init_and_paths
 test_dependency_installation
+test_prompt_helpers
 test_logging_and_run
 test_confirmation_guards
 test_lock_backup_and_atomic_write

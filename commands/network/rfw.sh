@@ -464,17 +464,7 @@ rfw_require_managed_files() {
 }
 
 rfw_ensure_dependencies() {
-    local status=0
-
-    if vps_cmd_ensure_tools network-rfw "$@"; then
-        return 0
-    else
-        status=$?
-    fi
-    if ((status == 3)) && [[ "${VPSCTL_INSTALL_DEPS:-0}" != "1" ]]; then
-        rfw_error "缺少必需的系统工具；请使用 --install-deps 明确允许安装依赖"
-    fi
-    return "$status"
+    vps_cmd_ensure_tools network-rfw "$@"
 }
 
 rfw_stop_after_dependency_plan() {
@@ -1055,33 +1045,88 @@ rfw_install_or_update() {
     return 0
 }
 
-rfw_prompt_value() {
-    local key="$1" prompt="$2" current value
-    current="${RFW_CFG[$key]}"
-    printf '%s [%s]：' "$prompt" "${current:-空}"
-    IFS= read -r value || return 1
-    if [[ "$value" == "-" ]]; then
-        RFW_CFG[$key]=""
-    elif [[ -n "$value" ]]; then
-        RFW_CFG[$key]="$value"
-    fi
+rfw_prompt_config_value() {
+    local key="$1" prompt="$2" validator="$3" invalid_message="$4" value
+    while true; do
+        value="$(vps_cmd_prompt_value "$prompt" "${RFW_CFG[$key]}")" || return $?
+        if "$validator" "$value"; then
+            RFW_CFG[$key]="$value"
+            return 0
+        fi
+        rfw_warning "$invalid_message"
+    done
+}
+
+rfw_prompt_countries() {
+    local value normalized
+    while true; do
+        value="$(vps_cmd_prompt_value "国家代码（逗号分隔）" "${RFW_CFG[countries]}")" || return $?
+        if normalized="$(rfw_normalize_countries "$value")" && [[ -n "$normalized" ]]; then
+            RFW_CFG[countries]="$normalized"
+            return 0
+        fi
+        rfw_warning "请输入以逗号分隔且不重复的 ISO 3166-1 alpha-2 国家代码"
+    done
+}
+
+rfw_show_config_summary() {
+    local countries="${RFW_CFG[countries]:-无}"
+    printf '\n即将保存的 RFW 配置\n'
+    printf '  网络接口：%s\n' "${RFW_CFG[interface]}"
+    printf '  GeoIP：%s；国家：%s\n' "$(rfw_display_geo_mode "${RFW_CFG[geo_mode]}")" "$countries"
+    printf '  阻止外发邮件：%s；HTTP：%s；SOCKS5：%s\n' \
+        "$(rfw_display_switch "${RFW_CFG[block_email]}")" \
+        "$(rfw_display_switch "${RFW_CFG[block_http]}")" \
+        "$(rfw_display_switch "${RFW_CFG[block_socks5]}")"
+    printf '  WireGuard：%s；QUIC：%s；全部入站：%s\n' \
+        "$(rfw_display_switch "${RFW_CFG[block_wireguard]}")" \
+        "$(rfw_display_switch "${RFW_CFG[block_quic]}")" \
+        "$(rfw_display_switch "${RFW_CFG[block_all]}")"
+    printf '  FET：%s；XDP：%s\n' "$(rfw_display_fet "${RFW_CFG[fet]}")" "${RFW_CFG[xdp_mode]}"
+    printf '  端口访问日志：%s；日志级别：%s\n' "$(rfw_display_switch "${RFW_CFG[log]}")" "${RFW_CFG[RUST_LOG]}"
 }
 
 rfw_configure_wizard() {
-    rfw_info "RFW 配置向导：直接按 Enter 保留当前值。"
-    rfw_prompt_value interface "网络接口" || return
-    rfw_prompt_value geo_mode "Geo 模式 (none/blocklist/whitelist)" || return
-    rfw_prompt_value countries "国家代码（逗号分隔，输入 '-' 清空）" || return
-    rfw_prompt_value block_email "阻止外发邮件 (on/off)" || return
-    rfw_prompt_value block_http "阻止 HTTP (on/off)" || return
-    rfw_prompt_value block_socks5 "阻止 SOCKS5 (on/off)" || return
-    rfw_prompt_value block_wireguard "阻止 WireGuard (on/off)" || return
-    rfw_prompt_value block_quic "阻止 QUIC (on/off)" || return
-    rfw_prompt_value block_all "阻止全部入站流量 (on/off)" || return
-    rfw_prompt_value fet "FET 模式 (off/loose/strict)" || return
-    rfw_prompt_value xdp_mode "XDP 模式 (auto/skb/drv/hw)" || return
-    rfw_prompt_value log "端口访问日志 (on/off)" || return
-    rfw_prompt_value RUST_LOG "Rust 日志级别" || return
+    local key rust_log_default
+    local -a switch_prompts=(
+        block_email "阻止外发邮件"
+        block_http "阻止 HTTP"
+        block_socks5 "阻止 SOCKS5"
+        block_wireguard "阻止 WireGuard"
+        block_quic "阻止 QUIC"
+        block_all "阻止全部入站流量"
+        log "端口访问日志"
+    )
+
+    rfw_info "RFW 配置向导：开放输入会校验格式，编号选择可直接按 Enter 保留当前值。"
+    rfw_prompt_config_value interface "网络接口" rfw_valid_interface "网络接口格式无效，请重新输入" || return
+    RFW_CFG[geo_mode]="$(vps_cmd_prompt_select "GeoIP 模式" "${RFW_CFG[geo_mode]}" \
+        none "关闭" blocklist "黑名单" whitelist "白名单")" || return $?
+    if [[ "${RFW_CFG[geo_mode]}" == "none" ]]; then
+        RFW_CFG[countries]=""
+    else
+        rfw_prompt_countries || return
+    fi
+    while ((${#switch_prompts[@]})); do
+        key="${switch_prompts[0]}"
+        RFW_CFG[$key]="$(vps_cmd_prompt_select "${switch_prompts[1]}" "${RFW_CFG[$key]}" \
+            off "关闭" on "开启")" || return $?
+        switch_prompts=("${switch_prompts[@]:2}")
+    done
+    RFW_CFG[fet]="$(vps_cmd_prompt_select "FET 模式" "${RFW_CFG[fet]}" \
+        off "关闭" loose "宽松" strict "严格")" || return $?
+    RFW_CFG[xdp_mode]="$(vps_cmd_prompt_select "XDP 模式" "${RFW_CFG[xdp_mode]}" \
+        auto "自动" skb "SKB / 通用模式" drv "驱动模式" hw "硬件卸载模式")" || return $?
+    rust_log_default="${RFW_CFG[RUST_LOG]%%,*}"
+    case "$rust_log_default" in
+        off | error | warn | info | debug | trace) ;;
+        *) rust_log_default=info ;;
+    esac
+    RFW_CFG[RUST_LOG]="$(vps_cmd_prompt_select "Rust 日志级别" "$rust_log_default" \
+        off "关闭" error "错误" warn "警告" info "信息" debug "调试" trace "跟踪")" || return $?
+    rfw_validate_config || return
+    rfw_show_config_summary
+    vps_cmd_confirm "确认保存以上配置？"
 }
 
 rfw_configure() {
@@ -1776,32 +1821,143 @@ rfw_uninstall() {
     ((failed == 0)) || return 30
 }
 
-rfw_menu() {
+rfw_menu_start() {
     local choice
-    while true; do
-        cat <<'EOF'
+    choice="$(vps_cmd_prompt_select "启动方式" start \
+        start "仅启动（推荐）" enable "启动并启用开机启动")" || return $?
+    if [[ "$choice" == "enable" ]]; then
+        rfw_service_start --enable
+    else
+        rfw_service_start
+    fi
+}
 
-RFW 管理
-  1) 查看状态     2) 安装          3) 更新
-  4) 配置         5) 启动          6) 停止
-  7) 重启         8) 访问统计      9) 日志
- 10) 卸载         q) 退出
-EOF
-        printf '请选择：'
-        IFS= read -r choice || return 0
+rfw_menu_stop() {
+    local choice
+    choice="$(vps_cmd_prompt_select "停止方式" stop \
+        stop "仅停止（推荐）" disable "停止并禁用开机启动")" || return $?
+    if [[ "$choice" == "disable" ]]; then
+        rfw_service_stop --disable
+    else
+        rfw_service_stop
+    fi
+}
+
+rfw_menu_stats() {
+    local filter port_mode port ip_mode ip group
+    local -a args=()
+
+    filter="$(vps_cmd_prompt_select "统计筛选" all \
+        all "全部流量（推荐）" blocked "仅已阻止" allowed "仅已允许")" || return $?
+    case "$filter" in
+        blocked) args+=(--blocked-only) ;;
+        allowed) args+=(--allowed-only) ;;
+    esac
+    port_mode="$(vps_cmd_prompt_select "端口筛选" none \
+        none "不限端口（推荐）" input "输入端口")" || return $?
+    if [[ "$port_mode" == "input" ]]; then
+        while true; do
+            port="$(vps_cmd_prompt_value "端口（1-65535）" "")" || return $?
+            if [[ "$port" =~ ^[0-9]+$ ]] && ((10#$port >= 1 && 10#$port <= 65535)); then
+                args+=(--port "$port")
+                break
+            fi
+            rfw_warning "端口无效，请重新输入"
+        done
+    fi
+    ip_mode="$(vps_cmd_prompt_select "IPv4 筛选" none \
+        none "不限地址（推荐）" input "输入 IPv4 地址")" || return $?
+    if [[ "$ip_mode" == "input" ]]; then
+        while true; do
+            ip="$(vps_cmd_prompt_value "IPv4 地址" "")" || return $?
+            if rfw_valid_ipv4 "$ip"; then
+                args+=(--ip "$ip")
+                break
+            fi
+            rfw_warning "IPv4 地址无效，请重新输入"
+        done
+    fi
+    group="$(vps_cmd_prompt_select "是否按端口分组" no \
+        no "否（推荐）" yes "是")" || return $?
+    [[ "$group" == "no" ]] || args+=(--group-by-port)
+    rfw_stats "${args[@]}"
+}
+
+rfw_menu_logs() {
+    local lines follow since_mode since
+    local -a args=()
+
+    lines="$(vps_cmd_prompt_select "日志行数" 100 \
+        50 "50 行" 100 "100 行（推荐）" 200 "200 行" 500 "500 行" input "手动输入")" || return $?
+    if [[ "$lines" == "input" ]]; then
+        while true; do
+            lines="$(vps_cmd_prompt_value "日志行数（0-1000000）" "100")" || return $?
+            if [[ "$lines" =~ ^[0-9]+$ && ${#lines} -le 7 ]] && ((10#$lines <= 1000000)); then
+                break
+            fi
+            rfw_warning "日志行数无效，请重新输入"
+        done
+    fi
+    args+=(--lines "$lines")
+    follow="$(vps_cmd_prompt_select "是否持续跟随新日志" no \
+        no "否（推荐）" yes "是")" || return $?
+    [[ "$follow" == "no" ]] || args+=(--follow)
+    since_mode="$(vps_cmd_prompt_select "日志起始时间" none \
+        none "不限制（推荐）" input "输入 journalctl --since 值")" || return $?
+    if [[ "$since_mode" == "input" ]]; then
+        while true; do
+            since="$(vps_cmd_prompt_value "起始时间（例如 today 或 1 hour ago）" "today")" || return $?
+            if [[ -n "$since" && "$since" != *$'\n'* && "$since" != *$'\r'* ]]; then
+                args+=(--since "$since")
+                break
+            fi
+            rfw_warning "起始时间不能为空且不能包含换行"
+        done
+    fi
+    rfw_logs "${args[@]}"
+}
+
+rfw_menu_uninstall() {
+    local choice
+    choice="$(vps_cmd_prompt_select "卸载方式" keep \
+        keep "保留配置、状态与备份（推荐）" purge "彻底清除")" || return $?
+    if [[ "$choice" == "purge" ]]; then
+        rfw_uninstall --purge
+    else
+        rfw_uninstall
+    fi
+}
+
+rfw_menu_action() {
+    local status=0
+    "$@" || status=$?
+    [[ "$status" == "130" ]] && return 0
+    return "$status"
+}
+
+rfw_menu() {
+    local choice status=0 prompt_status
+    while true; do
+        printf '\nRFW 管理\n'
+        choice="$(vps_cmd_prompt_select "请选择功能" "" \
+            status "查看状态" install "安装" update "更新" configure "配置" \
+            start "启动" stop "停止" restart "重启" stats "访问统计" \
+            logs "日志" uninstall "卸载")" || {
+                prompt_status=$?
+                [[ "$prompt_status" == "130" ]] && return "$status"
+                return "$prompt_status"
+            }
         case "$choice" in
-            1) rfw_status ;;
-            2) rfw_install_or_update install ;;
-            3) rfw_install_or_update update ;;
-            4) rfw_configure ;;
-            5) rfw_service_start ;;
-            6) rfw_service_stop ;;
-            7) rfw_service_restart ;;
-            8) rfw_stats ;;
-            9) rfw_logs -n 100 ;;
-            10) rfw_uninstall ;;
-            q | Q) return 0 ;;
-            *) rfw_error "菜单选项无效" ;;
+            status) rfw_menu_action rfw_status || status=$? ;;
+            install) rfw_menu_action rfw_install_or_update install || status=$? ;;
+            update) rfw_menu_action rfw_install_or_update update || status=$? ;;
+            configure) rfw_menu_action rfw_configure || status=$? ;;
+            start) rfw_menu_action rfw_menu_start || status=$? ;;
+            stop) rfw_menu_action rfw_menu_stop || status=$? ;;
+            restart) rfw_menu_action rfw_service_restart || status=$? ;;
+            stats) rfw_menu_action rfw_menu_stats || status=$? ;;
+            logs) rfw_menu_action rfw_menu_logs || status=$? ;;
+            uninstall) rfw_menu_action rfw_menu_uninstall || status=$? ;;
         esac
     done
 }

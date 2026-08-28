@@ -19,6 +19,13 @@ test_contains() {
     [[ "$output" == *"$expected"* ]] || test_fail "${message}: missing '${expected}'"
 }
 
+test_not_contains() {
+    local output="$1"
+    local unexpected="$2"
+    local message="$3"
+    [[ "$output" != *"$unexpected"* ]] || test_fail "${message}: unexpected '${unexpected}'"
+}
+
 test_no_ansi() {
     local output="$1"
     local message="$2"
@@ -26,7 +33,7 @@ test_no_ansi() {
 }
 
 test_cli() {
-    local output status
+    local output status option
 
     output="$("${VPSCTL[@]}" --version)"
     test_contains "$output" "vpsctl 0.3.0" "version output"
@@ -60,6 +67,20 @@ test_cli() {
     test_contains "$output" "network rfw" "RFW command listing"
     test_contains "$output" "service proxy" "proxy command listing"
 
+    for option in --dry-run --install-deps --yes --non-interactive --quiet --verbose; do
+        status=0
+        output="$("${VPSCTL[@]}" "$option" menu 2>&1)" || status=$?
+        [[ "$status" == "2" ]] || test_fail "menu option $option should return 2, got ${status}"
+        test_contains "$output" "$option" "menu execution-option rejection"
+        test_contains "$output" "交互菜单不能使用执行型全局选项" "localized menu option rejection"
+    done
+
+    status=0
+    output="$(bash "${TEST_ROOT}/bin/vpsctl" --no-color --no-clear menu 2>&1)" || status=$?
+    [[ "$status" == "2" ]] || test_fail "non-TTY menu should return 2, got ${status}"
+    test_contains "$output" "交互菜单需要终端" "display-only menu options remain accepted"
+    test_not_contains "$output" "不能使用执行型全局选项" "display-only menu option rejection"
+
     status=0
     output="$("${VPSCTL[@]}" system missing 2>&1)" || status=$?
     [[ "$status" == "2" ]] || test_fail "unknown command should return 2, got ${status}"
@@ -74,7 +95,7 @@ test_cli() {
 }
 
 test_dispatch_security() {
-    local sandbox output status marker
+    local sandbox output status marker menu_command
 
     [[ "$(uname -s)" == "Linux" ]] || return 0
     sandbox="$(mktemp -d)"
@@ -98,6 +119,9 @@ EOF
 #!/usr/bin/env bash
 printf 'no_color=%s\n' "${VPSCTL_NO_COLOR:-missing}"
 printf 'install_deps=%s\n' "${VPSCTL_INSTALL_DEPS:-missing}"
+printf 'bbr_args=%s\n' "$*"
+[[ -z "${VPSCTL_DISPATCH_MARKER:-}" ]] || printf 'bbr:%s\n' "$*" >>"$VPSCTL_DISPATCH_MARKER"
+exit "${VPSCTL_DISPATCH_STATUS:-0}"
 EOF
     chmod 0644 "$sandbox/commands/network/bbr.sh"
 
@@ -125,6 +149,18 @@ EOF
     test_contains "$output" "no_color=1" "no-color child context"
     output="$(bash "$sandbox/bin/vpsctl" --install-deps network bbr status)"
     test_contains "$output" "install_deps=1" "install-deps child context"
+
+    if command -v script >/dev/null 2>&1; then
+        marker="$sandbox/menu-executed"
+        printf -v menu_command 'env VPSCTL_DISPATCH_MARKER=%q VPSCTL_DISPATCH_STATUS=7 bash %q --no-color --no-clear menu' "$marker" "$sandbox/bin/vpsctl"
+        status=0
+        output="$(printf '1\n1\n\nb\nq\n' | script -q -e -f -c "$menu_command" /dev/null 2>&1)" || status=$?
+        [[ "$status" == "7" ]] || test_fail "menu should preserve feature status 7, got ${status}"
+        test_contains "$output" "bbr_args=" "menu zero-argument dispatch"
+        test_not_contains "$output" "命令详情" "removed command detail screen"
+        test_not_contains "$output" "[r] 无附加参数运行" "removed run confirmation"
+        [[ -f "$marker" && "$(<"$marker")" == "bbr:" ]] || test_fail "menu did not dispatch the selected feature without arguments"
+    fi
 
     marker="$sandbox/executed"
     output="$(VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" --no-color network rfw --help)"
