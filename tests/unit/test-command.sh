@@ -261,6 +261,24 @@ test_prompt_helpers() {
     test_assert_equal 130 "$status" "open input EOF status"
 }
 
+test_standard_system_paths() (
+    local original_path="$PATH"
+
+    [[ -d /usr/sbin ]] || return 0
+    VPSCTL_TESTING=0
+    VPSCTL_SYSTEM_ROOT=""
+    PATH=/usr/bin:/bin
+    vps_cmd_init "path-test" "$TEST_ROOT"
+    case ":$PATH:" in
+        *:/usr/sbin:*) ;;
+        *) test_fail "production initialization did not add /usr/sbin" ;;
+    esac
+    _vps_cmd_add_standard_system_paths
+    [[ "$(awk -F: '{count=0; for (i=1; i<=NF; i++) if ($i=="/usr/sbin") count++; print count}' <<<"$PATH")" == "1" ]] || \
+        test_fail "standard system path was added more than once"
+    PATH="$original_path"
+)
+
 test_logging_and_run() {
     local output
     local marker="${TEST_TEMP}/ran"
@@ -422,6 +440,7 @@ test_internal_symlink_component_guard() {
 test_init_and_paths
 test_dependency_installation
 test_prompt_helpers
+test_standard_system_paths
 test_logging_and_run
 test_confirmation_guards
 test_lock_backup_and_atomic_write

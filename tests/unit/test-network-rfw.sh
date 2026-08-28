@@ -450,6 +450,57 @@ test_global_options_and_release_validation() {
     assert_file_contains "$MOCK_LOG" "binary --version" "downloaded binary smoke test"
 }
 
+test_kernel_version_parsing() (
+    local release output status
+    local -a supported_releases=(
+        "6.12.105+deb13-amd64"
+        "6.12.105+deb13"
+        "6.8.0-31-generic"
+        "5.15.0-1-amd64"
+        "6.1.0"
+    )
+    local -a invalid_releases=(
+        "not-a-version"
+        "6.x.1"
+        "6.12.105 deb13"
+    )
+
+    reset_case
+    VPSCTL_PROJECT_ROOT="$TEST_ROOT"
+    VPSCTL_TESTING=1
+    VPSCTL_SYSTEM_ROOT="$SYSTEM_ROOT"
+    VPSCTL_ENV_KERNEL_NAME=Linux
+    VPSCTL_ENV_KERNEL_RELEASE=6.1.0
+    VPSCTL_ENV_ARCH=x86_64
+    VPSCTL_ENV_INIT=systemd
+    VPSCTL_NON_INTERACTIVE=1
+    VPSCTL_NO_COLOR=1
+    export VPSCTL_PROJECT_ROOT VPSCTL_TESTING VPSCTL_SYSTEM_ROOT
+    export VPSCTL_ENV_KERNEL_NAME VPSCTL_ENV_KERNEL_RELEASE VPSCTL_ENV_ARCH VPSCTL_ENV_INIT
+    export VPSCTL_NON_INTERACTIVE VPSCTL_NO_COLOR
+    # shellcheck source=../../commands/network/rfw.sh
+    source "$RFW_SCRIPT" help >/dev/null
+
+    for release in "${supported_releases[@]}"; do
+        VPSCTL_ENV_KERNEL_RELEASE="$release"
+        rfw_kernel_supported || fail "supported kernel release rejected: ${release}"
+    done
+
+    VPSCTL_ENV_KERNEL_RELEASE="5.14.99+deb13-amd64"
+    status=0
+    output="$(rfw_kernel_supported 2>&1)" || status=$?
+    assert_status 3 "$status" "old Debian kernel rejection"
+    assert_contains "$output" "当前 5.14.99+deb13-amd64" "old Debian kernel error retained full release"
+
+    for release in "${invalid_releases[@]}"; do
+        VPSCTL_ENV_KERNEL_RELEASE="$release"
+        status=0
+        output="$(rfw_kernel_supported 2>&1)" || status=$?
+        assert_status 3 "$status" "invalid kernel release rejection: ${release}"
+        assert_contains "$output" "无法验证内核版本：${release}" "invalid kernel error retained full release: ${release}"
+    done
+)
+
 test_dependency_install_controls() {
     local output status=0 config_hash pending_hash
 
@@ -838,6 +889,7 @@ test_update_preserves_state_without_restart
 test_dry_run_has_no_managed_writes
 test_managed_ancestor_symlink_guard
 test_global_options_and_release_validation
+test_kernel_version_parsing
 test_dependency_install_controls
 test_runtime_preconditions
 test_managed_boundaries_and_stats_guards

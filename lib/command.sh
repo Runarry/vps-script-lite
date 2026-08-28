@@ -94,6 +94,19 @@ _vps_cmd_path_has_symlink_component() {
     return 1
 }
 
+_vps_cmd_add_standard_system_paths() {
+    local directory
+
+    for directory in /usr/local/sbin /usr/sbin /sbin; do
+        [[ -d "$directory" ]] || continue
+        case ":${PATH:-}:" in
+            *":${directory}:"*) ;;
+            *) PATH="${PATH:+${PATH}:}${directory}" ;;
+        esac
+    done
+    export PATH
+}
+
 vps_cmd_require_no_symlink_components() {
     local path="${1:-}"
 
@@ -171,6 +184,10 @@ vps_cmd_init() {
         return 2
     fi
     VPSCTL_TESTING="$normalized"
+
+    if [[ "$VPSCTL_TESTING" != "1" ]]; then
+        _vps_cmd_add_standard_system_paths
+    fi
 
     VPSCTL_COMMAND_NAME="$command_name"
     # Public context consumed by command implementations after this library returns.
@@ -565,7 +582,7 @@ vps_cmd_ensure_tools() {
     )"
     if [[ "${VPSCTL_INSTALL_DEPS:-0}" != "1" ]]; then
         if [[ "${VPSCTL_DRY_RUN:-0}" == "1" ]] || ! vps_cmd_is_interactive; then
-            vps_cmd_error "${feature} 缺少工具：${missing_join}；请添加 --install-deps 允许安装依赖"
+            vps_cmd_error "缺少工具：${missing_join}；请添加 --install-deps 允许安装依赖"
             return 3
         fi
     fi
@@ -582,7 +599,7 @@ vps_cmd_ensure_tools() {
         printf '%s' "${packages[*]}"
     )"
     if [[ "${VPSCTL_INSTALL_DEPS:-0}" != 1 ]]; then
-        vps_cmd_warning "${feature} 缺少工具：${missing_join}；需要安装软件包：${packages_join}"
+        vps_cmd_warning "缺少工具：${missing_join}；需要安装软件包：${packages_join}"
         if _vps_cmd_confirm_dependency_install; then
             :
         else
@@ -590,11 +607,14 @@ vps_cmd_ensure_tools() {
             return "$confirm_status"
         fi
     fi
-    vps_cmd_info "${feature} 缺少工具：${missing_join}；将安装软件包：${packages_join}"
+    vps_cmd_info "缺少工具：${missing_join}；将安装软件包：${packages_join}"
     vps_cmd_install_packages "$manager" "${packages[@]}" || return $?
     if [[ "${VPSCTL_DRY_RUN:-0}" == 1 ]]; then
         VPS_CMD_DEPENDENCIES_PLANNED=1
         return 0
+    fi
+    if [[ "${VPSCTL_TESTING:-0}" != "1" ]]; then
+        _vps_cmd_add_standard_system_paths
     fi
     hash -r
     for tool in "${missing[@]}"; do

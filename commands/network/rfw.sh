@@ -429,8 +429,7 @@ rfw_has_effective_policy() {
 rfw_kernel_supported() {
     local release major minor
     release="${VPSCTL_ENV_KERNEL_RELEASE:-$(uname -r 2>/dev/null || true)}"
-    release="${release%%-*}"
-    if [[ ! "$release" =~ ^([0-9]+)\.([0-9]+)(\.[0-9]+)?$ ]]; then
+    if [[ ! "$release" =~ ^([0-9]+)\.([0-9]+)(\.[0-9]+)?([+-][0-9A-Za-z._+~-]+)?$ ]]; then
         rfw_error "无法验证内核版本：${release:-未知}"
         return 3
     fi
