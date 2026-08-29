@@ -1620,7 +1620,7 @@ rfw_status() {
             config_style="error"
         fi
     fi
-    printf 'RFW 状态\n'
+    vps_ui_section "RFW 状态"
     vps_cmd_status "版本" "$version" "info"
     vps_cmd_status "运行状态" "$active" "$active_style"
     vps_cmd_status "开机启动" "$enabled" "$enabled_style"
@@ -1962,14 +1962,39 @@ rfw_menu_action() {
     return "$status"
 }
 
+rfw_menu_snapshot() {
+    local version="未安装" active="未安装" pending="否"
+
+    if rfw_is_managed_install 2>/dev/null; then
+        version="$("$RFW_BINARY" --version 2>/dev/null | head -n 1 || printf '已安装')"
+        active="$(systemctl is-active rfw.service 2>/dev/null || true)"
+        case "$active" in
+            active) active="运行中" ;;
+            inactive) active="未运行" ;;
+            failed) active="运行失败" ;;
+            *) [[ -n "$active" ]] || active="未知" ;;
+        esac
+    fi
+    if [[ -n "${RFW_PENDING:-}" && -e "$RFW_PENDING" ]]; then
+        pending="是"
+    fi
+    printf '当前  %s  ·  %s  ·  待重启 %s' "$version" "$active" "$pending"
+}
+
 rfw_menu() {
-    local choice status=0 prompt_status
+    local choice status=0 prompt_status snapshot
     while true; do
-        printf '\nRFW 管理\n'
+        snapshot="$(rfw_menu_snapshot 2>/dev/null || true)"
+        vps_ui_page "RFW 管理" "$snapshot"
         choice="$(vps_cmd_prompt_select "请选择功能" "" \
+            __section__ "生命周期" \
             status "查看状态" install "安装" update "更新" configure "配置" \
-            start "启动" stop "停止" restart "重启" stats "访问统计" \
-            logs "日志" uninstall "卸载")" || {
+            __section__ "服务" \
+            start "启动" stop "停止" restart "重启" \
+            __section__ "观察" \
+            stats "访问统计" logs "日志" \
+            __section__ "卸载" \
+            uninstall "卸载")" || {
                 prompt_status=$?
                 [[ "$prompt_status" == "130" ]] && return "$status"
                 return "$prompt_status"

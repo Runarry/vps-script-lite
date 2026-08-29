@@ -57,7 +57,8 @@ proxy_confirm() {
         vps_cmd_error "确认操作需要交互式终端，或使用 --yes"
         return 3
     }
-    printf '%s [是/否，输入 y 确认] ' "$prompt" >&2
+    vps_ui_ensure_init
+    printf '%s%s%s [是/否，输入 y 确认] ' "$VPS_UI_YELLOW" "$prompt" "$VPS_UI_RESET" >&2
     IFS= read -r reply || return 130
     reply="$(vps_cmd_trim "$reply")"
     [[ "$reply" == "y" || "$reply" == "Y" || "$reply" == "yes" || "$reply" == "YES" ]]
@@ -78,18 +79,32 @@ proxy_prompt_select() {
         shift 2
     done
 
+    local item_no
+    local -a select_values=()
+    vps_ui_ensure_init
     while true; do
-        printf '%s\n' "$prompt" >&2
+        select_values=()
+        item_no=0
+        printf '\n' >&2
+        vps_ui_section "$prompt" >&2
+        printf '\n' >&2
         for ((index = 0; index < ${#values[@]}; index++)); do
             value="${values[$index]}"
             label="${labels[$index]}"
+            if [[ "$value" == "__section__" ]]; then
+                vps_ui_menu_item "" "$label" section >&2
+                continue
+            fi
+            item_no=$((item_no + 1))
+            select_values+=("$value")
             if [[ -n "$default_value" && "$value" == "$default_value" ]]; then
-                printf '  [%d] %s（默认）\n' "$((index + 1))" "$label" >&2
+                vps_ui_menu_item "$item_no" "${label}（默认）" default >&2
             else
-                printf '  [%d] %s\n' "$((index + 1))" "$label" >&2
+                vps_ui_menu_item "$item_no" "$label" >&2
             fi
         done
-        printf '  [q] 返回\n选择：' >&2
+        printf '\n  [q] 返回\n\n' >&2
+        vps_ui_prompt "请选择" >&2
         IFS= read -r choice || return 130
         choice="$(vps_cmd_trim "$choice")"
         case "$choice" in
@@ -101,8 +116,8 @@ proxy_prompt_select() {
                 fi
                 ;;
             *)
-                if [[ "$choice" =~ ^[1-9][0-9]*$ ]] && ((10#$choice <= ${#values[@]})); then
-                    printf '%s' "${values[$((10#$choice - 1))]}"
+                if [[ "$choice" =~ ^[1-9][0-9]*$ ]] && ((10#$choice <= ${#select_values[@]})); then
+                    printf '%s' "${select_values[$((10#$choice - 1))]}"
                     return 0
                 fi
                 ;;

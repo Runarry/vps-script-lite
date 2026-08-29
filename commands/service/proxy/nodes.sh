@@ -1293,7 +1293,8 @@ proxy_node_menu_run() {
             subscription) proxy_menu_action proxy_subscription_interactive || status=$? ;;
             back) return "$status" ;;
         esac
-        printf '\n按 Enter 返回节点菜单...' >&2
+        vps_ui_ensure_init
+        printf '\n %s按 Enter 返回节点菜单...%s' "$VPS_UI_CYAN" "$VPS_UI_RESET" >&2
         IFS= read -r ignored || return "$status"
         prompt_status=0
     done

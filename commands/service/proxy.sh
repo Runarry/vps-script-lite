@@ -506,7 +506,8 @@ proxy_dispatch_core_action() {
 
 proxy_pause() {
     local ignored
-    printf '\n按 Enter 返回代理菜单...' >&2
+    vps_ui_ensure_init
+    printf '\n %s按 Enter 返回代理菜单...%s' "$VPS_UI_CYAN" "$VPS_UI_RESET" >&2
     IFS= read -r ignored || true
 }
 
@@ -612,8 +613,7 @@ proxy_protocol_menu_run() {
 proxy_menu_run() {
     local choice status=0 rc
     while true; do
-        printf '\n代理管理\n'
-        printf '============================================================\n'
+        vps_ui_page "代理管理"
         proxy_core_status all || true
         if choice="$(proxy_prompt_select "代理能力" "" \
             core "内核管理" nodes "节点管理" relay "中转管理" service "服务控制" \

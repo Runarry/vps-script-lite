@@ -938,10 +938,24 @@ vps_dns_prompt_test_args() {
     vps_dns_parse_servers "${args[@]}"
 }
 
+vps_dns_menu_snapshot() {
+    local servers="" first="未检测到"
+
+    vps_dns_detect_backend || true
+    servers="$(vps_dns_effective_servers 2>/dev/null || true)"
+    if [[ -n "$servers" ]]; then
+        first="${servers%%$'\n'*}"
+        [[ -n "$first" ]] || first="未检测到"
+    fi
+    printf '当前  %s  ·  服务器 %s' "$(vps_dns_backend_display "${VPS_DNS_BACKEND:-未知}")" "$first"
+}
+
 vps_dns_menu() {
-    local choice status=0 prompt_status action_status
+    local choice status=0 prompt_status action_status snapshot
 
     while true; do
+        snapshot="$(vps_dns_menu_snapshot 2>/dev/null || true)"
+        [[ -z "$snapshot" ]] || printf ' %s\n' "$snapshot" >&2
         choice="$(vps_cmd_prompt_select \
             "DNS 管理" show \
             show "显示状态" \

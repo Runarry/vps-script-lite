@@ -295,12 +295,12 @@ vpsctl_dispatch() {
 
 vpsctl_run_domain_menu() {
     local domain="$1"
-    local choice command_index command_key status
+    local choice command_index command_key status notice=""
 
     while true; do
         vps_registry_commands_for_domain "$domain"
         vps_ui_clear_screen
-        vps_ui_header "${VPS_DOMAIN_LABEL[$domain]}"
+        vps_ui_header "主菜单 / ${VPS_DOMAIN_LABEL[$domain]}"
         vps_ui_domain_commands "$domain"
 
         if ((${#VPS_REGISTRY_RESULTS[@]} == 0)); then
@@ -309,7 +309,11 @@ vpsctl_run_domain_menu() {
             return 0
         fi
 
-        printf '\n  [b] 返回主菜单    [q] 退出\n\n'
+        vps_ui_nav_line b "返回主菜单" q "退出"
+        if [[ -n "$notice" ]]; then
+            vps_ui_warning "$notice"
+            notice=""
+        fi
         vps_ui_read_choice "请选择功能" || return "$VPSCTL_MENU_STATUS"
         choice="$VPS_UI_CHOICE"
 
@@ -330,10 +334,12 @@ vpsctl_run_domain_menu() {
                         status=$?
                     fi
                     VPSCTL_MENU_STATUS="$status"
-                    printf '\n%s重要提示%s：命令已结束，退出码：' "$VPS_UI_CYAN" "$VPS_UI_RESET"
+                    printf '\n %s命令已结束%s  退出码 ' "$VPS_UI_CYAN" "$VPS_UI_RESET"
                     vps_ui_exit_code "$status"
                     printf '\n'
                     vps_ui_pause
+                else
+                    notice="选择无效，请输入列表中的编号、b 返回或 q 退出"
                 fi
                 ;;
         esac
@@ -361,7 +367,7 @@ vpsctl_validate_menu_options() {
 }
 
 vpsctl_run_menu() {
-    local choice domain_index domain
+    local choice domain_index domain notice=""
 
     vpsctl_validate_menu_options || return $?
     if [[ ! -t 0 || ! -t 1 ]]; then
@@ -375,6 +381,10 @@ vpsctl_run_menu() {
         vps_ui_clear_screen
         vps_ui_dashboard "$VPSCTL_VERSION"
         vps_ui_main_menu
+        if [[ -n "$notice" ]]; then
+            vps_ui_warning "$notice"
+            notice=""
+        fi
         vps_ui_read_choice "请选择" || return "$VPSCTL_MENU_STATUS"
         choice="$VPS_UI_CHOICE"
 
@@ -390,6 +400,8 @@ vpsctl_run_menu() {
                     # Feature commands run in child processes. Refresh the parent
                     # snapshot so dashboard fields such as BBR reflect changes.
                     vps_env_detect
+                else
+                    notice="选择无效，请输入列表中的编号或 q 退出"
                 fi
                 ;;
         esac
@@ -399,7 +411,6 @@ vpsctl_run_menu() {
 vpsctl_show_environment() {
     vps_env_detect
     vps_ui_dashboard "$VPSCTL_VERSION"
-    printf '\n'
     vps_ui_environment_details
 }
 

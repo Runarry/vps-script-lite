@@ -1449,7 +1449,7 @@ proxy_relay_status_menu_run() {
 proxy_relay_menu_run() {
     local action status=0 rc
     while true; do
-        printf '\n中转管理\n============================================================\n'
+        vps_ui_page "中转管理"
         proxy_relay_status || true
         action="$(proxy_prompt_select "中转能力" "" exits "出口管理" bindings "节点中转" forwards "纯端口转发" status "状态与刷新" back "返回代理管理")" || {
             rc=$?; [[ "$rc" == 130 ]] && return "$status"; return "$rc";

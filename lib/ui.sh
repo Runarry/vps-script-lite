@@ -2,7 +2,14 @@
 # Terminal UI for vpsctl. The interface intentionally uses an ASCII layout so
 # it remains readable in basic SSH terminals and serial consoles.
 
+if [[ -n "${VPS_UI_LOADED:-}" ]]; then
+    return 0
+fi
+VPS_UI_LOADED=1
+
+declare -g VPS_UI_INITIALIZED=0
 declare -g VPS_UI_WIDTH=76
+declare -g VPS_UI_KV_WIDTH=16
 declare -g VPS_UI_CHOICE=""
 declare -g VPS_UI_INDEX=-1
 declare -g VPS_UI_RESET=""
@@ -12,6 +19,7 @@ declare -g VPS_UI_GREEN=""
 declare -g VPS_UI_YELLOW=""
 declare -g VPS_UI_RED=""
 declare -g VPS_UI_CYAN=""
+declare -g VPS_UI_MAGENTA=""
 
 vps_ui_init() {
     local detected_width="${COLUMNS:-}"
@@ -23,6 +31,7 @@ vps_ui_init() {
     VPS_UI_YELLOW=""
     VPS_UI_RED=""
     VPS_UI_CYAN=""
+    VPS_UI_MAGENTA=""
 
     if [[ ! "$detected_width" =~ ^[0-9]+$ ]] && command -v tput >/dev/null 2>&1; then
         detected_width="$(tput cols 2>/dev/null || true)"
@@ -40,7 +49,59 @@ vps_ui_init() {
         VPS_UI_YELLOW=$'\033[33m'
         VPS_UI_RED=$'\033[31m'
         VPS_UI_CYAN=$'\033[36m'
+        VPS_UI_MAGENTA=$'\033[1;35m'
     fi
+    VPS_UI_INITIALIZED=1
+}
+
+vps_ui_ensure_init() {
+    [[ "${VPS_UI_INITIALIZED:-0}" == "1" ]] || vps_ui_init
+}
+
+vps_ui_display_width() {
+    local LC_ALL=C
+    local text="${1:-}"
+    local byte
+    local -i i=0 len=${#text} width=0 b=0
+
+    while ((i < len)); do
+        byte="${text:i:1}"
+        printf -v b '%d' "'$byte"
+        if ((b < 128)); then
+            width=$((width + 1))
+            i=$((i + 1))
+        elif ((b < 192)); then
+            i=$((i + 1))
+        elif ((b < 224)); then
+            width=$((width + 1))
+            i=$((i + 2))
+        elif ((b < 240)); then
+            width=$((width + 2))
+            i=$((i + 3))
+        else
+            width=$((width + 2))
+            i=$((i + 4))
+        fi
+        if ((i > len)); then
+            i=$len
+        fi
+    done
+    printf '%s' "$width"
+}
+
+vps_ui_pad() {
+    local text="${1:-}"
+    local width="${2:-0}"
+    local current pad=0
+
+    [[ "$width" =~ ^[0-9]+$ ]] || width=0
+    current="$(vps_ui_display_width "$text")"
+    if ((current >= width)); then
+        printf '%s' "$text"
+        return 0
+    fi
+    pad=$((width - current))
+    printf '%s%*s' "$text" "$pad" ''
 }
 
 vps_ui_repeat() {
@@ -53,6 +114,7 @@ vps_ui_repeat() {
 }
 
 vps_ui_rule() {
+    vps_ui_ensure_init
     vps_ui_repeat "${1:--}" "$VPS_UI_WIDTH"
 }
 
@@ -62,17 +124,103 @@ vps_ui_clear_screen() {
     fi
 }
 
+vps_ui_emphasis() {
+    vps_ui_ensure_init
+    printf '%s%s%s' "$VPS_UI_MAGENTA" "$1" "$VPS_UI_RESET"
+}
+
 vps_ui_header() {
     local title="$1"
+    vps_ui_ensure_init
     vps_ui_rule '='
     printf ' %s%s%s\n' "$VPS_UI_BOLD" "$title" "$VPS_UI_RESET"
     vps_ui_rule '='
 }
 
+vps_ui_page() {
+    local title="$1"
+    local snapshot="${2:-}"
+    vps_ui_ensure_init
+    vps_ui_rule '='
+    printf ' %s%s%s\n' "$VPS_UI_BOLD" "$title" "$VPS_UI_RESET"
+    if [[ -n "$snapshot" ]]; then
+        printf ' %s\n' "$snapshot"
+    fi
+    vps_ui_rule '-'
+}
+
+vps_ui_section() {
+    local title="$1"
+    vps_ui_ensure_init
+    printf ' %s%s%s\n' "$VPS_UI_CYAN" "$title" "$VPS_UI_RESET"
+}
+
+vps_ui_spread() {
+    local left="$1"
+    local right="$2"
+    local left_w right_w pad
+    local inner=$((VPS_UI_WIDTH - 2))
+
+    vps_ui_ensure_init
+    left_w="$(vps_ui_display_width "$left")"
+    right_w="$(vps_ui_display_width "$right")"
+    pad=$((inner - left_w - right_w))
+    ((pad < 1)) && pad=1
+    printf ' %s%s%s%*s%s\n' "$VPS_UI_BOLD" "$left" "$VPS_UI_RESET" "$pad" '' "$right"
+}
+
 vps_ui_kv() {
     local label="$1"
     local value="${2:-未知}"
-    printf '  %s：%s\n' "$label" "$(vps_ui_value_label "$value")"
+    vps_ui_ensure_init
+    printf '  %s：%s\n' "$(vps_ui_pad "$label" "$VPS_UI_KV_WIDTH")" "$(vps_ui_value_label "$value")"
+}
+
+vps_ui_menu_item() {
+    local key="$1"
+    local label="$2"
+    local kind="${3:-}"
+    local color=""
+    local reset=""
+
+    vps_ui_ensure_init
+    case "$kind" in
+        section)
+            printf '\n %s%s%s\n' "$VPS_UI_DIM" "$label" "$VPS_UI_RESET"
+            return 0
+            ;;
+        default)
+            color="${VPS_UI_CYAN}${VPS_UI_BOLD}"
+            reset="$VPS_UI_RESET"
+            ;;
+        muted)
+            color="$VPS_UI_DIM"
+            reset="$VPS_UI_RESET"
+            ;;
+    esac
+    printf '  [%s] %s%s%s\n' "$key" "$color" "$label" "$reset"
+}
+
+vps_ui_nav_line() {
+    local key label
+    vps_ui_ensure_init
+    printf '\n'
+    while (($# >= 2)); do
+        key="$1"
+        label="$2"
+        shift 2
+        printf '  [%s] %s' "$key" "$label"
+        if (($# >= 2)); then
+            printf '    '
+        fi
+    done
+    printf '\n\n'
+}
+
+vps_ui_prompt() {
+    local prompt="$1"
+    vps_ui_ensure_init
+    printf ' %s%s%s > ' "$VPS_UI_CYAN" "$prompt" "$VPS_UI_RESET"
 }
 
 vps_ui_value_label() {
@@ -90,6 +238,18 @@ vps_ui_value_label() {
         container) printf '%s容器%s' "$VPS_UI_CYAN" "$VPS_UI_RESET" ;;
         local) printf '%s本地%s' "$VPS_UI_CYAN" "$VPS_UI_RESET" ;;
         *) printf '%s' "$1" ;;
+    esac
+}
+
+vps_ui_emphasis_or_label() {
+    vps_ui_ensure_init
+    case "$1" in
+        unknown | unavailable | 'not available')
+            vps_ui_value_label "$1"
+            ;;
+        *)
+            vps_ui_emphasis "$1"
+            ;;
     esac
 }
 
@@ -148,29 +308,44 @@ vps_ui_lifecycle_label() {
 
 vps_ui_exit_code() {
     local status="$1"
+    local label color=""
 
     case "$status" in
-        0) printf '%s%s%s' "$VPS_UI_GREEN" "$status" "$VPS_UI_RESET" ;;
-        30) printf '%s%s%s' "$VPS_UI_YELLOW" "$status" "$VPS_UI_RESET" ;;
-        130) printf '%s%s%s' "$VPS_UI_CYAN" "$status" "$VPS_UI_RESET" ;;
-        *) printf '%s%s%s' "$VPS_UI_RED" "$status" "$VPS_UI_RESET" ;;
+        0)
+            color="$VPS_UI_GREEN"
+            label="成功"
+            ;;
+        30)
+            color="$VPS_UI_YELLOW"
+            label="部分完成"
+            ;;
+        130)
+            color="$VPS_UI_CYAN"
+            label="已中断"
+            ;;
+        *)
+            color="$VPS_UI_RED"
+            label="失败"
+            ;;
     esac
+    printf '%s%s %s%s' "$color" "$status" "$label" "$VPS_UI_RESET"
 }
 
 vps_ui_dashboard() {
     local version="$1"
     local cpu_summary disk_summary network_summary
 
+    vps_ui_ensure_init
     cpu_summary="$(vps_ui_value_label "${VPS_ENV[cpu_cores]}") 核 / $(vps_ui_value_label "${VPS_ENV[memory_total]}")"
     disk_summary="可用 $(vps_ui_value_label "${VPS_ENV[root_disk_available]}") / 总计 $(vps_ui_value_label "${VPS_ENV[root_disk_total]}")（已用 $(vps_ui_value_label "${VPS_ENV[root_disk_used_percent]}")）"
-    network_summary="IPv4 $(vps_ui_value_label "${VPS_ENV[ipv4]}") / IPv6 $(vps_ui_value_label "${VPS_ENV[ipv6]}")"
+    network_summary="IPv4 $(vps_ui_emphasis_or_label "${VPS_ENV[ipv4]}") / IPv6 $(vps_ui_emphasis_or_label "${VPS_ENV[ipv6]}")"
     vps_ui_rule '='
-    printf ' %sVPS Script Lite%s  v%s\n' "$VPS_UI_BOLD" "$VPS_UI_RESET" "$version"
-    printf ' 主机：%s    状态：' "${VPS_ENV[hostname]}"
+    vps_ui_spread "VPS Script Lite" "v${version}"
+    printf ' 主机  %s    状态  ' "$(vps_ui_emphasis "${VPS_ENV[hostname]}")"
     vps_ui_status_badge
     printf '\n'
     vps_ui_rule '-'
-    printf ' %s基础环境%s\n' "$VPS_UI_CYAN" "$VPS_UI_RESET"
+    vps_ui_section "基础环境"
     vps_ui_kv "系统" "${VPS_ENV[os_pretty_name]}"
     vps_ui_kv "内核" "${VPS_ENV[kernel_name]} ${VPS_ENV[kernel_release]}"
     vps_ui_kv "架构" "${VPS_ENV[architecture]}"
@@ -180,12 +355,14 @@ vps_ui_dashboard() {
     vps_ui_kv "网络" "$network_summary"
     vps_ui_kv "BBR 状态" "${VPS_ENV[bbr_status]}"
     vps_ui_kv "BBR 版本" "${VPS_ENV[bbr_version]}"
-    vps_ui_kv "拥塞控制" "${VPS_ENV[congestion_control]}"
-    vps_ui_rule '-'
+    vps_ui_kv "拥塞控制" "$(vps_ui_emphasis_or_label "${VPS_ENV[congestion_control]}")"
+    vps_ui_rule '='
 }
 
 vps_ui_environment_details() {
-    printf ' %s系统与能力%s\n' "$VPS_UI_CYAN" "$VPS_UI_RESET"
+    vps_ui_ensure_init
+    printf '\n'
+    vps_ui_section "系统与能力"
     vps_ui_kv "系统 ID" "${VPS_ENV[os_id]}"
     vps_ui_kv "系统族" "${VPS_ENV[os_id_like]:-未知}"
     vps_ui_kv "系统版本" "${VPS_ENV[os_version_id]}"
@@ -199,23 +376,30 @@ vps_ui_environment_details() {
 vps_ui_main_menu() {
     local index domain count
 
-    printf ' %s主菜单%s\n\n' "$VPS_UI_BOLD" "$VPS_UI_RESET"
+    vps_ui_ensure_init
+    printf '\n'
+    vps_ui_section "主菜单"
+    printf '\n'
     if ((${#VPS_DOMAIN_IDS[@]} == 0)); then
         printf '  %s暂无已登记功能。%s\n' "$VPS_UI_DIM" "$VPS_UI_RESET"
     else
         for ((index = 0; index < ${#VPS_DOMAIN_IDS[@]}; index++)); do
             domain="${VPS_DOMAIN_IDS[$index]}"
             count="$(vps_registry_count_commands "$domain")"
-            printf '  [%d] %s  %s(%s 个功能)%s\n' "$((index + 1))" "${VPS_DOMAIN_LABEL[$domain]}" "$VPS_UI_DIM" "$count" "$VPS_UI_RESET"
+            printf '  [%d] %s  %s(%s 个功能)%s\n' \
+                "$((index + 1))" \
+                "$(vps_ui_pad "${VPS_DOMAIN_LABEL[$domain]}" 16)" \
+                "$VPS_UI_DIM" "$count" "$VPS_UI_RESET"
         done
     fi
-    printf '\n  [q] 退出\n\n'
+    vps_ui_nav_line q "退出"
 }
 
 vps_ui_domain_commands() {
     local domain="$1"
     local index command_key ready_label
 
+    vps_ui_ensure_init
     printf ' %s%s%s\n\n' "$VPS_UI_DIM" "${VPS_DOMAIN_DESCRIPTION[$domain]}" "$VPS_UI_RESET"
     for ((index = 0; index < ${#VPS_REGISTRY_RESULTS[@]}; index++)); do
         command_key="${VPS_REGISTRY_RESULTS[$index]}"
@@ -224,14 +408,18 @@ vps_ui_domain_commands() {
         else
             ready_label="$(vps_ui_availability_label limited)"
         fi
-        printf '  [%d] %s  [%b]\n' "$((index + 1))" "${VPS_COMMAND_LABEL[$command_key]}" "$ready_label"
-        printf '      %s\n' "${VPS_COMMAND_SUMMARY[$command_key]}"
+        printf '  [%d] %s  [%b]\n' \
+            "$((index + 1))" \
+            "$(vps_ui_pad "${VPS_COMMAND_LABEL[$command_key]}" 16)" \
+            "$ready_label"
+        printf '      %s%s%s\n' "$VPS_UI_DIM" "${VPS_COMMAND_SUMMARY[$command_key]}" "$VPS_UI_RESET"
     done
 }
 
 vps_ui_command_details() {
     local command_key="$1"
 
+    vps_ui_ensure_init
     printf ' %s%s%s\n\n' "$VPS_UI_BOLD" "${VPS_COMMAND_LABEL[$command_key]}" "$VPS_UI_RESET"
     vps_ui_kv "命令" "${VPS_COMMAND_DOMAIN[$command_key]} ${VPS_COMMAND_ACTION[$command_key]}"
     vps_ui_kv "摘要" "${VPS_COMMAND_SUMMARY[$command_key]}"
@@ -245,6 +433,7 @@ vps_ui_command_details() {
 vps_ui_registered_commands() {
     local command_key availability
 
+    vps_ui_ensure_init
     if ((${#VPS_COMMAND_KEYS[@]} == 0)); then
         vps_ui_info "当前尚无已实现的功能命令。环境检测和管理 UI 已可使用。"
         return 0
@@ -256,24 +445,26 @@ vps_ui_registered_commands() {
         else
             availability="$(vps_ui_availability_label limited)"
         fi
-        printf '  %-28s [%b] %s\n' \
-            "${VPS_COMMAND_DOMAIN[$command_key]} ${VPS_COMMAND_ACTION[$command_key]}" \
+        printf '  %s [%b] %s\n' \
+            "$(vps_ui_pad "${VPS_COMMAND_DOMAIN[$command_key]} ${VPS_COMMAND_ACTION[$command_key]}" 22)" \
             "$availability" \
             "${VPS_COMMAND_SUMMARY[$command_key]}"
     done
 }
 
 vps_ui_info() {
+    vps_ui_ensure_init
     printf '\n  %s提示%s  %s\n' "$VPS_UI_CYAN" "$VPS_UI_RESET" "$1"
 }
 
 vps_ui_warning() {
+    vps_ui_ensure_init
     printf '\n  %s警告%s  %s\n' "$VPS_UI_YELLOW" "$VPS_UI_RESET" "$1"
 }
 
 vps_ui_read_choice() {
     local prompt="$1"
-    printf ' %s%s%s > ' "$VPS_UI_CYAN" "$prompt" "$VPS_UI_RESET"
+    vps_ui_prompt "$prompt"
     if IFS= read -r VPS_UI_CHOICE; then
         VPS_UI_CHOICE="$(vps_env_trim "$VPS_UI_CHOICE")"
         return 0
@@ -299,6 +490,7 @@ vps_ui_parse_index() {
 
 vps_ui_pause() {
     local _pause_input
+    vps_ui_ensure_init
     printf '\n %s按 Enter 返回...%s' "$VPS_UI_CYAN" "$VPS_UI_RESET"
     IFS= read -r _pause_input || true
 }

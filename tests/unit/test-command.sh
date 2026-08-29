@@ -259,6 +259,11 @@ test_prompt_helpers() {
     status=0
     vps_cmd_prompt_value "监听端口" 443 </dev/null >/dev/null 2>&1 || status=$?
     test_assert_equal 130 "$status" "open input EOF status"
+
+    selected="$(vps_cmd_prompt_select "分组" "" \
+        __section__ "一组" a "甲" __section__ "二组" b "乙" 2>"$output_file" <<<2)"
+    test_assert_equal b "$selected" "section headers are not numbered"
+    [[ "$(<"$output_file")" == *'一组'* && "$(<"$output_file")" == *'二组'* ]] || test_fail "section headers are visible"
 }
 
 test_standard_system_paths() (
@@ -307,7 +312,7 @@ test_logging_and_run() {
         test_assert_no_ansi "$output" "TTY output without TERM"
     fi
     output="$(vps_cmd_status 状态 就绪 success)"
-    test_assert_equal "状态：就绪" "$output" "status output"
+    test_assert_equal "  $(vps_ui_pad "状态" "$VPS_UI_KV_WIDTH")：就绪" "$output" "status output"
     test_assert_no_ansi "$output" "redirected status output"
     output="$(
         _vps_cmd_color_enabled() {
@@ -322,14 +327,14 @@ test_logging_and_run() {
         }
         vps_cmd_status 状态 注意 warning
     )"
-    test_assert_equal $'\033[36m状态\033[0m：\033[33m注意\033[0m' "$output" "status colors"
+    test_assert_equal "  "$'\033[36m'"$(vps_ui_pad "状态" "$VPS_UI_KV_WIDTH")"$'\033[0m：\033[33m注意\033[0m' "$output" "status colors"
     output="$(
         _vps_cmd_color_enabled() {
             return 0
         }
         vps_cmd_status 重点 BBR emphasis
     )"
-    test_assert_equal $'\033[36m重点\033[0m：\033[1;35mBBR\033[0m' "$output" "emphasis color"
+    test_assert_equal "  "$'\033[36m'"$(vps_ui_pad "重点" "$VPS_UI_KV_WIDTH")"$'\033[0m：\033[1;35mBBR\033[0m' "$output" "emphasis color"
     if vps_cmd_status 状态 未知 invalid >/dev/null 2>&1; then
         test_fail "invalid status style was accepted"
     fi

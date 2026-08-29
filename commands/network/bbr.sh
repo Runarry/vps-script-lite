@@ -1141,10 +1141,28 @@ bbr_prompt_live_qdisc() {
     return "$status"
 }
 
+bbr_menu_snapshot() {
+    local algorithm="未知" qdisc="未知" module="不可用" mapped=""
+
+    algorithm="$(bbr_current_algorithm 2>/dev/null || true)"
+    [[ -n "$algorithm" ]] || algorithm="未知"
+    qdisc="$(bbr_current_qdisc 2>/dev/null || true)"
+    [[ -n "$qdisc" ]] || qdisc="未知"
+    mapped="$(vps_cmd_system_path /sys/module/tcp_bbr 2>/dev/null || true)"
+    if [[ -n "$mapped" && -d "$mapped" ]]; then
+        module="已加载"
+    elif bbr_algorithm_available bbr 2>/dev/null; then
+        module="可用"
+    fi
+    printf '当前  %s  ·  qdisc %s  ·  模块 %s' "$algorithm" "$qdisc" "$module"
+}
+
 bbr_interactive_menu() {
-    local choice algorithm qdisc status=0 prompt_status action_status
+    local choice algorithm qdisc status=0 prompt_status action_status snapshot
 
     while true; do
+        snapshot="$(bbr_menu_snapshot 2>/dev/null || true)"
+        [[ -z "$snapshot" ]] || printf ' %s\n' "$snapshot" >&2
         choice="$(vps_cmd_prompt_select \
             "BBR 网络管理" status \
             status "查看状态" \

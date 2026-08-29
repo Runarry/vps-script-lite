@@ -200,8 +200,10 @@ test_chinese_status_without_ansi() {
     }
     vps_dns_effective_servers() { printf '1.1.1.1\n2606:4700:4700::1111\n'; }
     output="$(vps_dns_show)"
-    assert_contains "$output" 'DNS 后端：静态 /etc/resolv.conf' "Chinese backend status"
-    assert_contains "$output" '活动服务器：1.1.1.1' "Chinese server status"
+    assert_contains "$output" 'DNS 后端' "Chinese backend status"
+    assert_contains "$output" '静态 /etc/resolv.conf' "Chinese backend value"
+    assert_contains "$output" '活动服务器' "Chinese server status"
+    assert_contains "$output" '1.1.1.1' "Chinese server value"
     assert_not_contains "$output" $'\033[' "no ANSI in non-color status"
     help_output="$(vps_dns_usage)"
     assert_contains "$help_output" '动作：' "Chinese help"

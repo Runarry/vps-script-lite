@@ -823,24 +823,25 @@ proxy_core_status() {
         ((json)) && continue
         installed="$(jq -r '.installed' <<<"$record")"; source="$(jq -r '.source' <<<"$record")"; version="$(jq -r '.version' <<<"$record")"
         running="$(jq -r '.running' <<<"$record")"; enabled="$(jq -r '.enabled' <<<"$record")"; pending="$(jq -r '.pending_restart' <<<"$record")"; config="$(jq -r '.config' <<<"$record")"
-        printf '%s 状态\n' "$(proxy_core_label "$core")"
+        vps_ui_section "$(proxy_core_label "$core") 状态"
         if [[ "$installed" == true ]]; then
-            printf '  安装来源：%s\n' "$( [[ "$source" == vpsctl ]] && printf 'vpsctl 管理' || printf '外部复用' )"
-            printf '  版本：%s\n' "$version"
+            vps_cmd_status "安装来源" "$( [[ "$source" == vpsctl ]] && printf 'vpsctl 管理' || printf '外部复用' )" info
+            vps_cmd_status "版本" "$version" emphasis
         else
-            printf '  安装来源：未安装\n  版本：未安装\n'
+            vps_cmd_status "安装来源" "未安装" warning
+            vps_cmd_status "版本" "未安装" warning
         fi
-        printf '  运行状态：%s\n' "$( [[ "$running" == true ]] && printf '运行中' || printf '未运行' )"
-        printf '  开机启动：%s\n' "$( [[ "$enabled" == true ]] && printf '已启用' || printf '未启用' )"
-        printf '  配置文件：%s\n' "$config"
-        printf '  节点数：%s\n' "$nodes"
-        printf '  待重启：%s\n' "$( [[ "$pending" == true ]] && printf '是' || printf '否' )"
+        vps_cmd_status "运行状态" "$( [[ "$running" == true ]] && printf '运行中' || printf '未运行' )" "$( [[ "$running" == true ]] && printf success || printf warning )"
+        vps_cmd_status "开机启动" "$( [[ "$enabled" == true ]] && printf '已启用' || printf '未启用' )" "$( [[ "$enabled" == true ]] && printf success || printf warning )"
+        vps_cmd_status "配置文件" "$config" info
+        vps_cmd_status "节点数" "$nodes" emphasis
+        vps_cmd_status "待重启" "$( [[ "$pending" == true ]] && printf '是' || printf '否' )" "$( [[ "$pending" == true ]] && printf warning || printf success )"
     done
     if ((json)); then
         jq -n --argjson schema "$PROXY_SCHEMA_VERSION" --argjson cores "$records" --argjson total_nodes "$total" \
             '{schema_version:$schema,cores:$cores,total_nodes:$total_nodes}'
     else
-        printf '总节点数：%s\n' "$total"
+        vps_cmd_status "总节点数" "$total" emphasis
     fi
 }
 

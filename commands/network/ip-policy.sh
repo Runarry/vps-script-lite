@@ -753,10 +753,21 @@ ip_policy_status() {
     vps_cmd_status "IPv6 默认路由" "$IP_POLICY_STATUS_IPV6_ROUTE" info
 }
 
+ip_policy_menu_snapshot() {
+    local managed="否"
+
+    [[ -n "${IP_POLICY_GAI_FILE:-}" ]] || return 0
+    ip_policy_collect_status || true
+    [[ "${IP_POLICY_STATUS_MANAGED:-}" == "true" ]] && managed="是"
+    printf '当前  %s  ·  受管 %s' "${IP_POLICY_STATUS_POLICY:-未知}" "$managed"
+}
+
 ip_policy_menu() {
-    local choice status=0 prompt_status
+    local choice status=0 prompt_status snapshot
 
     while true; do
+        snapshot="$(ip_policy_menu_snapshot 2>/dev/null || true)"
+        [[ -z "$snapshot" ]] || printf ' %s\n' "$snapshot" >&2
         choice="$(vps_cmd_prompt_select \
             "系统 IP 地址选择策略" status \
             status "查看状态" \

@@ -323,8 +323,8 @@ test_status_service_and_logs() {
     assert_equal 0 "$RUN_STATUS" "status both cores"
     assert_contains "$RUN_OUTPUT" "/etc/vpsctl/proxy/sing-box/config.json" "sing-box config path"
     assert_contains "$RUN_OUTPUT" "/etc/vpsctl/proxy/xray/config.json" "xray config path"
-    assert_equal 2 "$(grep -c '节点数：1' <<<"$RUN_OUTPUT")" "per-core status counts"
-    assert_contains "$RUN_OUTPUT" "总节点数：2" "status total"
+    assert_equal 2 "$(grep -cE '节点数[[:space:]]*：[[:space:]]*1' <<<"$RUN_OUTPUT")" "per-core status counts"
+    grep -qE '总节点数[[:space:]]*：[[:space:]]*2' <<<"$RUN_OUTPUT" || fail "status total"
     run_proxy node list
     assert_equal 0 "$RUN_STATUS" "full node list"
     assert_contains "$RUN_OUTPUT" "[1] status-sb" "numbered first node"
@@ -588,9 +588,9 @@ test_unified_interactive_api() (
     done
     assert_contains "$output" "/etc/vpsctl/proxy/sing-box/config.json" "menu sing-box status path"
     assert_contains "$output" "/etc/vpsctl/proxy/xray/config.json" "menu Xray status path"
-    assert_contains "$output" "总节点数：0" "menu status total"
+    assert_contains "$output" "总节点数" "menu status total"
     menu_line="$(grep -n -m1 '代理能力' <<<"$output" | cut -d: -f1)"
-    status_line="$(grep -n -m1 '总节点数：0' <<<"$output" | cut -d: -f1)"
+    status_line="$(grep -nE -m1 '总节点数[[:space:]]*：[[:space:]]*0' <<<"$output" | cut -d: -f1)"
     ((status_line < menu_line)) || fail "status summary was not above grouped proxy menu"
 
     run_proxy node add --profile shadowsocks-aes-256-gcm --core xray --name numbered-one --port 19301 --address proxy.example

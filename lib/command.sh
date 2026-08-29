@@ -1,6 +1,11 @@
 # shellcheck shell=bash
 # Shared command safety helpers. Sourcing this file only defines functions.
 
+if [[ -z "${VPS_UI_LOADED:-}" ]]; then
+    # shellcheck source=ui.sh
+    source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/ui.sh"
+fi
+
 VPS_CMD_DEPENDENCIES_PLANNED=0
 
 _vps_cmd_normalize_boolean() {
@@ -218,6 +223,7 @@ vps_cmd_init() {
     VPS_CMD_LOCK_FD=""
     VPS_CMD_LOCK_PATH=""
     VPS_CMD_DEPENDENCIES_PLANNED=0
+    vps_ui_init
 }
 
 vps_cmd_trim() {
@@ -252,7 +258,8 @@ vps_cmd_is_interactive() {
 
 vps_cmd_prompt_select() {
     local prompt="${1:-}" default_value="${2:-}" choice value label index
-    local -a values=() labels=()
+    local item_no
+    local -a values=() labels=() select_values=()
 
     (($# >= 4 && ($# - 2) % 2 == 0)) || {
         vps_cmd_error "vps_cmd_prompt_select 需要 PROMPT、DEFAULT 和至少一组 VALUE/LABEL"
@@ -269,18 +276,34 @@ vps_cmd_prompt_select() {
         shift 2
     done
 
+    vps_ui_ensure_init
     while true; do
-        printf '%s\n' "$prompt" >&2
+        select_values=()
+        item_no=0
+        printf '\n' >&2
+        vps_ui_section "$prompt" >&2
+        printf '\n' >&2
         for ((index = 0; index < ${#values[@]}; index++)); do
             value="${values[$index]}"
             label="${labels[$index]}"
+            if [[ "$value" == "__section__" ]]; then
+                vps_ui_menu_item "" "$label" section >&2
+                continue
+            fi
+            item_no=$((item_no + 1))
+            select_values+=("$value")
             if [[ -n "$default_value" && "$value" == "$default_value" ]]; then
-                printf '  [%d] %s（默认）\n' "$((index + 1))" "$label" >&2
+                vps_ui_menu_item "$item_no" "${label}（默认）" default >&2
             else
-                printf '  [%d] %s\n' "$((index + 1))" "$label" >&2
+                vps_ui_menu_item "$item_no" "$label" >&2
             fi
         done
-        printf '  [q] 返回\n选择：' >&2
+        ((${#select_values[@]} > 0)) || {
+            vps_cmd_error "vps_cmd_prompt_select 没有可选择的项目"
+            return 2
+        }
+        printf '\n  [q] 返回\n\n' >&2
+        vps_ui_prompt "请选择" >&2
         IFS= read -r choice || return 130
         choice="$(vps_cmd_trim "$choice")"
         case "$choice" in
@@ -292,8 +315,8 @@ vps_cmd_prompt_select() {
                 fi
                 ;;
             *)
-                if [[ "$choice" =~ ^[1-9][0-9]{0,3}$ ]] && ((10#$choice <= ${#values[@]})); then
-                    printf '%s' "${values[$((10#$choice - 1))]}"
+                if [[ "$choice" =~ ^[1-9][0-9]{0,3}$ ]] && ((10#$choice <= ${#select_values[@]})); then
+                    printf '%s' "${select_values[$((10#$choice - 1))]}"
                     return 0
                 fi
                 ;;
@@ -313,10 +336,11 @@ vps_cmd_prompt_value() {
         vps_cmd_error "vps_cmd_prompt_value 的 PROMPT 不能为空"
         return 2
     }
+    vps_ui_ensure_init
     if [[ -n "$default_value" ]]; then
-        printf '%s [%s]：' "$prompt" "$default_value" >&2
+        printf '%s%s%s [%s]：' "$VPS_UI_CYAN" "$prompt" "$VPS_UI_RESET" "$default_value" >&2
     else
-        printf '%s：' "$prompt" >&2
+        printf '%s%s%s：' "$VPS_UI_CYAN" "$prompt" "$VPS_UI_RESET" >&2
     fi
     IFS= read -r value || return 130
     value="$(vps_cmd_trim "$value")"
@@ -375,7 +399,8 @@ vps_cmd_status() {
         value_color="$(_vps_cmd_color_for_style "$style")"
         reset=$'\033[0m'
     fi
-    printf '%s%s%s：%s%s%s\n' "$label_color" "$label" "$reset" "$value_color" "$value" "$reset"
+    vps_ui_ensure_init
+    printf '  %s%s%s：%s%s%s\n' "$label_color" "$(vps_ui_pad "$label" "$VPS_UI_KV_WIDTH")" "$reset" "$value_color" "$value" "$reset"
 }
 
 vps_cmd_run() {
@@ -554,7 +579,8 @@ _vps_cmd_tool_available() {
 _vps_cmd_confirm_dependency_install() {
     local reply
 
-    printf '是否安装这些依赖？ [是/否，输入 y 确认] ' >&2
+    vps_ui_ensure_init
+    printf '%s是否安装这些依赖？%s [是/否，输入 y 确认] ' "$VPS_UI_YELLOW" "$VPS_UI_RESET" >&2
     IFS= read -r reply || return 130
     reply="$(vps_cmd_trim "$reply")"
     case "$reply" in
@@ -644,7 +670,8 @@ vps_cmd_confirm() {
         vps_cmd_error "确认操作需要交互式终端，或使用 --yes"
         return 3
     }
-    printf '%s [是/否，输入 y 确认] ' "$prompt" >&2
+    vps_ui_ensure_init
+    printf '%s%s%s [是/否，输入 y 确认] ' "$VPS_UI_YELLOW" "$prompt" "$VPS_UI_RESET" >&2
     IFS= read -r reply || return 130
     reply="$(vps_cmd_trim "$reply")"
     [[ "$reply" == "y" || "$reply" == "Y" || "$reply" == "yes" || "$reply" == "YES" ]]
@@ -664,7 +691,8 @@ vps_cmd_confirm_token() {
         vps_cmd_error "令牌确认需要交互式终端"
         return 3
     }
-    printf '%s 请输入 %s 以继续: ' "$prompt" "$token" >&2
+    vps_ui_ensure_init
+    printf '%s%s%s 请输入 %s%s%s 以继续: ' "$VPS_UI_RED" "$prompt" "$VPS_UI_RESET" "$VPS_UI_BOLD" "$token" "$VPS_UI_RESET" >&2
     IFS= read -r reply || return 130
     [[ "$reply" == "$token" ]]
 }
