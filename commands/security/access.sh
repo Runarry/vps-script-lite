@@ -61,8 +61,9 @@ access_usage() {
   多端口或条件访问配置会被拒绝，不会猜测合并。
 
 防火墙：
-  auto 适配单一活动 UFW、firewalld、持久化 nftables 或持久化 iptables。
-  原生 nftables/iptables 无可靠持久化时拒绝自动修改；manual 不改防火墙。
+  auto 适配单一活动 UFW、firewalld、nftables 或持久化 iptables。
+  nftables 只处理会限制入站的真实 INPUT 基链；缺少可靠持久化时可自动添加运行时规则，
+  交互模式允许改选 manual。运行时规则在重启/ruleset reload 后失效。
 
 权限：
   status 与 session verify 可由非 root 执行；其他写操作需要 root。
@@ -123,7 +124,7 @@ access_status_user_fields() {
 access_status() {
     local user="$1" json="$2" port=unknown root_login=unknown password_login=unknown pubkey=unknown managed=false
     local active='' tx_status='' expires='' service_state=unknown strict=invalid listening=false
-    local firewall_backend=unknown firewall_port_rule=null firewall_managed=false
+    local firewall_backend=unknown firewall_port_rule=null firewall_managed=false firewall_mode=unmanaged
 
     if access_sshd_validate_standard >/dev/null 2>&1; then
         strict=standard
@@ -141,7 +142,10 @@ access_status() {
         access_firewall_has_port "$firewall_backend" "$port" && firewall_port_rule=true || firewall_port_rule=false
     fi
     access_firewall_load_managed
-    [[ -n "$ACCESS_FW_PREVIOUS_BACKEND" && "$ACCESS_FW_PREVIOUS_OWNED" == 1 ]] && firewall_managed=true
+    if [[ -n "$ACCESS_FW_PREVIOUS_BACKEND" && "$ACCESS_FW_PREVIOUS_OWNED" == 1 ]]; then
+        firewall_managed=true
+        firewall_mode="${ACCESS_FW_PREVIOUS_MODE:-persistent}"
+    fi
     [[ -f "$ACCESS_CONFIG" && ! -L "$ACCESS_CONFIG" ]] && grep -Fqx "$ACCESS_MANAGED_MARKER" "$ACCESS_CONFIG" && managed=true
     active="$(access_active_transaction 2>/dev/null || true)"
     if [[ -n "$active" ]]; then
@@ -156,8 +160,8 @@ access_status() {
         printf '  "platform": "systemd",\n'
         printf '  "sshd": {"service": "%s", "service_state": "%s", "config_shape": "%s", "port": "%s", "listening": %s, "permit_root_login": "%s", "password_authentication": "%s", "pubkey_authentication": "%s", "managed": %s},\n' \
             "$(access_json_escape "$ACCESS_SSH_SERVICE")" "$service_state" "$strict" "$port" "$listening" "$root_login" "$password_login" "$pubkey" "$managed"
-        printf '  "firewall": {"backend": "%s", "port_rule_present": %s, "managed": %s},\n' \
-            "$(access_json_escape "$firewall_backend")" "$firewall_port_rule" "$firewall_managed"
+        printf '  "firewall": {"backend": "%s", "port_rule_present": %s, "managed": %s, "mode": "%s"},\n' \
+            "$(access_json_escape "$firewall_backend")" "$firewall_port_rule" "$firewall_managed" "$(access_json_escape "$firewall_mode")"
         if [[ -n "$active" ]]; then
             printf '  "transaction": {"id": "%s", "status": "%s", "expires_epoch": %s},\n' "$active" "$tx_status" "${expires:-0}"
         else
@@ -181,7 +185,8 @@ access_status() {
     vps_cmd_status "密码认证" "$password_login" info
     vps_cmd_status "公钥认证" "$pubkey" "$([[ "$pubkey" == yes ]] && printf success || printf warning)"
     vps_cmd_status "vpsctl 受管" "$managed" info
-    vps_cmd_status "防火墙" "$firewall_backend (port_rule_present=$firewall_port_rule, managed=$firewall_managed)" info
+    vps_cmd_status "防火墙" "$firewall_backend (port_rule_present=$firewall_port_rule, managed=$firewall_managed, mode=$firewall_mode)" info
+    [[ "$firewall_mode" != runtime ]] || vps_cmd_warning "当前 vpsctl nftables 放行规则仅在运行时有效；重启或 reload ruleset 前请配置持久化"
     vps_cmd_status "活动事务" "${active:-无}${tx_status:+ ($tx_status, expires $expires)}" "$([[ -z "$active" ]] && printf info || printf warning)"
     if [[ -n "$user" ]]; then
         vps_cmd_status "用户" "$user (exists=$ACCESS_STATUS_USER_EXISTS, uid=${ACCESS_STATUS_USER_UID:-无})" info

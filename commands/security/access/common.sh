@@ -58,6 +58,9 @@ access_require_platform() {
         vps_cmd_error "security access 仅支持 systemd；OpenRC 与其他 init 系统不受支持"
         return 3
     }
+    VPSCTL_ENV_OS_ID="$os_id"
+    VPSCTL_ENV_INIT="$init"
+    access_sshd_init || return $?
     command -v systemctl >/dev/null 2>&1 || {
         vps_cmd_error "未找到 systemctl，无法安全管理 SSH 服务"
         return 3

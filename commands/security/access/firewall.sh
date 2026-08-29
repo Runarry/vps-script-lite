@@ -5,10 +5,11 @@ ACCESS_FW_ADDED=0
 ACCESS_FW_PREVIOUS_BACKEND=''
 ACCESS_FW_PREVIOUS_PORT=''
 ACCESS_FW_PREVIOUS_OWNED=0
+ACCESS_FW_PREVIOUS_MODE=''
 ACCESS_FW_STATE_LOGICAL="${ACCESS_STATE_LOGICAL}/firewall.state"
 ACCESS_FW_STATE=''
-ACCESS_FW_NFT_TABLE=''
-ACCESS_FW_NFT_CHAIN=''
+ACCESS_FW_NFT_TARGETS=''
+ACCESS_FW_NFT_MODE='auto'
 
 access_firewall_init() {
     ACCESS_FW_STATE="$(vps_cmd_system_path "$ACCESS_FW_STATE_LOGICAL")" || return $?
@@ -19,7 +20,7 @@ access_firewall_service_enabled() {
 }
 
 access_firewall_detect() {
-    local ufw_status iptables_version nft_rules iptables_rules
+    local ufw_status iptables_version iptables_rules
     local -a detected=()
 
     if command -v ufw >/dev/null 2>&1; then
@@ -32,9 +33,8 @@ access_firewall_detect() {
         detected+=(firewalld)
     fi
     if ((${#detected[@]} == 0)); then
-        if command -v nft >/dev/null 2>&1; then
-            nft_rules="$(nft list ruleset 2>/dev/null || true)"
-            [[ -z "${nft_rules//[[:space:]]/}" ]] || detected+=(nftables)
+        if command -v nft >/dev/null 2>&1 && access_firewall_nft_targets; then
+            detected+=(nftables)
         fi
         if command -v iptables >/dev/null 2>&1; then
             iptables_rules="$(iptables -S 2>/dev/null || true)"
@@ -58,24 +58,58 @@ access_firewall_nft_persistent() {
     access_firewall_service_enabled nftables.service || return 1
     [[ -f "$config" && ! -L "$config" ]] || return 1
     grep -Eq '^[[:space:]]*include[[:space:]]+[\"]?/etc/nftables\.d/\*\.nft[\"]?[[:space:]]*$' "$config" || return 1
-    access_firewall_nft_anchor
+    access_firewall_nft_targets
 }
 
-access_firewall_nft_anchor() {
-    local output count
+access_firewall_nft_targets() {
+    local output family table chain found=0
 
     output="$(nft -a list ruleset 2>/dev/null | awk '
-        $1 == "table" && $2 == "inet" { table_name=$3; sub(/\{.*/, "", table_name); next }
-        $1 == "chain" { chain_name=$2; sub(/\{.*/, "", chain_name); in_chain=1; next }
-        in_chain && /type[[:space:]]+filter[[:space:]]+hook[[:space:]]+input([[:space:]]|;)/ {
-            print table_name "\t" chain_name
+        $1 == "table" && ($2 == "inet" || $2 == "ip" || $2 == "ip6") {
+            family=$2
+            table_name=$3
+            sub(/\{.*/, "", table_name)
+            in_table=1
+            next
         }
-        in_chain && $1 == "}" { in_chain=0 }
+        in_table && $1 == "chain" {
+            chain_name=$2
+            sub(/\{.*/, "", chain_name)
+            in_chain=1
+            is_input=0
+            restrictive=0
+            managed=0
+            next
+        }
+        in_chain && /type[[:space:]]+filter[[:space:]]+hook[[:space:]]+input([[:space:]]|;)/ {
+            is_input=1
+            if (/policy[[:space:]]+drop([[:space:]]|;)/) restrictive=1
+            next
+        }
+        in_chain && $1 == "}" {
+            if (is_input && (restrictive || managed)) {
+                key=family SUBSEP table_name SUBSEP chain_name
+                if (!seen[key]++) print family "\t" table_name "\t" chain_name
+            }
+            in_chain=0
+            chain_name=""
+            next
+        }
+        in_chain {
+            if (/comment "vpsctl-access-[0-9]+"/) managed=1
+            else if ($1 != "") restrictive=1
+            next
+        }
+        in_table && $1 == "}" { in_table=0; family=""; table_name="" }
     ')" || return 1
-    count="$(grep -c . <<<"$output" || true)"
-    [[ "$count" == 1 ]] || return 1
-    IFS=$'\t' read -r ACCESS_FW_NFT_TABLE ACCESS_FW_NFT_CHAIN <<<"$output"
-    [[ "$ACCESS_FW_NFT_TABLE" =~ ^[A-Za-z_][A-Za-z0-9_]*$ && "$ACCESS_FW_NFT_CHAIN" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]
+    [[ -n "$output" ]] || return 1
+    while IFS=$'\t' read -r family table chain; do
+        [[ "$family" == inet || "$family" == ip || "$family" == ip6 ]] || return 1
+        [[ "$table" =~ ^[A-Za-z_][A-Za-z0-9_.-]*$ && "$chain" =~ ^[A-Za-z_][A-Za-z0-9_.-]*$ ]] || return 1
+        found=1
+    done <<<"$output"
+    ((found == 1)) || return 1
+    ACCESS_FW_NFT_TARGETS="$output"
 }
 
 access_firewall_iptables_persistence() {
@@ -91,15 +125,53 @@ access_firewall_iptables_persistence() {
 }
 
 access_firewall_require_auto_backend() {
-    local backend="$1"
+    local backend="$1" requested_mode="${2:-auto}" choice nft_file
 
     case "$backend" in
         none | ufw | firewalld) return 0 ;;
         nftables)
-            access_firewall_nft_persistent || {
-                vps_cmd_error "检测到原生 nftables，但未同时证明 nftables.service、/etc/nftables.d/*.nft 持久化 include 与唯一 inet input 基链；拒绝自动修改，请使用 --firewall manual"
+            access_firewall_nft_targets || {
+                vps_cmd_error "检测到 nftables，但无法定位现有 INPUT 基链；请使用 --firewall manual"
                 return 3
             }
+            if [[ "$requested_mode" == persistent ]]; then
+                access_firewall_nft_persistent || {
+                    vps_cmd_error "事务记录要求 nftables 持久化模式，但 nftables.service 或 /etc/nftables.d/*.nft include 已漂移"
+                    return 3
+                }
+                ACCESS_FW_NFT_MODE=persistent
+                return 0
+            fi
+            if [[ "$requested_mode" == auto ]] && access_firewall_nft_persistent; then
+                ACCESS_FW_NFT_MODE=persistent
+                return 0
+            fi
+            if [[ "$requested_mode" == runtime ]]; then
+                choice=runtime
+            elif vps_cmd_is_interactive; then
+                choice="$(vps_cmd_prompt_select "nftables 未检测到可靠持久化，如何处理候选 SSH 端口" runtime \
+                    runtime "自动添加运行时规则（重启后失效）" \
+                    manual "本次改为人工管理防火墙")" || return $?
+            else
+                choice=runtime
+                vps_cmd_warning "nftables 未检测到可靠持久化；--firewall auto 将添加运行时规则，规则在重启或 ruleset reload 后可能失效"
+            fi
+            if [[ "$choice" == manual ]]; then
+                ACCESS_FW_NFT_MODE=manual
+                vps_cmd_warning "已选择人工管理 nftables；请自行确保候选 SSH 端口可达"
+                return 0
+            fi
+            nft_file="$(access_firewall_nft_file)" || return $?
+            if [[ -e "$nft_file" ]]; then
+                access_firewall_nft_validate_file "$nft_file" || {
+                    vps_cmd_error "存在不受管的 nftables 片段，拒绝运行时回退：/etc/nftables.d/zz-vpsctl-access.nft"
+                    return 3
+                }
+                vps_cmd_error "已存在 vpsctl nftables 持久化片段，但持久化入口当前不可用；请先修复 nftables.service/include 或使用 --firewall manual"
+                return 3
+            fi
+            ACCESS_FW_NFT_MODE=runtime
+            vps_cmd_warning "将只在现有 INPUT 基链中添加 vpsctl 运行时规则；第二会话仍会实测可达性，但提交后请在重启或 reload ruleset 前补齐持久化"
             ;;
         iptables)
             access_firewall_iptables_persistence >/dev/null || {
@@ -115,10 +187,12 @@ access_firewall_load_managed() {
     ACCESS_FW_PREVIOUS_BACKEND=''
     ACCESS_FW_PREVIOUS_PORT=''
     ACCESS_FW_PREVIOUS_OWNED=0
+    ACCESS_FW_PREVIOUS_MODE=''
     [[ -f "$ACCESS_FW_STATE" && ! -L "$ACCESS_FW_STATE" ]] || return 0
     ACCESS_FW_PREVIOUS_BACKEND="$(access_kv_get "$ACCESS_FW_STATE" backend 2>/dev/null || true)"
     ACCESS_FW_PREVIOUS_PORT="$(access_kv_get "$ACCESS_FW_STATE" port 2>/dev/null || true)"
     ACCESS_FW_PREVIOUS_OWNED="$(access_kv_get "$ACCESS_FW_STATE" owned 2>/dev/null || true)"
+    ACCESS_FW_PREVIOUS_MODE="$(access_kv_get "$ACCESS_FW_STATE" mode 2>/dev/null || true)"
     case "$ACCESS_FW_PREVIOUS_BACKEND" in
         ufw | firewalld | nftables | iptables) ;;
         *)
@@ -127,10 +201,16 @@ access_firewall_load_managed() {
             ACCESS_FW_PREVIOUS_OWNED=0
             ;;
     esac
+    if [[ "$ACCESS_FW_PREVIOUS_BACKEND" == nftables ]]; then
+        [[ "$ACCESS_FW_PREVIOUS_MODE" == persistent || "$ACCESS_FW_PREVIOUS_MODE" == runtime ]] || ACCESS_FW_PREVIOUS_MODE=persistent
+    else
+        ACCESS_FW_PREVIOUS_MODE=''
+    fi
     [[ "$ACCESS_FW_PREVIOUS_OWNED" == 1 ]] && access_validate_port "$ACCESS_FW_PREVIOUS_PORT" || {
         ACCESS_FW_PREVIOUS_BACKEND=''
         ACCESS_FW_PREVIOUS_PORT=''
         ACCESS_FW_PREVIOUS_OWNED=0
+        ACCESS_FW_PREVIOUS_MODE=''
     }
 }
 
@@ -205,11 +285,16 @@ access_firewall_has_owned_port() {
 }
 
 access_firewall_nft_has_port() {
-    local port="$1" rules
+    local port="$1" family table chain rules found=0
 
-    access_firewall_nft_anchor || return 1
-    rules="$(nft -a list chain inet "$ACCESS_FW_NFT_TABLE" "$ACCESS_FW_NFT_CHAIN" 2>/dev/null)" || return 1
-    grep -Fq "comment \"vpsctl-access-${port}\"" <<<"$rules"
+    access_firewall_nft_targets || return 1
+    while IFS=$'\t' read -r family table chain; do
+        [[ -n "$family" ]] || continue
+        rules="$(nft -a list chain "$family" "$table" "$chain" 2>/dev/null)" || return 1
+        grep -Fq "comment \"vpsctl-access-${port}\"" <<<"$rules" || return 1
+        found=1
+    done <<<"$ACCESS_FW_NFT_TARGETS"
+    ((found == 1))
 }
 
 access_firewall_iptables_has_owned_port() {
@@ -232,7 +317,10 @@ access_firewall_nft_validate_file() {
     awk -v marker="$ACCESS_MANAGED_MARKER" '
         NR == 1 { if ($0 != marker) exit 1; next }
         {
-            if (NF != 11 || $1 != "insert" || $2 != "rule" || $3 != "inet" ||
+            if (NF != 11 || $1 != "insert" || $2 != "rule" ||
+                ($3 != "inet" && $3 != "ip" && $3 != "ip6") ||
+                $4 !~ /^[A-Za-z_][A-Za-z0-9_.-]*$/ ||
+                $5 !~ /^[A-Za-z_][A-Za-z0-9_.-]*$/ ||
                 $6 != "tcp" || $7 != "dport" || $8 !~ /^[0-9]+$/ ||
                 $9 != "accept" || $10 != "comment") exit 1
             comment=$11
@@ -244,31 +332,100 @@ access_firewall_nft_validate_file() {
 }
 
 access_firewall_nft_render() {
-    local port="$1" old_port="${2:-}"
+    local port="$1" old_port="${2:-}" family table chain
 
     printf '%s\n' "$ACCESS_MANAGED_MARKER"
-    printf 'insert rule inet %s %s tcp dport %s accept comment "vpsctl-access-%s"\n' "$ACCESS_FW_NFT_TABLE" "$ACCESS_FW_NFT_CHAIN" "$port" "$port"
-    [[ -z "$old_port" || "$old_port" == "$port" ]] ||
-        printf 'insert rule inet %s %s tcp dport %s accept comment "vpsctl-access-%s"\n' "$ACCESS_FW_NFT_TABLE" "$ACCESS_FW_NFT_CHAIN" "$old_port" "$old_port"
+    while IFS=$'\t' read -r family table chain; do
+        [[ -n "$family" ]] || continue
+        printf 'insert rule %s %s %s tcp dport %s accept comment "vpsctl-access-%s"\n' "$family" "$table" "$chain" "$port" "$port"
+        [[ -z "$old_port" || "$old_port" == "$port" ]] ||
+            printf 'insert rule %s %s %s tcp dport %s accept comment "vpsctl-access-%s"\n' "$family" "$table" "$chain" "$old_port" "$old_port"
+    done <<<"$ACCESS_FW_NFT_TARGETS"
 }
 
 access_firewall_nft_delete_owned_rules() {
-    local output handle
+    local family table chain output handle
     local -a handles=()
 
-    access_firewall_nft_anchor || return 30
-    output="$(nft -a list chain inet "$ACCESS_FW_NFT_TABLE" "$ACCESS_FW_NFT_CHAIN" 2>/dev/null)" || return 20
-    mapfile -t handles < <(awk '
-        /comment "vpsctl-access-[0-9]+"/ && /handle [0-9]+/ {
-            for (i=1; i<=NF; i++) if ($i == "handle" && $(i+1) ~ /^[0-9]+$/) print $(i+1)
-        }
-    ' <<<"$output" | sort -rn)
-    for handle in "${handles[@]}"; do
-        vps_cmd_run nft delete rule inet "$ACCESS_FW_NFT_TABLE" "$ACCESS_FW_NFT_CHAIN" handle "$handle" || return 20
-    done
+    access_firewall_nft_targets || return 30
+    while IFS=$'\t' read -r family table chain; do
+        [[ -n "$family" ]] || continue
+        output="$(nft -a list chain "$family" "$table" "$chain" 2>/dev/null)" || return 20
+        mapfile -t handles < <(awk '
+            /comment "vpsctl-access-[0-9]+"/ && /handle [0-9]+/ {
+                for (i=1; i<=NF; i++) if ($i == "handle" && $(i+1) ~ /^[0-9]+$/) print $(i+1)
+            }
+        ' <<<"$output" | sort -rn)
+        for handle in "${handles[@]}"; do
+            vps_cmd_run nft delete rule "$family" "$table" "$chain" handle "$handle" || return 20
+        done
+        handles=()
+    done <<<"$ACCESS_FW_NFT_TARGETS"
 }
 
-access_firewall_nft_apply() {
+access_firewall_nft_snapshot_owned() {
+    local destination="$1" family table chain output
+
+    printf '%s\n' "$ACCESS_MANAGED_MARKER" >"$destination" || return 20
+    while IFS=$'\t' read -r family table chain; do
+        [[ -n "$family" ]] || continue
+        output="$(nft -a list chain "$family" "$table" "$chain" 2>/dev/null)" || return 20
+        awk -v family="$family" -v table="$table" -v chain="$chain" '
+            /comment "vpsctl-access-[0-9]+"/ {
+                port=""
+                for (i=1; i<=NF; i++) if ($i == "dport" && $(i+1) ~ /^[0-9]+$/) port=$(i+1)
+                comment=$0
+                sub(/^.*comment "vpsctl-access-/, "", comment)
+                sub(/".*$/, "", comment)
+                if (port != "" && comment == port)
+                    printf "insert rule %s %s %s tcp dport %s accept comment \"vpsctl-access-%s\"\n", family, table, chain, port, port
+            }
+        ' <<<"$output" >>"$destination" || return 20
+    done <<<"$ACCESS_FW_NFT_TARGETS"
+}
+
+access_firewall_nft_apply_runtime() {
+    local port="$1" old_port="${2:-}" tmp old_file delete_status=0
+
+    tmp="$(mktemp)" || return 20
+    old_file="$(mktemp)" || {
+        rm -f -- "$tmp"
+        return 20
+    }
+    access_firewall_nft_render "$port" "$old_port" >"$tmp" || {
+        rm -f -- "$tmp" "$old_file"
+        return 20
+    }
+    if [[ "${VPSCTL_DRY_RUN:-0}" == 1 ]]; then
+        rm -f -- "$tmp" "$old_file"
+        vps_cmd_info "演练：将在现有 nftables INPUT 基链首部插入运行时 TCP $port 规则；不会创建持久化文件"
+        return 0
+    fi
+    nft -c -f "$tmp" || {
+        rm -f -- "$tmp" "$old_file"
+        return 10
+    }
+    access_firewall_nft_snapshot_owned "$old_file" || {
+        rm -f -- "$tmp" "$old_file"
+        return 20
+    }
+    access_firewall_nft_delete_owned_rules || delete_status=$?
+    if ((delete_status)); then
+        rm -f -- "$tmp" "$old_file"
+        return "$delete_status"
+    fi
+    if ! nft -f "$tmp"; then
+        access_firewall_nft_delete_owned_rules >/dev/null 2>&1 || true
+        nft -f "$old_file" >/dev/null 2>&1 || true
+        rm -f -- "$tmp" "$old_file"
+        return 20
+    fi
+    rm -f -- "$tmp" "$old_file"
+    access_firewall_has_port nftables "$port" || return 30
+    [[ -z "$old_port" || "$old_port" == "$port" ]] || access_firewall_has_port nftables "$old_port" || return 30
+}
+
+access_firewall_nft_apply_persistent() {
     local port="$1" old_port="${2:-}" nft_file nft_dir tmp old_file='' had_file=0 delete_status=0
 
     access_firewall_nft_persistent || return 3
@@ -281,7 +438,7 @@ access_firewall_nft_apply() {
         return 3
     fi
     if [[ "${VPSCTL_DRY_RUN:-0}" == 1 ]]; then
-        vps_cmd_info "演练：将在 inet $ACCESS_FW_NFT_TABLE/$ACCESS_FW_NFT_CHAIN 基链首部插入带标记的 TCP $port 规则"
+        vps_cmd_info "演练：将在现有 nftables INPUT 基链首部插入并持久化带标记的 TCP $port 规则"
         return 0
     fi
     mkdir -p -- "$nft_dir" || return 20
@@ -332,6 +489,23 @@ access_firewall_nft_apply() {
     rm -f -- "$old_file"
     access_firewall_has_port nftables "$port" || return 30
     [[ -z "$old_port" || "$old_port" == "$port" ]] || access_firewall_has_port nftables "$old_port" || return 30
+}
+
+access_firewall_nft_apply() {
+    local port="$1" old_port="${2:-}" mode="${3:-auto}"
+
+    access_firewall_nft_targets || {
+        vps_cmd_error "nftables INPUT 基链已消失或无法安全解析"
+        return 30
+    }
+    if [[ "$mode" == auto ]]; then
+        access_firewall_nft_persistent && mode=persistent || mode=runtime
+    fi
+    case "$mode" in
+        persistent) access_firewall_nft_apply_persistent "$port" "$old_port" ;;
+        runtime) access_firewall_nft_apply_runtime "$port" "$old_port" ;;
+        *) return 70 ;;
+    esac
 }
 
 access_firewall_iptables_save() {
@@ -425,7 +599,8 @@ access_firewall_open() {
             ACCESS_FW_ADDED="firewalld-r${added_runtime}-p${added_permanent}"
             ;;
         nftables)
-            access_firewall_nft_apply "$port" "$old_port" || return $?
+            access_firewall_nft_apply "$port" "$old_port" "$ACCESS_FW_NFT_MODE" || return $?
+            ACCESS_FW_ADDED="nft-${ACCESS_FW_NFT_MODE}"
             ;;
         iptables)
             vps_cmd_run iptables -I INPUT 1 -p tcp --dport "$port" -m comment --comment "vpsctl-access-${port}" -j ACCEPT || return 20
@@ -456,7 +631,7 @@ access_firewall_open() {
 }
 
 access_firewall_close() {
-    local backend="$1" port="$2" owned="${3:-0}" rule number removed=0 zone zones
+    local backend="$1" port="$2" owned="${3:-0}" mode="${4:-auto}" rule number removed=0 zone zones
     local -a numbers=()
 
     case "$backend" in
@@ -503,8 +678,14 @@ access_firewall_close() {
             access_firewall_nft_delete_owned_rules || return $?
             local nft_file
             nft_file="$(access_firewall_nft_file)" || return $?
-            [[ ! -e "$nft_file" ]] || access_firewall_nft_validate_file "$nft_file" || return 30
-            vps_cmd_run rm -f -- "$nft_file" || return 20
+            if [[ -e "$nft_file" ]]; then
+                [[ "$mode" != runtime ]] || {
+                    vps_cmd_error "运行时 nftables 状态与持久化片段发生冲突；拒绝删除未知来源文件"
+                    return 30
+                }
+                access_firewall_nft_validate_file "$nft_file" || return 30
+                vps_cmd_run rm -f -- "$nft_file" || return 20
+            fi
             ;;
         iptables)
             [[ "$owned" == 1 ]] || {
@@ -528,7 +709,7 @@ access_firewall_close() {
 }
 
 access_firewall_write_state() {
-    local backend="$1" port="$2" tmp
+    local backend="$1" port="$2" mode="${3:-}" tmp
 
     if [[ -z "$backend" || -z "$port" || "$backend" == none ]]; then
         [[ "${VPSCTL_DRY_RUN:-0}" == 1 ]] || rm -f -- "$ACCESS_FW_STATE"
@@ -537,10 +718,11 @@ access_firewall_write_state() {
     [[ "${VPSCTL_DRY_RUN:-0}" != 1 ]] || return 0
     tmp="$(mktemp --tmpdir="$ACCESS_STATE_DIR" .firewall.XXXXXX)" || return 20
     {
-        access_kv_put schema_version 1
+        access_kv_put schema_version 2
         access_kv_put backend "$backend"
         access_kv_put port "$port"
         access_kv_put owned 1
+        access_kv_put mode "$mode"
     } >"$tmp" || {
         rm -f -- "$tmp"
         return 20
@@ -556,27 +738,36 @@ access_firewall_write_state() {
 }
 
 access_firewall_commit() {
-    local backend="$1" old_port="$2" new_port="$3" added="$4" previous_backend="$5" previous_port="$6"
+    local backend="$1" old_port="$2" new_port="$3" added="$4" previous_backend="$5" previous_port="$6" previous_mode="${7:-}" mode=''
 
     if [[ "$backend" == nftables ]]; then
-        access_firewall_nft_apply "$new_port" || return $?
+        case "$added" in
+            nft-runtime) mode=runtime ;;
+            nft-persistent) mode=persistent ;;
+            *) mode="${previous_mode:-auto}" ;;
+        esac
+        access_firewall_nft_apply "$new_port" '' "$mode" || return $?
     elif [[ "$old_port" != "$new_port" && "$previous_backend" == "$backend" && "$previous_port" == "$old_port" ]]; then
         access_firewall_close "$backend" "$old_port" 1 || return $?
     fi
     if [[ "$added" != 0 || "$previous_backend:$previous_port" == "$backend:$new_port" ]]; then
-        access_firewall_write_state "$backend" "$new_port"
+        access_firewall_write_state "$backend" "$new_port" "$mode"
     else
         access_firewall_write_state '' ''
     fi
 }
 
 access_firewall_abort() {
-    local backend="$1" new_port="$2" added="$3" previous_backend="${4:-}" previous_port="${5:-}"
+    local backend="$1" new_port="$2" added="$3" previous_backend="${4:-}" previous_port="${5:-}" previous_mode="${6:-}" mode=auto
 
     [[ "$added" != 0 ]] || return 0
+    case "$added" in
+        nft-runtime) mode=runtime ;;
+        nft-persistent) mode=persistent ;;
+    esac
     if [[ "$backend" == nftables && "$previous_backend" == nftables && -n "$previous_port" ]]; then
-        access_firewall_nft_apply "$previous_port"
+        access_firewall_nft_apply "$previous_port" '' "${previous_mode:-auto}"
         return $?
     fi
-    access_firewall_close "$backend" "$new_port" 1
+    access_firewall_close "$backend" "$new_port" 1 "$mode"
 }

@@ -144,8 +144,14 @@ printf "LISTEN 0 128 0.0.0.0:%s 0.0.0.0:* users:((\\\"sshd\\\",pid=1,fd=3))\n" "
 make_mock nft '
 printf "%s\n" "$*" >>"${VPSCTL_SYSTEM_ROOT}/run/nft.log"
 if [[ " $* " == *" list ruleset "* ]]; then
-    if [[ -e "${VPSCTL_SYSTEM_ROOT}/run/nft-active" ]]; then
-        printf "table inet filter {\n    chain input {\n        type filter hook input priority filter; policy drop;\n"
+    family=inet
+    [[ ! -f "${VPSCTL_SYSTEM_ROOT}/run/nft-family" ]] || family="$(<"${VPSCTL_SYSTEM_ROOT}/run/nft-family")"
+    if [[ -e "${VPSCTL_SYSTEM_ROOT}/run/nft-forward-only" ]]; then
+        printf "table inet containers {\n    chain forward {\n        type filter hook forward priority filter; policy accept;\n    }\n}\n"
+    elif [[ -e "${VPSCTL_SYSTEM_ROOT}/run/nft-input-accept-empty" ]]; then
+        printf "table inet netavark {\n    chain INPUT {\n        type filter hook input priority filter; policy accept;\n    }\n}\n"
+    elif [[ -e "${VPSCTL_SYSTEM_ROOT}/run/nft-active" ]]; then
+        printf "table %s filter {\n    chain input {\n        type filter hook input priority filter; policy drop;\n" "$family"
         if [[ -f "${VPSCTL_SYSTEM_ROOT}/run/nft-vpsctl-ports" ]]; then
             handle=0
             while IFS= read -r port; do handle=$((handle + 1)); [[ -n "$port" ]] && printf "        tcp dport %s accept comment \x22vpsctl-access-%s\x22 # handle %s\n" "$port" "$port" "$handle"; done <"${VPSCTL_SYSTEM_ROOT}/run/nft-vpsctl-ports"
@@ -155,7 +161,7 @@ if [[ " $* " == *" list ruleset "* ]]; then
     fi
     exit 0
 fi
-if [[ " $* " == *" list chain inet filter input "* ]]; then
+if [[ "${2:-} ${3:-}" == "list chain" ]]; then
     handle=0
     if [[ -f "${VPSCTL_SYSTEM_ROOT}/run/nft-vpsctl-ports" ]]; then
         while IFS= read -r port; do handle=$((handle + 1)); [[ -n "$port" ]] && printf "tcp dport %s accept comment \x22vpsctl-access-%s\x22 # handle %s\n" "$port" "$port" "$handle"; done <"${VPSCTL_SYSTEM_ROOT}/run/nft-vpsctl-ports"
@@ -168,7 +174,7 @@ if [[ "${1:-}" == -f ]]; then
     awk '"'"'/insert rule/ {for (i=1; i<=NF; i++) if ($i == "dport") print $(i+1)}'"'"' "$2" >"${VPSCTL_SYSTEM_ROOT}/run/nft-vpsctl-ports"
     exit 0
 fi
-if [[ " $* " == *" delete rule inet filter input handle "* ]]; then
+if [[ " $* " == *" delete rule "*" handle "* ]]; then
     handle="${!#}"
     awk -v remove="$handle" '"'"'NR != remove'"'"' "${VPSCTL_SYSTEM_ROOT}/run/nft-vpsctl-ports" >"${VPSCTL_SYSTEM_ROOT}/run/nft-vpsctl-ports.tmp"
     mv -f -- "${VPSCTL_SYSTEM_ROOT}/run/nft-vpsctl-ports.tmp" "${VPSCTL_SYSTEM_ROOT}/run/nft-vpsctl-ports"
@@ -450,7 +456,7 @@ test_user_password_and_keys() {
 }
 
 test_sshd_shape_and_firewall_rejections() {
-    local tx managed
+    local tx managed state family port
 
     reset_system
     printf 'Include /etc/ssh/other/*.conf\n' >"$TEST_SYSTEM_ROOT/etc/ssh/sshd_config"
@@ -482,9 +488,44 @@ test_sshd_shape_and_firewall_rejections() {
     reset_system
     : >"$TEST_SYSTEM_ROOT/run/nft-active"
     assert_contains "$(nft list ruleset)" 'table inet filter' "nftables active backend fixture"
-    assert_status 3 "non-persistent nftables rejection" run_access ssh prepare --port 2222 --firewall auto
-    assert_contains "$ACCESS_TEST_OUTPUT" '持久化' "nftables persistence diagnostic"
-    [[ ! -e "$TEST_SYSTEM_ROOT/etc/ssh/sshd_config.d/00-vpsctl-access.conf" ]] || fail "firewall rejection changed sshd config"
+    prepare_transaction 2222 --firewall auto
+    tx="$ACCESS_TEST_TX"
+    state="$TEST_SYSTEM_ROOT/var/lib/vpsctl/security/access/transactions/$tx/state"
+    assert_file_contains "$state" $'firewall_added\tnft-runtime' "non-persistent nftables runtime mode"
+    assert_file_contains "$TEST_SYSTEM_ROOT/run/nft-vpsctl-ports" '2222' "runtime nftables candidate port"
+    [[ ! -e "$TEST_SYSTEM_ROOT/etc/nftables.d/zz-vpsctl-access.nft" ]] || fail "runtime nftables mode wrote a persistence file"
+    assert_status 0 "runtime nftables abort" run_access ssh abort --transaction "$tx"
+    [[ ! -s "$TEST_SYSTEM_ROOT/run/nft-vpsctl-ports" ]] || fail "runtime nftables abort retained managed rules"
+
+    reset_system
+    : >"$TEST_SYSTEM_ROOT/run/nft-forward-only"
+    prepare_transaction 2223 --firewall auto
+    tx="$ACCESS_TEST_TX"
+    state="$TEST_SYSTEM_ROOT/var/lib/vpsctl/security/access/transactions/$tx/state"
+    assert_file_contains "$state" $'firewall_backend\tnone' "non-INPUT nftables rules are not an SSH firewall"
+    [[ ! -e "$TEST_SYSTEM_ROOT/run/nft-vpsctl-ports" ]] || fail "container-only nftables rules triggered an INPUT modification"
+    assert_status 0 "container-only nftables transaction abort" run_access ssh abort --transaction "$tx"
+
+    reset_system
+    : >"$TEST_SYSTEM_ROOT/run/nft-input-accept-empty"
+    prepare_transaction 2233 --firewall auto
+    tx="$ACCESS_TEST_TX"
+    state="$TEST_SYSTEM_ROOT/var/lib/vpsctl/security/access/transactions/$tx/state"
+    assert_file_contains "$state" $'firewall_backend\tnone' "empty accept INPUT chain needs no SSH allow rule"
+    [[ ! -e "$TEST_SYSTEM_ROOT/run/nft-vpsctl-ports" ]] || fail "empty accept INPUT chain triggered an unnecessary nftables rule"
+    assert_status 0 "empty accept INPUT transaction abort" run_access ssh abort --transaction "$tx"
+
+    port=2224
+    for family in ip ip6; do
+        reset_system
+        : >"$TEST_SYSTEM_ROOT/run/nft-active"
+        printf '%s\n' "$family" >"$TEST_SYSTEM_ROOT/run/nft-family"
+        prepare_transaction "$port" --firewall auto
+        tx="$ACCESS_TEST_TX"
+        assert_file_contains "$TEST_SYSTEM_ROOT/run/nft.log" "list chain $family filter input" "nftables $family INPUT target"
+        assert_status 0 "nftables $family runtime abort" run_access ssh abort --transaction "$tx"
+        port=$((port + 1))
+    done
 
     reset_system
     : >"$TEST_SYSTEM_ROOT/run/ufw-active"
@@ -649,6 +690,12 @@ test_firewall_owned_rule_cleanup() {
 
 test_rhel_platform_branches() {
     local output
+
+    reset_system
+    VPSCTL_ENV_OS_ID=''
+    output="$(run_access status --json)"
+    assert_contains "$output" '"service": "ssh.service"' "detected Debian-family platform is propagated to SSH service selection"
+    VPSCTL_ENV_OS_ID=ubuntu
 
     reset_system
     VPSCTL_ENV_OS_ID=rocky
