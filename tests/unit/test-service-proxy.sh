@@ -43,13 +43,24 @@ state="${VPSCTL_SYSTEM_ROOT}/run/mock-systemd"; mkdir -p "$state"
 case "${1:-}" in
   is-active) [[ -f "$state/active-${*: -1}" ]] ;;
   is-enabled) [[ -f "$state/enabled-${*: -1}" ]] ;;
-  start|restart) touch "$state/active-${2}" ;;
+  start) touch "$state/active-${2}" ;;
+  restart)
+    if [[ -e "${VPSCTL_SYSTEM_ROOT}/run/fail-service-restart-once" ]]; then
+      rm -f "${VPSCTL_SYSTEM_ROOT}/run/fail-service-restart-once"
+      exit 20
+    fi
+    touch "$state/active-${2}"
+    ;;
   stop) rm -f "$state/active-${2}" ;;
   enable)
     unit="${*: -1}"; touch "$state/enabled-$unit"
+    [[ ! -e "${VPSCTL_SYSTEM_ROOT}/run/fail-service-enable" ]] || exit 20
     [[ " $* " != *" --now "* ]] || touch "$state/active-$unit"
     ;;
-  disable) rm -f "$state/enabled-${2}" ;;
+  disable)
+    unit="${*: -1}"; rm -f "$state/enabled-$unit"
+    [[ " $* " != *" --now "* ]] || rm -f "$state/active-$unit"
+    ;;
   list-unit-files) printf "systemd-timesyncd.service enabled\n" ;;
   *) exit 0 ;;
 esac'
@@ -74,7 +85,38 @@ fi'
 make_mock chronyc '
 printf "chronyc %s\n" "$*" >>"$MOCK_LOG"
 case "${1:-}" in tracking) printf "Leap status     : Normal\n" ;; esac'
-make_mock ip '[[ "$*" == *"-4 address"* ]] && printf "1: eth0 inet 203.0.113.10/24 scope global eth0\n"'
+make_mock ip '[[ "$*" == *"-4 address"* || "$*" == *"-o address show"* ]] && printf "1: eth0 inet 203.0.113.10/24 scope global eth0\n"'
+make_mock getent '
+family="${1:-}"; host="${2:-}"
+file="${VPSCTL_SYSTEM_ROOT}/run/dns-${family}-${host}"
+[[ -f "$file" ]] || exit 2
+while IFS= read -r address; do [[ -n "$address" ]] && printf "%s STREAM %s\n" "$address" "$host"; done <"$file"'
+make_mock sysctl 'printf "sysctl %s\n" "$*" >>"$MOCK_LOG"'
+make_mock nft '
+printf "nft %s\n" "$*" >>"$MOCK_LOG"
+state="${VPSCTL_SYSTEM_ROOT}/run/mock-nft"; mkdir -p "$state"
+if [[ "${1:-}" == -j && "${2:-}" == list && "${3:-}" == ruleset ]]; then printf "{\"nftables\":[]}"; exit 0; fi
+if [[ "${1:-}" == list && "${2:-}" == table ]]; then
+  family="${3:-}"; table="${4:-}"; [[ -f "$state/${family}-${table}" ]] || exit 1
+  printf "table %s %s { }\n" "$family" "$table"; exit 0
+fi
+if [[ "${1:-}" == -c && "${2:-}" == -f ]]; then
+  [[ ! -e "${VPSCTL_SYSTEM_ROOT}/run/fail-nft-check" ]] || exit 10
+  exit 0
+fi
+if [[ "${1:-}" == -f ]]; then
+  if [[ -e "${VPSCTL_SYSTEM_ROOT}/run/fail-nft-apply-once" ]]; then rm -f "${VPSCTL_SYSTEM_ROOT}/run/fail-nft-apply-once"; exit 20; fi
+  [[ ! -e "${VPSCTL_SYSTEM_ROOT}/run/fail-nft-apply" ]] || exit 20
+  batch="${2:-}"; cp -p -- "$batch" "${VPSCTL_SYSTEM_ROOT}/run/last-nft.batch"
+  for family in ip ip6; do
+    table="vpsctl_proxy_forward$([[ "$family" == ip ]] && printf 4 || printf 6)"
+    if grep -Fq "add table $family $table" "$batch" || grep -Fq "table $family $table {" "$batch"; then touch "$state/${family}-${table}"
+    elif grep -Eq "(delete|destroy) table $family $table" "$batch"; then rm -f "$state/${family}-${table}"
+    fi
+  done
+  exit 0
+fi
+exit 2'
 make_mock ss '[[ ! -f "${VPSCTL_SYSTEM_ROOT}/run/listening-port" ]] || printf "tcp LISTEN 0 128 0.0.0.0:%s 0.0.0.0:*\n" "$(<"${VPSCTL_SYSTEM_ROOT}/run/listening-port")"'
 make_mock flock 'exit 0'
 make_mock curl 'printf "unexpected curl %s\n" "$*" >>"$MOCK_LOG"; exit 99'
@@ -102,6 +144,7 @@ export VPSCTL_DRY_RUN=0
 export VPSCTL_NO_COLOR=1
 export VPSCTL_QUIET=0
 export VPSCTL_VERBOSE=0
+export PROXY_RELAY_FORWARD_ALLOW_TEST_RUNTIME=1
 export MOCK_LOG
 export REAL_SHA256SUM
 export REAL_JQ
@@ -134,10 +177,10 @@ write_core_binary() {
         'case "$core:$*" in' \
         '  "sing-box:version") printf "sing-box version 1.11.0\\n" ;;' \
         '  "sing-box:generate uuid") printf "11111111-1111-4111-8111-111111111111\\n" ;;' \
-        '  "sing-box:generate reality-keypair") printf "PrivateKey: private-secret\\nPublicKey: public-value\\n" ;;' \
+        '  "sing-box:generate reality-keypair") printf "PrivateKey: private-secret\\nPublicKey: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\\n" ;;' \
         '  "xray:version"|"xray:-version") printf "Xray 25.1.1\\n" ;;' \
         '  "xray:uuid") printf "22222222-2222-4222-8222-222222222222\\n" ;;' \
-        '  "xray:x25519") printf "PrivateKey: private-secret\\nPublicKey: public-value\\n" ;;' \
+        '  "xray:x25519") printf "PrivateKey: private-secret\\nPublicKey: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\\n" ;;' \
         'esac' >"$path"
     chmod +x "$path"
 }
@@ -151,6 +194,7 @@ install_external() {
 }
 
 manifest_path() { printf '%s' "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/nodes.json"; }
+relay_path() { printf '%s' "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/relay.json"; }
 node_id_by_name() { jq -r --arg name "$1" '.nodes[] | select(.name == $name) | .id' "$(manifest_path)"; }
 
 test_arguments_dry_run_and_time() {
@@ -649,6 +693,7 @@ test_protocol_matrix() {
     source "${TEST_ROOT}/commands/service/proxy/protocols-sing-box.sh"
     source "${TEST_ROOT}/commands/service/proxy/protocols-xray.sh"
     source "${TEST_ROOT}/commands/service/proxy/nodes.sh"
+    source "${TEST_ROOT}/commands/service/proxy/relay-uri.sh"
     source "${TEST_ROOT}/commands/service/proxy/core.sh"
     proxy_common_init
 
@@ -689,6 +734,7 @@ test_protocol_matrix() {
     assert_equal 20 "$version_status" "ambiguous Xray product versions rejection"
 
     local cert_dir="${TEST_TEMP}/cert" profile label supported node rendered uri id profile_obfs port=20000 count=0
+    local descriptor relay_exit outbound rewritten rewritten_descriptor ss2022_uri="" parse_status=0 legacy_payload legacy_uri
     local profile_count=0 sb_count=0 xray_count=0 overlap_count=0 sb_only_count=0 xray_only_count=0
     local digest_file="${TEST_TEMP}/xray.dgst" digest digest_status=0
     printf 'SHA2-256= AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n' >"$digest_file"
@@ -729,6 +775,27 @@ test_protocol_matrix() {
                 jq -e '.[0].up_mbps == 100 and .[0].down_mbps == 200' >/dev/null <<<"$rendered" || fail "hysteria2 bandwidth renderer fields"
             fi
             [[ -n "$uri" ]] || fail "$profile/$core empty URI"
+            descriptor="$(proxy_relay_uri_parse "$uri" "$profile")" || fail "$profile/$core relay URI parse"
+            assert_equal "$profile" "$(jq -r '.profile' <<<"$descriptor")" "$profile/$core parsed profile"
+            jq -e --arg core "$core" '.compatible_cores | index($core) != null' >/dev/null <<<"$descriptor" || fail "$profile/$core parsed core mapping"
+            relay_exit="$(jq -cn --arg id "exit-0000000000000001" --arg name matrix --arg core "$core" \
+                --arg profile "$profile" --arg uri "$uri" --argjson descriptor "$descriptor" \
+                '{id:$id,name:$name,type:"protocol",core:$core,profile:$profile,uri:$uri,descriptor:$descriptor,
+                  endpoint:$descriptor.endpoint,network_hint:$descriptor.network_hint}')"
+            outbound="$(proxy_relay_render_outbound "$core" "$relay_exit")" || fail "$profile/$core relay outbound render"
+            jq -e '(.outbounds | type) == "array" and (.outbounds | length) > 0 and (.target_tag | length) > 0' \
+                >/dev/null <<<"$outbound" || fail "$profile/$core relay outbound shape"
+            if [[ "$core" == xray && "$(jq -r '.tls.mode == "tls" and .tls.certificate_sha256 != ""' <<<"$descriptor")" == true ]]; then
+                assert_not_contains "$outbound" 'allowInsecure' "$profile/$core removed Xray allowInsecure"
+                jq -e --arg pin "$(jq -r '.tls.certificate_sha256' <<<"$descriptor")" \
+                    '.outbounds[0].streamSettings.tlsSettings.pinnedPeerCertSha256 == $pin' \
+                    >/dev/null <<<"$outbound" || fail "$profile/$core Xray certificate pin"
+            fi
+            rewritten="$(proxy_relay_uri_rewrite "$uri" relay.example 24443)" || fail "$profile/$core relay URI rewrite"
+            rewritten_descriptor="$(proxy_relay_uri_parse "$rewritten" "$profile")" || fail "$profile/$core rewritten URI parse"
+            assert_equal relay.example "$(jq -r '.endpoint.host' <<<"$rewritten_descriptor")" "$profile/$core rewritten host"
+            assert_equal 24443 "$(jq -r '.endpoint.port' <<<"$rewritten_descriptor")" "$profile/$core rewritten port"
+            [[ "$profile" != shadowsocks-2022 ]] || ss2022_uri="$uri"
             local private_key
             private_key="$(jq -r '.credentials.private_key' <<<"$node")"
             [[ -z "$private_key" ]] || assert_not_contains "$uri" "$private_key" "$profile/$core URI private_key"
@@ -748,7 +815,316 @@ test_protocol_matrix() {
     assert_equal 6 "$overlap_count" "shared profile count"
     assert_equal 9 "$sb_only_count" "sing-box-only profile count"
     assert_equal 5 "$xray_only_count" "Xray-only profile count"
+    parse_status=0
+    proxy_relay_uri_parse "$ss2022_uri" >/dev/null 2>&1 || parse_status=$?
+    assert_equal 2 "$parse_status" "ambiguous Shadowsocks 2022 profile selection"
+    parse_status=0
+    proxy_relay_uri_parse 'vless://11111111-1111-4111-8111-111111111111@proxy.example:443?type=tcp&security=none&unsupported=1' >/dev/null 2>&1 || parse_status=$?
+    assert_equal 10 "$parse_status" "unsupported relay URI parameter rejection"
+    descriptor="$(proxy_relay_uri_parse 'vless://11111111-1111-4111-8111-111111111111@proxy.example:443?encryption=none&type=grpc&security=tls&sni=proxy.example&serviceName=relay&authority=proxy.example&insecure=1' vless-grpc-tls)" || fail "Xray insecure TLS fixture parse"
+    relay_exit="$(jq -cn --arg id exit-0000000000000001 --arg name insecure --arg core xray \
+        --arg profile vless-grpc-tls --arg uri 'vless://11111111-1111-4111-8111-111111111111@proxy.example:443?encryption=none&type=grpc&security=tls&sni=proxy.example&serviceName=relay&authority=proxy.example&insecure=1' \
+        --argjson descriptor "$descriptor" \
+        '{id:$id,name:$name,type:"protocol",core:$core,profile:$profile,uri:$uri,descriptor:$descriptor,
+          endpoint:$descriptor.endpoint,network_hint:$descriptor.network_hint}')"
+    parse_status=0
+    proxy_relay_render_outbound xray "$relay_exit" >/dev/null 2>&1 || parse_status=$?
+    assert_equal 10 "$parse_status" "Xray insecure TLS without certificate pin rejection"
+    legacy_payload="$(printf 'aes-256-gcm:legacy-secret@[2001:db8::10]:8388' | base64 | tr -d '\r\n')"
+    legacy_uri="ss://${legacy_payload}#legacy"
+    descriptor="$(proxy_relay_uri_parse "$legacy_uri" shadowsocks-aes-256-gcm)" || fail "legacy Base64 Shadowsocks IPv6 parse"
+    assert_equal 2001:db8::10 "$(jq -r '.endpoint.host' <<<"$descriptor")" "legacy Shadowsocks IPv6 host"
+    rewritten="$(proxy_relay_uri_rewrite "$legacy_uri" 2001:db8::20 9443)" || fail "legacy Base64 Shadowsocks rewrite"
+    descriptor="$(proxy_relay_uri_parse "$rewritten" shadowsocks-aes-256-gcm)" || fail "rewritten legacy Shadowsocks parse"
+    assert_equal 2001:db8::20 "$(jq -r '.endpoint.host' <<<"$descriptor")" "rewritten legacy Shadowsocks IPv6 host"
+    assert_equal 9443 "$(jq -r '.endpoint.port' <<<"$descriptor")" "rewritten legacy Shadowsocks port"
+    rewritten="$(proxy_relay_uri_rewrite 'vless://11111111-1111-4111-8111-111111111111@[2001:db8::1]:443?encryption=none&type=tcp#name%20with%20space' relay.example 10443)" || fail "ordered URI rewrite"
+    assert_equal 'vless://11111111-1111-4111-8111-111111111111@relay.example:10443?encryption=none&type=tcp#name%20with%20space' "$rewritten" "URI rewrite preserves query order and fragment"
+    parse_status=0
+    proxy_relay_uri_parse 'socks5://bad%ZZ:value@proxy.example:1080' >/dev/null 2>&1 || parse_status=$?
+    assert_equal 10 "$parse_status" "invalid percent encoding rejection"
 }
+
+test_relay_state_bindings_and_purge() {
+    local exit_id node1 node2 binding_id original_uri status_json config outbound_count
+    reset_root
+
+    run_proxy relay exit add --name unsafe-xray \
+        --uri 'vless://11111111-1111-4111-8111-111111111111@proxy.example:443?encryption=none&type=grpc&security=tls&sni=proxy.example&serviceName=relay&authority=proxy.example&insecure=1' \
+        --core xray
+    assert_equal 10 "$RUN_STATUS" "unrenderable Xray TLS exit rejected before core installation"
+    assert_equal 0 "$(jq -r '.exits | length' "$(relay_path)")" "rejected Xray exit not persisted"
+
+    run_proxy relay exit add --name landing-socks --uri 'socks5://relay-user:relay-pass@198.51.100.20:1080#landing' --core sing-box
+    assert_equal 0 "$RUN_STATUS" "save protocol exit without installed core"
+    [[ -f "$(relay_path)" ]] || fail "relay state was not created"
+    assert_equal 600 "$(stat -c %a "$(relay_path)")" "relay state permissions"
+    exit_id="$(jq -r '.exits[0].id' "$(relay_path)")"
+    run_proxy relay status --json
+    assert_equal 0 "$RUN_STATUS" "relay JSON status without core"
+    status_json="$RUN_OUTPUT"
+    assert_equal 1 "$(jq -r '.unverified_protocol_exits | length' <<<"$status_json")" "unverified exit status"
+    run_proxy relay exit edit --id "$exit_id" \
+        --uri 'vless://11111111-1111-4111-8111-111111111111@198.51.100.21:10443?encryption=none&type=tcp#landing-vless'
+    assert_equal 0 "$RUN_STATUS" "protocol exit edit derives new profile"
+    assert_equal vless-tcp "$(jq -r '.exits[0].profile' "$(relay_path)")" "edited protocol exit profile"
+    assert_equal sing-box "$(jq -r '.exits[0].core' "$(relay_path)")" "edited protocol exit compatible core"
+
+    install_external sing-box
+    run_proxy node add --profile shadowsocks-aes-256-gcm --core sing-box --name relay-entry-1 --port 32101 --address entry.example
+    assert_equal 0 "$RUN_STATUS" "first relay entry add"
+    run_proxy node add --profile shadowsocks-aes-256-gcm --core sing-box --name relay-entry-2 --port 32102 --address entry.example
+    assert_equal 0 "$RUN_STATUS" "second relay entry add"
+    node1="$(node_id_by_name relay-entry-1)"
+    node2="$(node_id_by_name relay-entry-2)"
+    run_proxy node show --id "$node1" --uri
+    assert_equal 0 "$RUN_STATUS" "entry URI before binding"
+    original_uri="$RUN_OUTPUT"
+
+    run_proxy relay bind add --node-id "$node1" --exit-id "$exit_id"
+    assert_equal 0 "$RUN_STATUS" "first relay binding"
+    run_proxy relay bind add --node-id "$node2" --exit-id "$exit_id"
+    assert_equal 0 "$RUN_STATUS" "second relay binding sharing exit"
+    assert_equal 2 "$(jq -r '.bindings | length' "$(relay_path)")" "shared exit binding count"
+    config="${TEST_SYSTEM_ROOT}/etc/vpsctl/proxy/sing-box/config.json"
+    outbound_count="$(jq -r '[.outbounds[] | select((.tag // "") | startswith("relay-exit-"))] | length' "$config")"
+    [[ "$outbound_count" == 1 ]] || fail "one shared relay outbound: got ${outbound_count}; config=$(jq -c . "$config")"
+    assert_equal 2 "$(jq -r '[.route.rules[] | select(.outbound | startswith("relay-exit-"))] | length' "$config")" "two inbound routing rules"
+    run_proxy node show --id "$node1" --uri
+    assert_equal "$original_uri" "$RUN_OUTPUT" "binding preserves entry URI"
+
+    run_proxy relay bind add --node-id "$node1" --exit-id "$exit_id"
+    assert_equal 3 "$RUN_STATUS" "one exit per entry invariant"
+    run_proxy node delete --id "$node1" --confirm-delete
+    assert_equal 3 "$RUN_STATUS" "bound node delete refusal"
+    assert_contains "$RUN_OUTPUT" "仍作为中转入口" "bound node delete diagnostic"
+    run_proxy relay exit delete --id "$exit_id"
+    assert_equal 3 "$RUN_STATUS" "referenced exit delete refusal"
+    run_proxy uninstall --core sing-box --purge --confirm-purge
+    assert_equal 3 "$RUN_STATUS" "core purge relay refusal"
+    assert_contains "$RUN_OUTPUT" "$exit_id" "core purge exit diagnostic"
+    assert_contains "$RUN_OUTPUT" "$node1" "core purge node diagnostic"
+
+    binding_id="$(jq -r --arg node "$node1" '.bindings[] | select(.node_id == $node) | .id' "$(relay_path)")"
+    run_proxy relay bind delete --id "$binding_id" --confirm-delete
+    assert_equal 0 "$RUN_STATUS" "relay binding delete"
+    run_proxy node delete --id "$node2" --cascade-relay --confirm-delete
+    assert_equal 0 "$RUN_STATUS" "node delete with relay cascade"
+    assert_equal 0 "$(jq -r '.bindings | length' "$(relay_path)")" "all relay bindings removed"
+    run_proxy relay exit delete --id "$exit_id"
+    assert_equal 0 "$RUN_STATUS" "unreferenced exit delete"
+    assert_equal 0 "$(jq -r '.exits | length' "$(relay_path)")" "relay exit removed"
+}
+
+test_relay_xray_pending_and_validation() {
+    local node1 node2 node3 node_uri new_uri exit_id direct_id forward_id config pending state_hash
+    reset_root
+    install_external xray
+    run_proxy node add --profile shadowsocks-aes-256-gcm --core xray --name xray-entry-1 --port 32301 --address xray-entry.example
+    assert_equal 0 "$RUN_STATUS" "first Xray relay entry"
+    run_proxy node add --profile shadowsocks-aes-256-gcm --core xray --name xray-entry-2 --port 32302 --address xray-entry.example
+    assert_equal 0 "$RUN_STATUS" "second Xray relay entry"
+    run_proxy node add --profile shadowsocks-aes-256-gcm --core xray --name xray-entry-3 --port 32303 --address xray-entry.example
+    assert_equal 0 "$RUN_STATUS" "third Xray relay entry"
+    node1="$(node_id_by_name xray-entry-1)"; node2="$(node_id_by_name xray-entry-2)"; node3="$(node_id_by_name xray-entry-3)"
+    run_proxy node show --id "$node1" --uri
+    assert_equal 0 "$RUN_STATUS" "Xray relay source URI"
+    node_uri="$RUN_OUTPUT"
+    run_proxy relay exit add --name xray-landing --uri "$node_uri" --profile shadowsocks-aes-256-gcm --core xray
+    assert_equal 0 "$RUN_STATUS" "Xray relay exit"
+    exit_id="$(jq -r '.exits[] | select(.name == "xray-landing") | .id' "$(relay_path)")"
+    printf '198.51.100.80\n' >"${TEST_SYSTEM_ROOT}/run/dns-ahostsv4-xray-entry.example"
+    run_proxy relay forward add --name xray-forward --exit-id "$exit_id" --listen-ports 32400 --network auto --address relay.example
+    assert_equal 0 "$RUN_STATUS" "Xray protocol forward"
+    forward_id="$(jq -r '.forwards[] | select(.name == "xray-forward") | .id' "$(relay_path)")"
+    run_proxy relay exit add --name xray-direct --target 198.51.100.50 --target-port 443
+    assert_equal 0 "$RUN_STATUS" "Xray direct exit"
+    direct_id="$(jq -r '.exits[] | select(.name == "xray-direct") | .id' "$(relay_path)")"
+    run_proxy relay bind add --node-id "$node3" --exit-id "$direct_id"
+    assert_equal 3 "$RUN_STATUS" "direct exit cannot be bound"
+
+    run_proxy start --core xray --enable
+    assert_equal 0 "$RUN_STATUS" "start Xray before relay binding"
+    run_proxy relay bind add --node-id "$node1" --exit-id "$exit_id"
+    assert_equal 0 "$RUN_STATUS" "active Xray first relay binding"
+    run_proxy relay bind add --node-id "$node2" --exit-id "$exit_id"
+    assert_equal 0 "$RUN_STATUS" "active Xray shared relay binding"
+    pending="${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/pending/xray.json"
+    [[ -f "$pending" ]] || fail "active Xray relay binding did not create pending state"
+    jq -e '.relay_touched == true and (.reason | contains("relay-bind-add"))' "$pending" >/dev/null || fail "Xray relay pending metadata"
+    config="${TEST_SYSTEM_ROOT}/etc/vpsctl/proxy/xray/config.json"
+    assert_equal 1 "$(jq -r '[.outbounds[] | select((.tag // "") | startswith("relay-exit-"))] | length' "$config")" "one shared Xray relay outbound"
+    assert_equal 2 "$(jq -r '[.routing.rules[] | select((.outboundTag // "") | startswith("relay-exit-"))] | length' "$config")" "two Xray inboundTag rules"
+
+    run_proxy restart --core xray --confirm-disruptive
+    assert_equal 0 "$RUN_STATUS" "apply Xray relay pending configuration"
+    [[ ! -e "$pending" ]] || fail "Xray relay pending state not cleared"
+    assert_equal 2 "$(jq -r '.bindings | length' "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/lkg/xray/relay.json")" "Xray relay LKG snapshot"
+    [[ -f "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/lkg/xray/relay-resolved.json" ]] || fail "Xray relay LKG DNS cache snapshot"
+    [[ -f "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/lkg/xray/relay-nftables.nft" ]] || fail "Xray relay LKG nft snapshot"
+
+    state_hash="$(sha256sum "$(relay_path)" | awk '{print $1}')"
+    touch "${TEST_SYSTEM_ROOT}/run/fail-core-validation"
+    run_proxy relay bind add --node-id "$node3" --exit-id "$exit_id"
+    assert_equal 10 "$RUN_STATUS" "relay binding core validation failure"
+    rm -f -- "${TEST_SYSTEM_ROOT}/run/fail-core-validation"
+    assert_equal "$state_hash" "$(sha256sum "$(relay_path)" | awk '{print $1}')" "relay state unchanged after core validation failure"
+
+    new_uri="${node_uri/xray-entry.example/xray-new.example}"
+    printf '198.51.100.81\n' >"${TEST_SYSTEM_ROOT}/run/dns-ahostsv4-xray-new.example"
+    run_proxy relay exit edit --id "$exit_id" --uri "$new_uri" --profile shadowsocks-aes-256-gcm --core xray
+    assert_equal 0 "$RUN_STATUS" "active bound exit edit with immediate forward update"
+    jq -e '.relay_touched == true and .relay_runtime_touched == true and
+        .relay_cache_existed == true and .relay_nft_existed == true' "$pending" >/dev/null ||
+        fail "pending relay runtime snapshot metadata"
+    [[ -f "$(jq -r '.relay_cache_backup' "$pending")" ]] || fail "pending relay cache backup"
+    [[ -f "$(jq -r '.relay_nft_backup' "$pending")" ]] || fail "pending relay nft backup"
+    rm -f -- "${TEST_SYSTEM_ROOT}/run/dns-ahostsv4-xray-entry.example"
+    touch "${TEST_SYSTEM_ROOT}/run/fail-service-restart-once"
+    run_proxy restart --core xray --confirm-disruptive
+    assert_equal 20 "$RUN_STATUS" "failed Xray restart restores previous relay data plane"
+    [[ ! -e "$pending" ]] || fail "failed restart did not consume restored pending state"
+    assert_equal "$node_uri" "$(jq -r --arg id "$exit_id" '.exits[] | select(.id == $id) | .uri' "$(relay_path)")" "failed restart restored relay exit"
+    assert_equal xray-entry.example "$(jq -r --arg id "$exit_id" '.exits[$id].host' "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/relay-resolved.json")" "failed restart restored DNS cache"
+    [[ -f "${TEST_SYSTEM_ROOT}/run/mock-nft/ip-vpsctl_proxy_forward4" ]] || fail "failed restart did not restore managed nft table"
+    run_proxy relay forward delete --id "$forward_id" --confirm-delete
+    assert_equal 0 "$RUN_STATUS" "Xray forward cleanup after restart rollback"
+}
+
+test_relay_forwarding_subscription_and_rollback() {
+    local node_id node_uri exit_id forward_id direct_id ipv6_id ipv6_forward_id state_hash batch_hash cache_hash
+    local decoded status_json
+    reset_root
+    install_external sing-box
+    run_proxy node add --profile shadowsocks-aes-256-gcm --core sing-box --name subscription-entry --port 32200 --address proxy.example
+    assert_equal 0 "$RUN_STATUS" "relay subscription entry add"
+    node_id="$(node_id_by_name subscription-entry)"
+    run_proxy node show --id "$node_id" --uri
+    assert_equal 0 "$RUN_STATUS" "relay source URI"
+    node_uri="$RUN_OUTPUT"
+    printf '198.51.100.20\n' >"${TEST_SYSTEM_ROOT}/run/dns-ahostsv4-proxy.example"
+
+    run_proxy relay exit add --name protocol-landing --uri "$node_uri" --profile shadowsocks-aes-256-gcm --core sing-box
+    assert_equal 0 "$RUN_STATUS" "protocol forward exit add"
+    exit_id="$(jq -r '.exits[] | select(.name == "protocol-landing") | .id' "$(relay_path)")"
+    run_proxy relay forward add --name protocol-forward --exit-id "$exit_id" --listen-ports 33000-33002 --network auto --address relay.example
+    assert_equal 0 "$RUN_STATUS" "protocol range forward add"
+    forward_id="$(jq -r '.forwards[0].id' "$(relay_path)")"
+    [[ -f "${TEST_SYSTEM_ROOT}/run/last-nft.batch" ]] || fail "nft batch missing after forward add; output=${RUN_OUTPUT}; log=$(cat "$MOCK_LOG"); state=$(jq -c . "$(relay_path)")"
+    assert_file_contains "${TEST_SYSTEM_ROOT}/run/last-nft.batch" 'tcp dport 33000-33002' "TCP nft range"
+    assert_file_contains "${TEST_SYSTEM_ROOT}/run/last-nft.batch" 'udp dport 33000-33002' "UDP nft range"
+    assert_file_contains "${TEST_SYSTEM_ROOT}/run/last-nft.batch" 'dnat to 198.51.100.20:32200' "fixed destination port DNAT"
+    [[ -f "${TEST_SYSTEM_ROOT}/run/mock-nft/ip-vpsctl_proxy_forward4" ]] || fail "IPv4 managed nft table missing"
+    [[ -f "${TEST_SYSTEM_ROOT}/etc/systemd/system/vpsctl-proxy-forward.service" ]] || fail "relay forward systemd service missing"
+    [[ -f "${TEST_SYSTEM_ROOT}/usr/local/libexec/vpsctl-proxy-runtime/commands/service/proxy.sh" ]] || fail "relay forward runtime snapshot missing"
+    [[ -f "${TEST_SYSTEM_ROOT}/run/mock-systemd/enabled-vpsctl-proxy-forward.service" ]] || fail "relay forward service not enabled"
+
+    run_proxy relay forward show --id "$forward_id" --uris
+    assert_equal 0 "$RUN_STATUS" "expanded forward URIs"
+    assert_equal 3 "$(grep -c '^ss://' <<<"$RUN_OUTPUT")" "expanded forward URI count"
+    assert_contains "$RUN_OUTPUT" 'relay.example:33000' "first rewritten URI endpoint"
+    assert_contains "$RUN_OUTPUT" 'relay.example:33002' "last rewritten URI endpoint"
+    run_proxy subscription --core sing-box
+    assert_equal 0 "$RUN_STATUS" "subscription with forward URIs"
+    decoded="$(base64 -d <<<"$RUN_OUTPUT")"
+    assert_equal 4 "$(grep -c '^ss://' <<<"$decoded")" "subscription ordinary plus forward URI count"
+    assert_equal "$node_uri" "$(sed -n '1p' <<<"$decoded")" "ordinary node keeps subscription order"
+
+    run_proxy relay exit add --name direct-landing --target 198.51.100.30 --target-port 443
+    assert_equal 0 "$RUN_STATUS" "direct exit add"
+    direct_id="$(jq -r '.exits[] | select(.name == "direct-landing") | .id' "$(relay_path)")"
+    run_proxy relay forward add --name conflicting-forward --exit-id "$direct_id" --listen-ports 32200 --network tcp --address relay.example
+    assert_equal 10 "$RUN_STATUS" "node port/network conflict rejection"
+
+    run_proxy relay exit add --name ipv6-landing --target 2001:db8::20 --target-port 8443
+    assert_equal 0 "$RUN_STATUS" "IPv6 direct exit add"
+    ipv6_id="$(jq -r '.exits[] | select(.name == "ipv6-landing") | .id' "$(relay_path)")"
+    run_proxy relay forward add --name ipv6-large-range --exit-id "$ipv6_id" --listen-ports 40000-50000 --network udp --address relay6.example
+    assert_equal 0 "$RUN_STATUS" "IPv6 large-range forward"
+    ipv6_forward_id="$(jq -r '.forwards[] | select(.name == "ipv6-large-range") | .id' "$(relay_path)")"
+    assert_file_contains "${TEST_SYSTEM_ROOT}/run/last-nft.batch" 'udp dport 40000-50000' "IPv6 large nft interval"
+    assert_file_contains "${TEST_SYSTEM_ROOT}/run/last-nft.batch" 'dnat to [2001:db8::20]:8443' "IPv6 fixed destination port DNAT"
+    run_proxy relay forward delete --id "$ipv6_forward_id" --confirm-delete
+    assert_equal 0 "$RUN_STATUS" "IPv6 forward delete"
+
+    state_hash="$(sha256sum "$(relay_path)" | awk '{print $1}')"
+    batch_hash="$(sha256sum "${TEST_SYSTEM_ROOT}/run/last-nft.batch" | awk '{print $1}')"
+    touch "${TEST_SYSTEM_ROOT}/run/fail-nft-apply-once"
+    run_proxy relay forward edit --id "$forward_id" --listen-ports 33100-33102
+    [[ "$RUN_STATUS" != 0 ]] || fail "injected nft apply failure unexpectedly succeeded"
+    assert_equal "$state_hash" "$(sha256sum "$(relay_path)" | awk '{print $1}')" "relay state rollback after nft failure"
+    assert_equal "$batch_hash" "$(sha256sum "${TEST_SYSTEM_ROOT}/run/last-nft.batch" | awk '{print $1}')" "nft rollback after apply failure"
+
+    rm -f -- "${TEST_SYSTEM_ROOT}/run/dns-ahostsv4-proxy.example"
+    run_proxy relay forward refresh --id "$forward_id"
+    assert_equal 0 "$RUN_STATUS" "DNS failure retains last usable address"
+    run_proxy relay status --json
+    assert_equal 0 "$RUN_STATUS" "relay runtime status JSON"
+    status_json="$RUN_OUTPUT"
+    jq -e '.forward_runtime.degraded[] | select(.exit_id and .reason == "dns-failed" and .retained == true)' \
+        >/dev/null <<<"$status_json" || fail "retained DNS degradation missing"
+
+    cache_hash="$(sha256sum "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/relay-resolved.json" | awk '{print $1}')"
+    batch_hash="$(sha256sum "${TEST_SYSTEM_ROOT}/run/last-nft.batch" | awk '{print $1}')"
+    printf '203.0.113.10\n' >"${TEST_SYSTEM_ROOT}/run/dns-ahostsv4-proxy.example"
+    run_proxy relay forward refresh --id "$forward_id"
+    assert_equal 10 "$RUN_STATUS" "local destination loop rejection"
+    assert_equal "$cache_hash" "$(sha256sum "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/relay-resolved.json" | awk '{print $1}')" "loop rejection cache unchanged"
+    assert_equal "$batch_hash" "$(sha256sum "${TEST_SYSTEM_ROOT}/run/last-nft.batch" | awk '{print $1}')" "loop rejection rules unchanged"
+
+    run_proxy relay forward delete --id "$forward_id" --confirm-delete
+    assert_equal 0 "$RUN_STATUS" "last forward delete"
+    assert_equal 0 "$(jq -r '.forwards | length' "$(relay_path)")" "last forward state removed"
+    [[ ! -e "${TEST_SYSTEM_ROOT}/run/mock-nft/ip-vpsctl_proxy_forward4" ]] || fail "managed IPv4 nft table not cleared"
+    [[ ! -e "${TEST_SYSTEM_ROOT}/run/mock-systemd/enabled-vpsctl-proxy-forward.service" ]] || fail "relay service not disabled"
+}
+
+test_relay_forward_service_lifecycle() {
+    local exit_id forward_id
+    reset_root
+    run_proxy relay exit add --name lifecycle-direct --target 198.51.100.60 --target-port 8443
+    assert_equal 0 "$RUN_STATUS" "lifecycle direct exit"
+    exit_id="$(jq -r '.exits[0].id' "$(relay_path)")"
+    touch "${TEST_SYSTEM_ROOT}/run/fail-service-enable"
+    run_proxy relay forward add --name fail-start --exit-id "$exit_id" --listen-ports 34100 --network tcp --address relay.example
+    [[ "$RUN_STATUS" != 0 ]] || fail "injected relay service start failure unexpectedly succeeded"
+    rm -f -- "${TEST_SYSTEM_ROOT}/run/fail-service-enable"
+    assert_equal 0 "$(jq -r '.forwards | length' "$(relay_path)")" "relay state rollback after service start failure"
+    [[ ! -e "${TEST_SYSTEM_ROOT}/run/mock-nft/ip-vpsctl_proxy_forward4" ]] || fail "nft table survived failed first service start"
+    [[ ! -e "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/relay-resolved.json" ]] || fail "DNS cache survived failed first service start"
+
+    run_proxy relay forward add --name lifecycle-forward --exit-id "$exit_id" --listen-ports 34100 --network tcp --address relay.example
+    assert_equal 0 "$RUN_STATUS" "relay service start after rollback"
+    forward_id="$(jq -r '.forwards[0].id' "$(relay_path)")"
+    assert_file_contains "${TEST_SYSTEM_ROOT}/etc/systemd/system/vpsctl-proxy-forward.service" 'ExecStart=/usr/local/libexec/vpsctl-proxy-forward-refresh watch' "systemd DNS watcher"
+    assert_file_contains "${TEST_SYSTEM_ROOT}/usr/local/libexec/vpsctl-proxy-forward-refresh" 'sleep 300' "five minute DNS refresh"
+    run_proxy relay forward delete --id "$forward_id" --confirm-delete
+    assert_equal 0 "$RUN_STATUS" "systemd relay last delete"
+    [[ ! -e "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/relay-resolved.json" ]] || fail "last delete retained DNS cache"
+    run_proxy relay forward refresh
+    assert_equal 0 "$RUN_STATUS" "empty relay refresh"
+    [[ ! -e "${TEST_SYSTEM_ROOT}/run/mock-nft/ip-vpsctl_proxy_forward4" ]] || fail "empty refresh recreated managed nft table"
+
+    reset_root
+    VPSCTL_ENV_INIT=openrc run_proxy relay exit add --name openrc-direct --target 198.51.100.70 --target-port 9443
+    assert_equal 0 "$RUN_STATUS" "OpenRC direct exit"
+    exit_id="$(jq -r '.exits[0].id' "$(relay_path)")"
+    VPSCTL_ENV_INIT=openrc run_proxy relay forward add --name openrc-forward --exit-id "$exit_id" --listen-ports 34200 --network udp --address relay.example
+    assert_equal 0 "$RUN_STATUS" "OpenRC relay forward add"
+    forward_id="$(jq -r '.forwards[0].id' "$(relay_path)")"
+    assert_file_contains "${TEST_SYSTEM_ROOT}/etc/init.d/vpsctl-proxy-forward" 'command_args="watch"' "OpenRC DNS watcher"
+    [[ -f "${TEST_SYSTEM_ROOT}/run/mock-openrc/enabled-vpsctl-proxy-forward" ]] || fail "OpenRC relay service not enabled"
+    VPSCTL_ENV_INIT=openrc run_proxy relay forward delete --id "$forward_id" --confirm-delete
+    assert_equal 0 "$RUN_STATUS" "OpenRC relay last delete"
+    [[ ! -e "${TEST_SYSTEM_ROOT}/run/mock-openrc/enabled-vpsctl-proxy-forward" ]] || fail "OpenRC relay service not disabled"
+}
+
+case "${VPSCTL_TEST_ONLY:-}" in
+    relay-state) test_relay_state_bindings_and_purge; printf 'PASS: relay state tests\n'; exit 0 ;;
+    relay-xray) test_relay_xray_pending_and_validation; printf 'PASS: relay Xray tests\n'; exit 0 ;;
+    relay-forward) test_relay_forwarding_subscription_and_rollback; printf 'PASS: relay forward tests\n'; exit 0 ;;
+    relay-service) test_relay_forward_service_lifecycle; printf 'PASS: relay service tests\n'; exit 0 ;;
+esac
 
 printf 'TEST: proxy arguments, dry-run and time\n'
 test_arguments_dry_run_and_time
@@ -766,4 +1142,12 @@ printf 'TEST: proxy unified interactive API\n'
 test_unified_interactive_api
 printf 'TEST: proxy protocol renderer matrix\n'
 test_protocol_matrix
+printf 'TEST: proxy relay state, bindings and purge guards\n'
+test_relay_state_bindings_and_purge
+printf 'TEST: proxy relay Xray pending and validation\n'
+test_relay_xray_pending_and_validation
+printf 'TEST: proxy relay forwarding, subscriptions and rollback\n'
+test_relay_forwarding_subscription_and_rollback
+printf 'TEST: proxy relay service lifecycle and failures\n'
+test_relay_forward_service_lifecycle
 printf 'PASS: service proxy tests\n'

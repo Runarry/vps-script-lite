@@ -23,6 +23,9 @@ bash -n \
     "${TEST_ROOT}/tests/unit/test-network-dns.sh" \
     "${TEST_ROOT}/tests/unit/test-network-rfw.sh" \
     "${TEST_ROOT}/tests/unit/test-service-proxy.sh" \
+    "${TEST_ROOT}/tests/integration/test-service-proxy-relay-connectivity-real.sh" \
+    "${TEST_ROOT}/tests/integration/test-service-proxy-relay-cores-real.sh" \
+    "${TEST_ROOT}/tests/integration/test-service-proxy-relay-real.sh" \
     "${TEST_ROOT}/tests/integration/test-vpsctl.sh"
 
 bash "${TEST_ROOT}/tests/unit/test-libraries.sh"

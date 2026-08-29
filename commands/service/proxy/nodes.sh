@@ -940,8 +940,8 @@ proxy_node_show() {
     fi
 }
 
-proxy_subscription() {
-    local core="all" arg node node_core uri payload="" encoded
+proxy_subscription() (
+    local core="all" arg node node_core uri temp unique forward exit start end port
     while (($#)); do
         arg="$1"
         case "$arg" in
@@ -951,25 +951,42 @@ proxy_subscription() {
     done
     [[ "$core" == "all" ]] || proxy_core_valid "$core" || { vps_cmd_error "无效内核：$core"; return 2; }
     proxy_require_state_access || return $?
-    proxy_ensure_tools subscription jq base64 tr || return $?
+    proxy_ensure_tools subscription jq base64 tr awk mktemp || return $?
     if proxy_stop_after_dependency_plan; then return 0; fi
-    [[ -f "$PROXY_MANIFEST" ]] || { vps_cmd_error "当前没有节点"; return 3; }
-    proxy_manifest_validate_file "$PROXY_MANIFEST" || return $?
-    while IFS= read -r node; do
-        node_core="$(jq -r '.core' <<<"$node")"
-        case "$node_core" in
-            sing-box) uri="$(proxy_sb_render_uri "$node")" || return $? ;;
-            xray) uri="$(proxy_xray_render_uri "$node")" || return $? ;;
-        esac
-        payload+="${uri}"$'\n'
-    done < <(jq -c --arg core "$core" '.nodes[] | select($core == "all" or .core == $core)' "$PROXY_MANIFEST")
-    [[ -n "$payload" ]] || { vps_cmd_error "当前筛选没有节点"; return 3; }
-    encoded="$(printf '%s' "$payload" | base64 | tr -d '\r\n')" || {
-        vps_cmd_error "生成 Base64 订阅失败"
-        return 20
-    }
-    printf '%s\n' "$encoded"
-}
+    temp="$(mktemp "${TMPDIR:-/tmp}/vpsctl-subscription.XXXXXX")" || return 20
+    unique="${temp}.unique"
+    trap 'rm -f -- "$temp" "$unique"' EXIT
+    if [[ -f "$PROXY_MANIFEST" ]]; then
+        proxy_manifest_validate_file "$PROXY_MANIFEST" || return $?
+        while IFS= read -r node; do
+            node_core="$(jq -r '.core' <<<"$node")"
+            case "$node_core" in
+                sing-box) uri="$(proxy_sb_render_uri "$node")" || return $? ;;
+                xray) uri="$(proxy_xray_render_uri "$node")" || return $? ;;
+            esac
+            printf '%s\n' "$uri" >>"$temp" || return 20
+        done < <(jq -c --arg core "$core" '.nodes[] | select($core == "all" or .core == $core)' "$PROXY_MANIFEST")
+    fi
+    if [[ -n "${PROXY_RELAY_FILE:-}" && -f "$PROXY_RELAY_FILE" ]]; then
+        proxy_relay_validate_file "$PROXY_RELAY_FILE" "$PROXY_MANIFEST" || return $?
+        while IFS= read -r forward; do
+            exit="$(proxy_relay_exit "$(jq -r '.exit_id' <<<"$forward")")" || return 10
+            [[ "$(jq -r '.type' <<<"$exit")" == protocol ]] || continue
+            [[ "$core" == all || "$(jq -r '.core' <<<"$exit")" == "$core" ]] || continue
+            uri="$(jq -r '.uri' <<<"$exit")"
+            start="$(jq -r '.listen_port_start' <<<"$forward")"
+            end="$(jq -r '.listen_port_end' <<<"$forward")"
+            for ((port = start; port <= end; port++)); do
+                proxy_relay_uri_rewrite "$uri" "$(jq -r '.publish_address' <<<"$forward")" "$port" >>"$temp" || return $?
+                printf '\n' >>"$temp" || return 20
+            done
+        done < <(jq -c '.forwards[]' "$PROXY_RELAY_FILE")
+    fi
+    [[ -s "$temp" ]] || { vps_cmd_error "当前筛选没有节点或带 URI 的端口转发"; return 3; }
+    awk '!seen[$0]++' "$temp" >"$unique" || return 20
+    base64 "$unique" | tr -d '\r\n' || { vps_cmd_error "生成 Base64 订阅失败"; return 20; }
+    printf '\n'
+)
 
 proxy_subscription_interactive() {
     local core count selected
@@ -982,6 +999,9 @@ proxy_subscription_interactive() {
     for core in sing-box xray; do
         proxy_core_registered "$core" || continue
         count="$(proxy_manifest_count "$core")" || return $?
+        if declare -F proxy_relay_subscription_link_count >/dev/null 2>&1; then
+            count=$((count + $(proxy_relay_subscription_link_count "$core")))
+        fi
         [[ "$count" =~ ^[1-9][0-9]*$ ]] || continue
         choices+=("$core" "$(proxy_core_label "$core")（${count} 个节点）")
     done
@@ -1357,12 +1377,14 @@ proxy_node_edit() (
 )
 
 proxy_node_delete() (
-    local id="" confirmed=0 arg node current_node core name candidate_manifest candidate_config status=0 confirm_status=0
+    local id="" confirmed=0 cascade_relay=0 arg node current_node core name candidate_manifest candidate_config status=0 confirm_status=0
+    local binding="" candidate_relay=""
     while (($#)); do
         arg="$1"
         case "$arg" in
             --id) (($# >= 2)) || return 2; id="$2"; shift 2 ;;
             --confirm-delete) confirmed=1; shift ;;
+            --cascade-relay) cascade_relay=1; shift ;;
             *) vps_cmd_error "node delete 的未知选项：$arg"; return 2 ;;
         esac
     done
@@ -1386,9 +1408,15 @@ proxy_node_delete() (
     node="$(proxy_manifest_node "$id")" || { vps_cmd_error "未找到节点：$id"; return 3; }
     core="$(jq -r '.core' <<<"$node")"
     name="$(jq -r '.name' <<<"$node")"
+    if declare -F proxy_relay_node_binding >/dev/null 2>&1; then
+        binding="$(proxy_relay_node_binding "$id" 2>/dev/null || true)"
+    fi
+    if [[ -n "$binding" && "$cascade_relay" != 1 ]]; then
+        proxy_relay_require_node_unbound "$id" || return $?
+    fi
     if [[ "${VPSCTL_DRY_RUN:-0}" != "1" && "$confirmed" != "1" ]]; then
         if proxy_is_interactive; then
-            proxy_confirm "删除节点 ${name}（${id}）？" || confirm_status=$?
+            proxy_confirm "删除节点 ${name}（${id}）$([[ -n "$binding" ]] && printf '并级联删除中转关联')？" || confirm_status=$?
             if ((confirm_status != 0)); then
                 [[ "$confirm_status" == "130" ]] && return 130
                 vps_cmd_info "已取消删除"
@@ -1412,7 +1440,17 @@ proxy_node_delete() (
     }
     candidate_manifest="$(mktemp --tmpdir="$PROXY_STATE_DIR" .nodes.delete.XXXXXX)" || return 20
     candidate_config="$(mktemp --tmpdir="$PROXY_STATE_DIR" .config.delete.XXXXXX.json)" || { rm -f "$candidate_manifest"; return 20; }
-    trap 'rm -f -- "$candidate_manifest" "$candidate_config"; vps_cmd_unlock' EXIT
+    if [[ -n "$binding" ]]; then
+        candidate_relay="$(mktemp --tmpdir="$PROXY_STATE_DIR" .relay.node-delete.XXXXXX.json)" || {
+            rm -f -- "$candidate_manifest" "$candidate_config"
+            return 20
+        }
+        jq --arg node "$id" 'del(.bindings[] | select(.node_id == $node))' "$PROXY_RELAY_FILE" >"$candidate_relay" || {
+            rm -f -- "$candidate_manifest" "$candidate_config" "$candidate_relay"
+            return 10
+        }
+    fi
+    trap 'rm -f -- "$candidate_manifest" "$candidate_config" "$candidate_relay"; vps_cmd_unlock' EXIT
     if ! jq --arg id "$id" 'del(.nodes[] | select(.id == $id))' "$PROXY_MANIFEST" >"$candidate_manifest"; then
         status=10
     fi
@@ -1420,12 +1458,12 @@ proxy_node_delete() (
         proxy_manifest_validate_file "$candidate_manifest" || status=$?
     fi
     if ((status == 0)); then
-        proxy_render_config "$core" "$candidate_manifest" >"$candidate_config" || status=$?
+        proxy_render_config "$core" "$candidate_manifest" "${candidate_relay:-${PROXY_RELAY_FILE:-}}" >"$candidate_config" || status=$?
     fi
     if ((status == 0)); then
-        proxy_commit_manifest_config "$core" "$candidate_manifest" "$candidate_config" "node-delete" || status=$?
+        proxy_commit_manifest_config "$core" "$candidate_manifest" "$candidate_config" "node-delete" "$candidate_relay" || status=$?
     fi
-    rm -f -- "$candidate_manifest" "$candidate_config"
+    rm -f -- "$candidate_manifest" "$candidate_config" "$candidate_relay"
     trap 'vps_cmd_unlock' EXIT
     ((status == 0)) || return "$status"
     vps_cmd_success "节点 ${name} 已删除；证书会在下一次成功启动/重启后清理"

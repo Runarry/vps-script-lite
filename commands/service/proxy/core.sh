@@ -948,6 +948,9 @@ proxy_core_uninstall() (
         return 3
     fi
     if ((purge)); then
+        if declare -F proxy_relay_require_core_purge_safe >/dev/null 2>&1; then
+            proxy_relay_require_core_purge_safe "$core" || return $?
+        fi
         if _proxy_core_confirm_purge "$core" "$confirmed"; then
             :
         else

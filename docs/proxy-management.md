@@ -1,6 +1,6 @@
 # 代理管理
 
-`vpsctl service proxy` 在同一个入口下平级管理 Xray 与 sing-box。两个内核都按需安装，没有默认主次关系；可以只安装其中一个，也可以同时安装。命令支持 systemd 与 OpenRC，要求 Bash 4.4+。帮助、协议矩阵和时间状态可由普通用户查看；内核/节点状态、订阅以及所有安装、写配置、服务和时间同步操作需要 root，因为节点清单包含受限凭据。
+`vpsctl service proxy` 在同一个入口下平级管理 Xray 与 sing-box，并提供出口驱动的节点中转与 nftables 端口转发。两个内核都按需安装，没有默认主次关系；可以只安装其中一个，也可以同时安装。命令支持 systemd 与 OpenRC，要求 Bash 4.4+。帮助、协议矩阵和时间状态可由普通用户查看；内核、节点、中转状态和订阅需要 root，因为节点与出口清单包含受限凭据。
 
 本功能仍处于 `experimental` 生命周期。仓库自动化测试和 mock 验证不等同于真实 VPS 或 VM 验证；部署前应先在隔离环境使用 `--dry-run` 检查计划，并为 SSH 连接和现有配置准备恢复手段。
 
@@ -20,6 +20,7 @@ bash bin/vpsctl service proxy profiles
 bash bin/vpsctl --dry-run --install-deps service proxy install --core sing-box
 bash bin/vpsctl service proxy install --core sing-box
 bash bin/vpsctl service proxy node add --profile hysteria2 --core sing-box --port 8443 --address 203.0.113.10 --sni example.com
+bash bin/vpsctl service proxy relay status
 bash bin/vpsctl service proxy start --core sing-box --enable
 ```
 
@@ -34,6 +35,7 @@ bash bin/vpsctl service proxy start --core sing-box --enable
 - 内核生命周期：安装、更新和卸载。
 - 服务控制：启动、停止和重启。
 - 节点管理：添加、查看、修改和删除。
+- 中转管理：出口管理、节点中转、纯端口转发、状态与刷新。
 - 查看与输出：订阅、日志和支持的协议。
 - 系统工具：系统时间状态与同步。
 
@@ -54,6 +56,7 @@ vpsctl service proxy status [--core sing-box|xray|all] [--json]
 | sing-box 配置 | `/etc/vpsctl/proxy/sing-box/config.json` |
 | Xray 配置 | `/etc/vpsctl/proxy/xray/config.json` |
 | 节点清单 | `/var/lib/vpsctl/service/proxy/nodes.json` |
+| 中转定义与 DNS 运行缓存 | `/var/lib/vpsctl/service/proxy/relay.json`、`/var/lib/vpsctl/service/proxy/relay-resolved.json` |
 | 内核元数据与待重启记录 | `/var/lib/vpsctl/service/proxy/cores/`、`/var/lib/vpsctl/service/proxy/pending/` |
 | 回退副本 | `/var/lib/vpsctl/backups/service/proxy/` |
 | OpenRC 文件日志 | `/var/log/vpsctl/proxy/` |
@@ -88,7 +91,7 @@ Xray 与 sing-box 使用相同的命令模式生命周期接口：
 
 ### 待重启策略
 
-节点增加、修改、删除和内核更新都会先校验新配置。若内核正在运行，变更只写入磁盘并记录 `pending_restart`，不会静默中断现有连接。必须显式执行：
+节点增加、修改、删除、节点中转关联和内核更新都会先校验新配置。若内核正在运行，变更只写入磁盘并记录 `pending_restart`，不会静默中断现有连接。nftables 端口转发则在增删改后立即以单批事务生效；`relay status` 会分别显示核心配置待重启状态和转发运行状态。核心配置必须显式执行：
 
 ```text
 vpsctl service proxy restart --core sing-box
@@ -98,7 +101,7 @@ vpsctl service proxy restart --core sing-box
 
 ### 卸载与彻底清除
 
-普通 `uninstall` 保留该内核的配置、节点、证书和备份，便于重新安装或人工恢复。`--purge` 会删除该内核的节点、配置、状态、备份和日志，是不可逆清除：
+普通 `uninstall` 保留该内核的配置、节点、证书、中转状态和备份，便于重新安装或人工恢复。只要该内核仍有协议出口，`--purge` 就会拒绝，并列出出口及其节点和端口转发引用。没有中转引用时，`--purge` 会删除该内核的节点、配置、状态、备份和日志，是不可逆清除：
 
 - 交互模式要求输入 `PURGE-SING-BOX` 或 `PURGE-XRAY` 强确认令牌。
 - 非交互模式必须同时提供 `--purge --confirm-purge`；全局 `--yes` 不能替代强确认。
@@ -119,11 +122,11 @@ vpsctl service proxy node add --profile PROFILE [--core CORE] [--name NAME] [--p
     [--obfs none|salamander] [--up-mbps N] [--down-mbps N]
     [--congestion-control bbr|cubic|new_reno]
 vpsctl service proxy node edit --id NODE_ID [可修改上述非凭据字段]
-vpsctl service proxy node delete --id NODE_ID [--confirm-delete]
+vpsctl service proxy node delete --id NODE_ID [--cascade-relay] [--confirm-delete]
 vpsctl service proxy subscription [--core CORE|all]
 ```
 
-`profiles` 列出 profile ID、名称和支持它的内核。`node list` 可按内核筛选；`node show --uri` 输出单节点分享 URI；`subscription` 将全部或指定内核的分享 URI 按清单顺序拼接并输出单行 Base64 订阅内容。交互菜单生成订阅前先用编号选择“全部”，或选择当前确有节点的 sing-box/Xray 范围；没有节点的内核不显示为候选。直接命令仍以 `--core CORE|all` 指定范围。节点 ID、UUID、密码、Reality 密钥和需要的混淆密码由命令安全生成，编辑接口不直接接受替换凭据。
+`profiles` 列出 profile ID、名称和支持它的内核。`node list` 可按内核筛选；`node show --uri` 输出单节点分享 URI；`subscription` 先按原顺序输出普通节点，再按转发记录和端口升序追加协议出口的端口转发 URI，稳定去重后输出单行 Base64。`--core all` 包含所有协议出口转发，指定内核时按出口选择的内核筛选；直连出口不生成 URI。交互菜单生成订阅前先用编号选择“全部”，或选择当前确有普通节点或转发 URI 的 sing-box/Xray 范围。节点 ID、UUID、密码、Reality 密钥和需要的混淆密码由命令安全生成，编辑接口不直接接受替换凭据。
 
 交互式添加节点时，先用编号选择 profile 和适用内核，并填写监听端口与客户端连接地址，再选择“快速向导”或“自定义向导”。快速向导就此采用界面显示的推荐设置；自定义向导继续询问该 profile 支持的可调字段。profile、目标内核以及证书模式、混淆方式、拥塞控制等枚举值都通过编号选择，不要求记忆或手工输入内部枚举字符串；凭据在两种向导中都由命令安全生成。
 
@@ -131,7 +134,7 @@ vpsctl service proxy subscription [--core CORE|all]
 
 交互式节点列表默认展示全部内核的节点，每一项都明确标注所属 Xray 或 sing-box。查看、编辑和删除从这份完整列表按编号选取节点；命令模式仍使用稳定的 `--id NODE_ID`，便于脚本精确引用。命令模式的 `node list` 默认同样返回全部节点并标注 `core`，只有显式传入 `--core` 时才筛选。
 
-端口在整个代理节点清单中必须唯一，且会检查本机当前监听占用。新增或编辑会先生成候选清单和候选内核配置，再调用对应内核校验；校验失败不会提交候选配置。非交互删除节点必须传入 `--confirm-delete`。
+端口在整个代理节点清单中必须唯一，且会检查本机当前监听占用以及同网络端口转发冲突。新增或编辑会先生成候选清单并与当前中转状态共同渲染候选内核配置，再调用对应内核校验；校验失败不会提交候选配置。已经作为中转入口的节点默认拒绝删除；`--cascade-relay --confirm-delete` 可在同一事务中删除节点关联。非交互删除节点必须传入 `--confirm-delete`。
 
 ### TLS 证书
 
@@ -142,7 +145,55 @@ vpsctl service proxy subscription [--core CORE|all]
 
 私钥和证书均以受限权限保存，并按证书指纹使用不可覆盖的版本化文件名。运行中修改证书时，上一版会保留到显式重启完成：成功后清理未引用版本，失败回滚后清理新版本。代理管理不申请、续期或部署 ACME 证书；如需公有 CA 证书，应在外部完成签发，再使用复制导入模式。
 
-## 5. 协议矩阵
+## 5. 中转管理
+
+中转以“先定义出口，再关联入口”为核心模型。出口与入口相对解耦：一个本机节点最多关联一个同内核协议出口，一个出口可以被多个入口节点和多条端口转发复用。节点中转不会创建新入口、修改入口凭据或改变原节点 URI；未关联节点继续走 `direct`。本功能不把本机部署成落地机，也不进行跨主机编排、负载均衡或一个入口多出口分流。
+
+### 出口与节点中转
+
+```text
+vpsctl service proxy relay status [--json]
+
+vpsctl service proxy relay exit list [--json]
+vpsctl service proxy relay exit show --id EXIT_ID [--uri]
+vpsctl service proxy relay exit add --name NAME --uri URI [--profile PROFILE] [--core CORE]
+vpsctl service proxy relay exit add --name NAME --target HOST --target-port PORT
+vpsctl service proxy relay exit edit --id EXIT_ID [...]
+vpsctl service proxy relay exit delete --id EXIT_ID [--cascade --confirm-cascade]
+
+vpsctl service proxy relay bind list [--core CORE|all] [--json]
+vpsctl service proxy relay bind show --id BIND_ID
+vpsctl service proxy relay bind add --node-id NODE_ID --exit-id EXIT_ID
+vpsctl service proxy relay bind delete --id BIND_ID [--confirm-delete]
+```
+
+协议出口保存原始 URI、内核无关的规范化描述、profile、所选内核、目标地址端口和网络建议。一个 URI 有多个可用内核时必须明确选择；Shadowsocks 2022 普通与 Padding 无法仅从链接区分，必须使用 `--profile` 或在交互菜单中编号选择。内核尚未安装时可以保存协议出口，列表和状态会标记“尚未二进制验证”；实际建立节点关联时才要求同内核已登记，并用真实二进制校验完整配置。
+
+URI 层接受协议矩阵对应的标准 VLESS、Trojan、AnyTLS、Hysteria2/Hy2、TUIC、Shadowsocks/SIP002（含旧式整段 Base64）、ShadowTLS 插件和 SOCKS5 链接。未知或重复参数、矩阵外组合和无法渲染的变体会被拒绝；新版 Xray 已移除 `allowInsecure`，因此选择 Xray 的不安全 TLS URI 必须同时带有本项目的 `pcs` 证书指纹，渲染时使用证书固定。sing-box 按 inbound tag 生成 `route` 动作，Xray 使用 `inboundTag`/`outboundTag`；每个被使用的出口只生成一份稳定 tag 的 outbound。
+
+删除仍被引用的出口默认拒绝。`--cascade --confirm-cascade` 会同时删除该出口、全部节点关联和端口转发，并将核心配置、relay 状态和运行规则作为一个可回滚变更处理。关联修改沿用待重启策略，不会自动重启正在运行的核心；pending 与 LKG 快照同时记录 relay 定义、DNS 运行缓存和受管 nftables 规则，核心应用失败时恢复同一代数据面。
+
+### 纯端口转发
+
+```text
+vpsctl service proxy relay forward list [--json]
+vpsctl service proxy relay forward show --id FORWARD_ID [--uris]
+vpsctl service proxy relay forward add --name NAME --exit-id EXIT_ID --listen-ports START[-END]
+    [--network auto|tcp|udp|both] [--address HOST]
+vpsctl service proxy relay forward edit --id FORWARD_ID [...]
+vpsctl service proxy relay forward delete --id FORWARD_ID [--confirm-delete]
+vpsctl service proxy relay forward refresh [--id FORWARD_ID]
+```
+
+纯端口转发只使用 nftables，不启动用户态转发进程。协议出口和直连 `HOST:PORT` 出口都可用于转发；直连出口必须明确选择 TCP、UDP 或 both。`auto` 对 Hysteria2/TUIC 采用 UDP，对普通 Shadowsocks 采用 both，对 ShadowTLS 和其他当前协议采用 TCP。端口区间内的每个入口端口都映射到出口的同一个目标端口。
+
+nftables 规则只写入独立的 `ip vpsctl_proxy_forward4` 和 `ip6 vpsctl_proxy_forward6` 表，使用 `fib daddr type local` 限定本机 PREROUTING 流量，不创建 OUTPUT 规则，也不刷新全局 ruleset。规则包括受管 DNAT 连接的 FORWARD 放行和 masquerade；IPv4、IPv6 分别渲染，不做 NAT64。候选批次先通过 `nft -c`，再一次提交；状态、DNS 缓存、核心配置或运行规则任一提交失败都会尝试恢复旧版本。检测到其他 FORWARD 链拒绝策略时只告警，不修改 UFW、firewalld、云安全组或第三方表。
+
+首条转发会按需安装 nftables，启用 IP forwarding，并安装、启用 `vpsctl-proxy-forward` 服务。该服务每 5 分钟重新解析正在使用的域名出口并恢复受管规则，本身不承载流量。每个地址族确定性选取排序后的首个有效地址；解析失败时保留最后可用地址并在 `relay status` 中标记 degraded，没有可用旧地址时拒绝替换规则。目标解析到本机时拒绝应用，以避免转发循环。最后一条转发删除后会停止并禁用服务、清除两个受管表和 DNS 运行缓存。
+
+`--address` 只定义生成 URI 使用的本机发布地址；省略时使用本机探测地址。协议出口可用 `forward show --uris` 按端口升序展开新 URI：除 authority 的主机和端口外，原凭据、参数顺序和名称保持不变；旧式整段 Base64 Shadowsocks 链接只重新编码包含端点的载荷。普通列表只显示模板能力，不展开大范围内容。
+
+## 6. 协议矩阵
 
 下表以本项目采用的参考项目能力集合为基线，列出当前公开 profile ID 与内核支持矩阵。`是` 表示可以用该内核创建和渲染节点；空白表示不支持，不能通过 `--core` 强制绕过。
 
@@ -171,7 +222,7 @@ vpsctl service proxy subscription [--core CORE|all]
 
 其中 `vless-reality-vision`、`vless-grpc-tls`、`shadowsocks-aes-256-gcm`、`shadowsocks-chacha20-poly1305`、`shadowsocks-2022` 和 `shadowsocks-2022-padding` 由两个内核共同支持。
 
-## 6. 系统时间
+## 7. 系统时间
 
 TLS、Reality 和基于时间的认证都依赖正确系统时钟：
 
@@ -184,12 +235,12 @@ vpsctl service proxy time sync
 
 时间同步不使用 HTTP `Date`、网页时间解析或 `date -s`，也不会修改 DNS。
 
-## 7. 明确不包含的功能
+## 8. 明确不包含的功能
 
-当前代理管理只负责单机内核、节点、订阅、日志和系统时间。以下能力不在范围内：
+当前代理管理只负责单机内核、节点、出口关联、nftables 端口转发、订阅、日志和系统时间。以下能力不在范围内：
 
 - Argo 或其他 Cloudflare 隧道、API、DNS 和证书集成。
-- 中转机、落地机、多跳链路或跨主机编排。
+- 落地机部署、多跳链路、跨主机编排、负载均衡或一个入口多出口。
 - DNS 修改、域名解析托管或分流 DNS 配置。
 - 节点批量导入、批量编辑、批量删除或批量部署。
 - Hysteria2 端口跳跃；`hysteria2` profile 只使用单个监听端口。
@@ -197,8 +248,10 @@ vpsctl service proxy time sync
 
 如需修改本机 DNS，应单独使用 [`vpsctl network dns`](network-settings.md)，不要把 DNS 变更与代理事务混合执行。
 
-## 8. 依赖、演练与退出码
+## 9. 依赖、演练与退出码
 
-支持的平台范围是 Linux、systemd 或 OpenRC，以及 `x86_64`/`amd64`、`aarch64`/`arm64`、`armv7l`/`armv7` 架构。状态、清单和配置渲染依赖 `jq`；端口检查与订阅输出使用 `ss`、`base64` 和 `tr`；证书操作依赖 `openssl` 与 `sha256sum`；受管变更使用 `flock` 加锁；官方 Release 安装还依赖 `curl` 以及 Xray 的 `unzip` 或 sing-box 的 `tar`。功能只在当前动作实际需要时检查对应工具：真实执行的交互环境发现缺失后才列出缺失项并询问是否安装，不会在进入代理菜单时预装所有工具；非交互调用和 `--dry-run` 依赖计划仍必须提供 `--install-deps`。获得授权后，当前动作可通过 `apt-get`、`dnf5`、`dnf`、`yum`、`apk`、`pacman` 或 `zypper` 补齐缺失工具；时间同步只在缺少可用 NTP 后端时补齐 chrony。systemd 的 `journalctl`、OpenRC 的 `tail`、服务管理器和 CPU 架构属于平台前置条件，不由该选项安装或绕过。
+支持的平台范围是 Linux、systemd 或 OpenRC，以及 `x86_64`/`amd64`、`aarch64`/`arm64`、`armv7l`/`armv7` 架构。状态、清单和配置渲染依赖 `jq`；端口检查与订阅输出使用 `ss`、`base64`、`tr`、`awk` 和 `mktemp`；证书与稳定 ID 操作依赖 `openssl` 与 `sha256sum`；端口转发依赖 `nft`、`ip`、`getent` 和 `sysctl`；受管变更使用 `flock` 加锁；官方 Release 安装还依赖 `curl` 以及 Xray 的 `unzip` 或 sing-box 的 `tar`。功能只在当前动作实际需要时检查对应工具：真实执行的交互环境发现缺失后才列出缺失项并询问是否安装，不会在进入代理菜单时预装所有工具；非交互调用和 `--dry-run` 依赖计划仍必须提供 `--install-deps`。获得授权后，当前动作可通过 `apt-get`、`dnf5`、`dnf`、`yum`、`apk`、`pacman` 或 `zypper` 补齐缺失工具；时间同步只在缺少可用 NTP 后端时补齐 chrony。systemd 的 `journalctl`、OpenRC 的 `tail`、服务管理器和 CPU 架构属于平台前置条件，不由该选项安装或绕过。
+
+真实协议链路验收脚本为 `tests/integration/test-service-proxy-relay-connectivity-real.sh`，默认对任何失败都严格退出。Xray 26.3.27 与 26.6.27 的 `trojan-grpc-reality` 已确认在 REALITY 认证完成后由 gRPC 传输层关闭连接；需要执行其余完整矩阵时可显式设置 `ALLOW_XRAY_TROJAN_GRPC_REALITY_XFAIL=1`。该豁免只接受日志中的 server-preface 关闭特征；若未来版本修复并实际连通，脚本以 XPASS 失败，要求移除豁免，避免永久静默跳过。
 
 `--dry-run` 会展示安装、写入、服务控制和时间同步命令，不下载、不写受管配置、不安装包，也不启停服务。与 `--install-deps` 组合且发现工具缺失时，会先展示固定的软件包安装计划，再安全停止并提示安装后重跑完整计划。常见退出码遵循项目统一约定：`2` 为参数错误，`3` 为前置条件或依赖不满足，`4` 为权限不足，`10` 为配置或证书校验失败，`20` 为外部命令或远端服务失败，`30` 为部分完成、同步确认超时或需要人工恢复，`130` 为用户中断。发生 `30` 时先查看 `status`、待重启记录和服务日志，不要直接删除状态或备份文件。

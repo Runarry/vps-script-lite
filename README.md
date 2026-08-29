@@ -4,7 +4,7 @@
 
 项目采用“一个管理入口、多个独立命令”的结构：管理入口只负责参数解析、固定命令登记、公共上下文和分发；每项实际功能原则上由一个公开入口脚本实现，复杂入口可拆为不单独分发的私有子模块。这样既能通过统一入口使用，也能单独运行、测试和排错。
 
-> 当前版本为 0.3.0，在 BBR、DNS 和 RFW 三个 `network` 入口之外新增 `service proxy`，平级管理 Xray 与 sing-box。网络和代理服务变更都可能中断远程连接，请先使用 `--dry-run` 并阅读对应恢复说明。
+> 当前版本为 0.3.0，在 BBR、DNS 和 RFW 三个 `network` 入口之外提供 `service proxy`，平级管理 Xray、sing-box、出口驱动的节点中转和 nftables 端口转发。网络和代理服务变更都可能中断远程连接，请先使用 `--dry-run` 并阅读对应恢复说明。
 
 ## 文档
 
@@ -14,7 +14,7 @@
 - [开发与验收流程](docs/development-workflow.md)：从设计、实现到测试和评审的流程。
 - [主管理脚本与 UI](docs/manager-ui.md)：启动检测、菜单结构、非交互模式和扩展方式。
 - [网络设置](docs/network-settings.md)：BBR、DNS、RFW 的接口、安全边界、持久化路径和恢复要求。
-- [代理管理](docs/proxy-management.md)：Xray/sing-box 内核、节点、协议、订阅、证书、日志与时间同步。
+- [代理管理](docs/proxy-management.md)：Xray/sing-box 内核、节点、出口关联、端口转发、订阅、证书、日志与时间同步。
 
 ## 使用主管理脚本
 
@@ -46,9 +46,10 @@ bash bin/vpsctl network dns show
 bash bin/vpsctl network rfw status
 bash bin/vpsctl service proxy status
 bash bin/vpsctl service proxy profiles
+bash bin/vpsctl service proxy relay status
 ```
 
-直接运行 `bash bin/vpsctl service proxy` 会进入统一代理界面。界面首先同时显示 Xray 与 sing-box 的安装/运行状态、配置路径、各自节点数和节点总数，再按内核生命周期、服务控制、节点管理、查看输出和系统工具等能力分组提供操作。交互过程对内核、节点、模式和开关等固定值统一使用编号选择；地址、端口、名称等开放值则在输入后立即校验，不要求输入 `--core` 等 CLI 参数。订阅可按编号选择全部节点，或只输出当前确有节点的 sing-box/Xray 范围。
+直接运行 `bash bin/vpsctl service proxy` 会进入统一代理界面。界面首先同时显示 Xray 与 sing-box 的安装/运行状态、配置路径、各自节点数和节点总数，再按内核生命周期、服务控制、节点管理、中转管理、查看输出和系统工具等能力分组提供操作。中转管理按编号提供“出口管理 / 节点中转 / 纯端口转发 / 状态与刷新”；一个出口可供多个入口复用，节点 URI 不因关联而改变。交互过程对内核、节点、出口、模式和开关等固定值统一使用编号选择；地址、端口、名称等开放值则在输入后立即校验，不要求输入 `--core` 等 CLI 参数。订阅可按编号选择全部，或只输出当前确有普通节点或端口转发 URI 的 sing-box/Xray 范围。
 
 先查看变更计划的示例：
 

@@ -48,9 +48,13 @@ proxy_load_module common.sh || exit $?
 proxy_load_module protocols-sing-box.sh || exit $?
 proxy_load_module protocols-xray.sh || exit $?
 proxy_load_module nodes.sh || exit $?
+proxy_load_module relay-uri.sh || exit $?
+proxy_load_module relay-forward.sh || exit $?
+proxy_load_module relay.sh || exit $?
 proxy_load_module core.sh || exit $?
 proxy_load_module time.sh || exit $?
 proxy_common_init || exit $?
+proxy_relay_init || exit $?
 
 PROXY_ARGS=()
 PROXY_FORWARD_ARGS=()
@@ -88,8 +92,28 @@ proxy_usage() {
            [--obfs none|salamander] [--up-mbps N] [--down-mbps N]
            [--congestion-control bbr|cubic|new_reno]
   node edit --id NODE_ID [可修改 node add 中的非凭据字段]
-  node delete --id NODE_ID [--confirm-delete]
+  node delete --id NODE_ID [--cascade-relay] [--confirm-delete]
   subscription [--core CORE|all]
+
+中转：
+  relay status [--json]
+  relay exit list [--json]
+  relay exit show --id EXIT_ID [--uri]
+  relay exit add --name NAME (--uri URI [--profile PROFILE] [--core CORE] |
+                 --target HOST --target-port PORT)
+  relay exit edit --id EXIT_ID [出口字段]
+  relay exit delete --id EXIT_ID [--cascade --confirm-cascade]
+  relay bind list [--core CORE|all] [--json]
+  relay bind show --id BIND_ID
+  relay bind add --node-id NODE_ID --exit-id EXIT_ID
+  relay bind delete --id BIND_ID [--confirm-delete]
+  relay forward list [--json]
+  relay forward show --id FORWARD_ID [--uris]
+  relay forward add --name NAME --exit-id EXIT_ID --listen-ports START[-END]
+                    [--network auto|tcp|udp|both] [--address HOST]
+  relay forward edit --id FORWARD_ID [转发字段]
+  relay forward delete --id FORWARD_ID [--confirm-delete]
+  relay forward refresh [--id FORWARD_ID]
 
 系统时间：
   time status [--json]
@@ -588,7 +612,7 @@ proxy_menu_run() {
         printf '============================================================\n'
         proxy_core_status all || true
         if choice="$(proxy_prompt_select "代理能力" "" \
-            core "内核管理" nodes "节点管理" service "服务控制" \
+            core "内核管理" nodes "节点管理" relay "中转管理" service "服务控制" \
             logs "日志" time "时间" protocols "协议")"; then
             :
         else
@@ -599,6 +623,7 @@ proxy_menu_run() {
         case "$choice" in
             core) proxy_core_menu_run || status=$? ;;
             nodes) proxy_node_menu_run || status=$? ;;
+            relay) proxy_relay_menu_run || status=$? ;;
             service) proxy_service_menu_run || status=$? ;;
             logs) proxy_logs_menu_run || status=$? ;;
             time) proxy_time_menu_run || status=$? ;;
@@ -645,6 +670,9 @@ proxy_dispatch() {
             ;;
         subscription)
             proxy_subscription "$@"
+            ;;
+        relay)
+            proxy_relay_dispatch "$@"
             ;;
         time)
             (($# >= 1)) || { vps_cmd_error "time 需要 status|sync"; return 2; }

@@ -459,6 +459,15 @@ vps_cmd_package_for_tool() {
                 *) printf 'procps\n' ;;
             esac
             ;;
+        nft) printf 'nftables\n' ;;
+        getent)
+            case "$manager" in
+                apt-get) printf 'libc-bin\n' ;;
+                dnf5 | dnf | yum) printf 'glibc-common\n' ;;
+                apk) printf 'musl-utils\n' ;;
+                pacman | zypper) printf 'glibc\n' ;;
+            esac
+            ;;
         modprobe) printf 'kmod\n' ;;
         ip | tc | ss)
             case "$manager" in
@@ -466,7 +475,8 @@ vps_cmd_package_for_tool() {
                 *) printf 'iproute2\n' ;;
             esac
             ;;
-        base64 | sha256sum | tr) printf 'coreutils\n' ;;
+        base64 | sha256sum | tr | mktemp | sort | head) printf 'coreutils\n' ;;
+        awk) printf 'gawk\n' ;;
         flock)
             if [[ "$manager" == apk ]]; then printf 'flock\n'; else printf 'util-linux\n'; fi
             ;;
