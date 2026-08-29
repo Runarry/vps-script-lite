@@ -100,10 +100,11 @@ test_environment_chinese_fallbacks() {
 test_registry() {
     vps_registry_init
 
-    test_assert_equal "2" "${#VPS_DOMAIN_IDS[@]}" "registered domain count"
-    test_assert_equal "5" "${#VPS_COMMAND_KEYS[@]}" "registered command count"
+    test_assert_equal "3" "${#VPS_DOMAIN_IDS[@]}" "registered domain count"
+    test_assert_equal "6" "${#VPS_COMMAND_KEYS[@]}" "registered command count"
     test_assert_equal "network" "${VPS_DOMAIN_IDS[0]}" "network domain id"
-    test_assert_equal "service" "${VPS_DOMAIN_IDS[1]}" "service domain id"
+    test_assert_equal "security" "${VPS_DOMAIN_IDS[1]}" "security domain id"
+    test_assert_equal "service" "${VPS_DOMAIN_IDS[2]}" "service domain id"
     test_assert_equal "commands/network/bbr.sh" "${VPS_COMMAND_PATH["network:bbr"]}" "BBR command path"
     test_assert_equal "commands/network/dns.sh" "${VPS_COMMAND_PATH["network:dns"]}" "DNS command path"
     test_assert_equal "commands/network/ip-policy.sh" "${VPS_COMMAND_PATH["network:ip-policy"]}" "IP policy command path"
@@ -116,6 +117,12 @@ test_registry() {
     test_assert_equal "supported" "${VPS_COMMAND_DRY_RUN["network:dns"]}" "DNS dry-run"
     test_assert_equal "linux,init:systemd" "${VPS_COMMAND_REQUIREMENTS["network:rfw"]}" "RFW requirements"
     test_assert_equal "experimental" "${VPS_COMMAND_LIFECYCLE["network:rfw"]}" "RFW lifecycle"
+    test_assert_equal "commands/security/access.sh" "${VPS_COMMAND_PATH["security:access"]}" "access command path"
+    test_assert_equal "disruptive" "${VPS_COMMAND_RISK["security:access"]}" "access risk"
+    test_assert_equal "optional-root" "${VPS_COMMAND_PRIVILEGE["security:access"]}" "access privilege"
+    test_assert_equal "supported" "${VPS_COMMAND_DRY_RUN["security:access"]}" "access dry-run"
+    test_assert_equal "linux,init:systemd" "${VPS_COMMAND_REQUIREMENTS["security:access"]}" "access requirements"
+    test_assert_equal "experimental" "${VPS_COMMAND_LIFECYCLE["security:access"]}" "access lifecycle"
     test_assert_equal "commands/service/proxy.sh" "${VPS_COMMAND_PATH["service:proxy"]}" "proxy command path"
     test_assert_equal "disruptive" "${VPS_COMMAND_RISK["service:proxy"]}" "proxy risk"
     test_assert_equal "optional-root" "${VPS_COMMAND_PRIVILEGE["service:proxy"]}" "proxy privilege"
@@ -155,6 +162,7 @@ test_ui_input() {
     output="$(vps_ui_main_menu)"
     [[ "$output" == *"网络设置"* ]] || test_fail "registered network domain should be visible"
     [[ "$output" == *"(4 个功能)"* ]] || test_fail "network domain command count should be visible"
+    [[ "$output" == *"安全与访问"* ]] || test_fail "registered security domain should be visible"
     [[ "$output" == *"服务管理"* ]] || test_fail "registered service domain should be visible"
     [[ "$output" == *"(1 个功能)"* ]] || test_fail "service domain command count should be visible"
 
@@ -197,6 +205,7 @@ test_ui_input() {
     test_assert_contains "$output" "<绿>可用<重置>" "ready command listing marker"
     test_assert_contains "$output" "network rfw" "limited command listing"
     test_assert_contains "$output" "<黄>受限<重置>" "limited command listing marker"
+    test_assert_contains "$output" "security access" "registered access command listing"
 
     output="$(vps_ui_command_details "network:bbr")"
     test_assert_contains "$output" "命令" "localized command field"

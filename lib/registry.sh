@@ -109,6 +109,11 @@ vps_registry_init() {
         "BBR、本机 DNS、IP 地址族偏好与 RFW 网络防护管理"
 
     vps_registry_register_domain \
+        "security" \
+        "安全与访问" \
+        "用户凭据、公钥与 SSH 远程访问安全管理"
+
+    vps_registry_register_domain \
         "service" \
         "服务管理" \
         "按需安装并管理长期运行的系统服务"
@@ -155,6 +160,18 @@ vps_registry_init() {
         "RFW 管理" \
         "安装、更新、配置和管理基于 XDP 的 RFW 服务" \
         "commands/network/rfw.sh" \
+        "disruptive" \
+        "optional-root" \
+        "supported" \
+        "linux,init:systemd" \
+        "experimental"
+
+    vps_registry_register_command \
+        "security" \
+        "access" \
+        "访问管理" \
+        "管理用户、密码、公钥与可验证恢复的 SSH 访问变更" \
+        "commands/security/access.sh" \
         "disruptive" \
         "optional-root" \
         "supported" \

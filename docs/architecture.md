@@ -22,6 +22,7 @@ vps-script-lite/
 │   ├── monitoring/         # 健康检查、资源与告警相关操作
 │   ├── network/            # 网络、DNS、防火墙和连通性
 │   ├── security/           # 加固、审计、证书和访问控制
+│   │   └── access.sh       # 用户、凭据与 SSH 访问管理公开入口
 │   ├── service/            # 系统服务安装、配置和生命周期管理
 │   │   ├── proxy.sh        # 代理管理公开入口
 │   │   └── proxy/          # 仅由 proxy.sh 加载的私有实现模块
@@ -35,7 +36,7 @@ vps-script-lite/
 └── docs/                   # 架构、开发和命令登记规范
 ```
 
-尚未实现功能的空目录暂以 `.gitkeep` 保存；`commands/network/` 包含网络功能脚本，`commands/service/proxy.sh` 及其私有子模块实现 0.3.0 代理管理入口。
+尚未实现功能的空目录暂以 `.gitkeep` 保存；`commands/network/` 包含网络功能脚本，`commands/security/access.sh` 实现 0.4.0 访问管理入口，`commands/service/proxy.sh` 及其私有子模块实现代理管理入口。
 
 ## 3. 组件职责
 
@@ -95,6 +96,8 @@ vps-script-lite/
 - 日志：优先写入 systemd journal；确需文件时使用 `/var/log/vpsctl/`
 
 密码、令牌、私钥、真实主机清单和包含隐私的数据不得提交到仓库。
+
+访问管理把 SSH 加固视为跨会话事务：公开入口可以暂时并存旧端口与候选端口，但只有新的非 root SSH 会话提交一次性证明后才允许提交最终配置。事务状态和备份属于运行数据，不得放入仓库；功能脚本必须在写入前拒绝无法安全归并的复杂 SSH 配置，且不能把当前仍存活的旧会话当作新路径验证结果。
 
 ## 4. 调用关系
 

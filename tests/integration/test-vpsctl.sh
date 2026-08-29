@@ -36,7 +36,7 @@ test_cli() {
     local output status option
 
     output="$("${VPSCTL[@]}" --version)"
-    test_contains "$output" "vpsctl 0.3.0" "version output"
+    test_contains "$output" "vpsctl 0.4.0" "version output"
 
     output="$("${VPSCTL[@]}" --help)"
     test_contains "$output" "<domain> <action>" "help command model"
@@ -66,6 +66,7 @@ test_cli() {
     test_contains "$output" "network dns" "DNS command listing"
     test_contains "$output" "network ip-policy" "IP policy command listing"
     test_contains "$output" "network rfw" "RFW command listing"
+    test_contains "$output" "security access" "access command listing"
     test_contains "$output" "service proxy" "proxy command listing"
 
     for option in --dry-run --install-deps --yes --non-interactive --quiet --verbose; do
@@ -100,7 +101,7 @@ test_dispatch_security() {
 
     [[ "$(uname -s)" == "Linux" ]] || return 0
     sandbox="$(mktemp -d)"
-    mkdir -p "$sandbox/bin" "$sandbox/lib" "$sandbox/commands/network" "$sandbox/commands/service/proxy"
+    mkdir -p "$sandbox/bin" "$sandbox/lib" "$sandbox/commands/network" "$sandbox/commands/security" "$sandbox/commands/service/proxy"
     cp "$TEST_ROOT/bin/vpsctl" "$sandbox/bin/vpsctl"
     cp "$TEST_ROOT"/lib/*.sh "$sandbox/lib/"
     cat >>"$sandbox/lib/environment.sh" <<'EOF'
@@ -133,6 +134,14 @@ printf 'rfw_args=%s\n' "$*"
 [[ -z "${VPSCTL_DISPATCH_MARKER:-}" ]] || printf 'rfw:%s\n' "$*" >>"$VPSCTL_DISPATCH_MARKER"
 EOF
     chmod 0644 "$sandbox/commands/network/rfw.sh"
+
+    cat >"$sandbox/commands/security/access.sh" <<'EOF'
+#!/usr/bin/env bash
+printf 'access_no_color=%s\n' "${VPSCTL_NO_COLOR:-missing}"
+printf 'access_args=%s\n' "$*"
+[[ -z "${VPSCTL_DISPATCH_MARKER:-}" ]] || printf 'access:%s\n' "$*" >>"$VPSCTL_DISPATCH_MARKER"
+EOF
+    chmod 0644 "$sandbox/commands/security/access.sh"
 
     cat >"$sandbox/commands/service/proxy.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -171,6 +180,16 @@ EOF
     output="$(VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" network rfw status)"
     test_contains "$output" "rfw_args=status" "RFW status dispatch without init capability"
 
+    output="$(VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" --no-color security access status)"
+    test_contains "$output" "access_no_color=1" "access no-color child context"
+    test_contains "$output" "access_args=status" "access status dispatch"
+    output="$(VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" security access status --user alice --json)"
+    test_contains "$output" "access_args=status --user alice --json" "access parameterized status dispatch without init capability"
+    output="$(VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" security access session verify --transaction tx-test)"
+    test_contains "$output" "access_args=session verify --transaction tx-test" "access proof dispatch without init capability"
+    output="$(VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" security access --help)"
+    test_contains "$output" "access_args=--help" "access help dispatch without init capability"
+
     output="$(VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" --no-color service proxy status)"
     test_contains "$output" "proxy_no_color=1" "proxy no-color child context"
     output="$(VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" service proxy --help)"
@@ -193,6 +212,14 @@ EOF
     VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" network rfw status extra >/dev/null 2>&1 || status=$?
     [[ "$status" == "3" ]] || test_fail "RFW malformed status without init capability should return 3, got ${status}"
     [[ ! -e "$marker" ]] || test_fail "RFW malformed status bypassed the capability gate"
+    status=0
+    VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" security access status --unknown >/dev/null 2>&1 || status=$?
+    [[ "$status" == "3" ]] || test_fail "access malformed status without init capability should return 3, got ${status}"
+    [[ ! -e "$marker" ]] || test_fail "access malformed status bypassed the capability gate"
+    status=0
+    VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" --dry-run security access ssh prepare --port 2222 --firewall manual >/dev/null 2>&1 || status=$?
+    [[ "$status" == "3" ]] || test_fail "access prepare without init capability should return 3, got ${status}"
+    [[ ! -e "$marker" ]] || test_fail "access prepare bypassed the capability gate"
     status=0
     VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" --dry-run service proxy update >/dev/null 2>&1 || status=$?
     [[ "$status" == "3" ]] || test_fail "proxy dry-run update without service capability should return 3, got ${status}"

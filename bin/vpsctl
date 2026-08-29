@@ -9,7 +9,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 umask 022
 
-readonly VPSCTL_VERSION="0.3.0"
+readonly VPSCTL_VERSION="0.4.0"
 
 VPSCTL_DRY_RUN=0
 VPSCTL_INSTALL_DEPS=0
@@ -178,6 +178,28 @@ vpsctl_invocation_may_omit_requirement() {
             case "$1" in
                 help | -h | --help | status) return 0 ;;
             esac
+            ;;
+        security:access:init:systemd)
+            if (($# == 1)); then
+                case "$1" in
+                    help | -h | --help | status) return 0 ;;
+                esac
+            elif [[ "$1" == "status" ]]; then
+                shift
+                while (($# > 0)); do
+                    case "$1" in
+                        --json) shift ;;
+                        --user)
+                            (($# >= 2)) || return 1
+                            shift 2
+                            ;;
+                        *) return 1 ;;
+                    esac
+                done
+                return 0
+            elif (($# == 4)) && [[ "$1" == "session" && "$2" == "verify" && "$3" == "--transaction" && -n "$4" ]]; then
+                return 0
+            fi
             ;;
         service:proxy:service:any)
             if (($# == 1)); then

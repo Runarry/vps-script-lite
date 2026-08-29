@@ -485,6 +485,39 @@ vps_cmd_package_for_tool() {
             esac
             ;;
         nft) printf 'nftables\n' ;;
+        sudo | visudo) printf 'sudo\n' ;;
+        ssh-keygen)
+            case "$manager" in
+                apt-get) printf 'openssh-client\n' ;;
+                dnf5 | dnf | yum | zypper) printf 'openssh-clients\n' ;;
+                apk | pacman) printf 'openssh\n' ;;
+            esac
+            ;;
+        sshd)
+            case "$manager" in
+                apt-get | dnf5 | dnf | yum | zypper) printf 'openssh-server\n' ;;
+                apk | pacman) printf 'openssh\n' ;;
+            esac
+            ;;
+        systemctl | systemd-run) printf 'systemd\n' ;;
+        useradd | userdel | usermod)
+            case "$manager" in
+                apt-get) printf 'passwd\n' ;;
+                dnf5 | dnf | yum) printf 'shadow-utils\n' ;;
+                apk) printf 'shadow\n' ;;
+                pacman) printf 'shadow\n' ;;
+                zypper) printf 'shadow\n' ;;
+            esac
+            ;;
+        passwd)
+            case "$manager" in
+                apt-get | dnf5 | dnf | yum) printf 'passwd\n' ;;
+                apk | pacman | zypper) printf 'shadow\n' ;;
+            esac
+            ;;
+        ufw) printf 'ufw\n' ;;
+        firewall-cmd) printf 'firewalld\n' ;;
+        iptables | ip6tables) printf 'iptables\n' ;;
         getent)
             case "$manager" in
                 apt-get) printf 'libc-bin\n' ;;
