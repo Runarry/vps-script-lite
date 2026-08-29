@@ -169,7 +169,7 @@ vpsctl service proxy relay bind delete --id BIND_ID [--confirm-delete]
 
 协议出口保存原始 URI、内核无关的规范化描述、profile、所选内核、目标地址端口和网络建议。一个 URI 有多个可用内核时必须明确选择；Shadowsocks 2022 普通与 Padding 无法仅从链接区分，必须使用 `--profile` 或在交互菜单中编号选择。内核尚未安装时可以保存协议出口，列表和状态会标记“尚未二进制验证”；实际建立节点关联时才要求同内核已登记，并用真实二进制校验完整配置。
 
-URI 层接受协议矩阵对应的标准 VLESS、Trojan、AnyTLS、Hysteria2/Hy2、TUIC、Shadowsocks/SIP002（含旧式整段 Base64）、ShadowTLS 插件和 SOCKS5 链接。未知或重复参数、矩阵外组合和无法渲染的变体会被拒绝；新版 Xray 已移除 `allowInsecure`，因此选择 Xray 的不安全 TLS URI 必须同时带有本项目的 `pcs` 证书指纹，渲染时使用证书固定。sing-box 按 inbound tag 生成 `route` 动作，Xray 使用 `inboundTag`/`outboundTag`；每个被使用的出口只生成一份稳定 tag 的 outbound。
+URI 层接受协议矩阵对应的标准 VLESS、Trojan、AnyTLS、Hysteria2/Hy2、TUIC、Shadowsocks/SIP002（含旧式整段 Base64）、ShadowTLS 插件和 SOCKS5 链接。VLESS TCP/Reality 分享链接中常见的无操作参数 `headerType=none` 会被兼容接受，其他 header 类型仍会拒绝。未知或重复参数、矩阵外组合和无法渲染的变体会被拒绝；新版 Xray 已移除 `allowInsecure`，因此选择 Xray 的不安全 TLS URI 必须同时带有本项目的 `pcs` 证书指纹，渲染时使用证书固定。sing-box 按 inbound tag 生成 `route` 动作，Xray 使用 `inboundTag`/`outboundTag`；每个被使用的出口只生成一份稳定 tag 的 outbound。
 
 删除仍被引用的出口默认拒绝。`--cascade --confirm-cascade` 会同时删除该出口、全部节点关联和端口转发，并将核心配置、relay 状态和运行规则作为一个可回滚变更处理。关联修改沿用待重启策略，不会自动重启正在运行的核心；pending 与 LKG 快照同时记录 relay 定义、DNS 运行缓存和受管 nftables 规则，核心应用失败时恢复同一代数据面。
 

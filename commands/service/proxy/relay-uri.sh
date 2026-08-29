@@ -195,7 +195,10 @@ _proxy_relay_query_keys_allowed() {
     shift || return 10
     for key in "$@"; do allowed+="$key|"; done
     while IFS= read -r key; do
-        [[ "$allowed" == *"|$key|"* ]] || return 10
+        if [[ "$allowed" != *"|$key|"* ]]; then
+            _proxy_relay_uri_error "unsupported query parameter: ${key}"
+            return 10
+        fi
     done < <(jq -r 'keys[]' <<<"$query_json" 2>/dev/null) || return 10
 }
 
@@ -489,7 +492,7 @@ proxy_relay_uri_parse() {
     esac
     case "$profile" in
         vless-reality-vision)
-            _proxy_relay_query_keys_allowed "$query_json" security encryption pbk fp type flow sni sid || return 10 ;;
+            _proxy_relay_query_keys_allowed "$query_json" security encryption pbk fp type flow sni sid headerType || return 10 ;;
         vless-grpc-reality | trojan-grpc-reality)
             _proxy_relay_query_keys_allowed "$query_json" security encryption pbk fp type serviceName authority sni sid || return 10 ;;
         trojan-xhttp-reality)
@@ -513,13 +516,17 @@ proxy_relay_uri_parse() {
         shadowsocks-*)
             _proxy_relay_query_keys_allowed "$query_json" plugin || return 10 ;;
         vless-tcp)
-            _proxy_relay_query_keys_allowed "$query_json" encryption type security || return 10 ;;
+            _proxy_relay_query_keys_allowed "$query_json" encryption type security headerType || return 10 ;;
         socks5)
             _proxy_relay_query_keys_allowed "$query_json" || return 10 ;;
     esac
-    [[ "$profile" != anytls-reality || -z "$header_type" || "$header_type" == none ]] || {
-        _proxy_relay_uri_error 'unsupported AnyTLS header type'; return 10;
-    }
+    case "$profile" in
+        vless-reality-vision | vless-tcp | anytls-reality)
+            [[ -z "$header_type" || "$header_type" == none ]] || {
+                _proxy_relay_uri_error 'unsupported header type'; return 10;
+            }
+            ;;
+    esac
     [[ "$profile" != tuic-v5 || -z "$alpn_value" || "$alpn_value" == h3 ]] || {
         _proxy_relay_uri_error 'unsupported TUIC ALPN'; return 10;
     }

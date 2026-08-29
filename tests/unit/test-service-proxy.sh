@@ -734,7 +734,7 @@ test_protocol_matrix() {
     assert_equal 20 "$version_status" "ambiguous Xray product versions rejection"
 
     local cert_dir="${TEST_TEMP}/cert" profile label supported node rendered uri id profile_obfs port=20000 count=0
-    local descriptor relay_exit outbound rewritten rewritten_descriptor ss2022_uri="" parse_status=0 legacy_payload legacy_uri
+    local descriptor relay_exit outbound rewritten rewritten_descriptor ss2022_uri="" parse_status=0 parse_error="" legacy_payload legacy_uri
     local profile_count=0 sb_count=0 xray_count=0 overlap_count=0 sb_only_count=0 xray_only_count=0
     local digest_file="${TEST_TEMP}/xray.dgst" digest digest_status=0
     printf 'SHA2-256= AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n' >"$digest_file"
@@ -819,8 +819,16 @@ test_protocol_matrix() {
     proxy_relay_uri_parse "$ss2022_uri" >/dev/null 2>&1 || parse_status=$?
     assert_equal 2 "$parse_status" "ambiguous Shadowsocks 2022 profile selection"
     parse_status=0
-    proxy_relay_uri_parse 'vless://11111111-1111-4111-8111-111111111111@proxy.example:443?type=tcp&security=none&unsupported=1' >/dev/null 2>&1 || parse_status=$?
+    parse_error=''
+    parse_error="$(proxy_relay_uri_parse 'vless://11111111-1111-4111-8111-111111111111@proxy.example:443?type=tcp&security=none&unsupported=1' 2>&1)" || parse_status=$?
     assert_equal 10 "$parse_status" "unsupported relay URI parameter rejection"
+    assert_contains "$parse_error" 'unsupported query parameter: unsupported' "unsupported relay URI parameter message"
+    descriptor="$(proxy_relay_uri_parse 'vless://11111111-1111-4111-8111-111111111111@198.51.100.24:55210?encryption=none&flow=xtls-rprx-vision&security=reality&sni=www.example.com&fp=chrome&pbk=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&sid=0123456789abcdef&type=tcp&headerType=none#compat')" || fail "VLESS Reality headerType compatibility parse"
+    assert_equal vless-reality-vision "$(jq -r '.profile' <<<"$descriptor")" "VLESS Reality headerType profile"
+    assert_equal '198.51.100.24:55210' "$(jq -r '.endpoint.host + ":" + (.endpoint.port | tostring)' <<<"$descriptor")" "VLESS Reality headerType endpoint"
+    parse_status=0
+    proxy_relay_uri_parse 'vless://11111111-1111-4111-8111-111111111111@proxy.example:443?encryption=none&flow=xtls-rprx-vision&security=reality&sni=www.example.com&fp=chrome&pbk=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&sid=0123456789abcdef&type=tcp&headerType=http' >/dev/null 2>&1 || parse_status=$?
+    assert_equal 10 "$parse_status" "unsupported VLESS Reality header type rejection"
     descriptor="$(proxy_relay_uri_parse 'vless://11111111-1111-4111-8111-111111111111@proxy.example:443?encryption=none&type=grpc&security=tls&sni=proxy.example&serviceName=relay&authority=proxy.example&insecure=1' vless-grpc-tls)" || fail "Xray insecure TLS fixture parse"
     relay_exit="$(jq -cn --arg id exit-0000000000000001 --arg name insecure --arg core xray \
         --arg profile vless-grpc-tls --arg uri 'vless://11111111-1111-4111-8111-111111111111@proxy.example:443?encryption=none&type=grpc&security=tls&sni=proxy.example&serviceName=relay&authority=proxy.example&insecure=1' \
