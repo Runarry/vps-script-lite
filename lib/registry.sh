@@ -106,7 +106,7 @@ vps_registry_init() {
     vps_registry_register_domain \
         "network" \
         "网络设置" \
-        "BBR、本机 DNS 与 RFW 网络防护管理"
+        "BBR、本机 DNS、IP 地址族偏好与 RFW 网络防护管理"
 
     vps_registry_register_domain \
         "service" \
@@ -131,6 +131,18 @@ vps_registry_init() {
         "本机 DNS" \
         "查看、测试、替换、刷新和验证本机 DNS 服务器" \
         "commands/network/dns.sh" \
+        "disruptive" \
+        "optional-root" \
+        "supported" \
+        "linux" \
+        "experimental"
+
+    vps_registry_register_command \
+        "network" \
+        "ip-policy" \
+        "IP 地址族偏好" \
+        "查看、设置或恢复本机 glibc IPv4/IPv6 地址排序偏好" \
+        "commands/network/ip-policy.sh" \
         "disruptive" \
         "optional-root" \
         "supported" \

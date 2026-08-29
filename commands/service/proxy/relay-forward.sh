@@ -11,6 +11,7 @@
 #   proxy_relay_forward_manifest_validate FILE [NODES_FILE]
 #   proxy_relay_forward_validate_manifest FILE [NODES_FILE] (integration alias)
 #   proxy_relay_forward_validate_conflicts FILE [NODES_FILE]
+#   proxy_relay_forward_validate_family_candidate FAMILY HOST PUBLISH_ADDRESS
 #   proxy_relay_forward_refresh_cache MANIFEST OLD_CACHE OUTPUT
 #   proxy_relay_forward_detect_loops MANIFEST CACHE
 #   proxy_relay_forward_render_nft MANIFEST CACHE
@@ -162,15 +163,74 @@ _proxy_relay_forward_valid_ipv4() {
 }
 
 _proxy_relay_forward_valid_ipv6() {
+    local value="${1:-}" normalized left right side part ipv4_tail="" compressed=0 count=0
+    local -a parts=()
+
+    [[ "$value" == *:* && "$value" != *%* ]] || return 1
+    normalized="$value"
+    if [[ "$normalized" == *.* ]]; then
+        ipv4_tail="${normalized##*:}"
+        _proxy_relay_forward_valid_ipv4 "$ipv4_tail" || return 1
+        normalized="${normalized%:*}:0:0"
+    fi
+    [[ "$normalized" =~ ^[0-9A-Fa-f:]+$ && "$normalized" != *:::* ]] || return 1
+    if [[ "$normalized" == *::* ]]; then
+        compressed=1
+        left="${normalized%%::*}"
+        right="${normalized#*::}"
+        [[ "$right" != *::* ]] || return 1
+    else
+        left="$normalized"
+        right=""
+        [[ "$left" != :* && "$left" != *: ]] || return 1
+    fi
+    for side in "$left" "$right"; do
+        [[ -n "$side" ]] || continue
+        [[ "$side" != :* && "$side" != *: ]] || return 1
+        IFS=: read -r -a parts <<<"$side"
+        for part in "${parts[@]}"; do
+            [[ "$part" =~ ^[0-9A-Fa-f]{1,4}$ ]] || return 1
+            count=$((count + 1))
+        done
+    done
+    if ((compressed)); then
+        ((count < 8))
+    else
+        ((count == 8))
+    fi
+}
+
+_proxy_relay_forward_valid_hostname() {
+    local value="${1:-}" label
+    local -a labels=()
+
+    [[ -n "$value" && ${#value} -le 253 && "$value" != *:* ]] || return 1
+    value="${value%.}"
+    [[ -n "$value" && "$value" != .* && "$value" != *. && "$value" != *..* ]] || return 1
+    [[ "$value" =~ ^[A-Za-z0-9.-]+$ ]] || return 1
+    IFS=. read -r -a labels <<<"$value"
+    for label in "${labels[@]}"; do
+        ((${#label} >= 1 && ${#label} <= 63)) || return 1
+        [[ "$label" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$ ]] || return 1
+    done
+}
+
+_proxy_relay_forward_valid_host_value() {
     local value="${1:-}"
-    [[ "$value" == *:* && "$value" =~ ^[0-9A-Fa-f:.]+$ && "$value" != *:::* ]]
+    if [[ "$value" == *:* ]]; then
+        _proxy_relay_forward_valid_ipv6 "$value"
+    elif [[ "$value" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        _proxy_relay_forward_valid_ipv4 "$value"
+    else
+        _proxy_relay_forward_valid_hostname "$value"
+    fi
 }
 
 _proxy_relay_forward_address_family() {
     if _proxy_relay_forward_valid_ipv4 "${1:-}"; then
-        printf 'ip'
+        printf 'ipv4'
     elif _proxy_relay_forward_valid_ipv6 "${1:-}"; then
-        printf 'ip6'
+        printf 'ipv6'
     else
         return 1
     fi
@@ -264,12 +324,43 @@ proxy_relay_forward_manifest_validate() {
             ((.listen_port_start | type) == "number" and (.listen_port_start | floor) == .listen_port_start and .listen_port_start >= 1 and .listen_port_start <= 65535) and
             ((.listen_port_end | type) == "number" and (.listen_port_end | floor) == .listen_port_end and .listen_port_end >= .listen_port_start and .listen_port_end <= 65535) and
             (.network == "auto" or .network == "tcp" or .network == "udp" or .network == "both") and
+            ((has("family") | not) or .family == "dual" or .family == "ipv4" or .family == "ipv6") and
             ((.publish_address | type) == "string" and (.publish_address | length) > 0 and (.publish_address | length) <= 253 and (.publish_address | test("[[:space:]/]")) == false)
         )
     ' "$file" >/dev/null 2>&1 || {
         vps_cmd_error "relay 清单格式、引用或唯一性校验失败：$file"
         return 10
     }
+
+    local forward forward_id exit_id family host publish host_family publish_family
+    while IFS= read -r forward; do
+        [[ -n "$forward" ]] || continue
+        forward_id="$(jq -r '.id' <<<"$forward")"
+        exit_id="$(jq -r '.exit_id' <<<"$forward")"
+        family="$(jq -r '.family // "dual"' <<<"$forward")"
+        host="$(jq -r --arg id "$exit_id" '.exits[] | select(.id == $id) | .endpoint.host' "$file")"
+        publish="$(jq -r '.publish_address' <<<"$forward")"
+        _proxy_relay_forward_valid_host_value "$host" || {
+            vps_cmd_error "转发 ${forward_id} 的出口主机无效：${host}"
+            return 10
+        }
+        _proxy_relay_forward_valid_host_value "$publish" || {
+            vps_cmd_error "转发 ${forward_id} 的发布地址无效：${publish}"
+            return 10
+        }
+        host_family="$(_proxy_relay_forward_address_family "$host" 2>/dev/null || true)"
+        publish_family="$(_proxy_relay_forward_address_family "$publish" 2>/dev/null || true)"
+        if [[ "$family" != dual ]]; then
+            if [[ -n "$host_family" && "$host_family" != "$family" ]]; then
+                vps_cmd_error "转发 ${forward_id} 的 ${family} 模式与出口字面量 ${host} 地址族不一致"
+                return 10
+            fi
+            if [[ -n "$publish_family" && "$publish_family" != "$family" ]]; then
+                vps_cmd_error "转发 ${forward_id} 的 ${family} 模式与发布地址字面量 ${publish} 地址族不一致"
+                return 10
+            fi
+        fi
+    done < <(jq -c '.forwards[]' "$file")
 
     if [[ -n "$nodes" && -e "$nodes" ]]; then
         [[ -f "$nodes" && ! -L "$nodes" ]] || {
@@ -304,6 +395,44 @@ proxy_relay_forward_resolve_family() {
     getent "$database" "$host" 2>/dev/null | awk '{print $1}' | LC_ALL=C sort -u
 }
 
+proxy_relay_forward_validate_family_candidate() {
+    local family="${1:-}" host="${2:-}" publish="${3:-}"
+    local host_family publish_family requested resolved available=0
+    case "$family" in dual | ipv4 | ipv6) ;; *) return 2 ;; esac
+    _proxy_relay_forward_valid_host_value "$host" || {
+        vps_cmd_error "出口主机不是有效的 IP 字面量或 DNS 主机名：${host}"
+        return 2
+    }
+    _proxy_relay_forward_valid_host_value "$publish" || {
+        vps_cmd_error "发布地址不是有效的 IP 字面量或 DNS 主机名：${publish}"
+        return 2
+    }
+
+    host_family="$(_proxy_relay_forward_address_family "$host" 2>/dev/null || true)"
+    publish_family="$(_proxy_relay_forward_address_family "$publish" 2>/dev/null || true)"
+    if [[ "$family" != dual && -n "$publish_family" && "$publish_family" != "$family" ]]; then
+        vps_cmd_error "${family} 转发的发布地址字面量必须使用同一地址族：${publish}"
+        return 2
+    fi
+    if [[ -n "$host_family" ]]; then
+        if [[ "$family" != dual && "$host_family" != "$family" ]]; then
+            vps_cmd_error "${family} 转发不能使用相反地址族的出口字面量：${host}"
+            return 2
+        fi
+        return 0
+    fi
+
+    for requested in ipv4 ipv6; do
+        [[ "$family" == dual || "$family" == "$requested" ]] || continue
+        resolved="$(proxy_relay_forward_resolve_family "$host" "$requested" | _proxy_relay_forward_first_valid_address "$requested" || true)"
+        [[ -z "$resolved" ]] || available=$((available + 1))
+    done
+    if ((available == 0)); then
+        vps_cmd_error "出口域名 ${host} 没有 ${family} 模式所需的可用地址"
+        return 3
+    fi
+}
+
 _proxy_relay_forward_first_valid_address() {
     local family="$1" address
     while IFS= read -r address; do
@@ -320,7 +449,7 @@ _proxy_relay_forward_first_valid_address() {
 
 proxy_relay_forward_refresh_cache() {
     local manifest="${1:-}" old_cache="${2:-}" output="${3:-}"
-    local cache='{"schema_version":1,"exits":{}}' degraded='[]' resolved_list exit id host family resolved old_address now entry retained literal_family=""
+    local cache='{"schema_version":1,"exits":{}}' degraded='[]' resolved_list exit id host family resolved old_address now entry retained literal_family="" required_families
     [[ -f "$manifest" && ! -L "$manifest" && -n "$output" ]] || return 2
     now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     while IFS= read -r exit; do
@@ -331,11 +460,13 @@ proxy_relay_forward_refresh_cache() {
         if _proxy_relay_forward_valid_ipv4 "$host"; then literal_family=ipv4
         elif _proxy_relay_forward_valid_ipv6 "$host"; then literal_family=ipv6
         fi
+        required_families="$(jq -r --arg id "$id" '[.forwards[] | select(.exit_id == $id) | (.family // "dual") | if . == "dual" then "ipv4", "ipv6" else . end] | unique[]' "$manifest")" || return 20
         entry='{}'
         for family in ipv4 ipv6; do
+            grep -Fxq "$family" <<<"$required_families" || continue
             retained=false
             if [[ -n "$literal_family" && "$family" != "$literal_family" ]]; then
-                entry="$(jq -cn --argjson current "$entry" --arg key "$family" '$current + {($key):null}')" || return 20
+                degraded="$(jq -cn --argjson current "$degraded" --arg id "$id" --arg host "$host" --arg family "$family" '$current + [{exit_id:$id,host:$host,family:$family,reason:"family-unavailable",retained:false}]')" || return 20
                 continue
             fi
             resolved="$(proxy_relay_forward_resolve_family "$host" "$family" | LC_ALL=C sort -u | _proxy_relay_forward_first_valid_address "$family" || true)"
@@ -361,7 +492,7 @@ proxy_relay_forward_refresh_cache() {
     done < <(jq -c '. as $root | .exits[] as $exit |
         select(any($root.forwards[]; .exit_id == $exit.id)) | $exit' "$manifest")
 
-    resolved_list="$(jq -c '[.exits | to_entries[] | {exit_id:.key,host:.value.host,ipv4:.value.ipv4,ipv6:.value.ipv6}]' <<<"$cache")" || return 20
+    resolved_list="$(jq -c '[.exits | to_entries[] | {exit_id:.key,host:.value.host,ipv4:(.value.ipv4 // null),ipv6:(.value.ipv6 // null)}]' <<<"$cache")" || return 20
     jq -n --argjson cache "$cache" --argjson resolved "$resolved_list" --argjson degraded "$degraded" --arg generated "$now" '$cache + {resolved:$resolved,degraded:$degraded,updated_at:$generated,generated_at:$generated}' >"$output" || return 20
     chmod 0600 -- "$output" || return 20
 }
@@ -373,7 +504,7 @@ _proxy_relay_forward_local_addresses() {
 }
 
 proxy_relay_forward_detect_loops() {
-    local manifest="${1:-}" cache="${2:-}" forward exit_id address family local_address
+    local manifest="${1:-}" cache="${2:-}" forward exit_id address family forward_family local_address
     local -a local_addresses=()
     while IFS= read -r local_address; do
         [[ -n "$local_address" ]] && local_addresses+=("$local_address")
@@ -381,7 +512,9 @@ proxy_relay_forward_detect_loops() {
     while IFS= read -r forward; do
         [[ -n "$forward" ]] || continue
         exit_id="$(jq -r '.exit_id' <<<"$forward")"
+        forward_family="$(jq -r '.family // "dual"' <<<"$forward")"
         for family in ipv4 ipv6; do
+            [[ "$forward_family" == dual || "$forward_family" == "$family" ]] || continue
             address="$(jq -r --arg id "$exit_id" --arg family "$family" '.exits[$id][$family] // empty' "$cache")"
             [[ -n "$address" ]] || continue
             for local_address in "${local_addresses[@]}"; do
@@ -419,7 +552,7 @@ _proxy_relay_forward_emit_rule_set() {
 }
 
 proxy_relay_forward_render_nft() {
-    local manifest="${1:-}" cache="${2:-}" forward id exit_id network hint effective start end publish family target target_port table protocol
+    local manifest="${1:-}" cache="${2:-}" forward id exit_id network hint effective start end publish family forward_family target target_port table protocol
     [[ -f "$manifest" && ! -L "$manifest" && -f "$cache" && ! -L "$cache" ]] || return 2
     printf 'destroy table ip %s\nadd table ip %s\n' "$PROXY_RELAY_FORWARD_TABLE4" "$PROXY_RELAY_FORWARD_TABLE4"
     printf 'add chain ip %s prerouting { type nat hook prerouting priority dstnat; policy accept; }\n' "$PROXY_RELAY_FORWARD_TABLE4"
@@ -440,12 +573,15 @@ proxy_relay_forward_render_nft() {
         start="$(jq -r '.listen_port_start' <<<"$forward")"
         end="$(jq -r '.listen_port_end' <<<"$forward")"
         publish="$(jq -r '.publish_address' <<<"$forward")"
+        forward_family="$(jq -r '.family // "dual"' <<<"$forward")"
         target_port="$(jq -r --arg id "$exit_id" '.exits[] | select(.id == $id) | .endpoint.port' "$manifest")"
         for family in ip ip6; do
             if [[ "$family" == ip ]]; then
+                [[ "$forward_family" == dual || "$forward_family" == ipv4 ]] || continue
                 target="$(jq -r --arg id "$exit_id" '.exits[$id].ipv4 // empty' "$cache")"
                 table="$PROXY_RELAY_FORWARD_TABLE4"
             else
+                [[ "$forward_family" == dual || "$forward_family" == ipv6 ]] || continue
                 target="$(jq -r --arg id "$exit_id" '.exits[$id].ipv6 // empty' "$cache")"
                 table="$PROXY_RELAY_FORWARD_TABLE6"
             fi
@@ -496,16 +632,45 @@ proxy_relay_forward_nft_apply() {
 }
 
 proxy_relay_forward_nft_snapshot() {
-    local output="${1:-}" tmp found=0
+    local output="${1:-}" tmp found=0 tables has4 has6
     [[ -n "$output" ]] || return 2
     _proxy_relay_forward_runtime_allowed || return $?
     tmp="${output}.part"
     : >"$tmp" || return 20
-    if nft list table ip "$PROXY_RELAY_FORWARD_TABLE4" >>"$tmp" 2>/dev/null; then found=1; fi
-    if nft list table ip6 "$PROXY_RELAY_FORWARD_TABLE6" >>"$tmp" 2>/dev/null; then found=1; fi
+    tables="$(nft -j list tables 2>/dev/null)" || {
+        rm -f -- "$tmp"
+        vps_cmd_error "无法枚举 nftables 表，拒绝在缺少可靠快照时替换转发规则"
+        return 20
+    }
+    has4="$(jq -r --arg family ip --arg name "$PROXY_RELAY_FORWARD_TABLE4" '
+        any(.nftables[]?.table?; .family == $family and .name == $name)
+    ' <<<"$tables")" || { rm -f -- "$tmp"; return 20; }
+    has6="$(jq -r --arg family ip6 --arg name "$PROXY_RELAY_FORWARD_TABLE6" '
+        any(.nftables[]?.table?; .family == $family and .name == $name)
+    ' <<<"$tables")" || { rm -f -- "$tmp"; return 20; }
+    if [[ "$has4" == true ]]; then
+        nft list table ip "$PROXY_RELAY_FORWARD_TABLE4" >>"$tmp" 2>/dev/null || {
+            rm -f -- "$tmp"
+            vps_cmd_error "读取 IPv4 受管 nftables 表失败，拒绝替换"
+            return 20
+        }
+        found=1
+    fi
+    if [[ "$has6" == true ]]; then
+        nft list table ip6 "$PROXY_RELAY_FORWARD_TABLE6" >>"$tmp" 2>/dev/null || {
+            rm -f -- "$tmp"
+            vps_cmd_error "读取 IPv6 受管 nftables 表失败，拒绝替换"
+            return 20
+        }
+        found=1
+    fi
+    if ((found == 0)); then
+        rm -f -- "$tmp"
+        return 1
+    fi
     mv -- "$tmp" "$output" || return 20
     chmod 0600 -- "$output" || return 20
-    ((found))
+    return 0
 }
 
 _proxy_relay_forward_warn_external_policy() {
@@ -733,7 +898,7 @@ _proxy_relay_forward_service_action() {
 
 proxy_relay_forward_apply() (
     local tmp cache_candidate batch referenced_missing snapshot cache_backup
-    local had_snapshot=0 cache_existed=0 rollback_failed=0
+    local had_snapshot=0 cache_existed=0 rollback_failed=0 snapshot_status=0
     proxy_relay_forward_init || return $?
     vps_cmd_require_root || return $?
     proxy_ensure_mutation_tools relay-forward-refresh jq nft getent ip || return $?
@@ -750,16 +915,33 @@ proxy_relay_forward_apply() (
     batch="$tmp/rules.nft"
     snapshot="$tmp/rules.old.nft"
     cache_backup="$tmp/cache.old.json"
-    if proxy_relay_forward_nft_snapshot "$snapshot"; then had_snapshot=1; fi
+    if proxy_relay_forward_nft_snapshot "$snapshot"; then
+        had_snapshot=1
+    else
+        snapshot_status=$?
+        if ((snapshot_status != 1)); then
+            rm -rf -- "$tmp"
+            return "$snapshot_status"
+        fi
+    fi
     if [[ -f "$PROXY_RELAY_FORWARD_CACHE" && ! -L "$PROXY_RELAY_FORWARD_CACHE" ]]; then
         cp -p -- "$PROXY_RELAY_FORWARD_CACHE" "$cache_backup" || { rm -rf -- "$tmp"; return 20; }
         cache_existed=1
     fi
     proxy_relay_forward_refresh_cache "$PROXY_RELAY_FORWARD_MANIFEST" "$PROXY_RELAY_FORWARD_CACHE" "$cache_candidate" || { local rc=$?; rm -rf -- "$tmp"; return "$rc"; }
     proxy_relay_forward_detect_loops "$PROXY_RELAY_FORWARD_MANIFEST" "$cache_candidate" || { local rc=$?; rm -rf -- "$tmp"; return "$rc"; }
-    referenced_missing="$(jq -r --slurpfile manifest "$PROXY_RELAY_FORWARD_MANIFEST" '. as $cache | [ $manifest[0].forwards[].exit_id ] | unique | map(select(. as $id | (($cache.exits[$id].ipv4 // null) == null and ($cache.exits[$id].ipv6 // null) == null))) | join(",")' "$cache_candidate")" || { rm -rf -- "$tmp"; return 20; }
+    referenced_missing="$(jq -r --slurpfile manifest "$PROXY_RELAY_FORWARD_MANIFEST" '
+        . as $cache |
+        [$manifest[0].forwards[] |
+            (.family // "dual") as $family |
+            select(if $family == "ipv4" then ($cache.exits[.exit_id].ipv4 // null) == null
+                   elif $family == "ipv6" then ($cache.exits[.exit_id].ipv6 // null) == null
+                   else (($cache.exits[.exit_id].ipv4 // null) == null and ($cache.exits[.exit_id].ipv6 // null) == null)
+                   end) |
+            (.id + "/" + $family)] | unique | join(",")
+    ' "$cache_candidate")" || { rm -rf -- "$tmp"; return 20; }
     if [[ -n "$referenced_missing" ]]; then
-        vps_cmd_error "以下出口没有可用 DNS 地址且无旧缓存：$referenced_missing"
+        vps_cmd_error "以下转发没有所需地址族的可用 DNS 地址且无旧缓存：$referenced_missing"
         rm -rf -- "$tmp"
         return 20
     fi

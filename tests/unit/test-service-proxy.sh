@@ -96,6 +96,13 @@ make_mock nft '
 printf "nft %s\n" "$*" >>"$MOCK_LOG"
 state="${VPSCTL_SYSTEM_ROOT}/run/mock-nft"; mkdir -p "$state"
 if [[ "${1:-}" == -j && "${2:-}" == list && "${3:-}" == ruleset ]]; then printf "{\"nftables\":[]}"; exit 0; fi
+if [[ "${1:-}" == -j && "${2:-}" == list && "${3:-}" == tables ]]; then
+  [[ ! -e "${VPSCTL_SYSTEM_ROOT}/run/fail-nft-list-tables" ]] || exit 20
+  printf "{\"nftables\":["; separator=""
+  if [[ -f "$state/ip-vpsctl_proxy_forward4" ]]; then printf "%s{\"table\":{\"family\":\"ip\",\"name\":\"vpsctl_proxy_forward4\"}}" "$separator"; separator=,; fi
+  if [[ -f "$state/ip6-vpsctl_proxy_forward6" ]]; then printf "%s{\"table\":{\"family\":\"ip6\",\"name\":\"vpsctl_proxy_forward6\"}}" "$separator"; fi
+  printf "]}"; exit 0
+fi
 if [[ "${1:-}" == list && "${2:-}" == table ]]; then
   family="${3:-}"; table="${4:-}"; [[ -f "$state/${family}-${table}" ]] || exit 1
   printf "table %s %s { }\n" "$family" "$table"; exit 0
@@ -647,19 +654,20 @@ test_unified_interactive_api() (
     assert_contains "$output" "请选择添加模式" "quick node add mode"
     assert_not_contains "$output" "混淆方式" "quick mode skips custom enums"
 
-    output="$(proxy_node_add --profile vless-ws-tls --port 19401 --address proxy.example <<< $'\n\n2\n\n\n\n\n2\n/tmp/cert.pem\n/tmp/key.pem' 2>&1)"
+    output="$(proxy_node_add --profile vless-ws-tls --port 19401 --address proxy.example <<< $'\n\n2\n\n\n\n\n2\n/tmp/cert.pem\n/tmp/key.pem\n' 2>&1)"
     assert_contains "$output" "证书方式" "custom certificate enum"
     assert_contains "$output" "生成自签名证书" "certificate self-signed choice"
     assert_contains "$output" "导入现有证书" "certificate imported choice"
     assert_contains "$output" "证书文件绝对路径" "imported certificate selection"
+    assert_contains "$output" "出站 IP 策略" "custom node IP strategy choice"
 
-    output="$(proxy_node_add --profile hysteria2 --port 19402 --address proxy.example <<< $'\n\n2\n\n\n\n\n2\n123\n456' 2>&1)"
+    output="$(proxy_node_add --profile hysteria2 --port 19402 --address proxy.example <<< $'\n\n2\n\n\n\n\n2\n123\n456\n' 2>&1)"
     assert_contains "$output" "混淆方式" "custom obfuscation enum"
     assert_contains "$output" "不使用混淆" "obfuscation none choice"
     assert_contains "$output" "Salamander" "obfuscation Salamander choice"
     assert_contains "$output" "上行 Mbps" "custom obfuscation bandwidth"
 
-    output="$(proxy_node_add --profile tuic-v5 --port 19403 --address proxy.example <<< $'\n\n2\n\n\n\n\n3' 2>&1)"
+    output="$(proxy_node_add --profile tuic-v5 --port 19403 --address proxy.example <<< $'\n\n2\n\n\n\n\n3\n' 2>&1)"
     assert_contains "$output" "拥塞控制" "custom congestion enum"
     assert_contains "$output" "BBR" "congestion BBR choice"
     assert_contains "$output" "CUBIC" "congestion CUBIC choice"
@@ -672,6 +680,156 @@ test_unified_interactive_api() (
     selected="$(proxy_prompt_select "拥塞控制" bbr bbr BBR cubic CUBIC new_reno "New Reno" <<<3 2>/dev/null)"
     assert_equal new_reno "$selected" "congestion enum selection"
 )
+
+test_node_ip_strategy_and_batch() {
+    local sb1 sb2 xr1 strategy expected config manifest_hash config_hash exit_id binding_id node_uri
+    local list_json show_json pending
+    reset_root
+    install_external sing-box
+    install_external xray
+
+    run_proxy node add --profile shadowsocks-aes-256-gcm --core sing-box --name policy-sb-1 --port 19601 \
+        --address proxy.example --ip-strategy prefer_ipv4
+    assert_equal 0 "$RUN_STATUS" "sing-box node with explicit IP strategy"
+    run_proxy node add --profile shadowsocks-aes-256-gcm --core sing-box --name policy-sb-2 --port 19602 --address proxy.example
+    assert_equal 0 "$RUN_STATUS" "second sing-box policy node"
+    run_proxy node add --profile shadowsocks-aes-256-gcm --core xray --name policy-xr-1 --port 19603 --address proxy.example
+    assert_equal 0 "$RUN_STATUS" "first Xray policy node"
+    run_proxy node add --profile shadowsocks-aes-256-gcm --core xray --name policy-xr-2 --port 19604 --address proxy.example
+    assert_equal 0 "$RUN_STATUS" "second Xray policy node"
+    sb1="$(node_id_by_name policy-sb-1)"; sb2="$(node_id_by_name policy-sb-2)"
+    xr1="$(node_id_by_name policy-xr-1)"
+
+    config="${TEST_SYSTEM_ROOT}/etc/vpsctl/proxy/sing-box/config.json"
+    jq -e --arg id "$sb1" '
+        any(.outbounds[]; .tag == ("direct-" + $id) and .domain_resolver.server == "local" and .domain_resolver.strategy == "prefer_ipv4") and
+        any(.route.rules[]; .inbound == [$id] and .outbound == ("direct-" + $id)) and
+        any(.dns.servers[]; .tag == "local" and .type == "local")
+    ' "$config" >/dev/null || fail "sing-box explicit policy renderer"
+
+    # A legacy node without ip_strategy must be exposed as auto without forcing
+    # an eager manifest rewrite.
+    jq --arg id "$sb2" '(.nodes[] | select(.id == $id)) |= del(.ip_strategy)' "$(manifest_path)" >"${TEST_TEMP}/legacy-nodes.json"
+    cp "${TEST_TEMP}/legacy-nodes.json" "$(manifest_path)"
+    run_proxy node list --core sing-box --json
+    assert_equal 0 "$RUN_STATUS" "legacy node list default"
+    list_json="$RUN_OUTPUT"
+    jq -e --arg id "$sb2" '.nodes[] | select(.id == $id and .ip_strategy == "auto" and .ip_strategy_effective == true)' \
+        >/dev/null <<<"$list_json" || fail "legacy node auto JSON default"
+    run_proxy node show --id "$sb2"
+    assert_equal 0 "$RUN_STATUS" "legacy node show default"
+    show_json="$RUN_OUTPUT"
+    jq -e '.ip_strategy == "auto"' >/dev/null <<<"$show_json" || fail "legacy node detail auto default"
+
+    manifest_hash="$(sha256sum "$(manifest_path)" | awk '{print $1}')"
+    config="${TEST_SYSTEM_ROOT}/etc/vpsctl/proxy/sing-box/config.json"
+    config_hash="$(sha256sum "$config" | awk '{print $1}')"
+    run_proxy --dry-run node ip-policy set --core sing-box --ip-strategy ipv6_only --all
+    assert_equal 0 "$RUN_STATUS" "node policy batch dry-run"
+    assert_equal "$manifest_hash" "$(sha256sum "$(manifest_path)" | awk '{print $1}')" "node policy dry-run manifest"
+    assert_equal "$config_hash" "$(sha256sum "$config" | awk '{print $1}')" "node policy dry-run config"
+
+    for strategy in auto prefer_ipv4 prefer_ipv6 ipv4_only ipv6_only; do
+        run_proxy node ip-policy set --core sing-box --ip-strategy "$strategy" --id "$sb1"
+        assert_equal 0 "$RUN_STATUS" "sing-box strategy ${strategy}"
+        assert_equal "$strategy" "$(jq -r --arg id "$sb1" '.nodes[] | select(.id == $id) | .ip_strategy' "$(manifest_path)")" "sing-box manifest ${strategy}"
+        if [[ "$strategy" == auto ]]; then
+            jq -e --arg id "$sb1" 'all(.outbounds[]; .tag != ("direct-" + $id)) and all(.route.rules[]?; .outbound != ("direct-" + $id))' \
+                "$config" >/dev/null || fail "sing-box auto renderer"
+        else
+            jq -e --arg id "$sb1" --arg strategy "$strategy" '
+                any(.outbounds[]; .tag == ("direct-" + $id) and .domain_resolver.strategy == $strategy) and
+                any(.route.rules[]; .inbound == [$id] and .outbound == ("direct-" + $id))
+            ' "$config" >/dev/null || fail "sing-box ${strategy} renderer"
+        fi
+    done
+
+    config="${TEST_SYSTEM_ROOT}/etc/vpsctl/proxy/xray/config.json"
+    for strategy in auto prefer_ipv4 prefer_ipv6 ipv4_only ipv6_only; do
+        case "$strategy" in
+            auto) expected=AsIs ;;
+            prefer_ipv4) expected=UseIPv4v6 ;;
+            prefer_ipv6) expected=UseIPv6v4 ;;
+            ipv4_only) expected=ForceIPv4 ;;
+            ipv6_only) expected=ForceIPv6 ;;
+        esac
+        run_proxy node ip-policy set --core xray --ip-strategy "$strategy" --id "$xr1"
+        assert_equal 0 "$RUN_STATUS" "Xray strategy ${strategy}"
+        if [[ "$strategy" == auto ]]; then
+            jq -e --arg id "$xr1" 'all(.outbounds[]; .tag != ("direct-" + $id)) and all(.routing.rules[]?; .outboundTag != ("direct-" + $id))' \
+                "$config" >/dev/null || fail "Xray auto renderer"
+        else
+            jq -e --arg id "$xr1" --arg expected "$expected" '
+                any(.outbounds[]; .tag == ("direct-" + $id) and .protocol == "freedom" and .settings.domainStrategy == $expected) and
+                any(.routing.rules[]; .inboundTag == [$id] and .outboundTag == ("direct-" + $id))
+            ' "$config" >/dev/null || fail "Xray ${strategy} renderer"
+        fi
+    done
+
+    run_proxy node ip-policy set --core sing-box --ip-strategy prefer_ipv6 --id "$sb1" --id "$sb1" --id "$sb2"
+    assert_equal 0 "$RUN_STATUS" "deduplicated same-core node batch"
+    assert_contains "$RUN_OUTPUT" '2 个节点' "deduplicated batch count"
+    assert_equal 2 "$(jq -r '[.nodes[] | select(.core == "sing-box" and .ip_strategy == "prefer_ipv6")] | length' "$(manifest_path)")" "deduplicated batch result"
+
+    run_proxy node ip-policy set --core xray --ip-strategy ipv4_only --profile shadowsocks-aes-256-gcm
+    assert_equal 0 "$RUN_STATUS" "profile batch"
+    assert_equal 2 "$(jq -r '[.nodes[] | select(.core == "xray" and .ip_strategy == "ipv4_only")] | length' "$(manifest_path)")" "profile batch result"
+    run_proxy node ip-policy set --core xray --ip-strategy prefer_ipv4 --all
+    assert_equal 0 "$RUN_STATUS" "all-nodes batch"
+    assert_equal 2 "$(jq -r '[.nodes[] | select(.core == "xray" and .ip_strategy == "prefer_ipv4")] | length' "$(manifest_path)")" "all-nodes batch result"
+
+    manifest_hash="$(sha256sum "$(manifest_path)" | awk '{print $1}')"
+    run_proxy node ip-policy set --core sing-box --ip-strategy ipv6_only \
+        --profile shadowsocks-aes-256-gcm --profile shadowsocks-aes-256-gcm
+    assert_equal 2 "$RUN_STATUS" "duplicate profile selector rejection"
+    assert_equal "$manifest_hash" "$(sha256sum "$(manifest_path)" | awk '{print $1}')" "duplicate profile manifest"
+    run_proxy node ip-policy set --core sing-box --ip-strategy ipv6_only --id "$xr1"
+    assert_equal 3 "$RUN_STATUS" "mixed-core ID rejection"
+    assert_equal "$manifest_hash" "$(sha256sum "$(manifest_path)" | awk '{print $1}')" "mixed-core rejection manifest"
+    run_proxy node ip-policy set --core sing-box --ip-strategy ipv6_only --profile vless-tcp
+    assert_equal 3 "$RUN_STATUS" "empty profile selection"
+    assert_equal "$manifest_hash" "$(sha256sum "$(manifest_path)" | awk '{print $1}')" "empty selection manifest"
+
+    config="${TEST_SYSTEM_ROOT}/etc/vpsctl/proxy/sing-box/config.json"
+    config_hash="$(sha256sum "$config" | awk '{print $1}')"
+    touch "${TEST_SYSTEM_ROOT}/run/fail-core-validation"
+    run_proxy node ip-policy set --core sing-box --ip-strategy ipv4_only --all
+    assert_equal 10 "$RUN_STATUS" "batch binary validation failure"
+    assert_contains "$RUN_OUTPUT" '请先更新内核' "old sing-box domain_resolver upgrade hint"
+    rm -f -- "${TEST_SYSTEM_ROOT}/run/fail-core-validation"
+    assert_equal "$manifest_hash" "$(sha256sum "$(manifest_path)" | awk '{print $1}')" "failed batch manifest hash"
+    assert_equal "$config_hash" "$(sha256sum "$config" | awk '{print $1}')" "failed batch config hash"
+
+    run_proxy node show --id "$sb2" --uri
+    assert_equal 0 "$RUN_STATUS" "policy relay source URI"
+    node_uri="$RUN_OUTPUT"
+    run_proxy relay exit add --name policy-protocol --uri "$node_uri" --profile shadowsocks-aes-256-gcm --core sing-box
+    assert_equal 0 "$RUN_STATUS" "policy relay protocol exit"
+    exit_id="$(jq -r '.exits[] | select(.name == "policy-protocol") | .id' "$(relay_path)")"
+    run_proxy relay bind add --node-id "$sb1" --exit-id "$exit_id"
+    assert_equal 0 "$RUN_STATUS" "policy node relay binding"
+    binding_id="$(jq -r --arg id "$sb1" '.bindings[] | select(.node_id == $id) | .id' "$(relay_path)")"
+    run_proxy node ip-policy set --core sing-box --ip-strategy ipv6_only --id "$sb1"
+    assert_equal 0 "$RUN_STATUS" "persist policy on relay-bound node"
+    jq -e --arg id "$sb1" 'all(.outbounds[]; .tag != ("direct-" + $id)) and all(.route.rules[]?; .outbound != ("direct-" + $id))' \
+        "$config" >/dev/null || fail "relay-bound node still rendered direct policy"
+    run_proxy node show --id "$sb1"
+    assert_equal 0 "$RUN_STATUS" "relay-bound policy detail"
+    jq -e '.relay_bound == true and .ip_strategy == "ipv6_only" and .ip_strategy_effective == false and .ip_strategy_status == "relay_bound"' \
+        >/dev/null <<<"$RUN_OUTPUT" || fail "relay-bound policy status"
+    run_proxy relay bind delete --id "$binding_id" --confirm-delete
+    assert_equal 0 "$RUN_STATUS" "policy relay unbind"
+    jq -e --arg id "$sb1" 'any(.outbounds[]; .tag == ("direct-" + $id) and .domain_resolver.strategy == "ipv6_only")' \
+        "$config" >/dev/null || fail "unbound policy not restored"
+
+    run_proxy start --core sing-box --enable
+    assert_equal 0 "$RUN_STATUS" "start sing-box for pending policy test"
+    run_proxy node ip-policy set --core sing-box --ip-strategy prefer_ipv4 --id "$sb1"
+    assert_equal 0 "$RUN_STATUS" "active-core policy batch"
+    pending="${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/pending/sing-box.json"
+    [[ -f "$pending" ]] || fail "active policy batch did not mark pending restart"
+    jq -e '.reason == "node-ip-policy"' "$pending" >/dev/null || fail "policy pending reason"
+}
 
 test_protocol_matrix() {
     reset_root
@@ -694,8 +852,15 @@ test_protocol_matrix() {
     source "${TEST_ROOT}/commands/service/proxy/protocols-xray.sh"
     source "${TEST_ROOT}/commands/service/proxy/nodes.sh"
     source "${TEST_ROOT}/commands/service/proxy/relay-uri.sh"
+    source "${TEST_ROOT}/commands/service/proxy/relay-forward.sh"
     source "${TEST_ROOT}/commands/service/proxy/core.sh"
     proxy_common_init
+
+    _proxy_relay_forward_valid_ipv6 '2001:db8::1' || fail "valid compressed IPv6 literal rejected"
+    _proxy_relay_forward_valid_ipv6 '::ffff:192.0.2.1' || fail "valid IPv4-mapped IPv6 literal rejected"
+    if _proxy_relay_forward_valid_ipv6 '1:2:3:4:5:6:7:8:9'; then fail "nine-hextet IPv6 literal accepted"; fi
+    if _proxy_relay_forward_valid_ipv6 '1:2:3:4:5:6:7:8::1'; then fail "compressed-overflow IPv6 literal accepted"; fi
+    if _proxy_relay_forward_valid_ipv6 '12345::1'; then fail "oversized IPv6 hextet accepted"; fi
 
     local version_binary="${TEST_TEMP}/version-core" parsed_version version_status=0
     printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\n" "$VERSION_FIXTURE_OUTPUT"' >"$version_binary"
@@ -1087,6 +1252,117 @@ test_relay_forwarding_subscription_and_rollback() {
     [[ ! -e "${TEST_SYSTEM_ROOT}/run/mock-systemd/enabled-vpsctl-proxy-forward.service" ]] || fail "relay service not disabled"
 }
 
+test_relay_forward_family_modes() {
+    local exit_id forward_id ipv6_forward_id ipv6_exit_id ipv6_literal_forward_id dual_partial_id
+    local state_hash cache_hash batch_hash batch list_json
+    reset_root
+    printf '198.51.100.80\n' >"${TEST_SYSTEM_ROOT}/run/dns-ahostsv4-dual.example"
+    printf '2001:db8::80\n' >"${TEST_SYSTEM_ROOT}/run/dns-ahostsv6-dual.example"
+    run_proxy relay exit add --name dual-domain --target dual.example --target-port 443
+    assert_equal 0 "$RUN_STATUS" "dual-stack domain exit"
+    exit_id="$(jq -r '.exits[0].id' "$(relay_path)")"
+    run_proxy relay forward add --name invalid-publish --exit-id "$exit_id" --listen-ports 34999 --network tcp \
+        --family dual --address not:a
+    assert_equal 2 "$RUN_STATUS" "colon-bearing non-IPv6 publish address refusal"
+    assert_equal 0 "$(jq -r '.forwards | length' "$(relay_path)")" "invalid publish address leaves state unchanged"
+    run_proxy relay forward add --name dual-forward --exit-id "$exit_id" --listen-ports 35000 --network tcp \
+        --family dual --address publish.example
+    assert_equal 0 "$RUN_STATUS" "dual-stack forward add"
+    forward_id="$(jq -r '.forwards[0].id' "$(relay_path)")"
+    assert_equal dual "$(jq -r '.forwards[0].family' "$(relay_path)")" "stored dual family"
+    jq -e --arg id "$exit_id" '.exits[$id].ipv4 == "198.51.100.80" and .exits[$id].ipv6 == "2001:db8::80"' \
+        "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/relay-resolved.json" >/dev/null || fail "dual cache contains both families"
+    batch="$(<"${TEST_SYSTEM_ROOT}/run/last-nft.batch")"
+    assert_contains "$batch" 'dnat to 198.51.100.80:443' "dual IPv4 nft rule"
+    assert_contains "$batch" 'dnat to [2001:db8::80]:443' "dual IPv6 nft rule"
+    run_proxy relay forward list --json
+    assert_equal 0 "$RUN_STATUS" "dual forward JSON list"
+    list_json="$RUN_OUTPUT"
+    jq -e '.forwards[0].family == "dual" and .forwards[0].publish_address_dns_managed_externally == true and
+        (.forwards[0].publish_address_note | contains("DNS"))' >/dev/null <<<"$list_json" || fail "forward JSON family and publish note"
+
+    # Legacy records remain valid and are surfaced with the effective default.
+    jq 'del(.forwards[0].family)' "$(relay_path)" >"${TEST_TEMP}/legacy-relay.json"
+    cp "${TEST_TEMP}/legacy-relay.json" "$(relay_path)"
+    run_proxy relay forward list --json
+    assert_equal 0 "$RUN_STATUS" "legacy forward family list"
+    jq -e '.forwards[0].family == "dual"' >/dev/null <<<"$RUN_OUTPUT" || fail "legacy forward dual default"
+    run_proxy relay forward show --id "$forward_id" --json
+    assert_equal 0 "$RUN_STATUS" "legacy forward family detail JSON"
+    jq -e '.forward.family == "dual" and .forward.publish_address_dns_managed_externally == true' \
+        >/dev/null <<<"$RUN_OUTPUT" || fail "legacy forward detail defaults"
+
+    run_proxy relay forward edit --id "$forward_id" --family ipv4
+    assert_equal 0 "$RUN_STATUS" "switch shared exit to IPv4-only"
+    assert_equal ipv4 "$(jq -r '.forwards[0].family' "$(relay_path)")" "normalized IPv4 family"
+    jq -e --arg id "$exit_id" '.exits[$id].ipv4 == "198.51.100.80" and (.exits[$id] | has("ipv6") | not)' \
+        "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/relay-resolved.json" >/dev/null || fail "unused IPv6 cache not cleaned"
+    batch="$(<"${TEST_SYSTEM_ROOT}/run/last-nft.batch")"
+    assert_contains "$batch" 'dnat to 198.51.100.80:443' "IPv4-only nft rule"
+    assert_not_contains "$batch" 'dnat to [2001:db8::80]:443' "IPv4-only excludes IPv6 nft rule"
+
+    run_proxy relay forward add --name ipv6-shared --exit-id "$exit_id" --listen-ports 35001 --network tcp \
+        --family ipv6 --address publish.example
+    assert_equal 0 "$RUN_STATUS" "shared exit IPv6 forward"
+    ipv6_forward_id="$(jq -r '.forwards[] | select(.name == "ipv6-shared") | .id' "$(relay_path)")"
+    jq -e --arg id "$exit_id" '.exits[$id].ipv4 == "198.51.100.80" and .exits[$id].ipv6 == "2001:db8::80"' \
+        "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/relay-resolved.json" >/dev/null || fail "shared exit family union cache"
+    batch="$(<"${TEST_SYSTEM_ROOT}/run/last-nft.batch")"
+    assert_contains "$batch" 'tcp dport 35000' "shared IPv4 forward rule"
+    assert_contains "$batch" 'tcp dport 35001' "shared IPv6 forward rule"
+
+    run_proxy relay forward delete --id "$ipv6_forward_id" --confirm-delete
+    assert_equal 0 "$RUN_STATUS" "shared IPv6 forward delete"
+    jq -e --arg id "$exit_id" '.exits[$id].ipv4 == "198.51.100.80" and (.exits[$id] | has("ipv6") | not)' \
+        "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/relay-resolved.json" >/dev/null || fail "unreferenced shared IPv6 cache cleanup"
+    rm -f -- "${TEST_SYSTEM_ROOT}/run/dns-ahostsv6-dual.example"
+    state_hash="$(sha256sum "$(relay_path)" | awk '{print $1}')"
+    run_proxy relay forward add --name missing-v6 --exit-id "$exit_id" --listen-ports 35002 --network tcp \
+        --family ipv6 --address publish.example
+    assert_equal 3 "$RUN_STATUS" "missing requested DNS family refusal"
+    assert_equal "$state_hash" "$(sha256sum "$(relay_path)" | awk '{print $1}')" "missing family leaves state unchanged"
+
+    run_proxy relay exit add --name literal-v6 --target 2001:db8::90 --target-port 8443
+    assert_equal 0 "$RUN_STATUS" "literal IPv6 exit"
+    ipv6_exit_id="$(jq -r '.exits[] | select(.name == "literal-v6") | .id' "$(relay_path)")"
+    run_proxy relay forward add --name wrong-exit-family --exit-id "$ipv6_exit_id" --listen-ports 35003 --network tcp \
+        --family ipv4 --address publish.example
+    assert_equal 2 "$RUN_STATUS" "opposite literal exit family refusal"
+    run_proxy relay forward add --name wrong-publish-family --exit-id "$ipv6_exit_id" --listen-ports 35003 --network tcp \
+        --family ipv6 --address 192.0.2.30
+    assert_equal 2 "$RUN_STATUS" "opposite literal publish family refusal"
+    run_proxy relay forward add --name literal-v6-forward --exit-id "$ipv6_exit_id" --listen-ports 35003 --network tcp \
+        --family ipv6 --address publish6.example
+    assert_equal 0 "$RUN_STATUS" "IPv6-only literal forward"
+    ipv6_literal_forward_id="$(jq -r '.forwards[] | select(.name == "literal-v6-forward") | .id' "$(relay_path)")"
+    run_proxy relay forward show --id "$ipv6_literal_forward_id"
+    assert_equal 0 "$RUN_STATUS" "domain publish forward detail"
+    assert_contains "$RUN_OUTPUT" 'DNS 记录由用户负责' "domain publish responsibility note"
+
+    run_proxy relay forward add --name partial-dual --exit-id "$ipv6_exit_id" --listen-ports 35004 --network tcp \
+        --family dual --address publish6.example
+    assert_equal 0 "$RUN_STATUS" "partial dual-stack literal target"
+    dual_partial_id="$(jq -r '.forwards[] | select(.name == "partial-dual") | .id' "$(relay_path)")"
+    [[ -n "$dual_partial_id" ]] || fail "partial dual forward missing"
+    run_proxy relay status --json
+    assert_equal 0 "$RUN_STATUS" "partial dual status"
+    jq -e --arg id "$ipv6_exit_id" '.forward_runtime.partial_dual == true and
+        (.forward_runtime.degraded[] |
+        select(.exit_id == $id and .family == "ipv4" and .reason == "family-unavailable" and .retained == false))' \
+        >/dev/null <<<"$RUN_OUTPUT" || fail "partial dual degradation marker"
+
+    state_hash="$(sha256sum "$(relay_path)" | awk '{print $1}')"
+    cache_hash="$(sha256sum "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/relay-resolved.json" | awk '{print $1}')"
+    batch_hash="$(sha256sum "${TEST_SYSTEM_ROOT}/run/last-nft.batch" | awk '{print $1}')"
+    touch "${TEST_SYSTEM_ROOT}/run/fail-nft-list-tables"
+    run_proxy relay forward refresh
+    assert_equal 20 "$RUN_STATUS" "nft table enumeration failure aborts before replacement"
+    rm -f -- "${TEST_SYSTEM_ROOT}/run/fail-nft-list-tables"
+    assert_equal "$state_hash" "$(sha256sum "$(relay_path)" | awk '{print $1}')" "snapshot failure state hash"
+    assert_equal "$cache_hash" "$(sha256sum "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/relay-resolved.json" | awk '{print $1}')" "snapshot failure cache hash"
+    assert_equal "$batch_hash" "$(sha256sum "${TEST_SYSTEM_ROOT}/run/last-nft.batch" | awk '{print $1}')" "snapshot failure nft hash"
+}
+
 test_relay_forward_service_lifecycle() {
     local exit_id forward_id
     reset_root
@@ -1128,9 +1404,11 @@ test_relay_forward_service_lifecycle() {
 }
 
 case "${VPSCTL_TEST_ONLY:-}" in
+    node-ip-policy) test_node_ip_strategy_and_batch; printf 'PASS: node IP policy tests\n'; exit 0 ;;
     relay-state) test_relay_state_bindings_and_purge; printf 'PASS: relay state tests\n'; exit 0 ;;
     relay-xray) test_relay_xray_pending_and_validation; printf 'PASS: relay Xray tests\n'; exit 0 ;;
     relay-forward) test_relay_forwarding_subscription_and_rollback; printf 'PASS: relay forward tests\n'; exit 0 ;;
+    relay-family) test_relay_forward_family_modes; printf 'PASS: relay forward family tests\n'; exit 0 ;;
     relay-service) test_relay_forward_service_lifecycle; printf 'PASS: relay service tests\n'; exit 0 ;;
 esac
 
@@ -1148,6 +1426,8 @@ printf 'TEST: proxy TLS certificate transactions\n'
 test_tls_certificate_transaction
 printf 'TEST: proxy unified interactive API\n'
 test_unified_interactive_api
+printf 'TEST: proxy node IP strategy rendering and atomic batches\n'
+test_node_ip_strategy_and_batch
 printf 'TEST: proxy protocol renderer matrix\n'
 test_protocol_matrix
 printf 'TEST: proxy relay state, bindings and purge guards\n'
@@ -1156,6 +1436,8 @@ printf 'TEST: proxy relay Xray pending and validation\n'
 test_relay_xray_pending_and_validation
 printf 'TEST: proxy relay forwarding, subscriptions and rollback\n'
 test_relay_forwarding_subscription_and_rollback
+printf 'TEST: proxy relay forward address-family modes\n'
+test_relay_forward_family_modes
 printf 'TEST: proxy relay service lifecycle and failures\n'
 test_relay_forward_service_lifecycle
 printf 'PASS: service proxy tests\n'

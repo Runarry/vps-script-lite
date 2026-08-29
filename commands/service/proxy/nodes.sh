@@ -70,6 +70,26 @@ proxy_profile_default_name() {
     printf '%s-%s' "$label" "$port"
 }
 
+proxy_ip_strategy_label() {
+    case "${1:-auto}" in
+        auto) printf '自动' ;;
+        prefer_ipv4) printf '优先 IPv4' ;;
+        prefer_ipv6) printf '优先 IPv6' ;;
+        ipv4_only) printf '仅 IPv4' ;;
+        ipv6_only) printf '仅 IPv6' ;;
+        *) printf '%s' "${1:-auto}" ;;
+    esac
+}
+
+proxy_prompt_ip_strategy() {
+    proxy_prompt_select "出站 IP 策略" "${1:-auto}" \
+        auto "自动（内核默认）" \
+        prefer_ipv4 "优先 IPv4" \
+        prefer_ipv6 "优先 IPv6" \
+        ipv4_only "仅 IPv4" \
+        ipv6_only "仅 IPv6"
+}
+
 proxy_choose_core_for_profile() {
     local profile="$1" requested="${2:-}" core selected confirm_status=0 installed_count=0
     local -a candidates=() supported=() choices=()
@@ -461,7 +481,7 @@ proxy_prepare_certificate() {
 proxy_prepare_node_json() {
     local core="$1" profile="$2" id="$3" name="$4" listen="$5" port="$6" address="$7"
     local sni="$8" path="$9" service_name="${10}" cert_mode="${11}" import_cert="${12}" import_key="${13}"
-    local obfs_type="${14}" up_mbps="${15}" down_mbps="${16}" congestion_control="${17}"
+    local obfs_type="${14}" up_mbps="${15}" down_mbps="${16}" congestion_control="${17}" ip_strategy="${18:-auto}"
     local binary uuid="" password="" username="" private_key="" public_key="" short_id="" shadowtls_password=""
     local method="" padding=false shadowtls=false obfs_password="" transport flow="" tls_enabled=false tls_mode="none"
     local cert_path="" key_path="" cert_sha="" insecure=false created_at
@@ -531,10 +551,10 @@ proxy_prepare_node_json() {
         --argjson tls_enabled "$tls_enabled" --argjson insecure "$insecure" \
         --argjson padding "$padding" --argjson shadowtls "$shadowtls" \
         --argjson up_mbps "$up_mbps" --argjson down_mbps "$down_mbps" \
-        --arg congestion_control "$congestion_control" --arg created_at "$created_at" \
+        --arg congestion_control "$congestion_control" --arg ip_strategy "$ip_strategy" --arg created_at "$created_at" \
         '{
             id:$id, core:$core, profile:$profile, name:$name, listen:$listen,
-            port:$port, address:$address, created_at:$created_at, updated_at:$created_at,
+            port:$port, address:$address, ip_strategy:$ip_strategy, created_at:$created_at, updated_at:$created_at,
             credentials:{uuid:$uuid,password:$password,username:$username,private_key:$private_key,public_key:$public_key,short_id:$short_id,shadowtls_password:$shadowtls_password},
             tls:{enabled:$tls_enabled,mode:$cert_mode,server_name:$sni,certificate_path:$certificate_path,key_path:$key_path,insecure:$insecure,certificate_sha256:$certificate_sha256},
             transport:{type:$transport,path:$path,service_name:$service_name,flow:$flow},
@@ -545,7 +565,7 @@ proxy_prepare_node_json() {
 proxy_node_add() (
     local profile="" requested_core="" name="" listen="::" port="" address="" sni="www.amd.com"
     local path="" service_name="" cert_mode="self-signed" import_cert="" import_key=""
-    local obfs_type="none" up_mbps=10000 down_mbps=10000 congestion_control="bbr" arg core id node
+    local obfs_type="none" up_mbps=10000 down_mbps=10000 congestion_control="bbr" ip_strategy="auto" arg core id node
     local candidate_manifest candidate_config status=0 mode detected_address address_choice transport
     local -a required_tools=(jq openssl ss)
     while (($#)); do
@@ -567,6 +587,7 @@ proxy_node_add() (
             --up-mbps) (($# >= 2)) || return 2; up_mbps="$2"; shift 2 ;;
             --down-mbps) (($# >= 2)) || return 2; down_mbps="$2"; shift 2 ;;
             --congestion-control) (($# >= 2)) || return 2; congestion_control="$2"; shift 2 ;;
+            --ip-strategy) (($# >= 2)) || return 2; ip_strategy="$2"; shift 2 ;;
             -h | --help) return 2 ;;
             *) vps_cmd_error "node add 的未知选项：$arg"; return 2 ;;
         esac
@@ -613,6 +634,7 @@ proxy_node_add() (
     [[ "$obfs_type" == "none" || "$obfs_type" == "salamander" ]] || { vps_cmd_error "--obfs 仅支持 none|salamander"; return 2; }
     [[ "$up_mbps" =~ ^[1-9][0-9]*$ && "$down_mbps" =~ ^[1-9][0-9]*$ ]] || { vps_cmd_error "带宽必须是正整数 Mbps"; return 2; }
     case "$congestion_control" in bbr | cubic | new_reno) ;; *) vps_cmd_error "拥塞控制仅支持 bbr|cubic|new_reno"; return 2 ;; esac
+    proxy_ip_strategy_valid "$ip_strategy" || { vps_cmd_error "--ip-strategy 仅支持 auto|prefer_ipv4|prefer_ipv6|ipv4_only|ipv6_only"; return 2; }
     vps_cmd_require_root || return $?
     proxy_require_platform || return $?
     if proxy_profile_requires_tls_certificate "$profile"; then
@@ -682,6 +704,7 @@ proxy_node_add() (
                 congestion_control="$(proxy_prompt_select "拥塞控制" "$congestion_control" \
                     bbr BBR cubic CUBIC new_reno "New Reno")" || return $?
             fi
+            ip_strategy="$(proxy_prompt_ip_strategy "$ip_strategy")" || return $?
         fi
     else
         address="${address:-$(proxy_default_address)}"
@@ -718,12 +741,13 @@ proxy_node_add() (
     [[ "$obfs_type" == "none" || "$obfs_type" == "salamander" ]] || { vps_cmd_error "--obfs 仅支持 none|salamander"; return 2; }
     [[ "$up_mbps" =~ ^[1-9][0-9]*$ && "$down_mbps" =~ ^[1-9][0-9]*$ ]] || { vps_cmd_error "带宽必须是正整数 Mbps"; return 2; }
     case "$congestion_control" in bbr | cubic | new_reno) ;; *) vps_cmd_error "拥塞控制仅支持 bbr|cubic|new_reno"; return 2 ;; esac
+    proxy_ip_strategy_valid "$ip_strategy" || { vps_cmd_error "--ip-strategy 仅支持 auto|prefer_ipv4|prefer_ipv6|ipv4_only|ipv6_only"; return 2; }
     port=$((10#$port))
     up_mbps=$((10#$up_mbps))
     down_mbps=$((10#$down_mbps))
 
     if [[ "${VPSCTL_DRY_RUN:-0}" == "1" ]]; then
-        vps_cmd_info "演练：向 $(proxy_core_label "$core") 添加 ${profile} 节点 ${name}（${listen}:${port}，客户端地址 ${address}）；不生成凭据、证书或配置"
+        vps_cmd_info "演练：向 $(proxy_core_label "$core") 添加 ${profile} 节点 ${name}（${listen}:${port}，客户端地址 ${address}，IP 策略 ${ip_strategy}）；不生成凭据、证书或配置"
         return 0
     fi
 
@@ -734,7 +758,7 @@ proxy_node_add() (
     proxy_require_available_port "$port" || return $?
     proxy_require_unique_name "$name" || return $?
     id="$(proxy_generate_node_id)" || return $?
-    node="$(proxy_prepare_node_json "$core" "$profile" "$id" "$name" "$listen" "$port" "$address" "$sni" "$path" "$service_name" "$cert_mode" "$import_cert" "$import_key" "$obfs_type" "$up_mbps" "$down_mbps" "$congestion_control")" || {
+    node="$(proxy_prepare_node_json "$core" "$profile" "$id" "$name" "$listen" "$port" "$address" "$sni" "$path" "$service_name" "$cert_mode" "$import_cert" "$import_key" "$obfs_type" "$up_mbps" "$down_mbps" "$congestion_control" "$ip_strategy")" || {
         status=$?
         proxy_cleanup_orphan_certs "$core" >/dev/null 2>&1 || true
         return "$status"
@@ -775,7 +799,7 @@ proxy_node_add() (
 )
 
 proxy_node_list() {
-    local core="all" json=0 arg count total node profile label
+    local core="all" json=0 arg count total node profile label ip_strategy relay_bound strategy_suffix bindings='[]'
     while (($#)); do
         arg="$1"
         case "$arg" in
@@ -793,10 +817,21 @@ proxy_node_list() {
         return 0
     }
     proxy_manifest_validate_file "$PROXY_MANIFEST" || return $?
+    if [[ -n "${PROXY_RELAY_FILE:-}" && -f "$PROXY_RELAY_FILE" && ! -L "$PROXY_RELAY_FILE" ]]; then
+        bindings="$(jq -c '.bindings // []' "$PROXY_RELAY_FILE" 2>/dev/null)" || bindings='[]'
+    fi
     if ((json)); then
-        jq --arg core "$core" '{
+        jq --arg core "$core" --argjson bindings "$bindings" '{
             schema_version: 1,
-            nodes: [.nodes[] | select($core == "all" or .core == $core) | {id,core,profile,name,listen,port,address,created_at,updated_at}],
+            nodes: [.nodes[] | select($core == "all" or .core == $core) | . as $node |
+                (any($bindings[]; .node_id == $node.id)) as $relay_bound |
+                ($node.ip_strategy // "auto") as $strategy |
+                {id,core,profile,name,listen,port,address,ip_strategy:$strategy,
+                 relay_bound:$relay_bound,
+                 ip_strategy_effective:(($relay_bound and $strategy != "auto") | not),
+                 ip_strategy_status:(if $relay_bound and $strategy != "auto" then "relay_bound" else "active" end),
+                 ip_strategy_note:(if $relay_bound and $strategy != "auto" then "已绑定中转，IP 策略暂不生效" else "" end),
+                 created_at,updated_at}],
             total: ([.nodes[] | select($core == "all" or .core == $core)] | length)
         }' "$PROXY_MANIFEST"
         return
@@ -811,6 +846,15 @@ proxy_node_list() {
             "$(jq -r '.id' <<<"$node")" "$(proxy_core_label "$(jq -r '.core' <<<"$node")")" "$label"
         printf '    监听：%s:%s  连接地址：%s\n' \
             "$(jq -r '.listen' <<<"$node")" "$(jq -r '.port' <<<"$node")" "$(jq -r '.address' <<<"$node")"
+        ip_strategy="$(jq -r '.ip_strategy // "auto"' <<<"$node")"
+        relay_bound=0
+        if [[ "$ip_strategy" != "auto" ]] && declare -F proxy_relay_node_binding >/dev/null 2>&1 && \
+            proxy_relay_node_binding "$(jq -r '.id' <<<"$node")" >/dev/null 2>&1; then
+            relay_bound=1
+        fi
+        strategy_suffix=""
+        [[ "$relay_bound" != 1 ]] || strategy_suffix='（已绑定中转，暂不生效）'
+        printf '    IP 策略：%s%s\n' "$(proxy_ip_strategy_label "$ip_strategy")" "$strategy_suffix"
     done < <(jq -c --arg core "$core" '.nodes[] | select($core == "all" or .core == $core)' "$PROXY_MANIFEST")
     total="$(proxy_manifest_count all)"
     printf '当前筛选：%d 个；节点总数：%s 个\n' "$count" "$total"
@@ -846,7 +890,7 @@ proxy_node_select_interactive() {
 }
 
 proxy_node_details_print() {
-    local node="$1" profile transport
+    local node="$1" profile transport ip_strategy relay_bound=0 strategy_suffix=""
     profile="$(jq -r '.profile' <<<"$node")"
     transport="$(proxy_profile_default_transport "$profile")"
     printf '节点详情\n'
@@ -856,6 +900,13 @@ proxy_node_details_print() {
     printf '  配置：%s（%s）\n' "$(proxy_profile_label "$profile" 2>/dev/null || printf '%s' "$profile")" "$profile"
     printf '  监听：%s:%s\n' "$(jq -r '.listen' <<<"$node")" "$(jq -r '.port' <<<"$node")"
     printf '  连接地址：%s\n' "$(jq -r '.address' <<<"$node")"
+    ip_strategy="$(jq -r '.ip_strategy // "auto"' <<<"$node")"
+    if [[ "$ip_strategy" != "auto" ]] && declare -F proxy_relay_node_binding >/dev/null 2>&1 && \
+        proxy_relay_node_binding "$(jq -r '.id' <<<"$node")" >/dev/null 2>&1; then
+        relay_bound=1
+    fi
+    [[ "$relay_bound" != 1 ]] || strategy_suffix='（已绑定中转，暂不生效）'
+    printf '  IP 策略：%s%s\n' "$(proxy_ip_strategy_label "$ip_strategy")" "$strategy_suffix"
     if proxy_profile_uses_reality "$profile" || proxy_profile_requires_tls_certificate "$profile" || [[ "$profile" == "shadowsocks-2022-shadowtls" ]]; then
         printf '  SNI：%s\n' "$(jq -r '.tls.server_name' <<<"$node")"
     fi
@@ -898,7 +949,7 @@ proxy_node_view_interactive() {
 }
 
 proxy_node_show() {
-    local id="" uri=0 arg node core
+    local id="" uri=0 arg node core ip_strategy relay_bound=false
     while (($#)); do
         arg="$1"
         case "$arg" in
@@ -936,7 +987,18 @@ proxy_node_show() {
             xray) proxy_xray_render_uri "$node" ;;
         esac
     else
-        jq '{id,core,profile,name,listen,port,address,created_at,updated_at}' <<<"$node"
+        ip_strategy="$(jq -r '.ip_strategy // "auto"' <<<"$node")"
+        if declare -F proxy_relay_node_binding >/dev/null 2>&1 && \
+            proxy_relay_node_binding "$id" >/dev/null 2>&1; then
+            relay_bound=true
+        fi
+        jq --arg strategy "$ip_strategy" --argjson relay_bound "$relay_bound" '
+            {id,core,profile,name,listen,port,address,ip_strategy:$strategy,
+             relay_bound:$relay_bound,
+             ip_strategy_effective:(($relay_bound and $strategy != "auto") | not),
+             ip_strategy_status:(if $relay_bound and $strategy != "auto" then "relay_bound" else "active" end),
+             ip_strategy_note:(if $relay_bound and $strategy != "auto" then "已绑定中转，IP 策略暂不生效" else "" end),
+             created_at,updated_at}' <<<"$node"
     fi
 }
 
@@ -1011,12 +1073,213 @@ proxy_subscription_interactive() {
     proxy_subscription --core "$selected"
 }
 
+proxy_node_ip_policy_set() (
+    local core="" ip_strategy="" selector_mode="" selector_values='[]' arg id profile node
+    local all_selected=0 selector_kinds=0 selected_count=0 candidate_manifest="" candidate_config="" status=0
+    local -a ids=() profiles=()
+    while (($#)); do
+        arg="$1"
+        case "$arg" in
+            --core)
+                (($# >= 2)) || { vps_cmd_error "--core 需要值"; return 2; }
+                [[ -z "$core" ]] || { vps_cmd_error "--core 只能指定一次"; return 2; }
+                core="$2"
+                shift 2
+                ;;
+            --ip-strategy)
+                (($# >= 2)) || { vps_cmd_error "--ip-strategy 需要值"; return 2; }
+                [[ -z "$ip_strategy" ]] || { vps_cmd_error "--ip-strategy 只能指定一次"; return 2; }
+                ip_strategy="$2"
+                shift 2
+                ;;
+            --id)
+                (($# >= 2)) || { vps_cmd_error "--id 需要值"; return 2; }
+                ids+=("$2")
+                shift 2
+                ;;
+            --profile)
+                (($# >= 2)) || { vps_cmd_error "--profile 需要值"; return 2; }
+                ((${#profiles[@]} == 0)) || { vps_cmd_error "--profile 只能指定一次"; return 2; }
+                profiles+=("$2")
+                shift 2
+                ;;
+            --all)
+                ((all_selected == 0)) || { vps_cmd_error "--all 只能指定一次"; return 2; }
+                all_selected=1
+                shift
+                ;;
+            *) vps_cmd_error "node ip-policy set 的未知选项：$arg"; return 2 ;;
+        esac
+    done
+    [[ -n "$core" ]] || { vps_cmd_error "node ip-policy set 需要 --core sing-box|xray"; return 2; }
+    proxy_core_valid "$core" || { vps_cmd_error "无效内核：$core"; return 2; }
+    [[ -n "$ip_strategy" ]] || { vps_cmd_error "node ip-policy set 需要 --ip-strategy"; return 2; }
+    proxy_ip_strategy_valid "$ip_strategy" || {
+        vps_cmd_error "--ip-strategy 仅支持 auto|prefer_ipv4|prefer_ipv6|ipv4_only|ipv6_only"
+        return 2
+    }
+    ((${#ids[@]} == 0)) || selector_kinds=$((selector_kinds + 1))
+    ((${#profiles[@]} == 0)) || selector_kinds=$((selector_kinds + 1))
+    ((all_selected == 0)) || selector_kinds=$((selector_kinds + 1))
+    ((selector_kinds == 1)) || {
+        vps_cmd_error "选择器必须且只能使用一类：可重复 --id、单个 --profile 或 --all"
+        return 2
+    }
+    for id in "${ids[@]}"; do
+        [[ "$id" =~ ^node-[a-f0-9]{16}$ ]] || { vps_cmd_error "无效节点 ID：$id"; return 2; }
+        selector_values="$(jq -cn --argjson current "$selector_values" --arg value "$id" '$current + [$value] | unique')" || return 10
+    done
+    if ((${#ids[@]} > 0)); then
+        selector_mode="id"
+    elif ((${#profiles[@]} > 0)); then
+        selector_mode="profile"
+        for profile in "${profiles[@]}"; do
+            proxy_profile_cores "$profile" | grep -Fxq "$core" || {
+                vps_cmd_error "${core} 不支持节点配置 ${profile}"
+                return 2
+            }
+            selector_values="$(jq -cn --argjson current "$selector_values" --arg value "$profile" '$current + [$value] | unique')" || return 10
+        done
+    else
+        selector_mode="all"
+    fi
+
+    vps_cmd_require_root || return $?
+    proxy_require_platform || return $?
+    proxy_ensure_mutation_tools node-ip-policy jq || return $?
+    if proxy_stop_after_dependency_plan; then return 0; fi
+    proxy_prepare_manifest_state || return $?
+    proxy_core_registered "$core" || {
+        vps_cmd_error "$(proxy_core_label "$core") 尚未安装登记"
+        return 3
+    }
+    if [[ "$selector_mode" == "id" ]]; then
+        while IFS= read -r id; do
+            node="$(proxy_manifest_node "$id")" || { vps_cmd_error "未找到节点：$id"; return 3; }
+            [[ "$(jq -r '.core' <<<"$node")" == "$core" ]] || {
+                vps_cmd_error "节点 ${id} 不属于指定内核 ${core}"
+                return 3
+            }
+        done < <(jq -r '.[]' <<<"$selector_values")
+    fi
+    selected_count="$(jq -r --arg core "$core" --arg mode "$selector_mode" --argjson values "$selector_values" '
+        [.nodes[] | . as $node | select(.core == $core and
+            ($mode == "all" or ($mode == "id" and any($values[]; . == $node.id)) or
+             ($mode == "profile" and any($values[]; . == $node.profile))))] | length
+    ' "$PROXY_MANIFEST")" || return 10
+    ((selected_count > 0)) || { vps_cmd_error "选择结果为空，未修改任何节点"; return 3; }
+    if [[ "${VPSCTL_DRY_RUN:-0}" == "1" ]]; then
+        vps_cmd_info "演练：将 ${core} 的 ${selected_count} 个节点 IP 策略设为 ${ip_strategy}；不会写入配置"
+        return 0
+    fi
+
+    vps_cmd_lock proxy || return $?
+    trap 'vps_cmd_unlock' EXIT
+    proxy_recover_transaction || return $?
+    proxy_manifest_validate_file "$PROXY_MANIFEST" || return $?
+    if [[ "$selector_mode" == "id" ]]; then
+        while IFS= read -r id; do
+            node="$(proxy_manifest_node "$id")" || { vps_cmd_error "节点在批量设置期间已被删除，请重试：$id"; return 3; }
+            [[ "$(jq -r '.core' <<<"$node")" == "$core" ]] || {
+                vps_cmd_error "节点在批量设置期间已不属于 ${core}，请重试：$id"
+                return 3
+            }
+        done < <(jq -r '.[]' <<<"$selector_values")
+    fi
+    selected_count="$(jq -r --arg core "$core" --arg mode "$selector_mode" --argjson values "$selector_values" '
+        [.nodes[] | . as $node | select(.core == $core and
+            ($mode == "all" or ($mode == "id" and any($values[]; . == $node.id)) or
+             ($mode == "profile" and any($values[]; . == $node.profile))))] | length
+    ' "$PROXY_MANIFEST")" || return 10
+    ((selected_count > 0)) || { vps_cmd_error "选择结果为空，未修改任何节点"; return 3; }
+    candidate_manifest="$(mktemp --tmpdir="$PROXY_STATE_DIR" .nodes.ip-policy.XXXXXX)" || return 20
+    candidate_config="$(mktemp --tmpdir="$PROXY_STATE_DIR" .config.ip-policy.XXXXXX.json)" || {
+        rm -f -- "$candidate_manifest"
+        return 20
+    }
+    trap 'rm -f -- "$candidate_manifest" "$candidate_config"; vps_cmd_unlock' EXIT
+    if ! jq --arg core "$core" --arg mode "$selector_mode" --arg strategy "$ip_strategy" \
+        --arg updated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson values "$selector_values" '
+        .nodes |= map(. as $node |
+            if .core == $core and
+               ($mode == "all" or ($mode == "id" and any($values[]; . == $node.id)) or
+                ($mode == "profile" and any($values[]; . == $node.profile)))
+            then .ip_strategy=$strategy | .updated_at=$updated_at else . end)
+    ' "$PROXY_MANIFEST" >"$candidate_manifest"; then
+        status=10
+    fi
+    if ((status == 0)); then
+        proxy_manifest_validate_file "$candidate_manifest" || status=$?
+    fi
+    if ((status == 0)); then
+        proxy_render_config "$core" "$candidate_manifest" >"$candidate_config" || status=$?
+    fi
+    if ((status == 0)); then
+        proxy_commit_manifest_config "$core" "$candidate_manifest" "$candidate_config" "node-ip-policy" || status=$?
+    fi
+    rm -f -- "$candidate_manifest" "$candidate_config"
+    trap 'vps_cmd_unlock' EXIT
+    ((status == 0)) || return "$status"
+    vps_cmd_success "已将 $(proxy_core_label "$core") 的 ${selected_count} 个节点 IP 策略设为 ${ip_strategy}"
+)
+
+proxy_node_ip_policy_interactive() {
+    local core strategy selector_mode selected profile node id label
+    local -a core_choices=() selector_args=() node_choices=() profile_choices=()
+    local -A chosen=()
+    proxy_require_state_access || return $?
+    proxy_ensure_tools node-ip-policy jq || return $?
+    if proxy_stop_after_dependency_plan; then return 0; fi
+    [[ -f "$PROXY_MANIFEST" ]] || { vps_cmd_error "当前没有节点"; return 3; }
+    proxy_manifest_validate_file "$PROXY_MANIFEST" || return $?
+    for core in sing-box xray; do
+        [[ "$(proxy_manifest_count "$core")" != 0 ]] || continue
+        proxy_core_registered "$core" || continue
+        core_choices+=("$core" "$(proxy_core_label "$core")")
+    done
+    ((${#core_choices[@]} > 0)) || { vps_cmd_error "当前没有可设置的已安装内核节点"; return 3; }
+    core="$(proxy_prompt_select "请选择节点所属内核" "${core_choices[0]}" "${core_choices[@]}")" || return $?
+    strategy="$(proxy_prompt_ip_strategy auto)" || return $?
+    selector_mode="$(proxy_prompt_select "请选择节点范围" ids \
+        ids "多选节点" profile "按配置（profile）" all "该内核全部节点")" || return $?
+    case "$selector_mode" in
+        ids)
+            while true; do
+                node_choices=()
+                while IFS= read -r node; do
+                    id="$(jq -r '.id' <<<"$node")"
+                    [[ -z "${chosen[$id]:-}" ]] || continue
+                    label="$(proxy_profile_label "$(jq -r '.profile' <<<"$node")" 2>/dev/null || jq -r '.profile' <<<"$node")"
+                    node_choices+=("$id" "$(jq -r '.name' <<<"$node") · ${label}")
+                done < <(jq -c --arg core "$core" '.nodes[] | select(.core == $core)' "$PROXY_MANIFEST")
+                ((${#selector_args[@]} == 0)) || node_choices+=("done" "完成选择")
+                ((${#node_choices[@]} > 0)) || break
+                selected="$(proxy_prompt_select "请选择节点（可连续选择多个）" "${node_choices[0]}" "${node_choices[@]}")" || return $?
+                [[ "$selected" == "done" ]] && break
+                chosen["$selected"]=1
+                selector_args+=(--id "$selected")
+            done
+            ((${#selector_args[@]} > 0)) || { vps_cmd_error "至少需要选择一个节点"; return 3; }
+            ;;
+        profile)
+            while IFS= read -r profile; do
+                [[ -n "$profile" ]] || continue
+                profile_choices+=("$profile" "$(proxy_profile_label "$profile" 2>/dev/null || printf '%s' "$profile")")
+            done < <(jq -r --arg core "$core" '[.nodes[] | select(.core == $core) | .profile] | unique[]' "$PROXY_MANIFEST")
+            profile="$(proxy_prompt_select "请选择配置（profile）" "${profile_choices[0]}" "${profile_choices[@]}")" || return $?
+            selector_args=(--profile "$profile")
+            ;;
+        all) selector_args=(--all) ;;
+    esac
+    proxy_node_ip_policy_set --core "$core" --ip-strategy "$strategy" "${selector_args[@]}"
+}
+
 proxy_node_menu_run() {
     local action status=0 prompt_status=0 ignored
     while true; do
         action="$(proxy_prompt_select "节点管理" view \
             add "添加节点" view "查看节点" edit "编辑节点" delete "删除节点" \
-            subscription "输出节点订阅" back "返回代理管理")" || prompt_status=$?
+            ip_policy "批量设置出站 IP 策略" subscription "输出节点订阅" back "返回代理管理")" || prompt_status=$?
         if ((prompt_status != 0)); then
             [[ "$prompt_status" == "130" ]] && return "$status"
             return "$prompt_status"
@@ -1026,6 +1289,7 @@ proxy_node_menu_run() {
             view) proxy_menu_action proxy_node_view_interactive || status=$? ;;
             edit) proxy_menu_action proxy_node_edit || status=$? ;;
             delete) proxy_menu_action proxy_node_delete || status=$? ;;
+            ip_policy) proxy_menu_action proxy_node_ip_policy_interactive || status=$? ;;
             subscription) proxy_menu_action proxy_subscription_interactive || status=$? ;;
             back) return "$status" ;;
         esac
@@ -1037,7 +1301,7 @@ proxy_node_menu_run() {
 
 proxy_node_edit() (
     local id="" name="" listen="" port="" address="" sni="" path="" service_name=""
-    local requested_cert_mode="" import_cert="" import_key="" obfs_type="" up_mbps="" down_mbps="" congestion_control="" arg
+    local requested_cert_mode="" import_cert="" import_key="" obfs_type="" up_mbps="" down_mbps="" congestion_control="" ip_strategy="" arg
     local node current_node core profile old_port old_cert_mode cert_mode candidate_node candidate_manifest candidate_config status=0
     local field transport current confirm_status=0 certificate_tools_needed=0
     local -a edit_fields=()
@@ -1060,11 +1324,12 @@ proxy_node_edit() (
             --up-mbps) (($# >= 2)) || return 2; up_mbps="$2"; shift 2 ;;
             --down-mbps) (($# >= 2)) || return 2; down_mbps="$2"; shift 2 ;;
             --congestion-control) (($# >= 2)) || return 2; congestion_control="$2"; shift 2 ;;
+            --ip-strategy) (($# >= 2)) || return 2; ip_strategy="$2"; shift 2 ;;
             *) vps_cmd_error "node edit 的未知选项：$arg"; return 2 ;;
         esac
     done
     local had_explicit_change=0
-    [[ -z "$name$listen$port$address$sni$path$service_name$requested_cert_mode$import_cert$import_key$obfs_type$up_mbps$down_mbps$congestion_control" ]] || had_explicit_change=1
+    [[ -z "$name$listen$port$address$sni$path$service_name$requested_cert_mode$import_cert$import_key$obfs_type$up_mbps$down_mbps$congestion_control$ip_strategy" ]] || had_explicit_change=1
     if [[ -n "$id" && ! "$id" =~ ^node-[a-f0-9]{16}$ ]]; then
         vps_cmd_error "node edit 需要有效 --id"
         return 2
@@ -1090,6 +1355,7 @@ proxy_node_edit() (
     [[ -z "$up_mbps" || "$up_mbps" =~ ^[1-9][0-9]*$ ]] || { vps_cmd_error "上行带宽必须是正整数 Mbps"; return 2; }
     [[ -z "$down_mbps" || "$down_mbps" =~ ^[1-9][0-9]*$ ]] || { vps_cmd_error "下行带宽必须是正整数 Mbps"; return 2; }
     case "$congestion_control" in '' | bbr | cubic | new_reno) ;; *) vps_cmd_error "拥塞控制仅支持 bbr|cubic|new_reno"; return 2 ;; esac
+    [[ -z "$ip_strategy" ]] || proxy_ip_strategy_valid "$ip_strategy" || { vps_cmd_error "--ip-strategy 仅支持 auto|prefer_ipv4|prefer_ipv6|ipv4_only|ipv6_only"; return 2; }
     vps_cmd_require_root || return $?
     proxy_require_platform || return $?
     proxy_ensure_mutation_tools node-edit jq || return $?
@@ -1125,6 +1391,7 @@ proxy_node_edit() (
         elif [[ "$profile" == "tuic-v5" ]]; then
             edit_fields+=(congestion "拥塞控制")
         fi
+        edit_fields+=(ip_strategy "出站 IP 策略")
         edit_fields+=(save "预览并保存" cancel "取消编辑")
         while true; do
             field="$(proxy_prompt_select "请选择要修改的字段" save "${edit_fields[@]}")" || return $?
@@ -1200,6 +1467,11 @@ proxy_node_edit() (
                     congestion_control="$(proxy_prompt_select "拥塞控制" "$current" bbr BBR cubic CUBIC new_reno "New Reno")" || return $?
                     had_explicit_change=1
                     ;;
+                ip_strategy)
+                    current="${ip_strategy:-$(jq -r '.ip_strategy // "auto"' <<<"$node")}"
+                    ip_strategy="$(proxy_prompt_ip_strategy "$current")" || return $?
+                    had_explicit_change=1
+                    ;;
                 cancel)
                     vps_cmd_info "已取消编辑"
                     return 0
@@ -1231,6 +1503,7 @@ proxy_node_edit() (
                     [[ -z "$up_mbps$down_mbps" ]] || printf '  带宽：%s/%s Mbps\n' \
                         "${up_mbps:-$(jq -r '.options.up_mbps' <<<"$node")}" "${down_mbps:-$(jq -r '.options.down_mbps' <<<"$node")}"
                     [[ -z "$congestion_control" ]] || printf '  拥塞控制：%s\n' "$congestion_control"
+                    [[ -z "$ip_strategy" ]] || printf '  IP 策略：%s\n' "$(proxy_ip_strategy_label "$ip_strategy")"
                     confirm_status=0
                     proxy_confirm "确认保存这些修改？" || confirm_status=$?
                     if ((confirm_status == 0)); then
@@ -1255,6 +1528,7 @@ proxy_node_edit() (
     up_mbps="${up_mbps:-$(jq -r '.options.up_mbps' <<<"$node")}"
     down_mbps="${down_mbps:-$(jq -r '.options.down_mbps' <<<"$node")}"
     congestion_control="${congestion_control:-$(jq -r '.options.congestion_control' <<<"$node")}"
+    ip_strategy="${ip_strategy:-$(jq -r '.ip_strategy // "auto"' <<<"$node")}"
     proxy_valid_host "$address" || { vps_cmd_error "连接地址无效"; return 2; }
     [[ "$listen" == "::" || "$listen" == "0.0.0.0" || "$listen" =~ ^[A-Fa-f0-9:.]+$ ]] || return 2
     if [[ -n "$path" ]] && ! proxy_valid_path "$path"; then vps_cmd_error "传输路径无效"; return 2; fi
@@ -1262,6 +1536,7 @@ proxy_node_edit() (
     [[ "$obfs_type" == "none" || "$obfs_type" == "salamander" ]] || return 2
     [[ "$up_mbps" =~ ^[1-9][0-9]*$ && "$down_mbps" =~ ^[1-9][0-9]*$ ]] || return 2
     case "$congestion_control" in bbr | cubic | new_reno) ;; *) return 2 ;; esac
+    proxy_ip_strategy_valid "$ip_strategy" || return 2
     if [[ -n "$requested_cert_mode" && "$requested_cert_mode" != "self-signed" && "$requested_cert_mode" != "imported" ]]; then
         vps_cmd_error "--cert-mode 仅支持 self-signed|imported"
         return 2
@@ -1303,11 +1578,11 @@ proxy_node_edit() (
         --arg name "$name" --arg listen "$listen" --argjson port "$port" --arg address "$address" \
         --arg sni "$sni" --arg path "$path" --arg service_name "$service_name" \
         --arg obfs_type "$obfs_type" --argjson up_mbps "$up_mbps" --argjson down_mbps "$down_mbps" \
-        --arg congestion_control "$congestion_control" --arg updated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        --arg congestion_control "$congestion_control" --arg ip_strategy "$ip_strategy" --arg updated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
         '.name=$name | .listen=$listen | .port=$port | .address=$address | .tls.server_name=$sni |
          .transport.path=$path | .transport.service_name=$service_name | .options.obfs_type=$obfs_type |
          .options.up_mbps=$up_mbps | .options.down_mbps=$down_mbps | .options.congestion_control=$congestion_control |
-         .updated_at=$updated_at' <<<"$node")" || return 10
+         .ip_strategy=$ip_strategy | .updated_at=$updated_at' <<<"$node")" || return 10
 
     if proxy_profile_requires_tls_certificate "$profile"; then
         old_cert_mode="$(jq -r '.tls.mode' <<<"$node")"

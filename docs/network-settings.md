@@ -1,6 +1,6 @@
 # 网络设置
 
-0.2.0 在固定的 `network` 领域提供 BBR、DNS 和 RFW 三个入口。本文记录公开命令接口、风险边界、落盘位置、失败语义和发布验收要求；它不声称这些操作已经在真实 VPS 或 VM 上完成验证。
+固定的 `network` 领域提供 BBR、DNS、IP 地址族偏好和 RFW 四个入口。本文记录公开命令接口、风险边界、落盘位置、失败语义和发布验收要求；它不声称这些操作已经在真实 VPS 或 VM 上完成验证。
 
 ## 1. 入口与公共约定
 
@@ -8,6 +8,7 @@
 | --- | --- | --- | --- | --- | --- | --- |
 | `network bbr` | `status`、`enable`、`set`、`restore` | `change` | `optional-root` | 支持 | `linux` | `experimental` |
 | `network dns` | `show`、`test`、`set`、`refresh`、`verify`、`restore` | `disruptive` | `optional-root` | 支持 | `linux` | `experimental` |
+| `network ip-policy` | `status`、`set`、`restore` | `disruptive` | `optional-root` | 支持 | `linux` | `experimental` |
 | `network rfw` | `status`、`install`、`update`、`configure`、`start`、`stop`、`restart`、`stats`、`logs`、`uninstall` | `disruptive` | `optional-root` | 支持 | `linux`、`init:systemd` | `experimental` |
 
 全局选项必须位于领域前，例如：
@@ -25,7 +26,7 @@ bash bin/vpsctl --dry-run --install-deps network dns set --server 1.1.1.1
 - 修改操作分别使用 `/run/vpsctl/network-bbr.lock`、`/run/vpsctl/network-dns.lock` 和 `/run/vpsctl/network-rfw.lock`，阻止同一功能的并发事务互相覆盖。
 - 普通用户可运行帮助和可读取的状态查询；写 `/etc`、`/usr/local`、systemd 单元或持久状态时需要 root。
 
-这些执行型全局参数只用于直接功能 CLI；主管理菜单进入 BBR、DNS 或 RFW UI 后执行真实动作，不提供演练、依赖授权、自动同意、非交互、静默或详细日志开关。机器可读输出选项、`--force` 与 `--confirm-*` 确认标志也只在直接 CLI 暴露；菜单用编号选择固定值，用经校验的文本输入收集开放值，并在危险动作前执行对应交互确认。
+这些执行型全局参数只用于直接功能 CLI；主管理菜单进入 BBR、DNS、IP 地址族偏好或 RFW UI 后执行真实动作，不提供演练、依赖授权、自动同意、非交互、静默或详细日志开关。机器可读输出选项、`--force` 与 `--confirm-*` 确认标志也只在直接 CLI 暴露；菜单用编号选择固定值，用经校验的文本输入收集开放值，并在危险动作前执行对应交互确认。
 
 ## 2. BBR
 
@@ -99,9 +100,29 @@ BBR 会按动作检查并在获授权后安装 `sysctl`、`modprobe`、`ip`、`t
 
 写入和后端重新加载完成后，命令从系统解析链路再次查询 `--test-domain`。写后验证失败属于部分完成：保留已经写入的新配置，不自动回滚，返回 `30`，输出备份标识、当前后端和明确的 `restore` 命令。这样既保留现场供诊断，也避免未经确认的第二次网络变更掩盖原始失败。
 
-## 4. RFW
+## 4. IP 地址族偏好
 
-### 4.1 支持边界
+### 4.1 子动作和选项
+
+| 子动作 | 用途 | 主要选项 |
+| --- | --- | --- |
+| `status` | 显示受管策略、作用域、配置所有权以及本机双栈诊断 | `--json` |
+| `set` | 设置 glibc 地址排序偏好 | `--policy prefer_ipv4\|prefer_ipv6` |
+| `restore` | 精确恢复首次受管前的 `/etc/gai.conf` | 无变更选项 |
+
+```text
+bash bin/vpsctl network ip-policy status
+bash bin/vpsctl --dry-run network ip-policy set --policy prefer_ipv4
+bash bin/vpsctl network ip-policy restore
+```
+
+该入口管理的是 glibc `getaddrinfo()` 返回多地址时的排序策略，作用域固定报告为 `glibc_getaddrinfo_order`。它不会禁用 IPv4 或 IPv6，不过滤字面量 IP，也不承诺影响 Go 自带解析器、应用内置 DNS、已缓存结果或显式指定地址族的 socket。系统级 `ipv4_only`/`ipv6_only` 不属于本入口；代理节点和纯端口转发的地址族策略见[代理管理](proxy-management.md)。
+
+命令将完整 RFC 6724 precedence 表写入 `/etc/gai.conf`。首次受管时，只要现有文件包含非空、非注释指令就安全拒绝，避免覆盖管理员策略；注释或空文件会原样备份。后续更新和恢复同时校验项目标记及 SHA-256，检测到外部修改后拒绝覆盖。状态写入 `/var/lib/vpsctl/network/ip-policy/state.json`，备份位于 `/var/lib/vpsctl/backups/network/ip-policy/`。写入使用锁、临时文件和原子替换；命令不重启长期运行进程，后者可能继续使用旧缓存。
+
+## 5. RFW
+
+### 5.1 支持边界
 
 RFW 入口仅支持以下组合：
 
@@ -114,7 +135,7 @@ RFW 入口仅支持以下组合：
 
 RFW 会在参数校验以及 Linux、systemd、架构和内核版本门禁通过后，只检查当前动作实际需要的 `curl`、`sha256sum`、`flock`、`ip`，以及启用端口日志时所需的 `mountpoint`。真实执行的交互环境发现这些可安装工具缺失时才列出缺失项并询问是否安装；非交互调用和 `--dry-run` 依赖计划仍需预先提供 `--install-deps`，否则返回依赖缺失。`systemctl`、`journalctl`、XDP、BPF 文件系统和 RFW 二进制能力仍按平台或功能前置条件处理，不作为通用软件包自动安装。
 
-### 4.2 子动作和选项
+### 5.2 子动作和选项
 
 | 子动作 | 用途 | 主要选项 |
 | --- | --- | --- |
@@ -141,13 +162,13 @@ RFW 会在参数校验以及 Linux、systemd、架构和内核版本门禁通过
 
 首次安装生成的配置将所有过滤规则、FET 和访问日志设为 `off`，不会自动启动服务；至少显式配置一项过滤规则或访问日志后才能启动。上游的 `--block-email` 针对 SMTP 发送流量，其他协议开关和 `--block-all` 针对相应的 IPv4 入站流量。
 
-### 4.3 延后重启与强确认
+### 5.3 延后重启与强确认
 
 `configure` 和 `update` 写入成功后不自动启动或重启 RFW；输出明确标记“已暂存、尚未应用”，让现有 SSH 会话保持在可控状态。服务停止时可用 `start` 应用暂存内容；服务已运行且存在暂存内容时必须用 `restart`，避免把一次无操作的 `start` 误判为已应用。
 
 当应用可能封禁管理地址或中断 SSH 的配置时，交互模式必须要求用户输入完整确认短语 `APPLY-RFW`。`--yes` 不能代替该短语；非交互模式必须显式提供 `--confirm-disruptive`，否则拒绝执行。强确认只确认已展示的当前计划，计划发生变化后必须重新确认。
 
-### 4.4 配置、状态与恢复
+### 5.4 配置、状态与恢复
 
 | 路径 | 用途 |
 | --- | --- |
@@ -164,9 +185,9 @@ RFW 会在参数校验以及 Linux、systemd、架构和内核版本门禁通过
 
 替换二进制、配置和单元前必须保留可识别的上一版本状态。安装、更新或卸载发生部分完成时返回 `30`，输出当前二进制版本、服务是否仍运行、哪些路径已改变，以及恢复上一文件或重新安装校验过版本的步骤。`uninstall` 默认保留配置和恢复状态；只有显式 `--purge` 才删除项目管理的数据，而且不得删除范围外文件。清除操作在交互模式要求输入 `PURGE-RFW`，在非交互模式要求额外提供无值标志 `--confirm-purge`；`--yes` 同样不能替代这一确认。
 
-## 5. 退出码
+## 6. 退出码
 
-三个入口遵守统一退出码：
+四个入口遵守统一退出码：
 
 | 退出码 | 含义与网络命令示例 |
 | ---: | --- |
@@ -182,13 +203,14 @@ RFW 会在参数校验以及 Linux、systemd、架构和内核版本门禁通过
 
 入口原样传递功能脚本退出码。失败信息必须同时说明已改变和未改变的状态、备份或状态路径以及下一条安全恢复命令。
 
-## 6. 发布验收要求
+## 7. 发布验收要求
 
 自动化测试通过只代表仓库内可重复检查完成。声明平台支持前，还必须在可丢弃的隔离 VPS 或 VM 中完成以下验收，并保留脱敏结果：
 
 - BBR：覆盖可用/不可用内核、重复执行、重启后持久化、`--apply-live-qdisc` 影响和完整恢复。
 - DNS：分别覆盖 systemd-resolved、NetworkManager、openresolv、静态 resolv.conf；验证 legacy Debian 安全拒绝、候选前测失败零写入、写后失败保留配置并返回 `30`、按备份恢复。
+- IP 地址族偏好：覆盖空/注释/自定义 `/etc/gai.conf`、两种完整 precedence 表、所有权冲突、重复设置、dry-run、精确恢复和新进程实际解析排序。
 - RFW：分别覆盖 systemd 上的 `x86_64`/`aarch64`，校验稳定 release 选择、checksum 不匹配拒绝、IPv6 不受影响、配置/更新延后重启、`APPLY-RFW`/`--confirm-disruptive` 门禁、更新和卸载恢复。
-- 三入口：覆盖普通用户/root、`--dry-run`、`--non-interactive`、锁冲突、中断、重复执行及各基础退出码。
+- 四入口：覆盖普通用户/root、`--dry-run`、`--non-interactive`、锁冲突、中断、重复执行及各基础退出码。
 
 RFW 和 DNS 的中断性用例不得在唯一可用的远程管理链路上直接试验；应准备控制台或快照恢复通道。

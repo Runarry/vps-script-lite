@@ -14,6 +14,7 @@ bash -n \
     "${TEST_ROOT}/lib/ui.sh" \
     "${TEST_ROOT}/commands/network/bbr.sh" \
     "${TEST_ROOT}/commands/network/dns.sh" \
+    "${TEST_ROOT}/commands/network/ip-policy.sh" \
     "${TEST_ROOT}/commands/network/rfw.sh" \
     "${TEST_ROOT}/commands/service/proxy.sh" \
     "${TEST_ROOT}"/commands/service/proxy/*.sh \
@@ -21,6 +22,7 @@ bash -n \
     "${TEST_ROOT}/tests/unit/test-command.sh" \
     "${TEST_ROOT}/tests/unit/test-network-bbr.sh" \
     "${TEST_ROOT}/tests/unit/test-network-dns.sh" \
+    "${TEST_ROOT}/tests/unit/test-network-ip-policy.sh" \
     "${TEST_ROOT}/tests/unit/test-network-rfw.sh" \
     "${TEST_ROOT}/tests/unit/test-service-proxy.sh" \
     "${TEST_ROOT}/tests/integration/test-service-proxy-relay-connectivity-real.sh" \
@@ -32,6 +34,7 @@ bash "${TEST_ROOT}/tests/unit/test-libraries.sh"
 bash "${TEST_ROOT}/tests/unit/test-command.sh"
 bash "${TEST_ROOT}/tests/unit/test-network-bbr.sh"
 bash "${TEST_ROOT}/tests/unit/test-network-dns.sh"
+bash "${TEST_ROOT}/tests/unit/test-network-ip-policy.sh"
 bash "${TEST_ROOT}/tests/unit/test-network-rfw.sh"
 bash "${TEST_ROOT}/tests/unit/test-service-proxy.sh"
 bash "${TEST_ROOT}/tests/integration/test-vpsctl.sh"

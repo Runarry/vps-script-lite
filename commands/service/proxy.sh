@@ -90,8 +90,11 @@ proxy_usage() {
            [--path PATH] [--service-name NAME]
            [--cert-mode self-signed|imported --cert-file FILE --key-file FILE]
            [--obfs none|salamander] [--up-mbps N] [--down-mbps N]
-           [--congestion-control bbr|cubic|new_reno]
+           [--congestion-control bbr|cubic|new_reno] [--ip-strategy STRATEGY]
   node edit --id NODE_ID [可修改 node add 中的非凭据字段]
+  node ip-policy set --core sing-box|xray --ip-strategy STRATEGY
+                     (--id NODE_ID [...] | --profile PROFILE | --all)
+  STRATEGY: auto | prefer_ipv4 | prefer_ipv6 | ipv4_only | ipv6_only
   node delete --id NODE_ID [--cascade-relay] [--confirm-delete]
   subscription [--core CORE|all]
 
@@ -108,10 +111,11 @@ proxy_usage() {
   relay bind add --node-id NODE_ID --exit-id EXIT_ID
   relay bind delete --id BIND_ID [--confirm-delete]
   relay forward list [--json]
-  relay forward show --id FORWARD_ID [--uris]
+  relay forward show --id FORWARD_ID [--uris|--json]
   relay forward add --name NAME --exit-id EXIT_ID --listen-ports START[-END]
-                    [--network auto|tcp|udp|both] [--address HOST]
-  relay forward edit --id FORWARD_ID [转发字段]
+                    [--network auto|tcp|udp|both] [--family dual|ipv4|ipv6]
+                    [--address HOST]
+  relay forward edit --id FORWARD_ID [--family dual|ipv4|ipv6] [其他转发字段]
   relay forward delete --id FORWARD_ID [--confirm-delete]
   relay forward refresh [--id FORWARD_ID]
 
@@ -656,7 +660,7 @@ proxy_dispatch() {
             proxy_profiles_show
             ;;
         node)
-            (($# >= 1)) || { vps_cmd_error "node 需要 list|show|add|edit|delete"; return 2; }
+            (($# >= 1)) || { vps_cmd_error "node 需要 list|show|add|edit|ip-policy|delete"; return 2; }
             subaction="$1"
             shift
             case "$subaction" in
@@ -664,6 +668,15 @@ proxy_dispatch() {
                 show) proxy_node_show "$@" ;;
                 add) proxy_node_add "$@" ;;
                 edit) proxy_node_edit "$@" ;;
+                ip-policy)
+                    (($# >= 1)) || { vps_cmd_error "node ip-policy 需要 set"; return 2; }
+                    subaction="$1"
+                    shift
+                    case "$subaction" in
+                        set) proxy_node_ip_policy_set "$@" ;;
+                        *) vps_cmd_error "未知 node ip-policy 动作：$subaction"; return 2 ;;
+                    esac
+                    ;;
                 delete) proxy_node_delete "$@" ;;
                 *) vps_cmd_error "未知 node 动作：$subaction"; return 2 ;;
             esac

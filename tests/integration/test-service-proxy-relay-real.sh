@@ -57,6 +57,7 @@ source "${TEST_ROOT}/commands/service/proxy/relay-forward.sh"
 manifest="${TEST_TEMP}/relay.json"
 cache="${TEST_TEMP}/cache.json"
 batch="${TEST_TEMP}/rules.nft"
+snapshot="${TEST_TEMP}/rules.snapshot.nft"
 before_tables="${TEST_TEMP}/tables.before"
 after_tables="${TEST_TEMP}/tables.after"
 
@@ -89,6 +90,9 @@ proxy_relay_forward_nft_check "$batch"
 proxy_relay_forward_nft_apply "$batch"
 nft list table ip "$PROXY_RELAY_FORWARD_TABLE4" >/dev/null
 nft list table ip6 "$PROXY_RELAY_FORWARD_TABLE6" >/dev/null
+proxy_relay_forward_nft_snapshot "$snapshot"
+grep -Fq "table ip $PROXY_RELAY_FORWARD_TABLE4" "$snapshot" || { printf 'FAIL: IPv4 snapshot missing\n' >&2; exit 1; }
+grep -Fq "table ip6 $PROXY_RELAY_FORWARD_TABLE6" "$snapshot" || { printf 'FAIL: IPv6 snapshot missing\n' >&2; exit 1; }
 
 # Exercise the actual data path in isolated namespaces.  The echo servers return
 # the source address they observed so the client can verify masquerading too.
@@ -136,17 +140,15 @@ sysctl -q -w net.ipv6.conf.all.forwarding=1
 
 jq -n --arg ipv4 "$IPV4_SERVER" --arg ipv6 "$IPV6_SERVER" '{schema_version:1,
     exits:[
-        {id:"exit-connect-v4",type:"direct",endpoint:{host:$ipv4,port:45443},network_hint:"both"},
-        {id:"exit-connect-v6",type:"direct",endpoint:{host:$ipv6,port:45444},network_hint:"both"}
+        {id:"exit-connect-dual",type:"direct",endpoint:{host:"dual-target.invalid",port:45445},network_hint:"both"}
     ],
     bindings:[],
     forwards:[
-        {id:"forward-connect-v4",name:"connect-v4",exit_id:"exit-connect-v4",listen_port_start:45100,listen_port_end:45100,network:"both",publish_address:"relay.example"},
-        {id:"forward-connect-v6",name:"connect-v6",exit_id:"exit-connect-v6",listen_port_start:45200,listen_port_end:45200,network:"both",publish_address:"relay6.example"}
+        {id:"forward-connect-v4",name:"connect-v4",exit_id:"exit-connect-dual",listen_port_start:45100,listen_port_end:45100,network:"both",family:"ipv4",publish_address:"relay.example"},
+        {id:"forward-connect-v6",name:"connect-v6",exit_id:"exit-connect-dual",listen_port_start:45200,listen_port_end:45200,network:"both",family:"ipv6",publish_address:"relay6.example"}
     ]}' >"$manifest"
 jq -n --arg ipv4 "$IPV4_SERVER" --arg ipv6 "$IPV6_SERVER" '{schema_version:1,exits:{
-    "exit-connect-v4":{host:$ipv4,ipv4:$ipv4,ipv6:null},
-    "exit-connect-v6":{host:$ipv6,ipv4:null,ipv6:$ipv6}
+    "exit-connect-dual":{host:"dual-target.invalid",ipv4:$ipv4,ipv6:$ipv6}
 }}' >"$cache"
 proxy_relay_forward_render_nft "$manifest" "$cache" >"$batch"
 proxy_relay_forward_nft_check "$batch"
@@ -205,10 +207,10 @@ run_client() {
     ip netns exec "$CLIENT_NS" python3 -c "$CLIENT_CODE" "$mode" "$host" "$port" "$expected_source" "$label"
 }
 
-start_server tcp "$IPV4_SERVER" 45443 tcp-v4
-start_server udp "$IPV4_SERVER" 45443 udp-v4
-start_server tcp "$IPV6_SERVER" 45444 tcp-v6
-start_server udp "$IPV6_SERVER" 45444 udp-v6
+start_server tcp "$IPV4_SERVER" 45445 tcp-v4
+start_server udp "$IPV4_SERVER" 45445 udp-v4
+start_server tcp "$IPV6_SERVER" 45445 tcp-v6
+start_server udp "$IPV6_SERVER" 45445 udp-v6
 all_ready=0
 for _attempt in {1..100}; do
     all_ready=1

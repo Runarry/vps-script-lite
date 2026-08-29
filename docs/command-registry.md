@@ -31,6 +31,7 @@
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `network bbr` | `commands/network/bbr.sh` | 查看、启用、设置或恢复 BBR 与队列规则 | `change` | `optional-root` | `supported` | `linux` | `experimental` |
 | `network dns` | `commands/network/dns.sh` | 检测、测试、设置、刷新、验证或恢复 DNS | `disruptive` | `optional-root` | `supported` | `linux` | `experimental` |
+| `network ip-policy` | `commands/network/ip-policy.sh` | 查看、设置或恢复 glibc IPv4/IPv6 地址排序偏好 | `disruptive` | `optional-root` | `supported` | `linux` | `experimental` |
 | `network rfw` | `commands/network/rfw.sh` | 安装、配置和管理 RFW systemd 服务 | `disruptive` | `optional-root` | `supported` | `linux,init:systemd` | `experimental` |
 | `service proxy` | `commands/service/proxy.sh` | 平级管理 Xray 与 sing-box 内核、节点、日志和时间同步 | `disruptive` | `optional-root` | `supported` | `linux,service:any` | `experimental` |
 

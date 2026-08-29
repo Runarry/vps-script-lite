@@ -370,6 +370,10 @@ proxy_manifest_validate_file() {
             ((.listen | type) == "string" and (.listen | length) > 0) and
             ((.port | type) == "number" and (.port | floor) == .port and .port >= 1 and .port <= 65535) and
             ((.address | type) == "string" and (.address | length) > 0) and
+            ((has("ip_strategy") | not) or
+                (.ip_strategy == "auto" or .ip_strategy == "prefer_ipv4" or
+                 .ip_strategy == "prefer_ipv6" or .ip_strategy == "ipv4_only" or
+                 .ip_strategy == "ipv6_only")) and
             ((.credentials | type) == "object") and
             ((.tls | type) == "object") and
             ((.transport | type) == "object") and
@@ -493,6 +497,13 @@ proxy_valid_host() {
 proxy_valid_path() {
     local value="${1:-}"
     [[ "$value" == /* && ${#value} -le 256 && "$value" != *$'\n'* && "$value" != *$'\r'* ]]
+}
+
+proxy_ip_strategy_valid() {
+    case "${1:-}" in
+        auto | prefer_ipv4 | prefer_ipv6 | ipv4_only | ipv6_only) return 0 ;;
+        *) return 1 ;;
+    esac
 }
 
 proxy_default_address() {
@@ -632,7 +643,7 @@ proxy_render_config() {
     local core="$1" manifest="$2" relay_manifest="${3:-${PROXY_RELAY_FILE:-}}"
     local node rendered inbounds='[]' relay_state='{"schema_version":1,"exits":[],"bindings":[],"forwards":[]}'
     local exit exit_id outbound_bundle target_tag node_id used_exit_ids
-    local relay_outbounds='[]' relay_rules='[]'
+    local relay_outbounds='[]' relay_rules='[]' policy_nodes='[]' policy_outbounds='[]' policy_rules='[]'
     proxy_core_valid "$core" || return 2
     proxy_manifest_validate_file "$manifest" || return $?
     if [[ -n "$relay_manifest" && -f "$relay_manifest" ]]; then
@@ -702,25 +713,62 @@ proxy_render_config() {
         done <<<"$used_exit_ids"
     fi
 
+    policy_nodes="$(jq -cn --arg core "$core" --argjson manifest "$(<"$manifest")" --argjson relay "$relay_state" '
+        [$manifest.nodes[] | select(.core == $core) | . as $node |
+         select(($node.ip_strategy // "auto") != "auto") |
+         select((any($relay.bindings[]; .node_id == $node.id)) | not) |
+         {id:$node.id,ip_strategy:($node.ip_strategy // "auto")}]
+    ')" || return 10
+
     case "$core" in
         sing-box)
-            jq -n --argjson inbounds "$inbounds" --argjson relay_outbounds "$relay_outbounds" --argjson relay_rules "$relay_rules" '{
-                log: {level: "warn", timestamp: true},
-                inbounds: $inbounds,
-                outbounds: ([{type: "direct", tag: "direct"}] + $relay_outbounds),
-                route: (if ($relay_rules | length) == 0 then {final:"direct"} else {rules:$relay_rules,final:"direct"} end)
-            }'
+            policy_outbounds="$(jq -cn --argjson nodes "$policy_nodes" '
+                $nodes | map(. as $node |
+                    {type:"direct",tag:("direct-" + $node.id),
+                     domain_resolver:{server:"local",strategy:$node.ip_strategy}})
+            ')" || return 10
+            policy_rules="$(jq -cn --argjson nodes "$policy_nodes" '
+                $nodes | map({inbound:[.id],action:"route",outbound:("direct-" + .id)})
+            ')" || return 10
+            jq -n --argjson inbounds "$inbounds" --argjson relay_outbounds "$relay_outbounds" \
+                --argjson relay_rules "$relay_rules" --argjson policy_outbounds "$policy_outbounds" \
+                --argjson policy_rules "$policy_rules" '
+                {
+                    log: {level: "warn", timestamp: true},
+                    inbounds: $inbounds,
+                    outbounds: ([{type: "direct", tag: "direct"}] + $policy_outbounds + $relay_outbounds),
+                    route: (if (($relay_rules + $policy_rules) | length) == 0 then {final:"direct"}
+                            else {rules:($relay_rules + $policy_rules),final:"direct"} end)
+                } + (if ($policy_outbounds | length) == 0 then {}
+                     else {dns:{servers:[{type:"local",tag:"local"}]}} end)
+            '
             ;;
         xray)
-            jq -n --argjson inbounds "$inbounds" --argjson relay_outbounds "$relay_outbounds" --argjson relay_rules "$relay_rules" '{
-                log: {loglevel: "warning"},
-                inbounds: $inbounds,
-                outbounds: ([
-                    {protocol: "freedom", tag: "direct"},
-                    {protocol: "blackhole", tag: "block"}
-                ] + $relay_outbounds),
-                routing: {rules: $relay_rules}
-            }'
+            policy_outbounds="$(jq -cn --argjson nodes "$policy_nodes" '
+                def domain_strategy:
+                    if . == "prefer_ipv4" then "UseIPv4v6"
+                    elif . == "prefer_ipv6" then "UseIPv6v4"
+                    elif . == "ipv4_only" then "ForceIPv4"
+                    elif . == "ipv6_only" then "ForceIPv6"
+                    else error("invalid IP strategy") end;
+                $nodes | map(. as $node |
+                    {protocol:"freedom",tag:("direct-" + $node.id),
+                     settings:{domainStrategy:($node.ip_strategy | domain_strategy)}})
+            ')" || return 10
+            policy_rules="$(jq -cn --argjson nodes "$policy_nodes" '
+                $nodes | map({type:"field",inboundTag:[.id],outboundTag:("direct-" + .id)})
+            ')" || return 10
+            jq -n --argjson inbounds "$inbounds" --argjson relay_outbounds "$relay_outbounds" \
+                --argjson relay_rules "$relay_rules" --argjson policy_outbounds "$policy_outbounds" \
+                --argjson policy_rules "$policy_rules" '{
+                    log: {loglevel: "warning"},
+                    inbounds: $inbounds,
+                    outbounds: ([
+                        {protocol: "freedom", tag: "direct"},
+                        {protocol: "blackhole", tag: "block"}
+                    ] + $policy_outbounds + $relay_outbounds),
+                    routing: {rules: ($relay_rules + $policy_rules)}
+                }'
             ;;
     esac
 }
@@ -738,8 +786,17 @@ proxy_validate_config_with_binary() {
     }
     case "$core" in
         sing-box)
-            "$binary" check -c "$config" >/dev/null 2>&1 || {
+            validation_output="$("$binary" check -c "$config" 2>&1)" || {
                 vps_cmd_error "sing-box 拒绝生成的配置"
+                if jq -e 'any(.outbounds[]?; has("domain_resolver"))' "$config" >/dev/null 2>&1; then
+                    vps_cmd_error "该节点策略需要支持现代 domain_resolver 的 sing-box；请先更新内核后重试"
+                fi
+                validation_detail="$(awk 'NF { detail=$0 } END { print detail }' <<<"$validation_output")"
+                validation_detail="${validation_detail%$'\r'}"
+                if ((${#validation_detail} > 512)); then
+                    validation_detail="${validation_detail:0:509}..."
+                fi
+                [[ -z "$validation_detail" ]] || vps_cmd_error "sing-box 校验详情：$validation_detail"
                 return 10
             }
             ;;

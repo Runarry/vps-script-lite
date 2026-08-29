@@ -64,6 +64,7 @@ test_cli() {
     output="$("${VPSCTL[@]}" list)"
     test_contains "$output" "network bbr" "BBR command listing"
     test_contains "$output" "network dns" "DNS command listing"
+    test_contains "$output" "network ip-policy" "IP policy command listing"
     test_contains "$output" "network rfw" "RFW command listing"
     test_contains "$output" "service proxy" "proxy command listing"
 

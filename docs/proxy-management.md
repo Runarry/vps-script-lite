@@ -34,7 +34,7 @@ bash bin/vpsctl service proxy start --core sing-box --enable
 
 - 内核生命周期：安装、更新和卸载。
 - 服务控制：启动、停止和重启。
-- 节点管理：添加、查看、修改和删除。
+- 节点管理：添加、查看、修改、批量设置出站 IP 策略和删除。
 - 中转管理：出口管理、节点中转、纯端口转发、状态与刷新。
 - 查看与输出：订阅、日志和支持的协议。
 - 系统工具：系统时间状态与同步。
@@ -121,7 +121,10 @@ vpsctl service proxy node add --profile PROFILE [--core CORE] [--name NAME] [--p
     [--cert-mode self-signed|imported --cert-file FILE --key-file FILE]
     [--obfs none|salamander] [--up-mbps N] [--down-mbps N]
     [--congestion-control bbr|cubic|new_reno]
+    [--ip-strategy auto|prefer_ipv4|prefer_ipv6|ipv4_only|ipv6_only]
 vpsctl service proxy node edit --id NODE_ID [可修改上述非凭据字段]
+vpsctl service proxy node ip-policy set --core sing-box|xray --ip-strategy STRATEGY
+    (--id NODE_ID [--id NODE_ID ...] | --profile PROFILE | --all)
 vpsctl service proxy node delete --id NODE_ID [--cascade-relay] [--confirm-delete]
 vpsctl service proxy subscription [--core CORE|all]
 ```
@@ -133,6 +136,20 @@ vpsctl service proxy subscription [--core CORE|all]
 如果当前没有已安装且兼容所选 profile 的内核，界面会列出兼容内核并询问是否先安装；用户确认并完成安装后继续原节点向导，拒绝或取消则不创建节点。一个内核兼容时自动使用，多个已安装内核兼容时按编号选择。这个引导不改变非交互接口：自动化调用在没有兼容内核时仍会失败并要求先安装，在多个候选可用时使用 `--core` 消歧。
 
 交互式节点列表默认展示全部内核的节点，每一项都明确标注所属 Xray 或 sing-box。查看、编辑和删除从这份完整列表按编号选取节点；命令模式仍使用稳定的 `--id NODE_ID`，便于脚本精确引用。命令模式的 `node list` 默认同样返回全部节点并标注 `core`，只有显式传入 `--core` 时才筛选。
+
+每个节点独立保存 `ip_strategy`；旧清单缺失该字段时按 `auto` 处理，列表和详情 JSON 始终补出有效默认值。`auto` 使用代理内核自身默认行为，且不会继承 [`network ip-policy`](network-settings.md#4-ip-地址族偏好) 的系统策略。其他策略通过节点专属直连出站和入站标签路由实现：
+
+| 节点策略 | sing-box `domain_resolver.strategy` | Xray Freedom `domainStrategy` |
+| --- | --- | --- |
+| `auto` | 默认 `direct` | 默认 `AsIs` |
+| `prefer_ipv4` | `prefer_ipv4` | `UseIPv4v6` |
+| `prefer_ipv6` | `prefer_ipv6` | `UseIPv6v4` |
+| `ipv4_only` | `ipv4_only` | `ForceIPv4` |
+| `ipv6_only` | `ipv6_only` | `ForceIPv6` |
+
+这些策略只约束内核对目标域名的解析和选址，不阻断写死的异族字面量 IP。节点绑定中转后，流量优先使用 relay 规则；策略仍保存在节点中，但列表和详情会显示“已绑定中转，暂不生效”。解除绑定后的同一重渲染流程会自动恢复节点策略。
+
+`node ip-policy set` 只接受单一内核，可重复 `--id` 去重选择节点，也可按一个 profile 或该内核全部节点设置。命令先构造统一候选 manifest、渲染配置并调用真实内核校验，再通过现有事务一次提交；任一节点或配置校验失败时整批不写入。运行中的内核只记录待重启，不自动断开现有连接。交互界面提供多选节点、按 profile 和当前内核全部节点三种范围。
 
 端口在整个代理节点清单中必须唯一，且会检查本机当前监听占用以及同网络端口转发冲突。新增或编辑会先生成候选清单并与当前中转状态共同渲染候选内核配置，再调用对应内核校验；校验失败不会提交候选配置。已经作为中转入口的节点默认拒绝删除；`--cascade-relay --confirm-delete` 可在同一事务中删除节点关联。非交互删除节点必须传入 `--confirm-delete`。
 
@@ -177,21 +194,23 @@ URI 层接受协议矩阵对应的标准 VLESS、Trojan、AnyTLS、Hysteria2/Hy2
 
 ```text
 vpsctl service proxy relay forward list [--json]
-vpsctl service proxy relay forward show --id FORWARD_ID [--uris]
+vpsctl service proxy relay forward show --id FORWARD_ID [--uris|--json]
 vpsctl service proxy relay forward add --name NAME --exit-id EXIT_ID --listen-ports START[-END]
-    [--network auto|tcp|udp|both] [--address HOST]
-vpsctl service proxy relay forward edit --id FORWARD_ID [...]
+    [--network auto|tcp|udp|both] [--family dual|ipv4|ipv6] [--address HOST]
+vpsctl service proxy relay forward edit --id FORWARD_ID [--family dual|ipv4|ipv6] [...]
 vpsctl service proxy relay forward delete --id FORWARD_ID [--confirm-delete]
 vpsctl service proxy relay forward refresh [--id FORWARD_ID]
 ```
 
 纯端口转发只使用 nftables，不启动用户态转发进程。协议出口和直连 `HOST:PORT` 出口都可用于转发；直连出口必须明确选择 TCP、UDP 或 both。`auto` 对 Hysteria2/TUIC 采用 UDP，对普通 Shadowsocks 采用 both，对 ShadowTLS 和其他当前协议采用 TCP。端口区间内的每个入口端口都映射到出口的同一个目标端口。
 
+每条转发独立保存 `family`；旧记录缺失时以及新增时默认 `dual`，列表 JSON 始终补出该默认值。`ipv4` 或 `ipv6` 只解析、缓存并渲染指定地址族，若出口是相反族字面量或域名没有所需记录，新增和编辑在提交前失败。`dual` 部署出口所有可用地址族，至少一个族可用即可提交；缺少另一族时在 `relay status` 中标记部分双栈 degraded。它不提供跨地址族优先、失败回退、NAT64 或用户态转发。
+
 nftables 规则只写入独立的 `ip vpsctl_proxy_forward4` 和 `ip6 vpsctl_proxy_forward6` 表，使用 `fib daddr type local` 限定本机 PREROUTING 流量，不创建 OUTPUT 规则，也不刷新全局 ruleset。规则包括受管 DNAT 连接的 FORWARD 放行和 masquerade；IPv4、IPv6 分别渲染，不做 NAT64。候选批次先通过 `nft -c`，再一次提交；状态、DNS 缓存、核心配置或运行规则任一提交失败都会尝试恢复旧版本。检测到其他 FORWARD 链拒绝策略时只告警，不修改 UFW、firewalld、云安全组或第三方表。
 
-首条转发会按需安装 nftables，启用 IP forwarding，并安装、启用 `vpsctl-proxy-forward` 服务。该服务每 5 分钟重新解析正在使用的域名出口并恢复受管规则，本身不承载流量。每个地址族确定性选取排序后的首个有效地址；解析失败时保留最后可用地址并在 `relay status` 中标记 degraded，没有可用旧地址时拒绝替换规则。目标解析到本机时拒绝应用，以避免转发循环。最后一条转发删除后会停止并禁用服务、清除两个受管表和 DNS 运行缓存。
+首条转发会按需安装 nftables，启用 IP forwarding，并安装、启用 `vpsctl-proxy-forward` 服务。该服务每 5 分钟重新解析正在使用的域名出口并恢复受管规则，本身不承载流量。多条转发共享出口时，缓存按所有引用记录计算所需地址族并集，成功提交后不再保留无人引用的旧族。每个地址族确定性选取排序后的首个有效地址；解析失败时保留最后可用地址并在 `relay status` 中标记 degraded，没有可用旧地址时拒绝替换规则并保留现有数据面。目标解析到本机时拒绝应用，以避免转发循环。最后一条转发删除后会停止并禁用服务、清除两个受管表和 DNS 运行缓存。
 
-`--address` 只定义生成 URI 使用的本机发布地址；省略时使用本机探测地址。协议出口可用 `forward show --uris` 按端口升序展开新 URI：除 authority 的主机和端口外，原凭据、参数顺序和名称保持不变；旧式整段 Base64 Shadowsocks 链接只重新编码包含端点的载荷。普通列表只显示模板能力，不展开大范围内容。
+`--address` 只定义生成 URI 使用的本机发布地址；省略时使用本机探测地址。单栈模式采用字面量发布地址时必须与所选地址族一致；域名发布地址允许保留，列表 JSON 和详情会提示其 DNS 记录由用户负责。协议出口可用 `forward show --uris` 按端口升序展开新 URI：除 authority 的主机和端口外，原凭据、参数顺序和名称保持不变；旧式整段 Base64 Shadowsocks 链接只重新编码包含端点的载荷。普通列表只显示模板能力，不展开大范围内容。
 
 ## 6. 协议矩阵
 
@@ -242,7 +261,7 @@ vpsctl service proxy time sync
 - Argo 或其他 Cloudflare 隧道、API、DNS 和证书集成。
 - 落地机部署、多跳链路、跨主机编排、负载均衡或一个入口多出口。
 - DNS 修改、域名解析托管或分流 DNS 配置。
-- 节点批量导入、批量编辑、批量删除或批量部署。
+- 节点批量导入、除 IP 地址族策略外的批量编辑、批量删除或批量部署。
 - Hysteria2 端口跳跃；`hysteria2` profile 只使用单个监听端口。
 - ACME 申请与自动续期。
 

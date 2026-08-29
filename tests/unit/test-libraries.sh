@@ -101,14 +101,16 @@ test_registry() {
     vps_registry_init
 
     test_assert_equal "2" "${#VPS_DOMAIN_IDS[@]}" "registered domain count"
-    test_assert_equal "4" "${#VPS_COMMAND_KEYS[@]}" "registered command count"
+    test_assert_equal "5" "${#VPS_COMMAND_KEYS[@]}" "registered command count"
     test_assert_equal "network" "${VPS_DOMAIN_IDS[0]}" "network domain id"
     test_assert_equal "service" "${VPS_DOMAIN_IDS[1]}" "service domain id"
     test_assert_equal "commands/network/bbr.sh" "${VPS_COMMAND_PATH["network:bbr"]}" "BBR command path"
     test_assert_equal "commands/network/dns.sh" "${VPS_COMMAND_PATH["network:dns"]}" "DNS command path"
+    test_assert_equal "commands/network/ip-policy.sh" "${VPS_COMMAND_PATH["network:ip-policy"]}" "IP policy command path"
     test_assert_equal "commands/network/rfw.sh" "${VPS_COMMAND_PATH["network:rfw"]}" "RFW command path"
     test_assert_equal "change" "${VPS_COMMAND_RISK["network:bbr"]}" "BBR risk"
     test_assert_equal "disruptive" "${VPS_COMMAND_RISK["network:dns"]}" "DNS risk"
+    test_assert_equal "disruptive" "${VPS_COMMAND_RISK["network:ip-policy"]}" "IP policy risk"
     test_assert_equal "disruptive" "${VPS_COMMAND_RISK["network:rfw"]}" "RFW risk"
     test_assert_equal "optional-root" "${VPS_COMMAND_PRIVILEGE["network:bbr"]}" "BBR privilege"
     test_assert_equal "supported" "${VPS_COMMAND_DRY_RUN["network:dns"]}" "DNS dry-run"
@@ -152,7 +154,7 @@ test_ui_input() {
     vps_registry_init
     output="$(vps_ui_main_menu)"
     [[ "$output" == *"网络设置"* ]] || test_fail "registered network domain should be visible"
-    [[ "$output" == *"(3 个功能)"* ]] || test_fail "network domain command count should be visible"
+    [[ "$output" == *"(4 个功能)"* ]] || test_fail "network domain command count should be visible"
     [[ "$output" == *"服务管理"* ]] || test_fail "registered service domain should be visible"
     [[ "$output" == *"(1 个功能)"* ]] || test_fail "service domain command count should be visible"
 

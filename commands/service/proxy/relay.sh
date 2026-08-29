@@ -75,6 +75,7 @@ proxy_relay_validate_file() {
             (.listen_port_start | port) and (.listen_port_end | port) and
             (.listen_port_start <= .listen_port_end) and
             (.network == "tcp" or .network == "udp" or .network == "both") and
+            ((has("family") | not) or .family == "dual" or .family == "ipv4" or .family == "ipv6") and
             (.publish_address | text) and
             ((.created_at | type) == "string") and ((.updated_at | type) == "string") and
             (.exit_id as $eid | any($root.exits[]; .id == $eid))
@@ -899,11 +900,15 @@ proxy_relay_forward_list() {
     fi
     proxy_relay_validate_file "$PROXY_RELAY_FILE" || return $?
     if ((json)); then
-        jq '. as $root | {schema_version:1,forwards:[.forwards[] as $f |
+        jq 'def literal_ip: test(":") or test("^([0-9]{1,3}\\.){3}[0-9]{1,3}$");
+            . as $root | {schema_version:1,forwards:[.forwards[] as $f |
             ([ $root.exits[] | select(.id == $f.exit_id) ][0]) as $e |
+            ($f.publish_address | literal_ip) as $publish_literal |
             {id:$f.id,name:$f.name,kind:"port-forward",exit:{id:$e.id,name:$e.name,type:$e.type,core:$e.core,profile:$e.profile},
              listen_port_start:$f.listen_port_start,listen_port_end:$f.listen_port_end,
-             network:$f.network,publish_address:$f.publish_address,target:$e.endpoint,
+             network:$f.network,family:($f.family // "dual"),publish_address:$f.publish_address,target:$e.endpoint,
+             publish_address_dns_managed_externally:($publish_literal | not),
+             publish_address_note:(if $publish_literal then "" else "发布域名的 DNS 记录由用户负责" end),
              has_uri_template:($e.type == "protocol"),created_at:$f.created_at,updated_at:$f.updated_at}
         ]}' "$PROXY_RELAY_FILE"
         return
@@ -911,8 +916,9 @@ proxy_relay_forward_list() {
     local forward exit
     while IFS= read -r forward; do
         exit="$(proxy_relay_exit "$(jq -r '.exit_id' <<<"$forward")")" || continue
-        printf '%s  %s  [端口转发/%s]  %s:%s-%s -> %s:%s  出口=%s\n' \
+        printf '%s  %s  [端口转发/%s/%s]  %s:%s-%s -> %s:%s  出口=%s\n' \
             "$(jq -r '.id' <<<"$forward")" "$(jq -r '.name' <<<"$forward")" "$(jq -r '.network' <<<"$forward")" \
+            "$(jq -r '.family // "dual"' <<<"$forward")" \
             "$(jq -r '.publish_address' <<<"$forward")" "$(jq -r '.listen_port_start' <<<"$forward")" \
             "$(jq -r '.listen_port_end' <<<"$forward")" "$(jq -r '.endpoint.host' <<<"$exit")" \
             "$(jq -r '.endpoint.port' <<<"$exit")" "$(jq -r '.name' <<<"$exit")"
@@ -920,12 +926,13 @@ proxy_relay_forward_list() {
 }
 
 proxy_relay_forward_show() {
-    local id="" show_uris=0 arg forward exit start end port publish uri
+    local id="" show_uris=0 json=0 arg forward exit start end port publish uri publish_literal=false
     while (($#)); do
         arg="$1"
         case "$arg" in
             --id) (($# >= 2)) || return 2; id="$2"; shift 2; continue ;;
             --uris) show_uris=1 ;;
+            --json) json=1 ;;
             *) vps_cmd_error "relay forward show 的未知选项：$arg"; return 2 ;;
         esac
         shift
@@ -935,6 +942,7 @@ proxy_relay_forward_show() {
     proxy_ensure_tools relay-forward-show jq base64 || return $?
     forward="$(proxy_relay_forward "$id")" || { vps_cmd_error "未找到端口转发：$id"; return 3; }
     exit="$(proxy_relay_exit "$(jq -r '.exit_id' <<<"$forward")")" || return 10
+    ((show_uris == 0 || json == 0)) || { vps_cmd_error "--uris 与 --json 不能同时使用"; return 2; }
     if ((show_uris)); then
         [[ "$(jq -r '.type' <<<"$exit")" == protocol ]] || { vps_cmd_error "直连出口没有 URI 模板"; return 3; }
         publish="$(jq -r '.publish_address' <<<"$forward")"
@@ -946,17 +954,39 @@ proxy_relay_forward_show() {
         done
         return
     fi
+    if ((json)); then
+        if _proxy_relay_forward_address_family "$(jq -r '.publish_address' <<<"$forward")" >/dev/null 2>&1; then
+            publish_literal=true
+        fi
+        jq -n --argjson forward "$forward" --argjson exit "$exit" --argjson publish_literal "$publish_literal" '
+            {schema_version:1,forward:{
+                id:$forward.id,name:$forward.name,kind:"port-forward",
+                exit:{id:$exit.id,name:$exit.name,type:$exit.type,core:$exit.core,profile:$exit.profile},
+                listen_port_start:$forward.listen_port_start,listen_port_end:$forward.listen_port_end,
+                network:$forward.network,family:($forward.family // "dual"),
+                publish_address:$forward.publish_address,target:$exit.endpoint,
+                publish_address_dns_managed_externally:($publish_literal | not),
+                publish_address_note:(if $publish_literal then "" else "发布域名的 DNS 记录由用户负责" end),
+                has_uri_template:($exit.type == "protocol"),
+                created_at:$forward.created_at,updated_at:$forward.updated_at
+            }}'
+        return
+    fi
     printf '端口转发详情\n  名称：%s\n  ID：%s\n  类型：端口转发\n  出口：%s（%s）\n' \
         "$(jq -r '.name' <<<"$forward")" "$id" "$(jq -r '.name' <<<"$exit")" "$(jq -r '.id' <<<"$exit")"
-    printf '  发布：%s:%s-%s/%s\n  目标：%s:%s\n  URI 模板：%s\n' \
+    printf '  发布：%s:%s-%s/%s\n  地址族：%s\n  目标：%s:%s\n  URI 模板：%s\n' \
         "$(jq -r '.publish_address' <<<"$forward")" "$(jq -r '.listen_port_start' <<<"$forward")" \
         "$(jq -r '.listen_port_end' <<<"$forward")" "$(jq -r '.network' <<<"$forward")" \
+        "$(jq -r '.family // "dual"' <<<"$forward")" \
         "$(jq -r '.endpoint.host' <<<"$exit")" "$(jq -r '.endpoint.port' <<<"$exit")" \
         "$([[ "$(jq -r '.type' <<<"$exit")" == protocol ]] && printf '可用（使用 --uris 展开）' || printf '无')"
+    if ! _proxy_relay_forward_address_family "$(jq -r '.publish_address' <<<"$forward")" >/dev/null 2>&1; then
+        printf '  发布地址提示：域名 DNS 记录由用户负责\n'
+    fi
 }
 
 proxy_relay_forward_add() (
-    local name="" exit_id="" ports="" network="auto" address="" arg exit id now item candidate status=0
+    local name="" exit_id="" ports="" network="auto" family="dual" address="" arg exit id now item candidate status=0
     while (($#)); do
         arg="$1"
         case "$arg" in
@@ -964,6 +994,7 @@ proxy_relay_forward_add() (
             --exit-id) (($# >= 2)) || return 2; exit_id="$2"; shift 2; continue ;;
             --listen-ports) (($# >= 2)) || return 2; ports="$2"; shift 2; continue ;;
             --network) (($# >= 2)) || return 2; network="$2"; shift 2; continue ;;
+            --family) (($# >= 2)) || return 2; family="$2"; shift 2; continue ;;
             --address) (($# >= 2)) || return 2; address="$2"; shift 2; continue ;;
             *) vps_cmd_error "relay forward add 的未知选项：$arg"; return 2 ;;
         esac
@@ -972,6 +1003,7 @@ proxy_relay_forward_add() (
     proxy_valid_name "$name" || { vps_cmd_error "端口转发名称无效"; return 2; }
     proxy_relay_parse_port_range "$ports" || return $?
     case "$network" in auto | tcp | udp | both) ;; *) vps_cmd_error "--network 仅支持 auto|tcp|udp|both"; return 2 ;; esac
+    case "$family" in dual | ipv4 | ipv6) ;; *) vps_cmd_error "--family 仅支持 dual|ipv4|ipv6"; return 2 ;; esac
     proxy_relay_prepare_state || return $?
     proxy_stop_after_dependency_plan && return 0
     proxy_ensure_mutation_tools relay-forward jq openssl nft ip getent || return $?
@@ -985,15 +1017,16 @@ proxy_relay_forward_add() (
         network="$(jq -r '.network_hint' <<<"$exit")"
     fi
     address="${address:-$(proxy_default_address)}"
-    proxy_valid_host "$address" || { vps_cmd_error "无法探测或验证发布地址，请使用 --address"; return 2; }
+    _proxy_relay_forward_valid_host_value "$address" || { vps_cmd_error "无法探测或验证发布地址，请使用有效的 IP 或 DNS 主机名"; return 2; }
+    proxy_relay_forward_validate_family_candidate "$family" "$(jq -r '.endpoint.host' <<<"$exit")" "$address" || return $?
     proxy_relay_name_available forwards "$name" || return $?
     id="$(proxy_relay_generate_id forward)" || return $?
     now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     item="$(jq -cn --arg id "$id" --arg name "$name" --arg exit "$exit_id" \
         --argjson start "$PROXY_RELAY_PORT_START" --argjson end "$PROXY_RELAY_PORT_END" \
-        --arg network "$network" --arg address "$address" --arg now "$now" '
+        --arg network "$network" --arg family "$family" --arg address "$address" --arg now "$now" '
         {id:$id,name:$name,exit_id:$exit,listen_port_start:$start,listen_port_end:$end,
-         network:$network,publish_address:$address,created_at:$now,updated_at:$now}')" || return 10
+         network:$network,family:$family,publish_address:$address,created_at:$now,updated_at:$now}')" || return 10
     vps_cmd_lock proxy || return $?
     trap 'vps_cmd_unlock' EXIT
     proxy_recover_transaction || return $?
@@ -1010,7 +1043,7 @@ proxy_relay_forward_add() (
 )
 
 proxy_relay_forward_edit() (
-    local id="" name="" exit_id="" ports="" network="" address="" arg explicit=0
+    local id="" name="" exit_id="" ports="" network="" family="" address="" arg explicit=0
     local old current exit candidate updated now status=0
     while (($#)); do
         arg="$1"
@@ -1020,6 +1053,7 @@ proxy_relay_forward_edit() (
             --exit-id) (($# >= 2)) || return 2; exit_id="$2"; explicit=1; shift 2; continue ;;
             --listen-ports) (($# >= 2)) || return 2; ports="$2"; explicit=1; shift 2; continue ;;
             --network) (($# >= 2)) || return 2; network="$2"; explicit=1; shift 2; continue ;;
+            --family) (($# >= 2)) || return 2; family="$2"; explicit=1; shift 2; continue ;;
             --address) (($# >= 2)) || return 2; address="$2"; explicit=1; shift 2; continue ;;
             *) vps_cmd_error "relay forward edit 的未知选项：$arg"; return 2 ;;
         esac
@@ -1034,24 +1068,27 @@ proxy_relay_forward_edit() (
     name="${name:-$(jq -r '.name' <<<"$old")}"
     exit_id="${exit_id:-$(jq -r '.exit_id' <<<"$old")}"
     network="${network:-$(jq -r '.network' <<<"$old")}"
+    family="${family:-$(jq -r '.family // "dual"' <<<"$old")}"
     address="${address:-$(jq -r '.publish_address' <<<"$old")}"
     if [[ -n "$ports" ]]; then proxy_relay_parse_port_range "$ports" || return $?; else
         PROXY_RELAY_PORT_START="$(jq -r '.listen_port_start' <<<"$old")"
         PROXY_RELAY_PORT_END="$(jq -r '.listen_port_end' <<<"$old")"
     fi
-    if ! proxy_valid_name "$name" || ! proxy_valid_host "$address"; then vps_cmd_error "名称或发布地址无效"; return 2; fi
+    if ! proxy_valid_name "$name" || ! _proxy_relay_forward_valid_host_value "$address"; then vps_cmd_error "名称或发布地址无效"; return 2; fi
     case "$network" in auto | tcp | udp | both) ;; *) vps_cmd_error "网络模式无效"; return 2 ;; esac
+    case "$family" in dual | ipv4 | ipv6) ;; *) vps_cmd_error "地址族模式无效"; return 2 ;; esac
     exit="$(proxy_relay_exit "$exit_id")" || { vps_cmd_error "未找到出口：$exit_id"; return 3; }
     if [[ "$network" == auto ]]; then
         [[ "$(jq -r '.type' <<<"$exit")" == protocol ]] || { vps_cmd_error "直连出口不能使用 auto 网络"; return 2; }
         network="$(jq -r '.network_hint' <<<"$exit")"
     fi
+    proxy_relay_forward_validate_family_candidate "$family" "$(jq -r '.endpoint.host' <<<"$exit")" "$address" || return $?
     proxy_relay_name_available forwards "$name" "$id" || return $?
     now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     updated="$(jq --arg name "$name" --arg exit "$exit_id" --argjson start "$PROXY_RELAY_PORT_START" \
-        --argjson end "$PROXY_RELAY_PORT_END" --arg network "$network" --arg address "$address" --arg now "$now" '
+        --argjson end "$PROXY_RELAY_PORT_END" --arg network "$network" --arg family "$family" --arg address "$address" --arg now "$now" '
         .name=$name | .exit_id=$exit | .listen_port_start=$start | .listen_port_end=$end |
-        .network=$network | .publish_address=$address | .updated_at=$now
+        .network=$network | .family=$family | .publish_address=$address | .updated_at=$now
     ' <<<"$old")" || return 10
     vps_cmd_lock proxy || return $?
     trap 'vps_cmd_unlock' EXIT
@@ -1166,6 +1203,10 @@ proxy_relay_status() {
     if declare -F proxy_relay_forward_runtime_status >/dev/null 2>&1; then
         runtime="$(proxy_relay_forward_runtime_status 2>/dev/null || printf '%s' "$runtime")"
     fi
+    runtime="$(jq -c '
+        . + {partial_dual:any((.degraded // [])[]?;
+            ((.retained // false) == false) and ((.family // "") != ""))}
+    ' <<<"$runtime")" || return 10
     while IFS= read -r exit; do
         [[ -n "$exit" ]] || continue
         if ! proxy_core_registered "$(jq -r '.core' <<<"$exit")"; then
@@ -1201,12 +1242,15 @@ proxy_relay_status() {
         "$([[ "$(jq -r '.active // false' <<<"$runtime")" == true ]] && printf '运行中' || printf '未运行')" \
         "$([[ "$(jq -r '.enabled // false' <<<"$runtime")" == true ]] && printf '已启用' || printf '未启用')"
     if [[ "$(jq -r '(.degraded // []) | length' <<<"$runtime")" != 0 ]]; then
-        printf '  DNS 状态：degraded\n'
+        if [[ "$(jq -r '.partial_dual // false' <<<"$runtime")" == true ]]; then
+            printf '  双栈状态：partial（至少一条 dual 转发仅部署单一地址族）\n'
+        fi
+        printf '  解析/地址族状态：degraded\n'
         jq -r '.degraded[]? | "    - " + ((.host // .exit_id // "runtime") | tostring) +
             (if (.family // "") == "" then "" else "/" + .family end) + ": " + (.reason // "unknown") +
             (if (.retained // false) then "（保留最后可用地址）" else "" end)' <<<"$runtime"
     else
-        printf '  DNS 状态：正常\n'
+        printf '  解析/地址族状态：正常\n'
     fi
     if [[ "$(jq -r 'length' <<<"$unverified")" != 0 ]]; then
         printf '  尚未二进制验证的协议出口：\n'
@@ -1254,7 +1298,7 @@ proxy_relay_select_forward() {
     local -a choices=()
     while IFS= read -r forward; do
         id="$(jq -r '.id' <<<"$forward")"
-        choices+=("$id" "$(jq -r '.name' <<<"$forward")（$(jq -r '.listen_port_start' <<<"$forward")-$(jq -r '.listen_port_end' <<<"$forward")/$(jq -r '.network' <<<"$forward")）")
+        choices+=("$id" "$(jq -r '.name' <<<"$forward")（$(jq -r '.listen_port_start' <<<"$forward")-$(jq -r '.listen_port_end' <<<"$forward")/$(jq -r '.network' <<<"$forward")/$(jq -r '.family // "dual"' <<<"$forward")）")
     done < <(jq -c '.forwards[]?' "$PROXY_RELAY_FILE" 2>/dev/null)
     ((${#choices[@]} > 0)) || { vps_cmd_error "没有可选端口转发"; return 3; }
     proxy_prompt_select "$prompt" "" "${choices[@]}"
@@ -1337,14 +1381,15 @@ proxy_relay_bind_menu_run() {
 }
 
 proxy_relay_menu_forward_add() {
-    local name exit_id ports network address
+    local name exit_id ports network family address
     name="$(proxy_prompt_value "端口转发名称" "")" || return $?
     exit_id="$(proxy_relay_select_exit "请选择出口")" || return $?
     ports="$(proxy_prompt_value "本机入口端口（PORT 或 START-END）" "")" || return $?
     network="$(proxy_prompt_select "转发网络" auto auto "按协议自动推荐" tcp TCP udp UDP both "TCP + UDP")" || return $?
+    family="$(proxy_prompt_select "地址族" dual dual "IPv4 + IPv6（可用族）" ipv4 "仅 IPv4" ipv6 "仅 IPv6")" || return $?
     address="$(proxy_default_address)"
     address="$(proxy_prompt_value "发布地址（写入新节点 URI）" "$address")" || return $?
-    proxy_relay_forward_add --name "$name" --exit-id "$exit_id" --listen-ports "$ports" --network "$network" --address "$address"
+    proxy_relay_forward_add --name "$name" --exit-id "$exit_id" --listen-ports "$ports" --network "$network" --family "$family" --address "$address"
 }
 
 proxy_relay_menu_forward_show() {
@@ -1358,12 +1403,13 @@ proxy_relay_menu_forward_edit() {
     local id forward field value
     id="$(proxy_relay_select_forward "请选择要编辑的端口转发")" || return $?
     forward="$(proxy_relay_forward "$id")" || return 3
-    field="$(proxy_prompt_select "编辑字段" ports name "名称" exit "出口" ports "入口端口范围" network "TCP/UDP" address "发布地址")" || return $?
+    field="$(proxy_prompt_select "编辑字段" ports name "名称" exit "出口" ports "入口端口范围" network "TCP/UDP" family "地址族" address "发布地址")" || return $?
     case "$field" in
         name) value="$(proxy_prompt_value "新名称" "$(jq -r '.name' <<<"$forward")")" || return $?; proxy_relay_forward_edit --id "$id" --name "$value" ;;
         exit) value="$(proxy_relay_select_exit "请选择新出口")" || return $?; proxy_relay_forward_edit --id "$id" --exit-id "$value" ;;
         ports) value="$(proxy_prompt_value "新入口端口范围" "$(jq -r '.listen_port_start' <<<"$forward")-$(jq -r '.listen_port_end' <<<"$forward")")" || return $?; proxy_relay_forward_edit --id "$id" --listen-ports "$value" ;;
         network) value="$(proxy_prompt_select "转发网络" "$(jq -r '.network' <<<"$forward")" tcp TCP udp UDP both "TCP + UDP")" || return $?; proxy_relay_forward_edit --id "$id" --network "$value" ;;
+        family) value="$(proxy_prompt_select "地址族" "$(jq -r '.family // "dual"' <<<"$forward")" dual "IPv4 + IPv6（可用族）" ipv4 "仅 IPv4" ipv6 "仅 IPv6")" || return $?; proxy_relay_forward_edit --id "$id" --family "$value" ;;
         address) value="$(proxy_prompt_value "新发布地址" "$(jq -r '.publish_address' <<<"$forward")")" || return $?; proxy_relay_forward_edit --id "$id" --address "$value" ;;
     esac
 }
