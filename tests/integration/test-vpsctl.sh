@@ -36,7 +36,7 @@ test_cli() {
     local output status option
 
     output="$("${VPSCTL[@]}" --version)"
-    test_contains "$output" "vpsctl 0.4.0" "version output"
+    test_contains "$output" "vpsctl 0.5.0" "version output"
 
     output="$("${VPSCTL[@]}" --help)"
     test_contains "$output" "<domain> <action>" "help command model"
@@ -68,6 +68,8 @@ test_cli() {
     test_contains "$output" "network rfw" "RFW command listing"
     test_contains "$output" "security access" "access command listing"
     test_contains "$output" "service proxy" "proxy command listing"
+    test_contains "$output" "test nodequality" "NodeQuality command listing"
+    test_contains "$output" "test tcpquality" "TCPQuality command listing"
 
     for option in --dry-run --install-deps --yes --non-interactive --quiet --verbose; do
         status=0
@@ -101,13 +103,50 @@ test_dispatch_security() {
 
     [[ "$(uname -s)" == "Linux" ]] || return 0
     sandbox="$(mktemp -d)"
-    mkdir -p "$sandbox/bin" "$sandbox/lib" "$sandbox/commands/network" "$sandbox/commands/security" "$sandbox/commands/service/proxy"
+    mkdir -p "$sandbox/bin" "$sandbox/lib" "$sandbox/commands/network" "$sandbox/commands/security" "$sandbox/commands/service/proxy" "$sandbox/commands/test"
     cp "$TEST_ROOT/bin/vpsctl" "$sandbox/bin/vpsctl"
     cp "$TEST_ROOT"/lib/*.sh "$sandbox/lib/"
     cat >>"$sandbox/lib/environment.sh" <<'EOF'
 
 # Make dispatch capability checks hermetic: this fixture deliberately exposes
 # Linux and no init/service capability, regardless of the integration host.
+vps_env_detect() {
+    VPS_ENV[hostname]="fixture"
+    VPS_ENV[user]="fixture"
+    VPS_ENV[session]="non-interactive"
+    VPS_ENV[interactive]="no"
+    VPS_ENV[kernel_name]="Linux"
+    VPS_ENV[kernel_release]="fixture"
+    VPS_ENV[architecture]="x86_64"
+    VPS_ENV[os_id]="fixture"
+    VPS_ENV[os_id_like]=""
+    VPS_ENV[os_version_id]="1"
+    VPS_ENV[os_codename]="fixture"
+    VPS_ENV[os_pretty_name]="Fixture Linux"
+    VPS_ENV[bash_version]="${BASH_VERSION}"
+    VPS_ENV[cpu_model]="fixture"
+    VPS_ENV[cpu_cores]="1"
+    VPS_ENV[memory_total]="1.0 GiB"
+    VPS_ENV[uptime]="1 分钟"
+    VPS_ENV[root_disk_total]="1.0 GiB"
+    VPS_ENV[root_disk_available]="1.0 GiB"
+    VPS_ENV[root_disk_used_percent]="0%"
+    VPS_ENV[ipv4]="192.0.2.1"
+    VPS_ENV[ipv6]="unavailable"
+    VPS_ENV[init_system]="none"
+    VPS_ENV[service_manager]="none"
+    VPS_ENV[package_manager]="unknown"
+    VPS_ENV[timezone]="UTC"
+    VPS_ENV[virtualization]="unknown"
+    VPS_ENV[is_root]="no"
+    VPS_ENV[bbr_status]="disabled"
+    VPS_ENV[bbr_version]="unavailable"
+    VPS_ENV[congestion_control]="unknown"
+    VPS_ENV[available_congestion_controls]="unknown"
+    VPS_ENV[compatibility]="limited"
+    VPS_ENV[compatibility_detail]="fixture"
+}
+
 vps_env_requirements_met() {
     VPS_ENV_MISSING_REQUIREMENTS=""
     if [[ "${1:-}" == "linux" ]]; then
@@ -154,6 +193,18 @@ EOF
         chmod 0644 "$sandbox/commands/service/proxy/${module}.sh"
     done
     chmod 0644 "$sandbox/commands/service/proxy.sh"
+
+    cat >"$sandbox/commands/test/nodequality.sh" <<'EOF'
+#!/usr/bin/env bash
+printf 'nodequality_args=%s\n' "$*"
+[[ -z "${VPSCTL_DISPATCH_MARKER:-}" ]] || printf 'nodequality:%s\n' "$*" >>"$VPSCTL_DISPATCH_MARKER"
+EOF
+    cat >"$sandbox/commands/test/tcpquality.sh" <<'EOF'
+#!/usr/bin/env bash
+printf 'tcpquality_args=%s\n' "$*"
+[[ -z "${VPSCTL_DISPATCH_MARKER:-}" ]] || printf 'tcpquality:%s\n' "$*" >>"$VPSCTL_DISPATCH_MARKER"
+EOF
+    chmod 0644 "$sandbox/commands/test/nodequality.sh" "$sandbox/commands/test/tcpquality.sh"
 
     output="$(bash "$sandbox/bin/vpsctl" --no-color network bbr status)"
     test_contains "$output" "no_color=1" "no-color child context"
@@ -203,7 +254,21 @@ EOF
     output="$(VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" service proxy time status --json)"
     test_contains "$output" "proxy_args=time status --json" "proxy JSON time status dispatch without service capability"
 
+    output="$(VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" test nodequality help)"
+    test_contains "$output" "nodequality_args=help" "NodeQuality help dispatch without root capability"
+    output="$(VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" test tcpquality --help)"
+    test_contains "$output" "tcpquality_args=--help" "TCPQuality help dispatch without root capability"
+
     rm -f -- "$marker"
+    status=0
+    VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" test nodequality >/dev/null 2>&1 || status=$?
+    [[ "$status" == "4" ]] || test_fail "NodeQuality execution without root capability should return 4, got ${status}"
+    [[ ! -e "$marker" ]] || test_fail "NodeQuality execution bypassed the root capability gate"
+    status=0
+    VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" test tcpquality help extra >/dev/null 2>&1 || status=$?
+    [[ "$status" == "4" ]] || test_fail "malformed TCPQuality help without root capability should return 4, got ${status}"
+    [[ ! -e "$marker" ]] || test_fail "malformed TCPQuality help bypassed the root capability gate"
+
     status=0
     VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" --dry-run network rfw install >/dev/null 2>&1 || status=$?
     [[ "$status" == "3" ]] || test_fail "RFW dry-run install without init capability should return 3, got ${status}"

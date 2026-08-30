@@ -9,7 +9,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 umask 022
 
-readonly VPSCTL_VERSION="0.4.0"
+readonly VPSCTL_VERSION="0.5.0"
 
 VPSCTL_DRY_RUN=0
 VPSCTL_INSTALL_DEPS=0
@@ -173,6 +173,12 @@ vpsctl_invocation_may_omit_requirement() {
     shift 2
 
     case "${command_key}:${requirement}" in
+        test:nodequality:root | test:tcpquality:root)
+            (($# == 1)) || return 1
+            case "$1" in
+                help | -h | --help) return 0 ;;
+            esac
+            ;;
         network:rfw:init:systemd)
             (($# == 1)) || return 1
             case "$1" in
@@ -254,7 +260,8 @@ vpsctl_validate_command_ready() {
     privilege="${VPS_COMMAND_PRIVILEGE[$command_key]}"
     requirements="$(vpsctl_invocation_requirements "$command_key" "$@")"
 
-    if [[ "$privilege" == "root" && "${VPS_ENV[is_root]}" != "yes" ]]; then
+    if [[ "$privilege" == "root" && "${VPS_ENV[is_root]}" != "yes" ]] && \
+        ! vpsctl_invocation_may_omit_requirement "$command_key" root "$@"; then
         vpsctl_error "${command_key} 需要 root 权限"
         return 4
     fi

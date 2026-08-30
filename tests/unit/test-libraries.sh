@@ -100,11 +100,12 @@ test_environment_chinese_fallbacks() {
 test_registry() {
     vps_registry_init
 
-    test_assert_equal "3" "${#VPS_DOMAIN_IDS[@]}" "registered domain count"
-    test_assert_equal "6" "${#VPS_COMMAND_KEYS[@]}" "registered command count"
+    test_assert_equal "4" "${#VPS_DOMAIN_IDS[@]}" "registered domain count"
+    test_assert_equal "8" "${#VPS_COMMAND_KEYS[@]}" "registered command count"
     test_assert_equal "network" "${VPS_DOMAIN_IDS[0]}" "network domain id"
     test_assert_equal "security" "${VPS_DOMAIN_IDS[1]}" "security domain id"
     test_assert_equal "service" "${VPS_DOMAIN_IDS[2]}" "service domain id"
+    test_assert_equal "test" "${VPS_DOMAIN_IDS[3]}" "server-test domain id"
     test_assert_equal "commands/network/bbr.sh" "${VPS_COMMAND_PATH["network:bbr"]}" "BBR command path"
     test_assert_equal "commands/network/dns.sh" "${VPS_COMMAND_PATH["network:dns"]}" "DNS command path"
     test_assert_equal "commands/network/ip-policy.sh" "${VPS_COMMAND_PATH["network:ip-policy"]}" "IP policy command path"
@@ -127,29 +128,39 @@ test_registry() {
     test_assert_equal "disruptive" "${VPS_COMMAND_RISK["service:proxy"]}" "proxy risk"
     test_assert_equal "optional-root" "${VPS_COMMAND_PRIVILEGE["service:proxy"]}" "proxy privilege"
     test_assert_equal "linux,service:any" "${VPS_COMMAND_REQUIREMENTS["service:proxy"]}" "proxy requirements"
+    test_assert_equal "commands/test/nodequality.sh" "${VPS_COMMAND_PATH["test:nodequality"]}" "NodeQuality command path"
+    test_assert_equal "disruptive" "${VPS_COMMAND_RISK["test:nodequality"]}" "NodeQuality risk"
+    test_assert_equal "root" "${VPS_COMMAND_PRIVILEGE["test:nodequality"]}" "NodeQuality privilege"
+    test_assert_equal "unsupported" "${VPS_COMMAND_DRY_RUN["test:nodequality"]}" "NodeQuality dry-run"
+    test_assert_equal "linux,root" "${VPS_COMMAND_REQUIREMENTS["test:nodequality"]}" "NodeQuality requirements"
+    test_assert_equal "commands/test/tcpquality.sh" "${VPS_COMMAND_PATH["test:tcpquality"]}" "TCPQuality command path"
+    test_assert_equal "disruptive" "${VPS_COMMAND_RISK["test:tcpquality"]}" "TCPQuality risk"
+    test_assert_equal "root" "${VPS_COMMAND_PRIVILEGE["test:tcpquality"]}" "TCPQuality privilege"
+    test_assert_equal "unsupported" "${VPS_COMMAND_DRY_RUN["test:tcpquality"]}" "TCPQuality dry-run"
+    test_assert_equal "linux,root" "${VPS_COMMAND_REQUIREMENTS["test:tcpquality"]}" "TCPQuality requirements"
 
     vps_registry_register_domain \
-        "test" \
+        "fixture" \
         "Test" \
         "Test-only domain"
 
     vps_registry_register_command \
-        "test" \
+        "fixture" \
         "inspect" \
         "Inspect" \
         "Read local system information" \
-        "commands/test/inspect.sh" \
+        "commands/fixture/inspect.sh" \
         "read-only" \
         "user" \
         "not-applicable" \
         "linux" \
         "experimental"
 
-    vps_registry_has_command "test:inspect" || test_fail "registered command is not discoverable"
-    test_assert_equal "commands/test/inspect.sh" "${VPS_COMMAND_PATH["test:inspect"]}" "registered path"
+    vps_registry_has_command "fixture:inspect" || test_fail "registered command is not discoverable"
+    test_assert_equal "commands/fixture/inspect.sh" "${VPS_COMMAND_PATH["fixture:inspect"]}" "registered path"
 
     if vps_registry_register_command \
-        "test" "unsafe" "Unsafe" "Unsafe path test" \
+        "fixture" "unsafe" "Unsafe" "Unsafe path test" \
         "../unsafe.sh" "read-only" "user" "not-applicable" "none" "experimental" 2>/dev/null; then
         test_fail "unsafe command path should be rejected"
     fi
@@ -165,6 +176,8 @@ test_ui_input() {
     [[ "$output" == *"安全与访问"* ]] || test_fail "registered security domain should be visible"
     [[ "$output" == *"服务管理"* ]] || test_fail "registered service domain should be visible"
     [[ "$output" == *"(1 个功能)"* ]] || test_fail "service domain command count should be visible"
+    [[ "$output" == *"服务器测试"* ]] || test_fail "registered server-test domain should be visible"
+    [[ "$output" == *"(2 个功能)"* ]] || test_fail "server-test domain command count should be visible"
 
     VPS_UI_GREEN="<绿>"
     VPS_UI_YELLOW="<黄>"

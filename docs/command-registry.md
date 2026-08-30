@@ -25,7 +25,7 @@
 
 ## 2. 已登记命令清单
 
-0.4.0 登记以下网络、安全与服务入口。状态列描述接口生命周期，不表示已经完成真实 VPS 或 VM 验证；隔离环境验收要求见[网络设置](network-settings.md)、[访问管理](access-management.md)和[代理管理](proxy-management.md)。
+0.5.0 登记以下网络、安全、服务与服务器测试入口。状态列描述接口生命周期，不表示已经完成真实 VPS 或 VM 验证；隔离环境验收要求见[网络设置](network-settings.md)、[访问管理](access-management.md)、[代理管理](proxy-management.md)和[服务器测试](server-testing.md)。
 
 | 命令 | 文件 | 摘要 | 风险 | 权限 | 演练 | 能力要求 | 状态 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -35,12 +35,14 @@
 | `network rfw` | `commands/network/rfw.sh` | 安装、配置和管理 RFW systemd 服务 | `disruptive` | `optional-root` | `supported` | `linux,init:systemd` | `experimental` |
 | `security access` | `commands/security/access.sh` | 管理用户、密码、公钥与可验证恢复的 SSH 访问变更 | `disruptive` | `optional-root` | `supported` | `linux,init:systemd` | `experimental` |
 | `service proxy` | `commands/service/proxy.sh` | 平级管理 Xray 与 sing-box 内核、节点、日志和时间同步 | `disruptive` | `optional-root` | `supported` | `linux,service:any` | `experimental` |
+| `test nodequality` | `commands/test/nodequality.sh` | 运行 NodeQuality 服务器综合质量测试 | `disruptive` | `root` | `unsupported` | `linux,root` | `experimental` |
+| `test tcpquality` | `commands/test/tcpquality.sh` | 运行 TcpQuality TCP 网络质量测试 | `disruptive` | `root` | `unsupported` | `linux,root` | `experimental` |
 
 `optional-root` 表示只读查询、帮助或部分计划阶段可以普通用户运行；实际系统变更仍须 root 或在具体步骤提权。依赖只在当前动作实际需要且确实缺失时处理：真实执行的交互模式列出缺失项并询问是否安装，非交互模式和 `--dry-run` 依赖计划必须显式提供 `--install-deps`。`--dry-run --install-deps` 只展示安装计划，仍不写配置、不安装依赖、不启动或重启服务。
 
 主管理菜单选中登记功能后直接进入该功能 UI，不插入命令详情或二次运行页。封闭枚举由编号选择，开放值沿用命令参数校验；菜单真实执行动作，不暴露执行型全局参数、机器输出开关、`--force` 或 `--confirm-*` 标志。上述参数仅供直接功能 CLI；菜单中的危险动作使用对应交互确认及强确认短语。
 
-入口按“命令 + 完整子参数形状”计算本次调用的能力要求。`network rfw` 的无附加参数 `help`/`--help`/`-h` 与 `status` 在 Linux 上不要求 `init:systemd`；`service proxy` 的无附加参数 `help`/`--help`/`-h`、`profiles`、`status`，以及 `time status [--json]` 在 Linux 上不要求 `service:any`。这些是显式白名单中的只读例外，不会扩大到多余参数、安装、更新、卸载、服务控制、节点写操作、时间同步或它们的 `--dry-run` 调用；后者仍按完整注册能力门控。
+入口按“命令 + 完整子参数形状”计算本次调用的能力要求。`network rfw` 的无附加参数 `help`/`--help`/`-h` 与 `status` 在 Linux 上不要求 `init:systemd`；`service proxy` 的无附加参数 `help`/`--help`/`-h`、`profiles`、`status`，以及 `time status [--json]` 在 Linux 上不要求 `service:any`。`test nodequality` 和 `test tcpquality` 的单个 `help`/`--help`/`-h` 参数不要求 `root`，但仍保留 `linux` 能力要求。未列出的参数形状和两项测试的无参数真实执行不能使用这些例外；服务器测试完整边界见[服务器测试](server-testing.md)。
 
 `service proxy` 的 `service:any` 能力要求由入口解析为可用服务管理器，功能脚本会进一步限制为 systemd 或 OpenRC。注册表只登记公开入口 `commands/service/proxy.sh`；其 `commands/service/proxy/` 子模块是固定加载的私有实现，不单独登记，也不构成可直接分发的命令。交互菜单统一展示双核状态并按能力分组，通过状态筛选、枚举和编号选择解析内核或节点；订阅可选全部，或选择当前确有节点的 sing-box/Xray 范围。直接命令与非交互模式保留 `--core` 和 `--id` 作为精确消歧接口。帮助、协议矩阵和系统时间状态可由普通用户执行；内核状态与节点/订阅会读取受限状态文件，因此和安装、更新、卸载、服务控制、节点写操作及时间同步一样要求 root。重启、外部二进制原地更新与 `--purge` 另有不能被 `--yes` 绕过的强确认。完整接口见[代理管理](proxy-management.md)。
 

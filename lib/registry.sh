@@ -118,6 +118,11 @@ vps_registry_init() {
         "服务管理" \
         "按需安装并管理长期运行的系统服务"
 
+    vps_registry_register_domain \
+        "test" \
+        "服务器测试" \
+        "运行第三方服务器综合质量与 TCP 网络质量测试"
+
     vps_registry_register_command \
         "network" \
         "bbr" \
@@ -188,6 +193,30 @@ vps_registry_init() {
         "optional-root" \
         "supported" \
         "linux,service:any" \
+        "experimental"
+
+    vps_registry_register_command \
+        "test" \
+        "nodequality" \
+        "NodeQuality 综合测试" \
+        "运行 NodeQuality 服务器综合质量测试" \
+        "commands/test/nodequality.sh" \
+        "disruptive" \
+        "root" \
+        "unsupported" \
+        "linux,root" \
+        "experimental"
+
+    vps_registry_register_command \
+        "test" \
+        "tcpquality" \
+        "TcpQuality 网络测试" \
+        "运行 TcpQuality TCP 网络质量测试" \
+        "commands/test/tcpquality.sh" \
+        "disruptive" \
+        "root" \
+        "unsupported" \
+        "linux,root" \
         "experimental"
 }
 
