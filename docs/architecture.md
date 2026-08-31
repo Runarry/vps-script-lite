@@ -9,6 +9,7 @@
 3. 管理入口不承载业务逻辑；功能脚本之间不直接互相调用。
 4. 共享代码只提取稳定、通用的基础能力，避免形成难以追踪的隐式依赖。
 5. 配置、运行状态、日志和密钥与项目源码分离。
+6. 源码树运行与 Release 安装并存；安装态按分发版本隔离，领域代码只从同版本 Release 获取。
 
 ## 2. 目录结构
 
@@ -43,7 +44,7 @@ vps-script-lite/
 
 ### 3.1 管理入口
 
-入口文件为 `bin/vpsctl`。它只负责：
+源码树入口文件为 `bin/vpsctl`；安装后的固定快捷入口为 `/usr/local/bin/vpsctl`，并解析到当前分发版本的 core。管理入口只负责：
 
 - 解析全局参数，如日志级别、非交互模式和演练模式。
 - 将 `<domain> <action>` 映射到登记过的功能脚本。
@@ -89,12 +90,58 @@ vps-script-lite/
 - 隐式退出调用方进程。
 - 读取未声明的全局变量。
 
-### 3.4 配置与运行数据
+### 3.4 Release 分发与安装态
+
+源码树仍可直接运行 `bash bin/vpsctl`，用于开发、审阅和明确选择的源码部署场景。安装态采用以下固定布局：
+
+```text
+/usr/local/bin/vpsctl                         # 用户快捷入口
+/usr/local/lib/vpsctl/
+├── current                                  # 指向当前分发版本的原子切换指针
+└── releases/
+    └── <version>/                           # 单一不可变分发版本
+/var/lib/vpsctl/self/                        # 安装、自更新、资产缓存元数据
+```
+
+`core` 随每个分发版本常驻，必须足以完成启动、帮助、版本解析、固定登记、自管理和领域资产装载。`network`、`system`、`security`、`service` 与 `test` 是按领域发布的 bundle；首次分发某领域命令时，core 从当前版本对应的同一个 GitHub Release 下载 bundle，先按清单中的 SHA-256 校验，再写入该版本缓存并执行。校验失败、版本不匹配或资产缺失时不得执行已有临时文件，也不得回退到其他分发版本的 bundle。正常启动和菜单刷新均不检查更新，不应因为 GitHub 不可用而阻断已经缓存的功能。
+
+仓库根 `VERSION` 是分发版本的规范来源。分发版本 `0.1.0` 的 tag 为 `v0.1.0`，Release 必须同时包含：
+
+```text
+vpsctl.sh
+vpsctl-manifest.tsv
+vpsctl-core-0.1.0.tar.gz
+vpsctl-network-0.1.0.tar.gz
+vpsctl-system-0.1.0.tar.gz
+vpsctl-security-0.1.0.tar.gz
+vpsctl-service-0.1.0.tar.gz
+vpsctl-test-0.1.0.tar.gz
+```
+
+bundle 内部使用项目根相对路径，不能再包一层顶级目录。`vpsctl-manifest.tsv` 是严格 TSV，字段顺序如下；SHA-256 使用 64 位小写十六进制：
+
+```text
+schema_version<TAB>1
+version<TAB>0.1.0
+repository<TAB>Runarry/vps-script-lite
+asset<TAB>launcher<TAB>vpsctl.sh<TAB>SHA256
+bundle<TAB>core<TAB>vpsctl-core-0.1.0.tar.gz<TAB>SHA256
+bundle<TAB>network<TAB>vpsctl-network-0.1.0.tar.gz<TAB>SHA256
+bundle<TAB>system<TAB>vpsctl-system-0.1.0.tar.gz<TAB>SHA256
+bundle<TAB>security<TAB>vpsctl-security-0.1.0.tar.gz<TAB>SHA256
+bundle<TAB>service<TAB>vpsctl-service-0.1.0.tar.gz<TAB>SHA256
+bundle<TAB>test<TAB>vpsctl-test-0.1.0.tar.gz<TAB>SHA256
+```
+
+manifest 的 `version`、tag、文件名和安装目标版本必须一致。`current` 只在 manifest、core 及必要安装文件完成校验并落盘后切换；更新失败时保留原 current。这里的分发版本 `0.1.0` 与现有应用/功能版本 `0.5.0` 是不同维度，不得用分发版本回退功能文档或功能接口。
+
+### 3.5 配置与运行数据
 
 仓库中的 `config/` 只保存默认值、模式说明和脱敏示例。实际部署时建议使用：
 
 - 系统配置：`/etc/vpsctl/`
 - 持久状态：`/var/lib/vpsctl/`
+- self 元数据：`/var/lib/vpsctl/self/`
 - 运行锁：`/run/vpsctl/`
 - 日志：优先写入 systemd journal；确需文件时使用 `/var/log/vpsctl/`
 
@@ -115,6 +162,8 @@ vps-script-lite/
 
 管理入口应以子进程方式执行公开功能脚本，而不是加载其业务代码，以隔离参数、陷阱、工作目录和退出状态。公开功能脚本可以加载明确声明的公共库及自身同名目录中的固定私有模块；私有模块不得反向加载公开功能脚本或绕过入口自行分发。
 
+安装态的调用关系保持相同，只是 core 和领域代码来自 `/usr/local/lib/vpsctl/current` 指向的同一分发版本；源码树运行继续使用仓库内 `bin/`、`lib/` 和 `commands/`。领域下载与缓存属于 core 的装载职责，不改变功能脚本之间不得互相调用的边界。
+
 ## 5. 稳定边界
 
 以下内容一旦发布即视为公开接口：
@@ -124,5 +173,6 @@ vps-script-lite/
 - 标准输出中声明为机器可读的格式。
 - 退出码含义。
 - 配置键、环境变量和持久状态格式。
+- Release 资产命名、manifest schema、安装路径与 `vpsctl self` 命令语义。
 
 对公开接口的破坏性变更必须提供迁移说明，并在主版本升级时进行。

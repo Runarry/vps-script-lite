@@ -128,6 +128,11 @@ vps_registry_init() {
         "服务器测试" \
         "运行第三方服务器综合质量与 TCP 网络质量测试"
 
+    vps_registry_register_domain \
+        "self" \
+        "脚本管理" \
+        "查看分发状态，并安全更新或卸载 vpsctl"
+
     vps_registry_register_command \
         "network" \
         "bbr" \
@@ -247,6 +252,50 @@ vps_registry_init() {
         "unsupported" \
         "linux,root" \
         "experimental"
+
+    vps_registry_register_command \
+        "self" \
+        "status" \
+        "分发状态" \
+        "显示本地分发版本、缓存领域和受管路径（不访问网络）" \
+        "commands/self/status.sh" \
+        "read-only" \
+        "user" \
+        "not-applicable" \
+        "none" \
+        "stable"
+
+    vps_registry_register_command \
+        "self" \
+        "update" \
+        "更新脚本" \
+        "从官方 GitHub Release 验证并原子切换到新分发版本" \
+        "commands/self/update.sh" \
+        "change" \
+        "optional-root" \
+        "unsupported" \
+        "none" \
+        "stable"
+
+    vps_registry_register_command \
+        "self" \
+        "uninstall" \
+        "卸载脚本" \
+        "删除受管入口和 release；可选清除脚本自身状态" \
+        "commands/self/uninstall.sh" \
+        "destructive" \
+        "optional-root" \
+        "unsupported" \
+        "none" \
+        "stable"
+}
+
+vps_registry_distribution_domain() {
+    case "${1:-}" in
+        self) printf 'core' ;;
+        network | system | security | service | test) printf '%s' "$1" ;;
+        *) return 2 ;;
+    esac
 }
 
 vps_registry_has_command() {

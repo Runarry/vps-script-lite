@@ -6,6 +6,8 @@
 
 > 当前版本为 0.5.0，提供网络、系统内核、访问、代理与服务器测试入口。系统变更命令应先使用 `--dry-run` 并阅读对应恢复说明；内核变更需提前确认带外控制台或救援入口可用，服务器测试会下载并运行第三方代码、产生明显 CPU/磁盘/网络负载且不支持演练。
 
+这里的 `0.5.0` 是现有应用与功能版本。新的 GitHub Release 分发格式从分发版本 `0.1.0`（仓库根 `VERSION`、tag `v0.1.0`）开始，两套版本号用途不同；发布资产、安装目录和 `vpsctl self` 使用分发版本，不回退或改写现有功能版本。
+
 ## 文档
 
 - [架构与目录](docs/architecture.md)：组件边界、调用关系和目录用途。
@@ -20,7 +22,55 @@
 - [Fail2ban 管理](docs/fail2ban-management.md)：OpenSSH jail 的安装、均衡递增策略、白名单、验证和恢复。
 - [服务器测试](docs/server-testing.md)：NodeQuality 与 TcpQuality 的上游来源、负载、报告上传、清理和退出码边界。
 
-## 使用主管理脚本
+## 安装
+
+在受支持的 Linux VPS 的 root shell 中可使用一行命令安装最新 GitHub Release：
+
+```bash
+curl -fsSL https://github.com/Runarry/vps-script-lite/releases/latest/download/vpsctl.sh | bash
+```
+
+安装后使用快捷命令 `vpsctl`。启动 `vpsctl` 只读取本地已安装内容，不联网检查更新；需要查看或更新分发版本时显式运行：
+
+```text
+vpsctl self status
+vpsctl self update
+vpsctl self update --version v0.1.0
+```
+
+`curl | bash` 的初始执行信任边界包括 HTTPS、GitHub、仓库及 Release 发布权限，以及当前 `latest` 指向的 `vpsctl.sh`；同一 Release 中的校验清单只能在安装器已经开始执行后保护后续资产，不能倒过来证明安装器自身可信。更稳妥的方式是先下载安装器和清单，检查来源、版本、SHA-256 与脚本内容，再执行本地文件：
+
+```bash
+tmp_dir="$(mktemp -d)"
+base_url="https://github.com/Runarry/vps-script-lite/releases/download/v0.1.0"
+curl -fL "$base_url/vpsctl.sh" -o "$tmp_dir/vpsctl.sh"
+curl -fL "$base_url/vpsctl-manifest.tsv" -o "$tmp_dir/vpsctl-manifest.tsv"
+awk -F '\t' '$1 == "asset" && $2 == "launcher" { print $4 "  vpsctl.sh" }' \
+  "$tmp_dir/vpsctl-manifest.tsv" | (cd "$tmp_dir" && sha256sum -c -)
+less "$tmp_dir/vpsctl.sh"
+# 确认后在 root shell 中使用已校验的固定 tag manifest：
+bash "$tmp_dir/vpsctl.sh" --verified-manifest "$tmp_dir/vpsctl-manifest.tsv"
+```
+
+固定安装布局为：
+
+- 快捷入口：`/usr/local/bin/vpsctl`
+- 不可变版本目录：`/usr/local/lib/vpsctl/releases/<version>/`
+- 当前版本指针：`/usr/local/lib/vpsctl/current`
+- 安装器、自更新和分发缓存元数据：`/var/lib/vpsctl/self/`
+
+`core` 常驻安装；`network`、`system`、`security`、`service` 与 `test` 按领域拆分。首次调用某领域时，只从当前分发版本对应的同一个 GitHub Release 下载该领域资产，按 `vpsctl-manifest.tsv` 的 SHA-256 校验后缓存；不同版本的 core 与领域资产不得混用。
+
+卸载命令为：
+
+```text
+vpsctl self uninstall --confirm-uninstall
+vpsctl self uninstall --purge --confirm-uninstall --confirm-purge
+```
+
+普通卸载删除分发入口和已安装的分发文件，但不触碰 `/etc/vpsctl/`、功能状态与备份、各功能已经安装的组件或 `/usr/local/libexec/`。交互菜单会要求现场确认；非交互调用必须提供 `--confirm-uninstall`，purge 还必须提供 `--confirm-purge`，全局 `--yes` 不能替代这些非交互确认标志。`--purge` 具有相同的功能数据保护边界，只额外删除 `/var/lib/vpsctl/self/` 中的 self 元数据。
+
+## 从源码树运行主管理脚本
 
 在 Linux VPS、WSL 或其他 Bash 4.4+ 的 GNU/Linux 环境中运行：
 

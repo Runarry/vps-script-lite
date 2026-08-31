@@ -44,6 +44,7 @@ vpsctl_load_library() {
 }
 
 vpsctl_load_library "${VPSCTL_PROJECT_ROOT}/lib/environment.sh"
+vpsctl_load_library "${VPSCTL_PROJECT_ROOT}/lib/distribution.sh"
 vpsctl_load_library "${VPSCTL_PROJECT_ROOT}/lib/registry.sh"
 vpsctl_load_library "${VPSCTL_PROJECT_ROOT}/lib/ui.sh"
 
@@ -159,6 +160,7 @@ vpsctl_parse_global_options() {
 vpsctl_export_context() {
     export VPSCTL_PROJECT_ROOT VPSCTL_DRY_RUN VPSCTL_INSTALL_DEPS VPSCTL_ASSUME_YES
     export VPSCTL_NON_INTERACTIVE VPSCTL_QUIET VPSCTL_VERBOSE VPSCTL_NO_COLOR VPSCTL_CLEAR
+    export VPSCTL_DISTRIBUTED VPSCTL_INSTALL_ROOT VPSCTL_SELF_STATE_ROOT VPSCTL_MANAGED_ENTRY
     export VPSCTL_ENV_OS_ID="${VPS_ENV[os_id]}"
     export VPSCTL_ENV_OS_VERSION_ID="${VPS_ENV[os_version_id]}"
     export VPSCTL_ENV_ARCH="${VPS_ENV[architecture]}"
@@ -293,6 +295,12 @@ vpsctl_dispatch() {
     if ! vps_registry_has_command "$command_key"; then
         vpsctl_error "未知命令：${domain} ${action}"
         return 2
+    fi
+
+    if vps_distribution_ensure_domain "$(vps_registry_distribution_domain "$domain")"; then
+        :
+    else
+        return $?
     fi
 
     if vpsctl_validate_command_ready "$command_key" "$@"; then

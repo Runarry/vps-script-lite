@@ -2,7 +2,7 @@
 
 ## 1. 入口与运行模式
 
-主管理入口为 `bin/vpsctl`，支持两种等价的使用方式：
+源码树主管理入口为 `bin/vpsctl`，安装后的固定快捷入口为 `/usr/local/bin/vpsctl`（命令名 `vpsctl`）。两种入口保持相同的功能调用模型，并支持：
 
 - 交互模式：终端中不带参数运行，从主菜单直接进入所选功能自己的 UI。
 - 命令模式：使用 `vpsctl <domain> <action> [options]` 直接分发已登记功能。
@@ -16,12 +16,15 @@
 | `vpsctl env` | 重新检测并显示完整环境信息 |
 | `vpsctl list` | 列出已登记的功能命令 |
 | `vpsctl help` | 显示参数和调用说明 |
+| `vpsctl self status` | 只读显示本地运行模式、分发版本、受管路径及领域缓存状态 |
+| `vpsctl self update [--version vX.Y.Z]` | 显式更新到 latest 或指定分发版本 |
+| `vpsctl self uninstall [--purge] [--confirm-uninstall] [--confirm-purge]` | 卸载 vpsctl 分发文件；purge 只额外清除 self 元数据 |
 
-帮助和版本查询不会触发环境检测。`list` 会执行一次只读环境检测，并在每个登记项旁显示“可用”或“受限”。交互菜单不允许在 `--non-interactive` 或没有终端时运行，避免自动化任务意外等待输入。
+帮助和版本查询不会触发环境检测。`list` 会执行一次只读环境检测，并在每个登记项旁显示“可用”或“受限”。交互菜单不允许在 `--non-interactive` 或没有终端时运行，避免自动化任务意外等待输入。`self` 作为“脚本管理”领域固定登记，其实现由 core 常驻；源码树运行保持可用，`self status` 可说明当前运行模式，`self update` 与 `self uninstall` 只操作固定安装态。
 
 ## 2. 启动检测
 
-环境检测位于 `lib/environment.sh`，只执行本地只读操作，不访问公网、不运行 `sudo`、不修改系统。交互 UI 启动时检测一次；每个功能脚本返回菜单后再检测一次，使 BBR 等运行态变化立即反映在面板中。
+环境检测位于 `lib/environment.sh`，只执行本地只读操作，不访问公网、不运行 `sudo`、不修改系统。交互 UI 启动时检测一次；每个功能脚本返回菜单后再检测一次，使 BBR 等运行态变化立即反映在面板中。普通启动、环境面板、菜单刷新和功能返回均不得检查 GitHub 更新；只有显式 `vpsctl self update` 可以解析或下载新的分发版本。
 
 UI 显示以下摘要：
 
@@ -37,6 +40,8 @@ UI 显示以下摘要：
 检测结果同时转换为能力标识，例如 `linux`、`pkg:any`、`pkg:apt-get`、`init:systemd`、`service:any`、`root`、`ipv4`。注册命令可以声明能力要求，菜单和 `list` 会据此标记可用性，直接分发也会在运行前拦截不兼容命令。入口只对精确匹配的静态只读调用移除其不需要的运行时能力：RFW 的帮助和无参数状态不要求 systemd，代理的帮助、协议矩阵、无参数状态与系统时间状态不要求服务管理器，两项服务器测试的单个帮助参数不要求 root；Linux 等其余要求仍保留。访问管理当前整体要求 systemd，不声明 OpenRC SSH 编排例外。多余参数和任何真实测试或变更动作都不能使用这些例外。
 
 容器、WSL、未知发行版或缺少基础管理器时显示黄色“受限”；非 Linux 显示红色“不支持”；满足基础条件时显示绿色“支持”。该状态只是入口层的快速提示，功能脚本仍必须自行验证它实际需要的全部前置条件。
+
+安装态的 core 常驻在 `/usr/local/lib/vpsctl/releases/<version>/`，`/usr/local/lib/vpsctl/current` 指向当前分发版本。首次选择 `network`、`system`、`security`、`service` 或 `test` 领域时，core 可以先显示一次下载提示，再从当前版本对应的同一个 GitHub Release 获取相应 bundle；只有 `vpsctl-manifest.tsv` 中的文件名、版本和 SHA-256 全部通过校验后才缓存和分发。缓存命中时不联网，不得混用其他分发版本的领域代码。
 
 ## 3. UI 层级
 
@@ -66,9 +71,13 @@ UI 显示以下摘要：
     │       ├── 中转管理：出口 / 节点中转 / 纯端口转发 / 状态刷新
     │       ├── 查看与输出：订阅 / 日志 / 支持协议
     │       └── 系统工具：系统时间状态 / 同步
-    └── 服务器测试（test）
+    ├── 服务器测试（test）
         ├── NodeQuality 综合测试（nodequality）
         └── TcpQuality 网络测试（tcpquality）
+    └── 脚本管理（self）
+        ├── 查看本地分发状态（status）
+        ├── 显式更新分发版本（update）
+        └── 卸载受管脚本（uninstall）
 ```
 
 主菜单不会扫描目录或推测功能分类，只显示固定注册表中已经登记的真实功能。0.5.0 登记 `network`、`system`、`security`、`service` 与 `test` 五个领域，以及 `bbr`、`dns`、`ip-policy`、`rfw`、`kernel`、`access`、`fail2ban`、`proxy`、`nodequality`、`tcpquality` 十个入口。用户选择功能后，入口立即无附加参数分发该公开脚本，由功能脚本进入自己的交互 UI 或开始测试；不再显示命令详情页，也不再要求输入 `r` 才运行。环境详情仍可通过非菜单命令 `vpsctl env` 查看。
@@ -100,9 +109,22 @@ UI 使用 ASCII 边框和可选 ANSI 语义色，适合普通 SSH 终端：青�
 1. 在 `commands/<domain>/<action>.sh` 实现并测试公开入口脚本；复杂入口可按架构规范拆分同名私有子模块。
 2. 在 `vps_registry_init` 中调用 `vps_registry_register_command`，登记标签、摘要、固定路径、风险、权限、演练支持、能力要求和生命周期。
 3. 更新 `docs/command-registry.md` 的公开命令清单和详细说明。
-4. 运行 `bash tests/run.sh`。
+4. 通过 `ssh host-vps-scripts` 在专用真实环境运行 `bash tests/run.sh` 及所需真实验收；不得在当前系统或 WSL 运行项目测试或验证命令。
 
 菜单和 `vpsctl list` 会自动使用登记数据，无需修改 UI 代码；`list` 还会根据当前环境标注每项“可用”或“受限”。登记路径只接受与登记动作同名的 `commands/<domain>/<action>.sh`，分发时会逐段拒绝符号链接，并由 Bash 读取固定登记的脚本，从结构上阻止用户输入或被替换的链接指向任意执行路径。
+
+### 4.1 Self 管理边界
+
+`vpsctl self status` 只读取本地安装与缓存元数据，不借机访问 GitHub。`vpsctl self update` 默认解析 latest；`--version vX.Y.Z` 固定目标 Release。更新必须下载并校验该版本的 `vpsctl-manifest.tsv` 与 core；当前版本已经缓存的领域也从目标版本的同一 Release 下载、校验并写入新版本目录，随后才原子切换 `/usr/local/lib/vpsctl/current`。任何失败都保留原 current；此前未缓存的领域仍在新版本首次使用时按需下载。
+
+普通卸载在交互菜单中要求现场确认；非交互调用需要明确的 `--confirm-uninstall`。它删除 `/usr/local/bin/vpsctl`、vpsctl 分发版本目录和 current，但不得触碰：
+
+- `/etc/vpsctl/` 下的配置；
+- `/var/lib/vpsctl/` 中除 self 元数据之外的功能状态和备份；
+- 各功能已经安装的内核、软件包、服务、规则或其他组件；
+- `/usr/local/libexec/` 及其中的外部二进制。
+
+`--purge` 仍遵守上述保护边界，只额外删除 `/var/lib/vpsctl/self/` 中的安装、自更新与分发缓存元数据；交互模式会再次确认，非交互模式要求同时提供 `--confirm-purge`。`--yes` 不能替代非交互所需的 `--confirm-uninstall` 或 `--confirm-purge`。self 卸载不同于 RFW、代理等功能自身的卸载或 purge；它绝不代替用户逐项卸载已安装组件。
 
 ## 5. 当前边界
 

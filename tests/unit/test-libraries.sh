@@ -100,13 +100,14 @@ test_environment_chinese_fallbacks() {
 test_registry() {
     vps_registry_init
 
-    test_assert_equal "5" "${#VPS_DOMAIN_IDS[@]}" "registered domain count"
-    test_assert_equal "10" "${#VPS_COMMAND_KEYS[@]}" "registered command count"
+    test_assert_equal "6" "${#VPS_DOMAIN_IDS[@]}" "registered domain count"
+    test_assert_equal "13" "${#VPS_COMMAND_KEYS[@]}" "registered command count"
     test_assert_equal "network" "${VPS_DOMAIN_IDS[0]}" "network domain id"
     test_assert_equal "system" "${VPS_DOMAIN_IDS[1]}" "system domain id"
     test_assert_equal "security" "${VPS_DOMAIN_IDS[2]}" "security domain id"
     test_assert_equal "service" "${VPS_DOMAIN_IDS[3]}" "service domain id"
     test_assert_equal "test" "${VPS_DOMAIN_IDS[4]}" "server-test domain id"
+    test_assert_equal "self" "${VPS_DOMAIN_IDS[5]}" "self-management domain id"
     test_assert_equal "commands/network/bbr.sh" "${VPS_COMMAND_PATH["network:bbr"]}" "BBR command path"
     test_assert_equal "commands/network/dns.sh" "${VPS_COMMAND_PATH["network:dns"]}" "DNS command path"
     test_assert_equal "commands/network/ip-policy.sh" "${VPS_COMMAND_PATH["network:ip-policy"]}" "IP policy command path"
@@ -150,6 +151,10 @@ test_registry() {
     test_assert_equal "root" "${VPS_COMMAND_PRIVILEGE["test:tcpquality"]}" "TCPQuality privilege"
     test_assert_equal "unsupported" "${VPS_COMMAND_DRY_RUN["test:tcpquality"]}" "TCPQuality dry-run"
     test_assert_equal "linux,root" "${VPS_COMMAND_REQUIREMENTS["test:tcpquality"]}" "TCPQuality requirements"
+    test_assert_equal "commands/self/status.sh" "${VPS_COMMAND_PATH["self:status"]}" "self status command path"
+    test_assert_equal "commands/self/update.sh" "${VPS_COMMAND_PATH["self:update"]}" "self update command path"
+    test_assert_equal "commands/self/uninstall.sh" "${VPS_COMMAND_PATH["self:uninstall"]}" "self uninstall command path"
+    test_assert_equal "stable" "${VPS_COMMAND_LIFECYCLE["self:update"]}" "self update lifecycle"
 
     vps_registry_register_domain \
         "fixture" \
@@ -193,6 +198,8 @@ test_ui_input() {
     [[ "$output" == *"(1 个功能)"* ]] || test_fail "service domain command count should be visible"
     [[ "$output" == *"服务器测试"* ]] || test_fail "registered server-test domain should be visible"
     [[ "$output" == *"(2 个功能)"* ]] || test_fail "server-test domain command count should be visible"
+    [[ "$output" == *"脚本管理"* ]] || test_fail "registered self-management domain should be visible"
+    [[ "$output" == *"(3 个功能)"* ]] || test_fail "self-management domain command count should be visible"
 
     VPS_UI_GREEN="<绿>"
     VPS_UI_YELLOW="<黄>"
@@ -236,6 +243,9 @@ test_ui_input() {
     test_assert_contains "$output" "security access" "registered access command listing"
     test_assert_contains "$output" "security fail2ban" "registered Fail2ban command listing"
     test_assert_contains "$output" "system kernel" "registered kernel command listing"
+    test_assert_contains "$output" "self status" "registered self-status command listing"
+    test_assert_contains "$output" "self update" "registered self-update command listing"
+    test_assert_contains "$output" "self uninstall" "registered self-uninstall command listing"
 
     output="$(vps_ui_command_details "network:bbr")"
     test_assert_contains "$output" "命令" "localized command field"

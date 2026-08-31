@@ -63,7 +63,37 @@
 - 错误信息能够指导下一步操作。
 - 命令登记、支持平台和恢复说明已更新。
 
-## 4. 完成定义
+## 4. Release 资产与发布流程
+
+分发版本与现有应用/功能版本分别维护。仓库根 `VERSION` 是分发版本的规范来源；首个分发版本为 `0.1.0`，对应 tag `v0.1.0`。现有功能版本仍为 `0.5.0`，不能因建立分发流程而回退功能说明。发布前必须明确检查两种版本各自的来源和展示位置，禁止把其中一个静默改写成另一个。
+
+每个分发 Release 必须一次性提供安装器、严格 TSV 清单、core bundle 和五个领域 bundle。`0.1.0` 的完整资产集为：
+
+```text
+vpsctl.sh
+vpsctl-manifest.tsv
+vpsctl-core-0.1.0.tar.gz
+vpsctl-network-0.1.0.tar.gz
+vpsctl-system-0.1.0.tar.gz
+vpsctl-security-0.1.0.tar.gz
+vpsctl-service-0.1.0.tar.gz
+vpsctl-test-0.1.0.tar.gz
+```
+
+每个 tar 包内使用项目根相对路径，不包含额外顶级包目录。`vpsctl-manifest.tsv` 依次包含 `schema_version<TAB>1`、`version<TAB>VERSION`、`repository<TAB>Runarry/vps-script-lite`、安装器的 `asset<TAB>launcher<TAB>FILENAME<TAB>SHA256` 行，以及 core 和五个领域各自的 `bundle<TAB>NAME<TAB>FILENAME<TAB>SHA256` 行；不允许缺行、重复名称、未登记资产或非 64 位小写十六进制摘要。
+
+发布按以下顺序进行：
+
+1. 固定仓库根 `VERSION`，并确认 tag、manifest 版本、资产文件名完全一致，同时保留现有功能版本语义。
+2. 从目标提交构建六个不带顶级目录的 bundle 和 `vpsctl.sh`，计算所有资产的 SHA-256，最后生成 `vpsctl-manifest.tsv`；清单不能自我登记。
+3. 只通过 `ssh host-vps-scripts` 验证清单严格解析、摘要、tar 路径安全、全新安装、重复安装、首次领域下载、离线缓存、显式更新、指定版本更新、失败回退、普通卸载和 purge 边界。不得在当前系统或 WSL 运行这些检查。
+4. 先创建 draft Release 并上传同一版本的完整资产集；资产未齐全或摘要不符时不得发布，也不得让 `latest` 提前指向该版本。
+5. 从 draft 资产重新下载并在 `host-vps-scripts` 复核 SHA-256 与安装结果，再发布 tag 对应的 Release。
+6. 发布后验证 `releases/latest/download/vpsctl.sh`、显式 `vX.Y.Z` 更新和全新 VPS 安装，记录命令、关键结果、回退版本和必要恢复信息。
+
+一行 `curl | bash` 安装把 HTTPS、GitHub、仓库与 Release 发布权限以及远端安装器本身放在初始信任边界内。manifest 能验证安装器之后下载的资产，也能在先下载模式下验证本地 `vpsctl.sh`，但如果安装器和 manifest 都来自同一被攻破的发布渠道，它不能提供独立真实性证明。验收文档必须同时保留“先固定 tag 下载安装器与 manifest、核对摘要、审阅脚本、再执行本地文件”的较安全流程。
+
+## 5. 完成定义
 
 一个功能只有同时满足以下条件才算完成：
 
@@ -72,4 +102,5 @@
 - 通过 `ssh host-vps-scripts` 在声明支持的平台上完成真实环境验证。
 - 正常、重复执行、无权限、缺依赖、失败和中断路径均被验证。
 - 命令登记、帮助和恢复说明齐全。
+- 涉及分发时，完整 Release 资产、manifest、同版本领域缓存、无启动更新检查和 self 卸载保护边界均已在 `host-vps-scripts` 验证。
 - 没有真实凭据、主机信息、运行状态或日志进入仓库。

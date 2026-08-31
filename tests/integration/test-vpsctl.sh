@@ -71,6 +71,9 @@ test_cli() {
     test_contains "$output" "service proxy" "proxy command listing"
     test_contains "$output" "test nodequality" "NodeQuality command listing"
     test_contains "$output" "test tcpquality" "TCPQuality command listing"
+    test_contains "$output" "self status" "self status command listing"
+    test_contains "$output" "self update" "self update command listing"
+    test_contains "$output" "self uninstall" "self uninstall command listing"
 
     for option in --dry-run --install-deps --yes --non-interactive --quiet --verbose; do
         status=0

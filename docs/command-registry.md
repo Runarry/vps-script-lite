@@ -4,6 +4,8 @@
 
 当前固定注册表位于 `lib/registry.sh`；领域菜单和命令列表均由它生成。
 
+安装态的 core 还提供并固定登记 `self` 自管理命令。其实现随 core 常驻，不依赖任何按需领域 bundle，也不能被其他领域 bundle 覆盖。
+
 ## 1. 每个命令必须登记的字段
 
 | 字段 | 要求 |
@@ -23,7 +25,26 @@
 | 恢复 | 失败或中断后的检查与恢复入口 |
 | 负责人 | 维护该命令的团队或角色 |
 
-## 2. 已登记命令清单
+## 2. Core 常驻 self 命令
+
+`self` 固定驻留在 core，并以 `stable` 生命周期登记在“脚本管理”领域；接口为：
+
+```text
+vpsctl self status
+vpsctl self update [--version vX.Y.Z]
+vpsctl self uninstall [--purge] [--confirm-uninstall] [--confirm-purge]
+```
+
+| 子命令 | 语义 |
+| --- | --- |
+| `status` | 只读显示本地运行模式、分发版本、受管路径和领域缓存状态；不检查远端更新 |
+| `update` | 用户显式触发更新；默认使用 latest，`--version vX.Y.Z` 固定目标 tag；校验完成并落盘后才原子切换 current，失败保留原版本 |
+| `uninstall` | 交互模式现场确认；非交互模式需要 `--confirm-uninstall`；移除快捷入口、current 和 vpsctl 分发文件，不卸载任何功能组件 |
+| `uninstall --purge` | 交互模式再次确认；非交互模式还需要 `--confirm-purge`；在普通卸载基础上只额外删除 `/var/lib/vpsctl/self/` 元数据 |
+
+普通卸载和 purge 均不得删除或修改 `/etc/vpsctl/`、功能状态与备份、功能安装的软件包/服务/规则/内核及 `/usr/local/libexec/`。`--yes` 不能替代非交互调用所需的两个 self 确认标志。该边界独立于各功能命令自己的 `uninstall` 或 `--purge`，后者仍按各自命令文档处理。
+
+## 3. 已登记命令清单
 
 0.5.0 登记以下网络、系统、安全、服务与服务器测试入口。状态列描述接口生命周期，不表示已经完成真实 VPS 或 VM 验证；隔离环境验收要求见[网络设置](network-settings.md)、[系统内核管理](kernel-management.md)、[访问管理](access-management.md)、[Fail2ban 管理](fail2ban-management.md)、[代理管理](proxy-management.md)和[服务器测试](server-testing.md)。
 
@@ -42,6 +63,8 @@
 
 `optional-root` 表示只读查询、帮助或部分计划阶段可以普通用户运行；实际系统变更仍须 root 或在具体步骤提权。依赖只在当前动作实际需要且确实缺失时处理：真实执行的交互模式列出缺失项并询问是否安装，非交互模式和 `--dry-run` 依赖计划必须显式提供 `--install-deps`。`--dry-run --install-deps` 只展示安装计划，仍不写配置、不安装依赖、不启动或重启服务。
 
+在 Release 安装态，注册表仍登记相同的公开命令，但命令文件按领域来自当前分发版本的 bundle：`network`、`system`、`security`、`service` 和 `test` 分别对应同名 bundle，`self` 来自常驻 core。某领域首次分发前必须从 current 对应的同一个 GitHub Release 下载其资产，并以 `vpsctl-manifest.tsv` 中的 SHA-256 校验后缓存到版本隔离目录；未校验文件、其他版本缓存或临时下载都不得进入注册表解析与分发。源码树运行继续直接使用仓库固定路径。
+
 `system kernel` 的状态可由普通用户读取，安装和卸载要求 root 与独立强确认，`--yes` 不能绕过。它只支持 Debian/Ubuntu amd64，从 XanMod 官方 APT 源动态选择当前候选版本，固定验证完整仓库密钥指纹；ARM、容器、WSL、Secure Boot 和不受支持的 suite 在任何写入前停止。卸载只传递经过校验的确切 XanMod 包名，必须先证明非 XanMod 回退内核存在，不运行 `autoremove`。完整恢复边界见[系统内核管理](kernel-management.md)。
 
 主管理菜单选中登记功能后直接进入该功能 UI，不插入命令详情或二次运行页。封闭枚举由编号选择，开放值沿用命令参数校验；菜单真实执行动作，不暴露执行型全局参数、机器输出开关、`--force` 或 `--confirm-*` 标志。上述参数仅供直接功能 CLI；菜单中的危险动作使用对应交互确认及强确认短语。
@@ -54,7 +77,7 @@
 
 `security fail2ban` 只管理 systemd 上的 OpenSSH `sshd` jail。受管配置位于独立的 `jail.d/*.local` 文件，安装和配置会先备份、测试完整 Fail2ban 配置，再启动或 reload 服务；状态会报告受管文件漂移和 SSH 端口不同步。已有非受管 `sshd` jail 时必须显式接管，卸载只撤销 vpsctl 配置，不删除软件包、用户配置或历史备份。完整接口与恢复顺序见[Fail2ban 管理](fail2ban-management.md)。
 
-## 3. 单命令说明模板
+## 4. 单命令说明模板
 
 每个已登记命令还应在适当的命令文档中使用以下结构：
 
@@ -82,7 +105,7 @@
 
 模板只是说明格式，不代表需要为尚未实现的命令预先创建空文档。
 
-## 4. 生命周期
+## 5. 生命周期
 
 - `experimental`：接口可能调整，不进入默认稳定清单。
 - `stable`：遵守公开接口兼容要求，可用于日常运维。
