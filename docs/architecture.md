@@ -37,7 +37,7 @@ vps-script-lite/
 └── docs/                   # 架构、开发和命令登记规范
 ```
 
-尚未实现功能的空目录暂以 `.gitkeep` 保存；`commands/network/` 包含网络功能脚本，`commands/security/access.sh` 实现访问管理入口，`commands/service/proxy.sh` 及其私有子模块实现代理管理入口，`commands/test/nodequality.sh` 与 `commands/test/tcpquality.sh` 实现 0.5.0 服务器测试入口。
+尚未实现功能的空目录暂以 `.gitkeep` 保存；`commands/network/` 包含网络功能脚本，`commands/security/access.sh` 实现访问管理入口，`commands/security/fail2ban.sh` 及其私有子模块实现 OpenSSH Fail2ban 防护，`commands/service/proxy.sh` 及其私有子模块实现代理管理入口，`commands/test/nodequality.sh` 与 `commands/test/tcpquality.sh` 实现 0.5.0 服务器测试入口。
 
 ## 3. 组件职责
 

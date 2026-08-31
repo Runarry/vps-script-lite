@@ -111,7 +111,7 @@ vps_registry_init() {
     vps_registry_register_domain \
         "security" \
         "安全与访问" \
-        "用户凭据、公钥与 SSH 远程访问安全管理"
+        "用户凭据、公钥、SSH 远程访问与 Fail2ban 防护管理"
 
     vps_registry_register_domain \
         "service" \
@@ -177,6 +177,18 @@ vps_registry_init() {
         "访问管理" \
         "管理用户、密码、公钥与可验证恢复的 SSH 访问变更" \
         "commands/security/access.sh" \
+        "disruptive" \
+        "optional-root" \
+        "supported" \
+        "linux,init:systemd" \
+        "experimental"
+
+    vps_registry_register_command \
+        "security" \
+        "fail2ban" \
+        "Fail2ban 防护" \
+        "安装、配置和管理 OpenSSH 的 Fail2ban 防护" \
+        "commands/security/fail2ban.sh" \
         "disruptive" \
         "optional-root" \
         "supported" \

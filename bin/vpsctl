@@ -207,6 +207,15 @@ vpsctl_invocation_may_omit_requirement() {
                 return 0
             fi
             ;;
+        security:fail2ban:init:systemd)
+            if (($# == 1)); then
+                case "$1" in
+                    help | -h | --help | status) return 0 ;;
+                esac
+            elif (($# == 2)) && [[ "$1" == "status" && "$2" == "--json" ]]; then
+                return 0
+            fi
+            ;;
         service:proxy:service:any)
             if (($# == 1)); then
                 case "$1" in

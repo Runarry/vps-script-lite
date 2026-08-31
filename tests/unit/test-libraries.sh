@@ -101,7 +101,7 @@ test_registry() {
     vps_registry_init
 
     test_assert_equal "4" "${#VPS_DOMAIN_IDS[@]}" "registered domain count"
-    test_assert_equal "8" "${#VPS_COMMAND_KEYS[@]}" "registered command count"
+    test_assert_equal "9" "${#VPS_COMMAND_KEYS[@]}" "registered command count"
     test_assert_equal "network" "${VPS_DOMAIN_IDS[0]}" "network domain id"
     test_assert_equal "security" "${VPS_DOMAIN_IDS[1]}" "security domain id"
     test_assert_equal "service" "${VPS_DOMAIN_IDS[2]}" "service domain id"
@@ -124,6 +124,12 @@ test_registry() {
     test_assert_equal "supported" "${VPS_COMMAND_DRY_RUN["security:access"]}" "access dry-run"
     test_assert_equal "linux,init:systemd" "${VPS_COMMAND_REQUIREMENTS["security:access"]}" "access requirements"
     test_assert_equal "experimental" "${VPS_COMMAND_LIFECYCLE["security:access"]}" "access lifecycle"
+    test_assert_equal "commands/security/fail2ban.sh" "${VPS_COMMAND_PATH["security:fail2ban"]}" "Fail2ban command path"
+    test_assert_equal "disruptive" "${VPS_COMMAND_RISK["security:fail2ban"]}" "Fail2ban risk"
+    test_assert_equal "optional-root" "${VPS_COMMAND_PRIVILEGE["security:fail2ban"]}" "Fail2ban privilege"
+    test_assert_equal "supported" "${VPS_COMMAND_DRY_RUN["security:fail2ban"]}" "Fail2ban dry-run"
+    test_assert_equal "linux,init:systemd" "${VPS_COMMAND_REQUIREMENTS["security:fail2ban"]}" "Fail2ban requirements"
+    test_assert_equal "experimental" "${VPS_COMMAND_LIFECYCLE["security:fail2ban"]}" "Fail2ban lifecycle"
     test_assert_equal "commands/service/proxy.sh" "${VPS_COMMAND_PATH["service:proxy"]}" "proxy command path"
     test_assert_equal "disruptive" "${VPS_COMMAND_RISK["service:proxy"]}" "proxy risk"
     test_assert_equal "optional-root" "${VPS_COMMAND_PRIVILEGE["service:proxy"]}" "proxy privilege"
@@ -174,6 +180,7 @@ test_ui_input() {
     [[ "$output" == *"网络设置"* ]] || test_fail "registered network domain should be visible"
     [[ "$output" == *"(4 个功能)"* ]] || test_fail "network domain command count should be visible"
     [[ "$output" == *"安全与访问"* ]] || test_fail "registered security domain should be visible"
+    [[ "$output" == *"(2 个功能)"* ]] || test_fail "security domain command count should be visible"
     [[ "$output" == *"服务管理"* ]] || test_fail "registered service domain should be visible"
     [[ "$output" == *"(1 个功能)"* ]] || test_fail "service domain command count should be visible"
     [[ "$output" == *"服务器测试"* ]] || test_fail "registered server-test domain should be visible"
@@ -219,6 +226,7 @@ test_ui_input() {
     test_assert_contains "$output" "network rfw" "limited command listing"
     test_assert_contains "$output" "<黄>受限<重置>" "limited command listing marker"
     test_assert_contains "$output" "security access" "registered access command listing"
+    test_assert_contains "$output" "security fail2ban" "registered Fail2ban command listing"
 
     output="$(vps_ui_command_details "network:bbr")"
     test_assert_contains "$output" "命令" "localized command field"

@@ -182,6 +182,14 @@ printf 'access_args=%s\n' "$*"
 EOF
     chmod 0644 "$sandbox/commands/security/access.sh"
 
+    cat >"$sandbox/commands/security/fail2ban.sh" <<'EOF'
+#!/usr/bin/env bash
+printf 'fail2ban_no_color=%s\n' "${VPSCTL_NO_COLOR:-missing}"
+printf 'fail2ban_args=%s\n' "$*"
+[[ -z "${VPSCTL_DISPATCH_MARKER:-}" ]] || printf 'fail2ban:%s\n' "$*" >>"$VPSCTL_DISPATCH_MARKER"
+EOF
+    chmod 0644 "$sandbox/commands/security/fail2ban.sh"
+
     cat >"$sandbox/commands/service/proxy.sh" <<'EOF'
 #!/usr/bin/env bash
 printf 'proxy_no_color=%s\n' "${VPSCTL_NO_COLOR:-missing}"
@@ -241,6 +249,14 @@ EOF
     output="$(VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" security access --help)"
     test_contains "$output" "access_args=--help" "access help dispatch without init capability"
 
+    output="$(VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" --no-color security fail2ban status)"
+    test_contains "$output" "fail2ban_no_color=1" "Fail2ban no-color child context"
+    test_contains "$output" "fail2ban_args=status" "Fail2ban status dispatch"
+    output="$(VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" security fail2ban status --json)"
+    test_contains "$output" "fail2ban_args=status --json" "Fail2ban JSON status dispatch without init capability"
+    output="$(VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" security fail2ban --help)"
+    test_contains "$output" "fail2ban_args=--help" "Fail2ban help dispatch without init capability"
+
     output="$(VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" --no-color service proxy status)"
     test_contains "$output" "proxy_no_color=1" "proxy no-color child context"
     output="$(VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" service proxy --help)"
@@ -281,6 +297,14 @@ EOF
     VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" security access status --unknown >/dev/null 2>&1 || status=$?
     [[ "$status" == "3" ]] || test_fail "access malformed status without init capability should return 3, got ${status}"
     [[ ! -e "$marker" ]] || test_fail "access malformed status bypassed the capability gate"
+    status=0
+    VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" security fail2ban status --unknown >/dev/null 2>&1 || status=$?
+    [[ "$status" == "3" ]] || test_fail "Fail2ban malformed status without init capability should return 3, got ${status}"
+    [[ ! -e "$marker" ]] || test_fail "Fail2ban malformed status bypassed the capability gate"
+    status=0
+    VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" --dry-run security fail2ban install >/dev/null 2>&1 || status=$?
+    [[ "$status" == "3" ]] || test_fail "Fail2ban install without init capability should return 3, got ${status}"
+    [[ ! -e "$marker" ]] || test_fail "Fail2ban install bypassed the capability gate"
     status=0
     VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" --dry-run security access ssh prepare --port 2222 --firewall manual >/dev/null 2>&1 || status=$?
     [[ "$status" == "3" ]] || test_fail "access prepare without init capability should return 3, got ${status}"

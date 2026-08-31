@@ -25,7 +25,7 @@
 
 ## 2. 已登记命令清单
 
-0.5.0 登记以下网络、安全、服务与服务器测试入口。状态列描述接口生命周期，不表示已经完成真实 VPS 或 VM 验证；隔离环境验收要求见[网络设置](network-settings.md)、[访问管理](access-management.md)、[代理管理](proxy-management.md)和[服务器测试](server-testing.md)。
+0.5.0 登记以下网络、安全、服务与服务器测试入口。状态列描述接口生命周期，不表示已经完成真实 VPS 或 VM 验证；隔离环境验收要求见[网络设置](network-settings.md)、[访问管理](access-management.md)、[Fail2ban 管理](fail2ban-management.md)、[代理管理](proxy-management.md)和[服务器测试](server-testing.md)。
 
 | 命令 | 文件 | 摘要 | 风险 | 权限 | 演练 | 能力要求 | 状态 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -34,6 +34,7 @@
 | `network ip-policy` | `commands/network/ip-policy.sh` | 查看、设置或恢复 glibc IPv4/IPv6 地址排序偏好 | `disruptive` | `optional-root` | `supported` | `linux` | `experimental` |
 | `network rfw` | `commands/network/rfw.sh` | 安装、配置和管理 RFW systemd 服务 | `disruptive` | `optional-root` | `supported` | `linux,init:systemd` | `experimental` |
 | `security access` | `commands/security/access.sh` | 管理用户、密码、公钥与可验证恢复的 SSH 访问变更 | `disruptive` | `optional-root` | `supported` | `linux,init:systemd` | `experimental` |
+| `security fail2ban` | `commands/security/fail2ban.sh` | 安装、配置和管理 OpenSSH 的 Fail2ban 防护 | `disruptive` | `optional-root` | `supported` | `linux,init:systemd` | `experimental` |
 | `service proxy` | `commands/service/proxy.sh` | 平级管理 Xray 与 sing-box 内核、节点、日志和时间同步 | `disruptive` | `optional-root` | `supported` | `linux,service:any` | `experimental` |
 | `test nodequality` | `commands/test/nodequality.sh` | 运行 NodeQuality 服务器综合质量测试 | `disruptive` | `root` | `unsupported` | `linux,root` | `experimental` |
 | `test tcpquality` | `commands/test/tcpquality.sh` | 运行 TcpQuality TCP 网络质量测试 | `disruptive` | `root` | `unsupported` | `linux,root` | `experimental` |
@@ -42,11 +43,13 @@
 
 主管理菜单选中登记功能后直接进入该功能 UI，不插入命令详情或二次运行页。封闭枚举由编号选择，开放值沿用命令参数校验；菜单真实执行动作，不暴露执行型全局参数、机器输出开关、`--force` 或 `--confirm-*` 标志。上述参数仅供直接功能 CLI；菜单中的危险动作使用对应交互确认及强确认短语。
 
-入口按“命令 + 完整子参数形状”计算本次调用的能力要求。`network rfw` 的无附加参数 `help`/`--help`/`-h` 与 `status` 在 Linux 上不要求 `init:systemd`；`service proxy` 的无附加参数 `help`/`--help`/`-h`、`profiles`、`status`，以及 `time status [--json]` 在 Linux 上不要求 `service:any`。`test nodequality` 和 `test tcpquality` 的单个 `help`/`--help`/`-h` 参数不要求 `root`，但仍保留 `linux` 能力要求。未列出的参数形状和两项测试的无参数真实执行不能使用这些例外；服务器测试完整边界见[服务器测试](server-testing.md)。
+入口按“命令 + 完整子参数形状”计算本次调用的能力要求。`network rfw` 的无附加参数 `help`/`--help`/`-h` 与 `status`，以及 `security fail2ban` 的帮助与 `status [--json]`，在 Linux 上不要求 `init:systemd`；`service proxy` 的无附加参数 `help`/`--help`/`-h`、`profiles`、`status`，以及 `time status [--json]` 在 Linux 上不要求 `service:any`。`test nodequality` 和 `test tcpquality` 的单个 `help`/`--help`/`-h` 参数不要求 `root`，但仍保留 `linux` 能力要求。未列出的参数形状和两项测试的无参数真实执行不能使用这些例外；服务器测试完整边界见[服务器测试](server-testing.md)。
 
 `service proxy` 的 `service:any` 能力要求由入口解析为可用服务管理器，功能脚本会进一步限制为 systemd 或 OpenRC。注册表只登记公开入口 `commands/service/proxy.sh`；其 `commands/service/proxy/` 子模块是固定加载的私有实现，不单独登记，也不构成可直接分发的命令。交互菜单统一展示双核状态并按能力分组，通过状态筛选、枚举和编号选择解析内核或节点；订阅可选全部，或选择当前确有节点的 sing-box/Xray 范围。直接命令与非交互模式保留 `--core` 和 `--id` 作为精确消歧接口。帮助、协议矩阵和系统时间状态可由普通用户执行；内核状态与节点/订阅会读取受限状态文件，因此和安装、更新、卸载、服务控制、节点写操作及时间同步一样要求 root。重启、外部二进制原地更新与 `--purge` 另有不能被 `--yes` 绕过的强确认。完整接口见[代理管理](proxy-management.md)。
 
 `security access` 整体登记为 `linux,init:systemd`，当前不承诺 OpenRC SSH 服务编排。帮助、公开状态和第二 SSH 会话证明可由普通用户运行；用户、密码、公钥、SSH 配置、防火墙、事务和备份的变更由功能脚本要求 root。SSH 变更不是单次覆盖：`ssh prepare` 建立保留旧端口的候选配置，新的非 root SSH 会话运行 `session verify` 写入短期证明，再由原管理会话运行 `ssh commit`；验证失败或不再继续时使用 `ssh abort`，历史备份由 `restore` 显式恢复。复杂的 include/Match/多值来源等无法安全归并的配置会在写入前拒绝。完整接口与恢复顺序见[访问管理](access-management.md)。
+
+`security fail2ban` 只管理 systemd 上的 OpenSSH `sshd` jail。受管配置位于独立的 `jail.d/*.local` 文件，安装和配置会先备份、测试完整 Fail2ban 配置，再启动或 reload 服务；状态会报告受管文件漂移和 SSH 端口不同步。已有非受管 `sshd` jail 时必须显式接管，卸载只撤销 vpsctl 配置，不删除软件包、用户配置或历史备份。完整接口与恢复顺序见[Fail2ban 管理](fail2ban-management.md)。
 
 ## 3. 单命令说明模板
 

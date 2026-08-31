@@ -66,7 +66,7 @@ UI 显示以下摘要：
         └── TcpQuality 网络测试（tcpquality）
 ```
 
-主菜单不会扫描目录或推测功能分类，只显示固定注册表中已经登记的真实功能。0.5.0 登记 `network`、`security`、`service` 与 `test` 四个领域，以及 `bbr`、`dns`、`ip-policy`、`rfw`、`access`、`proxy`、`nodequality`、`tcpquality` 八个入口。用户选择功能后，入口立即无附加参数分发该公开脚本，由功能脚本进入自己的交互 UI 或开始测试；不再显示命令详情页，也不再要求输入 `r` 才运行。环境详情仍可通过非菜单命令 `vpsctl env` 查看。
+主菜单不会扫描目录或推测功能分类，只显示固定注册表中已经登记的真实功能。0.5.0 登记 `network`、`security`、`service` 与 `test` 四个领域，以及 `bbr`、`dns`、`ip-policy`、`rfw`、`access`、`fail2ban`、`proxy`、`nodequality`、`tcpquality` 九个入口。用户选择功能后，入口立即无附加参数分发该公开脚本，由功能脚本进入自己的交互 UI 或开始测试；不再显示命令详情页，也不再要求输入 `r` 才运行。环境详情仍可通过非菜单命令 `vpsctl env` 查看。
 
 `service proxy` 是一个公开登记入口，进入后使用自己的三级操作菜单。Xray 与 sing-box 在该菜单中平级展示并按需安装；每次进入或返回菜单都显示两个内核的状态、配置路径、各自节点数和总节点数，随后按能力分组提供操作，而不是先绑定某个内核。生命周期和服务操作会按当前安装/运行状态过滤候选；安装和更新在有多个候选时允许选择全部，其他动作解析到单个适用内核。其 `commands/service/proxy/` 私有模块不会作为额外菜单项出现。
 
@@ -101,7 +101,7 @@ UI 使用 ASCII 边框和可选 ANSI 语义色，适合普通 SSH 终端：青�
 
 ## 5. 当前边界
 
-0.5.0 的管理入口已登记网络功能、访问管理、代理管理与服务器测试。UI 只负责展示元数据、收集用户选择并分发，不实现 BBR、DNS、IP 地址族偏好、RFW、用户凭据、SSH 事务、代理或测试业务逻辑。
+0.5.0 的管理入口已登记网络功能、访问管理、Fail2ban 防护、代理管理与服务器测试。UI 只负责展示元数据、收集用户选择并分发，不实现 BBR、DNS、IP 地址族偏好、RFW、用户凭据、SSH 事务、Fail2ban、代理或测试业务逻辑。
 
 网络功能的当前边界为：
 
@@ -111,6 +111,7 @@ UI 使用 ASCII 边框和可选 ANSI 语义色，适合普通 SSH 终端：青�
 - RFW 只支持 systemd、`x86_64`/`aarch64` 和 IPv4；安装只使用官方最新稳定 release 并校验 checksum。配置和更新不会自行重启服务，实际应用危险规则必须显式强确认。
 - 代理管理支持 systemd 与 OpenRC，平级管理 Xray 和 sing-box，并提供出口驱动的节点中转和独立 nftables 端口转发；核心配置与内核更新不会自行重启正在运行的服务，端口转发则立即原子生效。卸载默认保留配置与中转状态，彻底清除、级联删除、外部二进制原地更新和中断性重启均有独立确认。
 - 访问管理当前只支持 systemd 上的 SSH 服务编排，不将代理功能已有的 OpenRC 支持外推到 SSH。用户、密码和公钥操作与 SSH 配置事务分开；SSH 事务需要新的非 root 会话证明，准备、提交、中止和历史恢复均保留明确入口。
+- Fail2ban 当前只支持 systemd 上的 OpenSSH `sshd` jail；帮助和公开状态可在 init 能力缺失时进入诊断，其余安装、配置、服务、解封、验证和恢复操作仍受 systemd 能力门禁约束。
 - 服务器测试只在 Linux 上以 root 运行固定官方 HTTPS 地址下载的当前版本脚本，不支持演练或上游参数透传。NodeQuality 保留上游四项交互，TcpQuality 保留当前官方脚本自身的测试选项；两者都可能产生高 CPU、磁盘和网络负载并把报告上传到上游服务。入口只清理当前调用拥有的临时资源，`SIGKILL`、Shell 崩溃和主机异常不保证清理。
 
 详细子动作、路径、恢复和验收要求见 [`docs/network-settings.md`](network-settings.md)、[`docs/access-management.md`](access-management.md)、[`docs/proxy-management.md`](proxy-management.md) 与 [`docs/server-testing.md`](server-testing.md)。
