@@ -48,6 +48,11 @@ UI 显示以下摘要：
     │   ├── DNS 管理（dns）
     │   ├── IP 地址族偏好（ip-policy）
     │   └── RFW 管理（rfw）
+    ├── 系统管理（system）
+    │   └── 内核管理（kernel）
+    │       ├── 查看内核、XanMod 包与回退内核
+    │       ├── 安装 / 更新最新 BBRv3 内核
+    │       └── 安全卸载 BBRv3 内核
     ├── 安全与访问（security）
     │   └── 访问管理（access）
     │       ├── 用户、密码与公钥
@@ -66,7 +71,7 @@ UI 显示以下摘要：
         └── TcpQuality 网络测试（tcpquality）
 ```
 
-主菜单不会扫描目录或推测功能分类，只显示固定注册表中已经登记的真实功能。0.5.0 登记 `network`、`security`、`service` 与 `test` 四个领域，以及 `bbr`、`dns`、`ip-policy`、`rfw`、`access`、`fail2ban`、`proxy`、`nodequality`、`tcpquality` 九个入口。用户选择功能后，入口立即无附加参数分发该公开脚本，由功能脚本进入自己的交互 UI 或开始测试；不再显示命令详情页，也不再要求输入 `r` 才运行。环境详情仍可通过非菜单命令 `vpsctl env` 查看。
+主菜单不会扫描目录或推测功能分类，只显示固定注册表中已经登记的真实功能。0.5.0 登记 `network`、`system`、`security`、`service` 与 `test` 五个领域，以及 `bbr`、`dns`、`ip-policy`、`rfw`、`kernel`、`access`、`fail2ban`、`proxy`、`nodequality`、`tcpquality` 十个入口。用户选择功能后，入口立即无附加参数分发该公开脚本，由功能脚本进入自己的交互 UI 或开始测试；不再显示命令详情页，也不再要求输入 `r` 才运行。环境详情仍可通过非菜单命令 `vpsctl env` 查看。
 
 `service proxy` 是一个公开登记入口，进入后使用自己的三级操作菜单。Xray 与 sing-box 在该菜单中平级展示并按需安装；每次进入或返回菜单都显示两个内核的状态、配置路径、各自节点数和总节点数，随后按能力分组提供操作，而不是先绑定某个内核。生命周期和服务操作会按当前安装/运行状态过滤候选；安装和更新在有多个候选时允许选择全部，其他动作解析到单个适用内核。其 `commands/service/proxy/` 私有模块不会作为额外菜单项出现。
 
@@ -101,11 +106,12 @@ UI 使用 ASCII 边框和可选 ANSI 语义色，适合普通 SSH 终端：青�
 
 ## 5. 当前边界
 
-0.5.0 的管理入口已登记网络功能、访问管理、Fail2ban 防护、代理管理与服务器测试。UI 只负责展示元数据、收集用户选择并分发，不实现 BBR、DNS、IP 地址族偏好、RFW、用户凭据、SSH 事务、Fail2ban、代理或测试业务逻辑。
+0.5.0 的管理入口已登记网络功能、系统内核、访问管理、Fail2ban 防护、代理管理与服务器测试。UI 只负责展示元数据、收集用户选择并分发，不实现 BBR、DNS、IP 地址族偏好、RFW、内核、用户凭据、SSH 事务、Fail2ban、代理或测试业务逻辑。
 
 网络功能的当前边界为：
 
 - BBR 只管理拥塞控制、队列规则及其持久化配置，不负责升级或替换内核。
+- 系统内核只管理 XanMod BBRv3 软件包、专用 APT 源和签名密钥；不自动重启、不执行远程脚本，也不替代 `network bbr` 的 sysctl/qdisc 管理。
 - DNS 只修改检测到的权威 DNS 后端；候选解析器必须先通过前测，写后验证失败会保留新配置并返回部分完成状态，以便按备份恢复。
 - IP 地址族偏好只管理 glibc 地址排序，不禁用任一地址族，也不作为 sing-box/Xray 节点的隐式默认值。
 - RFW 只支持 systemd、`x86_64`/`aarch64` 和 IPv4；安装只使用官方最新稳定 release 并校验 checksum。配置和更新不会自行重启服务，实际应用危险规则必须显式强确认。
@@ -114,4 +120,4 @@ UI 使用 ASCII 边框和可选 ANSI 语义色，适合普通 SSH 终端：青�
 - Fail2ban 当前只支持 systemd 上的 OpenSSH `sshd` jail；帮助和公开状态可在 init 能力缺失时进入诊断，其余安装、配置、服务、解封、验证和恢复操作仍受 systemd 能力门禁约束。
 - 服务器测试只在 Linux 上以 root 运行固定官方 HTTPS 地址下载的当前版本脚本，不支持演练或上游参数透传。NodeQuality 保留上游四项交互，TcpQuality 保留当前官方脚本自身的测试选项；两者都可能产生高 CPU、磁盘和网络负载并把报告上传到上游服务。入口只清理当前调用拥有的临时资源，`SIGKILL`、Shell 崩溃和主机异常不保证清理。
 
-详细子动作、路径、恢复和验收要求见 [`docs/network-settings.md`](network-settings.md)、[`docs/access-management.md`](access-management.md)、[`docs/proxy-management.md`](proxy-management.md) 与 [`docs/server-testing.md`](server-testing.md)。
+详细子动作、路径、恢复和验收要求见 [`docs/network-settings.md`](network-settings.md)、[`docs/kernel-management.md`](kernel-management.md)、[`docs/access-management.md`](access-management.md)、[`docs/proxy-management.md`](proxy-management.md) 与 [`docs/server-testing.md`](server-testing.md)。

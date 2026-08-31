@@ -109,6 +109,11 @@ vps_registry_init() {
         "BBR、本机 DNS、IP 地址族偏好与 RFW 网络防护管理"
 
     vps_registry_register_domain \
+        "system" \
+        "系统管理" \
+        "内核、软件包和主机基础维护"
+
+    vps_registry_register_domain \
         "security" \
         "安全与访问" \
         "用户凭据、公钥、SSH 远程访问与 Fail2ban 防护管理"
@@ -169,6 +174,18 @@ vps_registry_init() {
         "optional-root" \
         "supported" \
         "linux,init:systemd" \
+        "experimental"
+
+    vps_registry_register_command \
+        "system" \
+        "kernel" \
+        "内核管理" \
+        "安装、更新或安全卸载最新 XanMod BBRv3 内核" \
+        "commands/system/kernel.sh" \
+        "disruptive" \
+        "optional-root" \
+        "supported" \
+        "linux" \
         "experimental"
 
     vps_registry_register_command \

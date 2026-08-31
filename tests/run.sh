@@ -17,6 +17,7 @@ bash -n \
     "${TEST_ROOT}/commands/network/dns.sh" \
     "${TEST_ROOT}/commands/network/ip-policy.sh" \
     "${TEST_ROOT}/commands/network/rfw.sh" \
+    "${TEST_ROOT}/commands/system/kernel.sh" \
     "${TEST_ROOT}/commands/security/access.sh" \
     "${TEST_ROOT}"/commands/security/access/*.sh \
     "${TEST_ROOT}/commands/security/fail2ban.sh" \
@@ -29,6 +30,7 @@ bash -n \
     "${TEST_ROOT}/tests/unit/test-network-dns.sh" \
     "${TEST_ROOT}/tests/unit/test-network-ip-policy.sh" \
     "${TEST_ROOT}/tests/unit/test-network-rfw.sh" \
+    "${TEST_ROOT}/tests/unit/test-system-kernel.sh" \
     "${TEST_ROOT}/tests/unit/test-security-access.sh" \
     "${TEST_ROOT}/tests/unit/test-security-fail2ban.sh" \
     "${TEST_ROOT}/tests/unit/test-server-test.sh" \
@@ -45,6 +47,7 @@ bash "${TEST_ROOT}/tests/unit/test-network-bbr.sh"
 bash "${TEST_ROOT}/tests/unit/test-network-dns.sh"
 bash "${TEST_ROOT}/tests/unit/test-network-ip-policy.sh"
 bash "${TEST_ROOT}/tests/unit/test-network-rfw.sh"
+bash "${TEST_ROOT}/tests/unit/test-system-kernel.sh"
 bash "${TEST_ROOT}/tests/unit/test-security-access.sh"
 bash "${TEST_ROOT}/tests/unit/test-security-fail2ban.sh"
 bash "${TEST_ROOT}/tests/unit/test-server-test.sh"

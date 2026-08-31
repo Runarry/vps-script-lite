@@ -25,7 +25,7 @@
 
 ## 2. 已登记命令清单
 
-0.5.0 登记以下网络、安全、服务与服务器测试入口。状态列描述接口生命周期，不表示已经完成真实 VPS 或 VM 验证；隔离环境验收要求见[网络设置](network-settings.md)、[访问管理](access-management.md)、[Fail2ban 管理](fail2ban-management.md)、[代理管理](proxy-management.md)和[服务器测试](server-testing.md)。
+0.5.0 登记以下网络、系统、安全、服务与服务器测试入口。状态列描述接口生命周期，不表示已经完成真实 VPS 或 VM 验证；隔离环境验收要求见[网络设置](network-settings.md)、[系统内核管理](kernel-management.md)、[访问管理](access-management.md)、[Fail2ban 管理](fail2ban-management.md)、[代理管理](proxy-management.md)和[服务器测试](server-testing.md)。
 
 | 命令 | 文件 | 摘要 | 风险 | 权限 | 演练 | 能力要求 | 状态 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -33,6 +33,7 @@
 | `network dns` | `commands/network/dns.sh` | 检测、测试、设置、刷新、验证或恢复 DNS | `disruptive` | `optional-root` | `supported` | `linux` | `experimental` |
 | `network ip-policy` | `commands/network/ip-policy.sh` | 查看、设置或恢复 glibc IPv4/IPv6 地址排序偏好 | `disruptive` | `optional-root` | `supported` | `linux` | `experimental` |
 | `network rfw` | `commands/network/rfw.sh` | 安装、配置和管理 RFW systemd 服务 | `disruptive` | `optional-root` | `supported` | `linux,init:systemd` | `experimental` |
+| `system kernel` | `commands/system/kernel.sh` | 安装、更新或安全卸载最新 XanMod BBRv3 内核 | `disruptive` | `optional-root` | `supported` | `linux` | `experimental` |
 | `security access` | `commands/security/access.sh` | 管理用户、密码、公钥与可验证恢复的 SSH 访问变更 | `disruptive` | `optional-root` | `supported` | `linux,init:systemd` | `experimental` |
 | `security fail2ban` | `commands/security/fail2ban.sh` | 安装、配置和管理 OpenSSH 的 Fail2ban 防护 | `disruptive` | `optional-root` | `supported` | `linux,init:systemd` | `experimental` |
 | `service proxy` | `commands/service/proxy.sh` | 平级管理 Xray 与 sing-box 内核、节点、日志和时间同步 | `disruptive` | `optional-root` | `supported` | `linux,service:any` | `experimental` |
@@ -40,6 +41,8 @@
 | `test tcpquality` | `commands/test/tcpquality.sh` | 运行 TcpQuality TCP 网络质量测试 | `disruptive` | `root` | `unsupported` | `linux,root` | `experimental` |
 
 `optional-root` 表示只读查询、帮助或部分计划阶段可以普通用户运行；实际系统变更仍须 root 或在具体步骤提权。依赖只在当前动作实际需要且确实缺失时处理：真实执行的交互模式列出缺失项并询问是否安装，非交互模式和 `--dry-run` 依赖计划必须显式提供 `--install-deps`。`--dry-run --install-deps` 只展示安装计划，仍不写配置、不安装依赖、不启动或重启服务。
+
+`system kernel` 的状态可由普通用户读取，安装和卸载要求 root 与独立强确认，`--yes` 不能绕过。它只支持 Debian/Ubuntu amd64，从 XanMod 官方 APT 源动态选择当前候选版本，固定验证完整仓库密钥指纹；ARM、容器、WSL、Secure Boot 和不受支持的 suite 在任何写入前停止。卸载只传递经过校验的确切 XanMod 包名，必须先证明非 XanMod 回退内核存在，不运行 `autoremove`。完整恢复边界见[系统内核管理](kernel-management.md)。
 
 主管理菜单选中登记功能后直接进入该功能 UI，不插入命令详情或二次运行页。封闭枚举由编号选择，开放值沿用命令参数校验；菜单真实执行动作，不暴露执行型全局参数、机器输出开关、`--force` 或 `--confirm-*` 标志。上述参数仅供直接功能 CLI；菜单中的危险动作使用对应交互确认及强确认短语。
 

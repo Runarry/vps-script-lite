@@ -533,7 +533,7 @@ vps_cmd_package_for_tool() {
                 *) printf 'iproute2\n' ;;
             esac
             ;;
-        base64 | sha256sum | tr | mktemp | sort | head) printf 'coreutils\n' ;;
+        base64 | sha256sum | tr | mktemp | sort | head | install | od) printf 'coreutils\n' ;;
         awk) printf 'gawk\n' ;;
         flock)
             if [[ "$manager" == apk ]]; then printf 'flock\n'; else printf 'util-linux\n'; fi
@@ -542,6 +542,7 @@ vps_cmd_package_for_tool() {
             if [[ "$manager" == apk ]]; then printf 'util-linux-misc\n'; else printf 'util-linux\n'; fi
             ;;
         curl | jq | openssl | unzip | tar | chrony) printf '%s\n' "$tool" ;;
+        gpg) printf 'gnupg\n' ;;
         chronyc) printf 'chrony\n' ;;
         *)
             vps_cmd_error "没有工具的软件包映射：${tool:-<空>}"

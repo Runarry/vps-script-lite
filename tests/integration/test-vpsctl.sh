@@ -66,6 +66,7 @@ test_cli() {
     test_contains "$output" "network dns" "DNS command listing"
     test_contains "$output" "network ip-policy" "IP policy command listing"
     test_contains "$output" "network rfw" "RFW command listing"
+    test_contains "$output" "system kernel" "kernel command listing"
     test_contains "$output" "security access" "access command listing"
     test_contains "$output" "service proxy" "proxy command listing"
     test_contains "$output" "test nodequality" "NodeQuality command listing"
@@ -103,7 +104,7 @@ test_dispatch_security() {
 
     [[ "$(uname -s)" == "Linux" ]] || return 0
     sandbox="$(mktemp -d)"
-    mkdir -p "$sandbox/bin" "$sandbox/lib" "$sandbox/commands/network" "$sandbox/commands/security" "$sandbox/commands/service/proxy" "$sandbox/commands/test"
+    mkdir -p "$sandbox/bin" "$sandbox/lib" "$sandbox/commands/network" "$sandbox/commands/system" "$sandbox/commands/security" "$sandbox/commands/service/proxy" "$sandbox/commands/test"
     cp "$TEST_ROOT/bin/vpsctl" "$sandbox/bin/vpsctl"
     cp "$TEST_ROOT"/lib/*.sh "$sandbox/lib/"
     cat >>"$sandbox/lib/environment.sh" <<'EOF'
@@ -174,6 +175,14 @@ printf 'rfw_args=%s\n' "$*"
 EOF
     chmod 0644 "$sandbox/commands/network/rfw.sh"
 
+    cat >"$sandbox/commands/system/kernel.sh" <<'EOF'
+#!/usr/bin/env bash
+printf 'kernel_no_color=%s\n' "${VPSCTL_NO_COLOR:-missing}"
+printf 'kernel_args=%s\n' "$*"
+[[ -z "${VPSCTL_DISPATCH_MARKER:-}" ]] || printf 'kernel:%s\n' "$*" >>"$VPSCTL_DISPATCH_MARKER"
+EOF
+    chmod 0644 "$sandbox/commands/system/kernel.sh"
+
     cat >"$sandbox/commands/security/access.sh" <<'EOF'
 #!/usr/bin/env bash
 printf 'access_no_color=%s\n' "${VPSCTL_NO_COLOR:-missing}"
@@ -238,6 +247,10 @@ EOF
     test_contains "$output" "rfw_args=help" "RFW help dispatch without init capability"
     output="$(VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" network rfw status)"
     test_contains "$output" "rfw_args=status" "RFW status dispatch without init capability"
+
+    output="$(VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" --no-color system kernel status)"
+    test_contains "$output" "kernel_no_color=1" "kernel no-color child context"
+    test_contains "$output" "kernel_args=status" "kernel status dispatch"
 
     output="$(VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" --no-color security access status)"
     test_contains "$output" "access_no_color=1" "access no-color child context"
