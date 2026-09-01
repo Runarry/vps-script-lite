@@ -263,7 +263,7 @@ access_write_active() {
     local id="$1" tmp
 
     [[ "${VPSCTL_DRY_RUN:-0}" != 1 ]] || return 0
-    tmp="$(mktemp --tmpdir="$ACCESS_STATE_DIR" .active.XXXXXX)" || return 20
+    tmp="$(mktemp "${ACCESS_STATE_DIR}/.active.XXXXXX")" || return 20
     printf '%s\n' "$id" >"$tmp" || {
         rm -f -- "$tmp"
         return 20

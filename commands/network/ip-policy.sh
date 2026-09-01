@@ -65,6 +65,38 @@ ip_policy_require_linux() {
     return 3
 }
 
+ip_policy_detect_libc() {
+    local output="" loader
+
+    case "${VPSCTL_ENV_LIBC:-}" in
+        glibc | musl) printf '%s\n' "$VPSCTL_ENV_LIBC"; return 0 ;;
+    esac
+    if command -v getconf >/dev/null 2>&1; then
+        output="$(getconf GNU_LIBC_VERSION 2>/dev/null || true)"
+        [[ "${output,,}" == glibc\ * ]] && { printf 'glibc\n'; return 0; }
+    fi
+    if command -v ldd >/dev/null 2>&1; then
+        output="$(LC_ALL=C ldd --version 2>&1 || true)"
+        case "${output,,}" in
+            *musl*) printf 'musl\n'; return 0 ;;
+            *glibc* | *"gnu libc"* | *"gnu c library"*) printf 'glibc\n'; return 0 ;;
+        esac
+    fi
+    for loader in /lib/ld-musl-*.so.1 /lib64/ld-musl-*.so.1; do
+        [[ ! -e "$loader" ]] || { printf 'musl\n'; return 0; }
+    done
+    printf 'unknown\n'
+}
+
+ip_policy_require_glibc() {
+    local libc
+
+    libc="$(ip_policy_detect_libc)" || return 3
+    [[ "$libc" == "glibc" ]] && return 0
+    vps_cmd_error "network ip-policy 仅适用于 glibc；当前用户空间：$libc"
+    return 3
+}
+
 ip_policy_parse_standalone_globals() {
     IP_POLICY_ARGS=()
     while (($# > 0)); do
@@ -817,6 +849,7 @@ ip_policy_main() {
         return 0
     fi
     ip_policy_require_linux || return $?
+    ip_policy_require_glibc || return $?
     if [[ -z "$action" ]]; then
         if vps_cmd_is_interactive; then
             ip_policy_menu

@@ -152,7 +152,8 @@ _proxy_time_service_enabled() {
             ;;
         openrc:chrony)
             service="$(_proxy_time_chrony_service)" || return 1
-            rc-update show default 2>/dev/null | awk '{print $1}' | grep -Fxq "$service"
+            rc-update show default 2>/dev/null |
+                awk -v wanted="$service" '$1 == wanted { found=1 } END { exit(found ? 0 : 1) }'
             ;;
         systemd:timedatectl)
             [[ "$(_proxy_time_timedatectl_value NTP || true)" =~ ^(yes|true|1)$ ]]

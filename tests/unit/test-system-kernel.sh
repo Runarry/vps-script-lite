@@ -180,6 +180,16 @@ test_status_output() (
     test_assert_contains "$output" '拥塞控制' 'congestion status'
 )
 
+test_non_debian_status_output() (
+    local output
+
+    KERNEL_OS_ID=alpine
+    KERNEL_RUNNING_RELEASE='6.18.0-virt'
+    output="$(kernel_status)"
+    test_assert_contains "$output" '不适用（仅 Debian/Ubuntu）' 'non-Debian package status'
+    test_assert_contains "$output" '当前平台不管理 XanMod 软件包' 'non-Debian package detail'
+)
+
 test_dpkg_state_parsing() (
     local status=0
     dpkg-query() {
@@ -376,6 +386,7 @@ test_psabi_and_candidates
 test_fallback_detection
 test_secure_boot_detection
 test_status_output
+test_non_debian_status_output
 test_dpkg_state_parsing
 test_candidate_origin_validation
 test_dry_run_install

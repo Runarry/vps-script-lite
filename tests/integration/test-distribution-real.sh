@@ -87,7 +87,7 @@ export VPSCTL_TEST_ASSET_DIR="$RELEASE_DIR"
 
 install_output="$(PATH="$MOCK_BIN:$PATH" bash "$RELEASE_DIR/vpsctl.sh" \
     --verified-manifest "$RELEASE_DIR/vpsctl-manifest.tsv" --version)"
-[[ "$install_output" == 'vpsctl 0.5.0' ]] || fail 'bootstrap did not enter the installed CLI'
+[[ "$install_output" == 'vpsctl 0.6.0' ]] || fail 'bootstrap did not enter the installed CLI'
 [[ -x "$ENTRY" && -L "$INSTALL_ROOT/current" ]] || fail 'managed launcher/current were not installed'
 release_root="$(readlink -f -- "$INSTALL_ROOT/current")"
 [[ -f "$release_root/.bundles/core.sha256" ]] || fail 'core marker is missing'
@@ -107,7 +107,7 @@ done
 VPSCTL_TEST_CURL_FAIL=1 PATH="$MOCK_BIN:$PATH" "$ENTRY" network bbr --help >/dev/null
 VPSCTL_TEST_CURL_FAIL=1 PATH="$MOCK_BIN:$PATH" "$ENTRY" self status >/dev/null
 PATH="$MOCK_BIN:$PATH" "$ENTRY" --yes --non-interactive self update >/dev/null
-su nobody -s /bin/bash -c "$ENTRY --version" | grep -Fx 'vpsctl 0.5.0' >/dev/null ||
+su nobody -s /bin/bash -c "$ENTRY --version" | grep -Fx 'vpsctl 0.6.0' >/dev/null ||
     fail 'ordinary user could not execute the installed shortcut'
 
 mkdir -p -- "${ETC_MARKER%/*}" "${STATE_MARKER%/*}" "${LIBEXEC_MARKER%/*}"

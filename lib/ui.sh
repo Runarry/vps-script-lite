@@ -360,13 +360,19 @@ vps_ui_dashboard() {
 }
 
 vps_ui_environment_details() {
+    local os_family codename
+
     vps_ui_ensure_init
+    os_family="${VPS_ENV[os_id_like]:-${VPS_ENV[os_id]}}"
+    codename="${VPS_ENV[os_codename]:-未知}"
+    [[ "${VPS_ENV[os_id]}" != "alpine" || -n "${VPS_ENV[os_codename]}" ]] || codename="不适用"
     printf '\n'
     vps_ui_section "系统与能力"
     vps_ui_kv "系统 ID" "${VPS_ENV[os_id]}"
-    vps_ui_kv "系统族" "${VPS_ENV[os_id_like]:-未知}"
+    vps_ui_kv "系统族" "${os_family:-未知}"
     vps_ui_kv "系统版本" "${VPS_ENV[os_version_id]}"
-    vps_ui_kv "代号" "${VPS_ENV[os_codename]:-未知}"
+    vps_ui_kv "代号" "$codename"
+    vps_ui_kv "用户空间" "${VPS_ENV[libc]}"
     vps_ui_kv "CPU 型号" "${VPS_ENV[cpu_model]}"
     vps_ui_kv "Bash" "${VPS_ENV[bash_version]}"
     vps_ui_kv "可用拥塞控制" "${VPS_ENV[available_congestion_controls]}"

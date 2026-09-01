@@ -4,9 +4,9 @@
 
 项目采用“一个管理入口、多个独立命令”的结构：管理入口只负责参数解析、固定命令登记、公共上下文和分发；每项实际功能原则上由一个公开入口脚本实现，复杂入口可拆为不单独分发的私有子模块。这样既能通过统一入口使用，也能单独运行、测试和排错。
 
-> 当前版本为 0.5.0，提供网络、系统内核、访问、代理与服务器测试入口。系统变更命令应先使用 `--dry-run` 并阅读对应恢复说明；内核变更需提前确认带外控制台或救援入口可用，服务器测试会下载并运行第三方代码、产生明显 CPU/磁盘/网络负载且不支持演练。
+> 当前版本为 0.6.0，提供网络、系统内核、访问、代理与服务器测试入口。系统变更命令应先使用 `--dry-run` 并阅读对应恢复说明；内核变更需提前确认带外控制台或救援入口可用，服务器测试会下载并运行第三方代码、产生明显 CPU/磁盘/网络负载且不支持演练。
 
-这里的 `0.5.0` 是现有应用与功能版本。新的 GitHub Release 分发格式从分发版本 `0.1.0`（仓库根 `VERSION`、tag `v0.1.0`）开始，两套版本号用途不同；发布资产、安装目录和 `vpsctl self` 使用分发版本，不回退或改写现有功能版本。
+这里的 `0.6.0` 是现有应用与功能版本。GitHub Release 分发格式始于分发版本 `0.1.0`，当前分发版本为 `0.2.0`（仓库根 `VERSION`、tag `v0.2.0`）；两套版本号用途不同，发布资产、安装目录和 `vpsctl self` 使用分发版本，不回退或改写现有功能版本。
 
 ## 文档
 
@@ -24,6 +24,27 @@
 
 ## 安装
 
+核心管理入口支持 Alpine Linux 3.20 及更新版本的 `x86_64`、`aarch64` 主机。最小化 Alpine 镜像应先安装启动和下载所需工具：
+
+```bash
+apk add --no-cache bash curl ca-certificates
+```
+
+这里的“核心支持”覆盖安装、自管理、环境检测、帮助、清单和命令分发，不代表每个领域功能都支持 Alpine/OpenRC/musl。关键功能边界如下：
+
+| 功能 | Alpine 3.20+ 边界 |
+| --- | --- |
+| 核心管理入口 | `x86_64`、`aarch64` 支持；要求 Bash 4.4+，安装/更新需要 `curl` 和 CA 证书 |
+| `network bbr` | 支持入口与依赖安装；实际变更仍要求内核暴露所选拥塞控制和 qdisc 能力 |
+| `network dns` | 支持静态 `/etc/resolv.conf` 与 openresolv；检测到 Alpine DHCP 可能回写 plain 后端时，会在零写入状态拒绝并要求 openresolv，或明确禁用 udhcpc/dhcpcd 的 DNS hook |
+| `network rfw` | 不支持 Alpine 默认的 OpenRC；仅支持 systemd、`x86_64`/`aarch64`、Linux 5.15+ 及所需 XDP/BPF 能力 |
+| `security access` | SSH 服务编排仅支持 systemd；不能把核心的 OpenRC 支持外推为访问管理支持 |
+| `security fail2ban` | 不支持 `apk`/OpenRC；仅支持文档列出的 systemd 发行版包管理器与 Fail2ban 0.11+ |
+| `system kernel` | 不支持 Alpine；仅支持 Debian/Ubuntu amd64 上的 APT/dpkg 和 XanMod 官方构建 |
+| `network ip-policy` | 不支持 Alpine 的 musl；该入口只管理 glibc `getaddrinfo()` 的 `/etc/gai.conf` 排序 |
+| `service proxy` | 支持 OpenRC 与 systemd；具体内核、协议、架构和依赖仍按代理功能文档与运行时门禁判断 |
+| `test nodequality` / `test tcpquality` | vpsctl 包装入口要求 Linux/root，但运行时下载的第三方脚本会自行决定依赖和发行版兼容性；核心支持不构成其 Alpine 兼容承诺 |
+
 在受支持的 Linux VPS 的 root shell 中可使用一行命令安装最新 GitHub Release：
 
 ```bash
@@ -35,14 +56,14 @@ curl -fsSL https://github.com/Runarry/vps-script-lite/releases/latest/download/v
 ```text
 vpsctl self status
 vpsctl self update
-vpsctl self update --version v0.1.0
+vpsctl self update --version v0.2.0
 ```
 
 `curl | bash` 的初始执行信任边界包括 HTTPS、GitHub、仓库及 Release 发布权限，以及当前 `latest` 指向的 `vpsctl.sh`；同一 Release 中的校验清单只能在安装器已经开始执行后保护后续资产，不能倒过来证明安装器自身可信。更稳妥的方式是先下载安装器和清单，检查来源、版本、SHA-256 与脚本内容，再执行本地文件：
 
 ```bash
 tmp_dir="$(mktemp -d)"
-base_url="https://github.com/Runarry/vps-script-lite/releases/download/v0.1.0"
+base_url="https://github.com/Runarry/vps-script-lite/releases/download/v0.2.0"
 curl -fL "$base_url/vpsctl.sh" -o "$tmp_dir/vpsctl.sh"
 curl -fL "$base_url/vpsctl-manifest.tsv" -o "$tmp_dir/vpsctl-manifest.tsv"
 awk -F '\t' '$1 == "asset" && $2 == "launcher" { print $4 "  vpsctl.sh" }' \
@@ -132,7 +153,7 @@ bash bin/vpsctl --dry-run --install-deps service proxy install --core sing-box
 
 - 规范：已建立。
 - 目录骨架：已建立。
-- 当前版本：0.5.0 服务器测试版。
+- 当前版本：0.6.0 服务器测试版。
 - 管理入口：提供环境检测、终端 UI、固定注册表和安全分发。
 - 功能命令：提供 `network bbr`、`network dns`、`network ip-policy`、`network rfw`、`system kernel`、`security access`、`security fail2ban`、`service proxy`、`test nodequality` 和 `test tcpquality`；均处于 `experimental` 生命周期。
 - 公共函数库：提供环境检测、命令注册、终端 UI 及网络和服务命令所需公共能力。

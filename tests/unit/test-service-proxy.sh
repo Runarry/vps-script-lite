@@ -74,7 +74,15 @@ state="${VPSCTL_SYSTEM_ROOT}/run/mock-openrc"; mkdir -p "$state"
 case "${1:-}" in
   add) touch "$state/enabled-${2}" ;;
   del) rm -f "$state/enabled-${2}" ;;
-  show) for f in "$state"/enabled-*; do [[ -e "$f" ]] && printf "%s default\n" "${f##*enabled-}"; done ;;
+  show)
+    if [[ -e "$state/long-show" ]]; then
+      printf "vpsctl-proxy-sing-box default\n"
+      i=0; while ((i < 5000)); do printf "filler-%04d default\n" "$i"; ((i += 1)); done
+      printf "vpsctl-proxy-xray default\n"
+    else
+      for f in "$state"/enabled-*; do [[ -e "$f" ]] && printf "%s default\n" "${f##*enabled-}"; done
+    fi
+    ;;
 esac'
 make_mock journalctl 'printf "journalctl %s\n" "$*" >>"$MOCK_LOG"; printf "journal fixture\n"'
 make_mock timedatectl '
@@ -353,6 +361,7 @@ test_status_service_and_logs() {
     reset_root
     export VPSCTL_ENV_INIT=openrc
     printf '  OpenRC install/start/logs\n'
+    install_external sing-box
     install_external xray
     assert_file_contains "${TEST_SYSTEM_ROOT}/etc/init.d/vpsctl-proxy-xray" 'command="/usr/bin/xray"' "OpenRC service command"
     assert_file_contains "${TEST_SYSTEM_ROOT}/etc/init.d/vpsctl-proxy-xray" 'output_log="/var/log/vpsctl/proxy/xray.log"' "OpenRC log path"
@@ -361,6 +370,10 @@ test_status_service_and_logs() {
     assert_equal 0 "$RUN_STATUS" "OpenRC start"
     assert_file_contains "$MOCK_LOG" "rc-service vpsctl-proxy-xray start" "OpenRC start routing"
     assert_file_contains "$MOCK_LOG" "rc-update add vpsctl-proxy-xray default" "OpenRC enable routing"
+    touch "${TEST_SYSTEM_ROOT}/run/mock-openrc/long-show"
+    run_proxy status --json
+    assert_equal true "$(jq -r '.cores[] | select(.core == "sing-box") | .enabled' <<<"$RUN_OUTPUT")" "OpenRC sing-box enabled status with long service list"
+    assert_equal true "$(jq -r '.cores[] | select(.core == "xray") | .enabled' <<<"$RUN_OUTPUT")" "OpenRC Xray enabled status with long service list"
     run_proxy logs --core xray --lines 1
     assert_equal 0 "$RUN_STATUS" "OpenRC logs"
     assert_contains "$RUN_OUTPUT" "openrc fixture" "OpenRC file log"
@@ -1382,6 +1395,7 @@ test_relay_forward_service_lifecycle() {
     forward_id="$(jq -r '.forwards[0].id' "$(relay_path)")"
     assert_file_contains "${TEST_SYSTEM_ROOT}/etc/systemd/system/vpsctl-proxy-forward.service" 'ExecStart=/usr/local/libexec/vpsctl-proxy-forward-refresh watch' "systemd DNS watcher"
     assert_file_contains "${TEST_SYSTEM_ROOT}/usr/local/libexec/vpsctl-proxy-forward-refresh" 'sleep 300' "five minute DNS refresh"
+    [[ -f "${TEST_SYSTEM_ROOT}/usr/local/libexec/vpsctl-proxy-runtime/lib/ui.sh" ]] || fail "relay runtime UI dependency missing"
     run_proxy relay forward delete --id "$forward_id" --confirm-delete
     assert_equal 0 "$RUN_STATUS" "systemd relay last delete"
     [[ ! -e "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/relay-resolved.json" ]] || fail "last delete retained DNS cache"

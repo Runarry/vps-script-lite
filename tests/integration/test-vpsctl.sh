@@ -36,7 +36,7 @@ test_cli() {
     local output status option
 
     output="$("${VPSCTL[@]}" --version)"
-    test_contains "$output" "vpsctl 0.5.0" "version output"
+    test_contains "$output" "vpsctl 0.6.0" "version output"
 
     output="$("${VPSCTL[@]}" --help)"
     test_contains "$output" "<domain> <action>" "help command model"
@@ -52,6 +52,9 @@ test_cli() {
     test_contains "$output" "BBR 版本" "BBR version field"
     test_contains "$output" "拥塞控制" "congestion-control algorithm field"
     test_contains "$output" "兼容性" "environment compatibility field"
+    test_contains "$output" "系统族" "environment OS family field"
+    test_contains "$output" "代号" "environment codename field"
+    test_contains "$output" "用户空间" "environment libc field"
     test_no_ansi "$output" "--no-color environment output"
     [[ "$output" != *"Init / Packages"* ]] || test_fail "removed Init / Packages field is still visible"
     [[ "$output" != *"Session"* ]] || test_fail "removed Session field is still visible"
@@ -127,6 +130,7 @@ vps_env_detect() {
     VPS_ENV[os_version_id]="1"
     VPS_ENV[os_codename]="fixture"
     VPS_ENV[os_pretty_name]="Fixture Linux"
+    VPS_ENV[libc]="musl"
     VPS_ENV[bash_version]="${BASH_VERSION}"
     VPS_ENV[cpu_model]="fixture"
     VPS_ENV[cpu_cores]="1"
@@ -164,11 +168,19 @@ EOF
 #!/usr/bin/env bash
 printf 'no_color=%s\n' "${VPSCTL_NO_COLOR:-missing}"
 printf 'install_deps=%s\n' "${VPSCTL_INSTALL_DEPS:-missing}"
+printf 'libc=%s\n' "${VPSCTL_ENV_LIBC:-missing}"
 printf 'bbr_args=%s\n' "$*"
 [[ -z "${VPSCTL_DISPATCH_MARKER:-}" ]] || printf 'bbr:%s\n' "$*" >>"$VPSCTL_DISPATCH_MARKER"
 exit "${VPSCTL_DISPATCH_STATUS:-0}"
 EOF
     chmod 0644 "$sandbox/commands/network/bbr.sh"
+
+    cat >"$sandbox/commands/network/ip-policy.sh" <<'EOF'
+#!/usr/bin/env bash
+printf 'ip_policy_args=%s\n' "$*"
+[[ -z "${VPSCTL_DISPATCH_MARKER:-}" ]] || printf 'ip-policy:%s\n' "$*" >>"$VPSCTL_DISPATCH_MARKER"
+EOF
+    chmod 0644 "$sandbox/commands/network/ip-policy.sh"
 
     cat >"$sandbox/commands/network/rfw.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -230,6 +242,7 @@ EOF
     test_contains "$output" "no_color=1" "no-color child context"
     output="$(bash "$sandbox/bin/vpsctl" --install-deps network bbr status)"
     test_contains "$output" "install_deps=1" "install-deps child context"
+    test_contains "$output" "libc=musl" "libc child context"
 
     if command -v script >/dev/null 2>&1; then
         marker="$sandbox/menu-executed"
@@ -244,6 +257,14 @@ EOF
     fi
 
     marker="$sandbox/executed"
+    output="$(VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" network ip-policy --help)"
+    test_contains "$output" "ip_policy_args=--help" "IP policy help dispatch without glibc capability"
+    rm -f -- "$marker"
+    status=0
+    VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" network ip-policy status >/dev/null 2>&1 || status=$?
+    [[ "$status" == "3" ]] || test_fail "IP policy status without glibc capability should return 3, got ${status}"
+    [[ ! -e "$marker" ]] || test_fail "IP policy status bypassed the glibc capability gate"
+
     output="$(VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" --no-color network rfw --help)"
     test_contains "$output" "rfw_args=--help" "RFW global help dispatch without init capability"
     output="$(VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" network rfw help)"
@@ -254,6 +275,11 @@ EOF
     output="$(VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" --no-color system kernel status)"
     test_contains "$output" "kernel_no_color=1" "kernel no-color child context"
     test_contains "$output" "kernel_args=status" "kernel status dispatch"
+    rm -f -- "$marker"
+    status=0
+    VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" --dry-run system kernel install >/dev/null 2>&1 || status=$?
+    [[ "$status" == "3" ]] || test_fail "kernel install outside Debian family should return 3, got ${status}"
+    [[ ! -e "$marker" ]] || test_fail "kernel install bypassed the Debian-family capability gate"
 
     output="$(VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" --no-color security access status)"
     test_contains "$output" "access_no_color=1" "access no-color child context"

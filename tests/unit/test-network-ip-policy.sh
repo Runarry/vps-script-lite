@@ -53,6 +53,7 @@ export VPSCTL_DRY_RUN=0
 export VPSCTL_NO_COLOR=1
 export VPSCTL_QUIET=0
 export VPSCTL_VERBOSE=0
+export VPSCTL_ENV_LIBC=glibc
 export PATH="${TEST_FAKE_BIN}:${PATH}"
 
 RUN_STATUS=0
@@ -92,6 +93,22 @@ test_arguments_and_unmanaged_status() {
     run_policy status
     test_assert_equal 0 "$RUN_STATUS" "unmanaged human status"
     test_assert_contains "$RUN_OUTPUT" 'glibc_getaddrinfo_order' "human status scope"
+}
+
+test_musl_platform_refusal() {
+    local before
+
+    reset_root
+    printf '# Alpine resolver policy must remain untouched\n' >"$(gai_path)"
+    before="$(<"$(gai_path)")"
+    VPSCTL_ENV_LIBC=musl run_policy status
+    test_assert_equal 3 "$RUN_STATUS" "musl status refusal"
+    test_assert_contains "$RUN_OUTPUT" "仅适用于 glibc" "musl refusal message"
+    test_assert_equal "$before" "$(<"$(gai_path)")" "musl status zero write"
+    [[ ! -e "$(state_path)" ]] || test_fail "musl status wrote state"
+
+    VPSCTL_ENV_LIBC=musl run_policy --help
+    test_assert_equal 0 "$RUN_STATUS" "musl help availability"
 }
 
 test_managed_tables_update_and_status() {
@@ -203,6 +220,7 @@ test_dry_run_and_symlink_refusal() {
 }
 
 test_arguments_and_unmanaged_status
+test_musl_platform_refusal
 test_managed_tables_update_and_status
 test_adoption_refusal_and_external_modification
 test_exact_restore

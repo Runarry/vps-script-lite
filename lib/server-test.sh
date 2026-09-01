@@ -94,7 +94,7 @@ vps_server_test_create_run_dir() {
     local kind="$1" run_dir base
 
     base="$(vps_server_test_temp_base)" || return $?
-    run_dir="$(mktemp -d --tmpdir="$base" "vpsctl-server-test.${kind}.XXXXXX")" || {
+    run_dir="$(mktemp -d "${base}/vpsctl-server-test.${kind}.XXXXXX")" || {
         vps_cmd_error "无法创建服务器测试临时目录"
         return 20
     }

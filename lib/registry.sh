@@ -166,7 +166,7 @@ vps_registry_init() {
         "disruptive" \
         "optional-root" \
         "supported" \
-        "linux" \
+        "linux,libc:glibc" \
         "experimental"
 
     vps_registry_register_command \
@@ -190,7 +190,7 @@ vps_registry_init() {
         "disruptive" \
         "optional-root" \
         "supported" \
-        "linux" \
+        "linux,os:debian-family" \
         "experimental"
 
     vps_registry_register_command \

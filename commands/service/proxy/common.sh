@@ -183,6 +183,19 @@ proxy_common_init() {
     fi
 }
 
+proxy_mktemp_json() {
+    local directory="${1:-}" prefix="${2:-temporary}" temporary target
+
+    [[ "$directory" == /* && -d "$directory" && "$prefix" =~ ^[A-Za-z0-9._-]+$ ]] || return 2
+    temporary="$(mktemp "${directory}/.${prefix}.XXXXXX")" || return 20
+    target="${temporary}.json"
+    if ! mv -- "$temporary" "$target"; then
+        rm -f -- "$temporary"
+        return 20
+    fi
+    printf '%s' "$target"
+}
+
 proxy_require_platform() {
     case "$PROXY_INIT_SYSTEM" in
         systemd | openrc) ;;
@@ -545,7 +558,7 @@ proxy_backup_file() {
     mkdir -p -- "$backup_root" || return 20
     chmod 0700 -- "$backup_root" || return 20
     timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
-    backup_dir="$(mktemp -d --tmpdir="$backup_root" "${timestamp}.XXXXXX")" || return 20
+    backup_dir="$(mktemp -d "${backup_root}/${timestamp}.XXXXXX")" || return 20
     chmod 0700 -- "$backup_dir" || return 20
     cp -p -- "$source" "${backup_dir}/${safe_label}" || return 20
     printf '%s' "${backup_dir}/${safe_label}"
@@ -563,7 +576,7 @@ proxy_backup_runtime_file() {
     mkdir -p -- "$backup_root" || return 20
     chmod 0700 -- "$backup_root" || return 20
     timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
-    backup_dir="$(mktemp -d --tmpdir="$backup_root" "${timestamp}.XXXXXX")" || return 20
+    backup_dir="$(mktemp -d "${backup_root}/${timestamp}.XXXXXX")" || return 20
     chmod 0700 -- "$backup_dir" || return 20
     cp -p -- "$source" "${backup_dir}/${safe_label}" || return 20
     chmod 0600 -- "${backup_dir}/${safe_label}" || return 20
@@ -625,7 +638,10 @@ proxy_service_is_enabled() {
     service="$(proxy_core_service_name "$core")" || return 2
     case "$PROXY_INIT_SYSTEM" in
         systemd) systemctl is-enabled --quiet "${service}.service" ;;
-        openrc) rc-update show default 2>/dev/null | awk '{print $1}' | grep -Fxq "$service" ;;
+        openrc)
+            rc-update show default 2>/dev/null |
+                awk -v wanted="$service" '$1 == wanted { found=1 } END { exit(found ? 0 : 1) }'
+            ;;
         *) return 3 ;;
     esac
 }
@@ -1036,7 +1052,7 @@ proxy_commit_manifest_config() {
                 relay_cache_existed=true
                 relay_cache_backup="$(proxy_backup_file relay "$PROXY_RELAY_FORWARD_CACHE_LOGICAL" relay-resolved.json)" || return 20
             fi
-            relay_nft_snapshot="$(mktemp --tmpdir="$PROXY_STATE_DIR" .relay-nft.pending.XXXXXX)" || return 20
+            relay_nft_snapshot="$(mktemp "${PROXY_STATE_DIR}/.relay-nft.pending.XXXXXX")" || return 20
             if proxy_relay_forward_nft_snapshot "$relay_nft_snapshot"; then
                 relay_nft_existed=true
                 relay_nft_backup="$(proxy_backup_runtime_file relay "$relay_nft_snapshot" relay-nftables.nft)" || {

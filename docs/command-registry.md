@@ -46,15 +46,15 @@ vpsctl self uninstall [--purge] [--confirm-uninstall] [--confirm-purge]
 
 ## 3. 已登记命令清单
 
-0.5.0 登记以下网络、系统、安全、服务与服务器测试入口。状态列描述接口生命周期，不表示已经完成真实 VPS 或 VM 验证；隔离环境验收要求见[网络设置](network-settings.md)、[系统内核管理](kernel-management.md)、[访问管理](access-management.md)、[Fail2ban 管理](fail2ban-management.md)、[代理管理](proxy-management.md)和[服务器测试](server-testing.md)。
+0.6.0 登记以下网络、系统、安全、服务与服务器测试入口。状态列描述接口生命周期，不表示已经完成真实 VPS 或 VM 验证；隔离环境验收要求见[网络设置](network-settings.md)、[系统内核管理](kernel-management.md)、[访问管理](access-management.md)、[Fail2ban 管理](fail2ban-management.md)、[代理管理](proxy-management.md)和[服务器测试](server-testing.md)。
 
 | 命令 | 文件 | 摘要 | 风险 | 权限 | 演练 | 能力要求 | 状态 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `network bbr` | `commands/network/bbr.sh` | 查看、启用、设置或恢复 BBR 与队列规则 | `change` | `optional-root` | `supported` | `linux` | `experimental` |
 | `network dns` | `commands/network/dns.sh` | 检测、测试、设置、刷新、验证或恢复 DNS | `disruptive` | `optional-root` | `supported` | `linux` | `experimental` |
-| `network ip-policy` | `commands/network/ip-policy.sh` | 查看、设置或恢复 glibc IPv4/IPv6 地址排序偏好 | `disruptive` | `optional-root` | `supported` | `linux` | `experimental` |
+| `network ip-policy` | `commands/network/ip-policy.sh` | 查看、设置或恢复 glibc IPv4/IPv6 地址排序偏好 | `disruptive` | `optional-root` | `supported` | `linux,libc:glibc` | `experimental` |
 | `network rfw` | `commands/network/rfw.sh` | 安装、配置和管理 RFW systemd 服务 | `disruptive` | `optional-root` | `supported` | `linux,init:systemd` | `experimental` |
-| `system kernel` | `commands/system/kernel.sh` | 安装、更新或安全卸载最新 XanMod BBRv3 内核 | `disruptive` | `optional-root` | `supported` | `linux` | `experimental` |
+| `system kernel` | `commands/system/kernel.sh` | 安装、更新或安全卸载最新 XanMod BBRv3 内核 | `disruptive` | `optional-root` | `supported` | `linux,os:debian-family` | `experimental` |
 | `security access` | `commands/security/access.sh` | 管理用户、密码、公钥与可验证恢复的 SSH 访问变更 | `disruptive` | `optional-root` | `supported` | `linux,init:systemd` | `experimental` |
 | `security fail2ban` | `commands/security/fail2ban.sh` | 安装、配置和管理 OpenSSH 的 Fail2ban 防护 | `disruptive` | `optional-root` | `supported` | `linux,init:systemd` | `experimental` |
 | `service proxy` | `commands/service/proxy.sh` | 平级管理 Xray 与 sing-box 内核、节点、日志和时间同步 | `disruptive` | `optional-root` | `supported` | `linux,service:any` | `experimental` |
@@ -69,7 +69,7 @@ vpsctl self uninstall [--purge] [--confirm-uninstall] [--confirm-purge]
 
 主管理菜单选中登记功能后直接进入该功能 UI，不插入命令详情或二次运行页。封闭枚举由编号选择，开放值沿用命令参数校验；菜单真实执行动作，不暴露执行型全局参数、机器输出开关、`--force` 或 `--confirm-*` 标志。上述参数仅供直接功能 CLI；菜单中的危险动作使用对应交互确认及强确认短语。
 
-入口按“命令 + 完整子参数形状”计算本次调用的能力要求。`network rfw` 的无附加参数 `help`/`--help`/`-h` 与 `status`，以及 `security fail2ban` 的帮助与 `status [--json]`，在 Linux 上不要求 `init:systemd`；`service proxy` 的无附加参数 `help`/`--help`/`-h`、`profiles`、`status`，以及 `time status [--json]` 在 Linux 上不要求 `service:any`。`test nodequality` 和 `test tcpquality` 的单个 `help`/`--help`/`-h` 参数不要求 `root`，但仍保留 `linux` 能力要求。未列出的参数形状和两项测试的无参数真实执行不能使用这些例外；服务器测试完整边界见[服务器测试](server-testing.md)。
+入口按“命令 + 完整子参数形状”计算本次调用的能力要求。`network ip-policy` 的帮助不要求 `libc:glibc`，但状态和变更都要求 glibc；`system kernel` 的帮助与无参数 `status` 不要求 `os:debian-family`，安装、卸载和交互入口仍要求 Debian/Ubuntu。`network rfw` 的无附加参数 `help`/`--help`/`-h` 与 `status`，以及 `security fail2ban` 的帮助与 `status [--json]`，在 Linux 上不要求 `init:systemd`；`service proxy` 的无附加参数 `help`/`--help`/`-h`、`profiles`、`status`，以及 `time status [--json]` 在 Linux 上不要求 `service:any`。`test nodequality` 和 `test tcpquality` 的单个 `help`/`--help`/`-h` 参数不要求 `root`，但仍保留 `linux` 能力要求。未列出的参数形状和两项测试的无参数真实执行不能使用这些例外；服务器测试完整边界见[服务器测试](server-testing.md)。
 
 `service proxy` 的 `service:any` 能力要求由入口解析为可用服务管理器，功能脚本会进一步限制为 systemd 或 OpenRC。注册表只登记公开入口 `commands/service/proxy.sh`；其 `commands/service/proxy/` 子模块是固定加载的私有实现，不单独登记，也不构成可直接分发的命令。交互菜单统一展示双核状态并按能力分组，通过状态筛选、枚举和编号选择解析内核或节点；订阅可选全部，或选择当前确有节点的 sing-box/Xray 范围。直接命令与非交互模式保留 `--core` 和 `--id` 作为精确消歧接口。帮助、协议矩阵和系统时间状态可由普通用户执行；内核状态与节点/订阅会读取受限状态文件，因此和安装、更新、卸载、服务控制、节点写操作及时间同步一样要求 root。重启、外部二进制原地更新与 `--purge` 另有不能被 `--yes` 绕过的强确认。完整接口见[代理管理](proxy-management.md)。
 

@@ -16,7 +16,7 @@ source "${KERNEL_PROJECT_ROOT}/lib/command.sh"
 readonly KERNEL_MANAGED_MARKER='# Managed by vpsctl system kernel.'
 readonly KERNEL_XANMOD_KEY_URL='https://dl.xanmod.org/archive.key'
 readonly KERNEL_XANMOD_REPO_URL='https://deb.xanmod.org'
-readonly KERNEL_DOWNLOAD_USER_AGENT='Mozilla/5.0 (compatible; vpsctl-system-kernel/0.5.0)'
+readonly KERNEL_DOWNLOAD_USER_AGENT='Mozilla/5.0 (compatible; vpsctl-system-kernel/0.6.0)'
 readonly KERNEL_XANMOD_KEY_FINGERPRINT='D38D7D1DA1349567ADED882D86F7D09EE734E623'
 readonly KERNEL_REPO_LOGICAL='/etc/apt/sources.list.d/vpsctl-xanmod.sources'
 readonly KERNEL_KEY_LOGICAL='/etc/apt/keyrings/vpsctl-xanmod-archive-keyring.gpg'
@@ -750,12 +750,25 @@ kernel_status() {
     local -a packages=() fallbacks=()
     local proc_path query_status
 
-    if kernel_query_xanmod_packages installed; then
-        packages=("${KERNEL_XANMOD_PACKAGES[@]}")
-    else
-        query_status=$?
-        return "$query_status"
-    fi
+    case "$KERNEL_OS_ID" in
+        debian | ubuntu)
+            if command -v dpkg-query >/dev/null 2>&1; then
+                if kernel_query_xanmod_packages installed; then
+                    packages=("${KERNEL_XANMOD_PACKAGES[@]}")
+                else
+                    query_status=$?
+                    return "$query_status"
+                fi
+            else
+                installed_state='不可用（缺少 dpkg-query）'
+                packages_state='无法读取 Debian/Ubuntu 软件包状态'
+            fi
+            ;;
+        *)
+            installed_state='不适用（仅 Debian/Ubuntu）'
+            packages_state='当前平台不管理 XanMod 软件包'
+            ;;
+    esac
     mapfile -t fallbacks < <(kernel_fallback_releases)
     ((${#packages[@]} == 0)) || {
         installed_state="已安装（${#packages[@]} 个包）"

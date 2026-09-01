@@ -289,15 +289,43 @@ test_plain_replacement_preserves_directives() {
 
 test_openresolv_replacement() {
     local content
-    printf 'dynamic_order="tap0 eth0"\nname_servers="192.0.2.1"\nname_server_blacklist="192.0.2.*"\n' >"$TEST_SYSTEM_ROOT/etc/resolvconf.conf"
+    printf 'dynamic_order="tap0 eth0"\nname_servers="192.0.2.1"\nname_server_blacklist="192.0.2.*"\nreplace="$replace nameserver/*/"\n' >"$TEST_SYSTEM_ROOT/etc/resolvconf.conf"
     VPS_DNS_SERVERS=(1.1.1.1 8.8.8.8)
     vps_dns_write_openresolv
     content="$(<"$TEST_SYSTEM_ROOT/etc/resolvconf.conf")"
     assert_contains "$content" 'dynamic_order="tap0 eth0"' "openresolv dynamic order preservation"
     assert_contains "$content" 'name_servers="1.1.1.1 8.8.8.8"' "openresolv servers"
-    assert_contains "$content" 'name_server_blacklist="*"' "openresolv dynamic server exclusion"
+    assert_contains "$content" 'replace="$replace nameserver/*/"' "openresolv dynamic server replacement"
+    assert_equal 1 "$(grep -Fc 'replace="$replace nameserver/*/"' "$TEST_SYSTEM_ROOT/etc/resolvconf.conf")" "single openresolv replacement rule"
     assert_not_contains "$content" '192.0.2.*' "old openresolv blacklist removal"
 }
+
+test_alpine_plain_dhcp_refusal() (
+    local before status=0
+
+    mkdir -p "$TEST_SYSTEM_ROOT/etc/network"
+    printf 'auto eth0\niface eth0 inet dhcp\n' >"$TEST_SYSTEM_ROOT/etc/network/interfaces"
+    before="$(<"$TEST_SYSTEM_ROOT/etc/resolv.conf")"
+    VPSCTL_ENV_OS_ID=alpine
+    VPS_DNS_SERVERS=(1.1.1.1)
+    vps_dns_test_candidates() { return 0; }
+    vps_cmd_confirm() { return 0; }
+    vps_cmd_require_root() { return 0; }
+    vps_dns_detect_backend() { VPS_DNS_BACKEND=plain; }
+    vps_dns_set >/dev/null 2>&1 || status=$?
+    assert_equal 3 "$status" "Alpine DHCP plain backend refusal"
+    assert_equal "$before" "$(<"$TEST_SYSTEM_ROOT/etc/resolv.conf")" "Alpine DHCP refusal zero write"
+
+    mkdir -p "$TEST_SYSTEM_ROOT/etc/udhcpc"
+    printf 'RESOLV_CONF="no"\n' >"$TEST_SYSTEM_ROOT/etc/udhcpc/udhcpc.conf"
+    ! vps_dns_alpine_plain_dhcp_conflict plain || fail "Alpine RESOLV_CONF=no should permit static DNS"
+
+    mkdir -p "$TEST_SYSTEM_ROOT/run"
+    : >"$TEST_SYSTEM_ROOT/run/dhcpcd.pid"
+    vps_dns_alpine_plain_dhcp_conflict plain || fail "udhcpc setting must not bypass active dhcpcd"
+    printf 'nohook hostname resolv.conf\n' >"$TEST_SYSTEM_ROOT/etc/dhcpcd.conf"
+    ! vps_dns_alpine_plain_dhcp_conflict plain || fail "dhcpcd nohook resolv.conf should permit static DNS"
+)
 
 test_legacy_resolvconf_refusal() {
     local before after status
@@ -498,6 +526,7 @@ test_backend_detection
 test_preflight_failure_does_not_write
 test_plain_replacement_preserves_directives
 test_openresolv_replacement
+test_alpine_plain_dhcp_refusal
 test_nm_refresh_reapplies_device
 test_nm_effective_servers_are_runtime_values
 test_read_only_target_rejected

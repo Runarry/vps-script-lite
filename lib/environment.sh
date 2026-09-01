@@ -94,6 +94,36 @@ vps_env_detect_package_manager() {
     done
 }
 
+vps_env_detect_libc() {
+    local output="" loader
+
+    VPS_ENV[libc]="unknown"
+    if command -v getconf >/dev/null 2>&1; then
+        output="$(getconf GNU_LIBC_VERSION 2>/dev/null || true)"
+        case "${output,,}" in
+            glibc\ *) VPS_ENV[libc]="glibc" ;;
+        esac
+    fi
+    if [[ "${VPS_ENV[libc]}" == "unknown" ]] && command -v ldd >/dev/null 2>&1; then
+        output="$(LC_ALL=C ldd --version 2>&1 || true)"
+        case "${output,,}" in
+            *musl*) VPS_ENV[libc]="musl" ;;
+            *glibc* | *"gnu libc"* | *"gnu c library"*) VPS_ENV[libc]="glibc" ;;
+        esac
+    fi
+    if [[ "${VPS_ENV[libc]}" == "unknown" ]]; then
+        for loader in /lib/ld-musl-*.so.1 /lib64/ld-musl-*.so.1; do
+            if [[ -e "$loader" ]]; then
+                VPS_ENV[libc]="musl"
+                break
+            fi
+        done
+    fi
+    case "${VPS_ENV[libc]}" in
+        glibc | musl) VPS_CAPABILITY["libc:${VPS_ENV[libc]}"]=1 ;;
+    esac
+}
+
 vps_env_detect_init() {
     local init_name="unknown"
 
@@ -142,8 +172,11 @@ vps_env_detect_virtualization() {
         case "$cgroup" in
             *docker*) detected="docker" ;;
             *lxc*) detected="lxc" ;;
-            *kubepods*) detected="container" ;;
+            *kubepods* | *libpod* | *podman*) detected="container" ;;
         esac
+    fi
+    if [[ -z "$detected" && ( -e /.dockerenv || -e /run/.containerenv ) ]]; then
+        detected="container"
     fi
 
     VPS_ENV[virtualization]="${detected:-unknown}"
@@ -335,6 +368,25 @@ vps_env_detect_bbr() {
     fi
 }
 
+vps_env_version_at_least() {
+    local current="${1:-}" required_major="${2:-}" required_minor="${3:-}"
+    local current_major current_minor
+
+    [[ "$current" =~ ^([0-9]+)\.([0-9]+)(\.|$) ]] || return 1
+    current_major="${BASH_REMATCH[1]}"
+    current_minor="${BASH_REMATCH[2]}"
+    [[ "$required_major" =~ ^[0-9]+$ && "$required_minor" =~ ^[0-9]+$ ]] || return 2
+    ((10#$current_major > 10#$required_major)) ||
+        ((10#$current_major == 10#$required_major && 10#$current_minor >= 10#$required_minor))
+}
+
+vps_env_alpine_arch_supported() {
+    case "${1:-}" in
+        x86_64 | aarch64) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 vps_env_set_compatibility() {
     if [[ "${VPS_ENV[kernel_name]}" != "Linux" ]]; then
         VPS_ENV[compatibility]="unsupported"
@@ -342,15 +394,30 @@ vps_env_set_compatibility() {
     elif [[ "${VPS_ENV[os_id]}" == "unknown" ]]; then
         VPS_ENV[compatibility]="limited"
         VPS_ENV[compatibility_detail]="已检测到 Linux，但无法识别发行版。"
-    elif [[ "${VPS_ENV[os_id]}" == "alpine" ]]; then
+    elif [[ "${VPS_ENV[os_id]}" == "alpine" ]] && ! vps_env_version_at_least "${VPS_ENV[os_version_id]}" 3 20; then
         VPS_ENV[compatibility]="limited"
-        VPS_ENV[compatibility_detail]="已检测到 Alpine；当前版本面向 GNU 用户空间，尚未在 Alpine 上完成验证。"
+        VPS_ENV[compatibility_detail]="Alpine 核心支持要求 3.20 或更高版本（当前：${VPS_ENV[os_version_id]}）。"
+    elif [[ "${VPS_ENV[os_id]}" == "alpine" ]] && ! vps_env_alpine_arch_supported "${VPS_ENV[architecture]}"; then
+        VPS_ENV[compatibility]="limited"
+        VPS_ENV[compatibility_detail]="Alpine 核心支持仅覆盖 x86_64 与 aarch64（当前：${VPS_ENV[architecture]}）。"
+    elif [[ "${VPS_ENV[os_id]}" == "alpine" && "${VPS_ENV[libc]}" != "musl" ]]; then
+        VPS_ENV[compatibility]="limited"
+        VPS_ENV[compatibility_detail]="Alpine 核心支持要求 musl 用户空间（当前：${VPS_ENV[libc]}）。"
     elif [[ "${VPS_ENV[virtualization]}" =~ ^(docker|lxc|container|wsl)$ ]]; then
         VPS_ENV[compatibility]="limited"
         VPS_ENV[compatibility_detail]="已检测到容器或兼容层；主机级命令可能不可用。"
+    elif [[ "${VPS_ENV[os_id]}" == "alpine" && "${VPS_ENV[package_manager]}" != "apk" ]]; then
+        VPS_ENV[compatibility]="limited"
+        VPS_ENV[compatibility_detail]="Alpine 核心支持要求 apk 软件包管理器。"
+    elif [[ "${VPS_ENV[os_id]}" == "alpine" && "${VPS_CAPABILITY[init:openrc]:-0}" != "1" ]]; then
+        VPS_ENV[compatibility]="limited"
+        VPS_ENV[compatibility_detail]="Alpine 核心支持要求由 OpenRC 管理系统服务。"
     elif [[ "${VPS_ENV[package_manager]}" == "unknown" || "${VPS_ENV[service_manager]}" == "unknown" ]]; then
         VPS_ENV[compatibility]="limited"
         VPS_ENV[compatibility_detail]="已检测到核心系统，但部分管理能力不可用。"
+    elif [[ "${VPS_ENV[os_id]}" == "alpine" ]]; then
+        VPS_ENV[compatibility]="supported"
+        VPS_ENV[compatibility_detail]="已支持 Alpine 3.20+（musl、apk、OpenRC）；各功能仍受独立能力门禁约束。"
     else
         VPS_ENV[compatibility]="supported"
         VPS_ENV[compatibility_detail]="核心环境已就绪，可以运行满足能力要求的已登记命令。"
@@ -373,6 +440,7 @@ vps_env_detect() {
     VPS_ENV[os_version_id]="unknown"
     VPS_ENV[os_codename]=""
     VPS_ENV[os_pretty_name]="未知 Linux 系统"
+    VPS_ENV[libc]="unknown"
     VPS_ENV[service_manager]="unknown"
 
     hostname_value="$(hostname 2>/dev/null || true)"
@@ -382,6 +450,7 @@ vps_env_detect() {
     VPS_ENV[hostname]="${hostname_value:-unknown}"
 
     vps_env_read_os_release
+    vps_env_detect_libc
     vps_env_detect_package_manager
     vps_env_detect_init
     vps_env_detect_virtualization
@@ -427,6 +496,9 @@ vps_env_detect() {
     [[ "${VPS_ENV[kernel_name]}" == "Linux" ]] && VPS_CAPABILITY[linux]=1
     VPS_CAPABILITY["bash:4.4"]=1
     [[ "${VPS_ENV[os_id]}" != "unknown" ]] && VPS_CAPABILITY["os:${VPS_ENV[os_id]}"]=1
+    case "${VPS_ENV[os_id]}" in
+        debian | ubuntu) VPS_CAPABILITY["os:debian-family"]=1 ;;
+    esac
 
     vps_env_set_compatibility
 }

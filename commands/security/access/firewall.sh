@@ -443,7 +443,7 @@ access_firewall_nft_apply_persistent() {
     fi
     mkdir -p -- "$nft_dir" || return 20
     chmod 0755 -- "$nft_dir" || return 20
-    tmp="$(mktemp --tmpdir="$nft_dir" .vpsctl-access.XXXXXX)" || return 20
+    tmp="$(mktemp "${nft_dir}/.vpsctl-access.XXXXXX")" || return 20
     access_firewall_nft_render "$port" "$old_port" >"$tmp" || {
         rm -f -- "$tmp"
         return 20
@@ -716,7 +716,7 @@ access_firewall_write_state() {
         return 0
     fi
     [[ "${VPSCTL_DRY_RUN:-0}" != 1 ]] || return 0
-    tmp="$(mktemp --tmpdir="$ACCESS_STATE_DIR" .firewall.XXXXXX)" || return 20
+    tmp="$(mktemp "${ACCESS_STATE_DIR}/.firewall.XXXXXX")" || return 20
     {
         access_kv_put schema_version 2
         access_kv_put backend "$backend"

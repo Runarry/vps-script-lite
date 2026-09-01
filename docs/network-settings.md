@@ -49,7 +49,7 @@ bash bin/vpsctl network bbr restore
 
 命令只使用当前内核已经提供的拥塞控制能力，不下载、升级或替换内核。`enable` 默认选择 `bbr`/`fq`；指定算法和队列规则前必须验证其可用性。算法与默认 qdisc 会同时写入运行时 sysctl 和持久化片段；只有 `--apply-live-qdisc` 才会进一步替换当前默认网卡的 root qdisc，因此计划和确认信息必须单独标明该影响。
 
-BBR 会按动作检查并在获授权后安装 `sysctl`、`modprobe`、`ip`、`tc`、`base64` 和实际事务锁所需的 `flock`。这只补齐用户空间工具；当前内核未提供目标拥塞控制算法时仍安全失败，不会尝试升级或替换内核。
+BBR 会按动作检查并在获授权后安装 `sysctl`、`modprobe`、`ip`、`tc`、`base64` 和实际事务锁所需的 `flock`。这只补齐用户空间工具；当前内核未提供目标拥塞控制算法时仍安全失败，不会尝试升级或替换内核。Alpine 3.20+ 的 OpenRC `modules` 与 `sysctl` 服务会分别读取 `/etc/modules-load.d` 和 `/etc/sysctl.d`；正式验收仍须在重启后核对模块与 sysctl 值，而不能只以文件存在判定持久化成功。
 
 ### 2.2 配置、状态与恢复
 
@@ -85,8 +85,10 @@ BBR 会按动作检查并在获授权后安装 `sysctl`、`modprobe`、`ip`、`t
 | --- | --- |
 | `systemd-resolved` | 使用项目专属的 resolved drop-in，并通过 resolved 重新加载；不直接覆盖其生成的 `/etc/resolv.conf` |
 | `NetworkManager` | 通过 `nmcli` 更新活动连接的 DNS 属性；连接配置文件仍由 NetworkManager 管理 |
-| `openresolv` | 更新 `/etc/resolvconf.conf` 并由 openresolv 生成结果；不把生成的 `/etc/resolv.conf` 当作静态文件覆盖 |
+| `openresolv` | 更新 `/etc/resolvconf.conf`，以 `name_servers` 配合 nameserver replacement 只生成受管服务器，再由 openresolv 刷新；不把生成的 `/etc/resolv.conf` 当作静态文件覆盖 |
 | 静态 `resolv.conf` | 仅在确认没有其他管理器拥有该文件时原子替换 `/etc/resolv.conf` |
+
+Alpine 使用 DHCP 时，udhcpc 或 dhcpcd 会默认覆盖 `/etc/resolv.conf`。检测到 Alpine、静态后端和 DHCP 配置或租约进程同时存在时，`set` 会在写入前拒绝；应先配置 openresolv，或由管理员为 udhcpc 在 `/etc/udhcpc/udhcpc.conf` 明确设置 `RESOLV_CONF="no"`、为 dhcpcd 在 `/etc/dhcpcd.conf` 明确设置 `nohook resolv.conf` 后再使用静态后端。两种开关不会互相替代；该门禁不影响只读查看或恢复已有备份。
 
 旧版 Debian 的 legacy `resolvconf` 布局不具备足够一致的安全恢复语义，因此命令必须明确拒绝变更并返回前置条件错误；不得退化为直接覆盖 `/etc/resolv.conf`。用户应先迁移到受支持的 DNS 管理后端，再重新执行。
 
@@ -208,7 +210,7 @@ RFW 会在参数校验以及 Linux、systemd、架构和内核版本门禁通过
 自动化测试通过只代表仓库内可重复检查完成。声明平台支持前，还必须在可丢弃的隔离 VPS 或 VM 中完成以下验收，并保留脱敏结果：
 
 - BBR：覆盖可用/不可用内核、重复执行、重启后持久化、`--apply-live-qdisc` 影响和完整恢复。
-- DNS：分别覆盖 systemd-resolved、NetworkManager、openresolv、静态 resolv.conf；验证 legacy Debian 安全拒绝、候选前测失败零写入、写后失败保留配置并返回 `30`、按备份恢复。
+- DNS：分别覆盖 systemd-resolved、NetworkManager、openresolv、静态 resolv.conf；在 Alpine 覆盖 DHCP 静态后端拒绝，以及 udhcpc `RESOLV_CONF="no"`/dhcpcd `nohook resolv.conf` 的分别接管；验证 legacy Debian 安全拒绝、候选前测失败零写入、写后失败保留配置并返回 `30`、按备份恢复。
 - IP 地址族偏好：覆盖空/注释/自定义 `/etc/gai.conf`、两种完整 precedence 表、所有权冲突、重复设置、dry-run、精确恢复和新进程实际解析排序。
 - RFW：分别覆盖 systemd 上的 `x86_64`/`aarch64`，校验稳定 release 选择、checksum 不匹配拒绝、IPv6 不受影响、配置/更新延后重启、`APPLY-RFW`/`--confirm-disruptive` 门禁、更新和卸载恢复。
 - 四入口：覆盖普通用户/root、`--dry-run`、`--non-interactive`、锁冲突、中断、重复执行及各基础退出码。

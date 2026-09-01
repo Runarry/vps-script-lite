@@ -9,7 +9,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 umask 022
 
-readonly VPSCTL_VERSION="0.5.0"
+readonly VPSCTL_VERSION="0.6.0"
 
 VPSCTL_DRY_RUN=0
 VPSCTL_INSTALL_DEPS=0
@@ -163,6 +163,7 @@ vpsctl_export_context() {
     export VPSCTL_DISTRIBUTED VPSCTL_INSTALL_ROOT VPSCTL_SELF_STATE_ROOT VPSCTL_MANAGED_ENTRY
     export VPSCTL_ENV_OS_ID="${VPS_ENV[os_id]}"
     export VPSCTL_ENV_OS_VERSION_ID="${VPS_ENV[os_version_id]}"
+    export VPSCTL_ENV_LIBC="${VPS_ENV[libc]}"
     export VPSCTL_ENV_ARCH="${VPS_ENV[architecture]}"
     export VPSCTL_ENV_INIT="${VPS_ENV[init_system]}"
     export VPSCTL_ENV_PACKAGE_MANAGER="${VPS_ENV[package_manager]}"
@@ -175,6 +176,18 @@ vpsctl_invocation_may_omit_requirement() {
     shift 2
 
     case "${command_key}:${requirement}" in
+        network:ip-policy:libc:glibc)
+            (($# == 1)) || return 1
+            case "$1" in
+                help | -h | --help) return 0 ;;
+            esac
+            ;;
+        system:kernel:os:debian-family)
+            (($# == 1)) || return 1
+            case "$1" in
+                help | -h | --help | status) return 0 ;;
+            esac
+            ;;
         test:nodequality:root | test:tcpquality:root)
             (($# == 1)) || return 1
             case "$1" in

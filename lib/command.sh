@@ -815,7 +815,7 @@ vps_cmd_backup_file() {
     mkdir -p -- "$backup_root" || return 20
     vps_cmd_require_no_symlink_components "$backup_root" || return $?
     chmod 0700 -- "$backup_root" || return 20
-    backup_directory="$(mktemp -d --tmpdir="$backup_root" "${timestamp}.XXXXXX")" || return 20
+    backup_directory="$(mktemp -d "${backup_root}/${timestamp}.XXXXXX")" || return 20
     backup_path="${backup_directory}/${logical_source##*/}"
     chmod 0700 -- "$backup_directory" || return 20
     cp -p -- "$source_path" "$backup_path" || return 20
@@ -843,7 +843,7 @@ vps_cmd_atomic_write() {
         vps_cmd_error "目标目录必须存在且不能是符号链接: ${logical_target%/*}"
         return 3
     }
-    temporary_path="$(mktemp --tmpdir="$target_directory" ".${target_name}.tmp.XXXXXX")" || return 20
+    temporary_path="$(mktemp "${target_directory}/.${target_name}.tmp.XXXXXX")" || return 20
     if ! cat >"$temporary_path"; then
         status=20
     elif ! chmod "$mode" -- "$temporary_path"; then

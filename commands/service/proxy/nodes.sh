@@ -390,7 +390,7 @@ proxy_prepare_certificate() {
     fi
     mkdir -p -- "$physical_dir" || return 20
     chmod 0700 -- "$physical_dir" || return 20
-    temp_dir="$(mktemp -d --tmpdir="$physical_dir" .prepare.XXXXXX)" || return 20
+    temp_dir="$(mktemp -d "${physical_dir}/.prepare.XXXXXX")" || return 20
     chmod 0700 -- "$temp_dir" || { rm -rf -- "$temp_dir"; return 20; }
     if [[ "$mode" == "imported" ]]; then
         resolved_cert="$(proxy_resolve_import_file "$import_cert")" || {
@@ -763,11 +763,11 @@ proxy_node_add() (
         proxy_cleanup_orphan_certs "$core" >/dev/null 2>&1 || true
         return "$status"
     }
-    candidate_manifest="$(mktemp --tmpdir="$PROXY_STATE_DIR" .nodes.add.XXXXXX)" || {
+    candidate_manifest="$(mktemp "${PROXY_STATE_DIR}/.nodes.add.XXXXXX")" || {
         proxy_cleanup_orphan_certs "$core" >/dev/null 2>&1 || true
         return 20
     }
-    candidate_config="$(mktemp --tmpdir="$PROXY_STATE_DIR" .config.add.XXXXXX.json)" || {
+    candidate_config="$(proxy_mktemp_json "$PROXY_STATE_DIR" config.add)" || {
         rm -f -- "$candidate_manifest"
         proxy_cleanup_orphan_certs "$core" >/dev/null 2>&1 || true
         return 20
@@ -1192,8 +1192,8 @@ proxy_node_ip_policy_set() (
              ($mode == "profile" and any($values[]; . == $node.profile))))] | length
     ' "$PROXY_MANIFEST")" || return 10
     ((selected_count > 0)) || { vps_cmd_error "选择结果为空，未修改任何节点"; return 3; }
-    candidate_manifest="$(mktemp --tmpdir="$PROXY_STATE_DIR" .nodes.ip-policy.XXXXXX)" || return 20
-    candidate_config="$(mktemp --tmpdir="$PROXY_STATE_DIR" .config.ip-policy.XXXXXX.json)" || {
+    candidate_manifest="$(mktemp "${PROXY_STATE_DIR}/.nodes.ip-policy.XXXXXX")" || return 20
+    candidate_config="$(proxy_mktemp_json "$PROXY_STATE_DIR" config.ip-policy)" || {
         rm -f -- "$candidate_manifest"
         return 20
     }
@@ -1621,11 +1621,11 @@ proxy_node_edit() (
         candidate_node="$(jq '.options.obfs_password=""' <<<"$candidate_node")" || return 10
     fi
 
-    candidate_manifest="$(mktemp --tmpdir="$PROXY_STATE_DIR" .nodes.edit.XXXXXX)" || {
+    candidate_manifest="$(mktemp "${PROXY_STATE_DIR}/.nodes.edit.XXXXXX")" || {
         proxy_cleanup_orphan_certs "$core" >/dev/null 2>&1 || true
         return 20
     }
-    candidate_config="$(mktemp --tmpdir="$PROXY_STATE_DIR" .config.edit.XXXXXX.json)" || {
+    candidate_config="$(proxy_mktemp_json "$PROXY_STATE_DIR" config.edit)" || {
         rm -f -- "$candidate_manifest"
         proxy_cleanup_orphan_certs "$core" >/dev/null 2>&1 || true
         return 20
@@ -1714,10 +1714,10 @@ proxy_node_delete() (
         vps_cmd_error "节点在删除确认后已发生变化，请重新确认：$id"
         return 3
     }
-    candidate_manifest="$(mktemp --tmpdir="$PROXY_STATE_DIR" .nodes.delete.XXXXXX)" || return 20
-    candidate_config="$(mktemp --tmpdir="$PROXY_STATE_DIR" .config.delete.XXXXXX.json)" || { rm -f "$candidate_manifest"; return 20; }
+    candidate_manifest="$(mktemp "${PROXY_STATE_DIR}/.nodes.delete.XXXXXX")" || return 20
+    candidate_config="$(proxy_mktemp_json "$PROXY_STATE_DIR" config.delete)" || { rm -f "$candidate_manifest"; return 20; }
     if [[ -n "$binding" ]]; then
-        candidate_relay="$(mktemp --tmpdir="$PROXY_STATE_DIR" .relay.node-delete.XXXXXX.json)" || {
+        candidate_relay="$(proxy_mktemp_json "$PROXY_STATE_DIR" relay.node-delete)" || {
             rm -f -- "$candidate_manifest" "$candidate_config"
             return 20
         }
@@ -1820,8 +1820,8 @@ proxy_purge_core_nodes() {
     local core="$1" candidate_manifest candidate_config status=0
     proxy_core_valid "$core" || return 2
     [[ -f "$PROXY_MANIFEST" ]] || return 0
-    candidate_manifest="$(mktemp --tmpdir="$PROXY_STATE_DIR" .nodes.purge.XXXXXX)" || return 20
-    candidate_config="$(mktemp --tmpdir="$PROXY_STATE_DIR" .config.purge.XXXXXX.json)" || { rm -f "$candidate_manifest"; return 20; }
+    candidate_manifest="$(mktemp "${PROXY_STATE_DIR}/.nodes.purge.XXXXXX")" || return 20
+    candidate_config="$(proxy_mktemp_json "$PROXY_STATE_DIR" config.purge)" || { rm -f "$candidate_manifest"; return 20; }
     if ! jq --arg core "$core" 'del(.nodes[] | select(.core == $core))' "$PROXY_MANIFEST" >"$candidate_manifest"; then
         status=10
     fi

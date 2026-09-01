@@ -53,6 +53,7 @@ test_environment_detection() {
     test_assert_nonempty "${VPS_ENV[kernel_name]}" "kernel name"
     test_assert_nonempty "${VPS_ENV[architecture]}" "architecture"
     test_assert_nonempty "${VPS_ENV[os_pretty_name]}" "OS display name"
+    test_assert_nonempty "${VPS_ENV[libc]}" "libc"
     test_assert_nonempty "${VPS_ENV[memory_total]}" "memory total"
     test_assert_nonempty "${VPS_ENV[root_disk_total]}" "root disk total"
     test_assert_nonempty "${VPS_ENV[compatibility]}" "compatibility"
@@ -87,6 +88,61 @@ test_environment_detection() {
     test_assert_equal "192.0.2.10" "${VPS_ENV[ipv4]}" "IPv4-only detection"
     test_assert_equal "unavailable" "${VPS_ENV[ipv6]}" "missing IPv6 detection"
     unset -f ip
+}
+
+test_alpine_compatibility_matrix() {
+    VPS_ENV=()
+    VPS_CAPABILITY=()
+    VPS_ENV[kernel_name]=Linux
+    VPS_ENV[os_id]=alpine
+    VPS_ENV[os_version_id]=3.20.0
+    VPS_ENV[architecture]=x86_64
+    VPS_ENV[libc]=musl
+    VPS_ENV[virtualization]=unknown
+    VPS_ENV[package_manager]=apk
+    VPS_ENV[service_manager]=rc-service
+    VPS_CAPABILITY[init:openrc]=1
+
+    vps_env_set_compatibility
+    test_assert_equal supported "${VPS_ENV[compatibility]}" "Alpine 3.20 x86_64 compatibility"
+    test_assert_contains "${VPS_ENV[compatibility_detail]}" "Alpine 3.20+" "Alpine support detail"
+    vps_env_version_at_least 3.23.5 3 20 || test_fail "Alpine patch version comparison"
+    vps_env_version_at_least 4.0 3 20 || test_fail "future Alpine major comparison"
+    ! vps_env_version_at_least 3.19.9 3 20 || test_fail "old Alpine version comparison"
+
+    VPS_ENV[os_version_id]=3.23.5
+    VPS_ENV[architecture]=aarch64
+    vps_env_set_compatibility
+    test_assert_equal supported "${VPS_ENV[compatibility]}" "Alpine 3.23 aarch64 compatibility"
+
+    VPS_ENV[os_version_id]=3.19.9
+    vps_env_set_compatibility
+    test_assert_equal limited "${VPS_ENV[compatibility]}" "old Alpine compatibility"
+
+    VPS_ENV[os_version_id]=3.23.5
+    VPS_ENV[architecture]=armv7l
+    vps_env_set_compatibility
+    test_assert_equal limited "${VPS_ENV[compatibility]}" "unsupported Alpine architecture"
+
+    VPS_ENV[architecture]=x86_64
+    VPS_ENV[libc]=glibc
+    vps_env_set_compatibility
+    test_assert_equal limited "${VPS_ENV[compatibility]}" "non-musl Alpine compatibility"
+
+    VPS_ENV[libc]=musl
+    VPS_ENV[virtualization]=container
+    vps_env_set_compatibility
+    test_assert_equal limited "${VPS_ENV[compatibility]}" "container Alpine compatibility"
+
+    VPS_ENV[virtualization]=unknown
+    unset 'VPS_CAPABILITY[init:openrc]'
+    vps_env_set_compatibility
+    test_assert_equal limited "${VPS_ENV[compatibility]}" "Alpine without OpenRC compatibility"
+
+    VPS_CAPABILITY[init:openrc]=1
+    VPS_ENV[package_manager]=unknown
+    vps_env_set_compatibility
+    test_assert_equal limited "${VPS_ENV[compatibility]}" "Alpine without apk compatibility"
 }
 
 test_environment_chinese_fallbacks() {
@@ -124,7 +180,8 @@ test_registry() {
     test_assert_equal "disruptive" "${VPS_COMMAND_RISK["system:kernel"]}" "kernel risk"
     test_assert_equal "optional-root" "${VPS_COMMAND_PRIVILEGE["system:kernel"]}" "kernel privilege"
     test_assert_equal "supported" "${VPS_COMMAND_DRY_RUN["system:kernel"]}" "kernel dry-run"
-    test_assert_equal "linux" "${VPS_COMMAND_REQUIREMENTS["system:kernel"]}" "kernel requirements"
+    test_assert_equal "linux,libc:glibc" "${VPS_COMMAND_REQUIREMENTS["network:ip-policy"]}" "IP policy requirements"
+    test_assert_equal "linux,os:debian-family" "${VPS_COMMAND_REQUIREMENTS["system:kernel"]}" "kernel requirements"
     test_assert_equal "commands/security/access.sh" "${VPS_COMMAND_PATH["security:access"]}" "access command path"
     test_assert_equal "disruptive" "${VPS_COMMAND_RISK["security:access"]}" "access risk"
     test_assert_equal "optional-root" "${VPS_COMMAND_PRIVILEGE["security:access"]}" "access privilege"
@@ -311,6 +368,7 @@ test_ui_input() {
 }
 
 test_environment_detection
+test_alpine_compatibility_matrix
 test_environment_chinese_fallbacks
 test_registry
 test_ui_input

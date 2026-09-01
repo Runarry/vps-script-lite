@@ -470,7 +470,7 @@ access_sshd_make_backup() {
             count=$((count + 1))
         done
     fi
-    tmp="$(mktemp --tmpdir="$backup_dir" .manifest.XXXXXX)" || return 20
+    tmp="$(mktemp "${backup_dir}/.manifest.XXXXXX")" || return 20
     {
         access_kv_put schema_version 1
         access_kv_put kind ssh
@@ -545,7 +545,7 @@ access_sshd_write_transaction() {
     local firewall_mode="${15}" firewall_backend="${16}" firewall_added="${17}" previous_backend="${18}" previous_port="${19}" previous_mode="${20}" pending_sha="${21}"
     local tmp
 
-    tmp="$(mktemp --tmpdir="$tx_dir" .state.XXXXXX)" || return 20
+    tmp="$(mktemp "${tx_dir}/.state.XXXXXX")" || return 20
     {
         access_kv_put schema_version 1
         access_kv_put status "$status"
@@ -611,7 +611,7 @@ access_sshd_backup_mark() {
     old="$backup_dir/manifest"
 
     [[ -f "$old" && ! -L "$old" ]] || return 30
-    tmp="$(mktemp --tmpdir="$backup_dir" .manifest.XXXXXX)" || return 20
+    tmp="$(mktemp "${backup_dir}/.manifest.XXXXXX")" || return 20
     while IFS=$'\t' read -r key value; do
         case "$key" in
             lifecycle) access_kv_put lifecycle "$lifecycle" ;;
@@ -637,7 +637,7 @@ access_sshd_transaction_mark() {
 
     [[ -f "$state" && ! -L "$state" ]] || return 30
     directory="${state%/*}"
-    tmp="$(mktemp --tmpdir="$directory" .state.XXXXXX)" || return 20
+    tmp="$(mktemp "${directory}/.state.XXXXXX")" || return 20
     while IFS=$'\t' read -r key value; do
         if [[ "$key" == status ]]; then
             access_kv_put status "$new_status"

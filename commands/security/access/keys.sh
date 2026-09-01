@@ -142,7 +142,7 @@ access_key_create_backup() {
         gid="$(access_user_field "$user" gid)" || return $?
         mode=600
     fi
-    tmp="$(mktemp --tmpdir="$backup_dir" .manifest.XXXXXX)" || return 20
+    tmp="$(mktemp "${backup_dir}/.manifest.XXXXXX")" || return 20
     {
         access_kv_put schema_version 1
         access_kv_put kind authorized_keys
@@ -176,7 +176,7 @@ access_key_mark_backup() {
     local lifecycle="$1" applied_sha="$2" manifest="$ACCESS_KEY_BACKUP_DIR/manifest" tmp key value
 
     [[ -f "$manifest" && ! -L "$manifest" ]] || return 30
-    tmp="$(mktemp --tmpdir="$ACCESS_KEY_BACKUP_DIR" .manifest.XXXXXX)" || return 20
+    tmp="$(mktemp "${ACCESS_KEY_BACKUP_DIR}/.manifest.XXXXXX")" || return 20
     while IFS=$'\t' read -r key value; do
         case "$key" in
             lifecycle) access_kv_put lifecycle "$lifecycle" ;;
@@ -214,7 +214,7 @@ access_key_add_line_locked() {
     chown "$uid:$gid" -- "$ssh_dir" || return 20
     vps_cmd_require_no_symlink_components "$ssh_dir" || return $?
     vps_cmd_require_no_symlink_components "$authorized" || return $?
-    tmp="$(mktemp --tmpdir="$ssh_dir" .authorized_keys.XXXXXX)" || return 20
+    tmp="$(mktemp "${ssh_dir}/.authorized_keys.XXXXXX")" || return 20
     if [[ -f "$authorized" ]]; then
         cat -- "$authorized" >"$tmp" || {
             rm -f -- "$tmp"
@@ -296,7 +296,7 @@ access_key_rollback_last_add_locked() {
     local authorized="${ACCESS_KEY_ADDED_PATH:-}" tmp
 
     [[ "${ACCESS_KEY_ADDED:-0}" == 1 && -f "$authorized" && ! -L "$authorized" ]] || return 0
-    tmp="$(mktemp --tmpdir="${authorized%/*}" .authorized_keys.rollback.XXXXXX)" || return 20
+    tmp="$(mktemp "${authorized%/*}/.authorized_keys.rollback.XXXXXX")" || return 20
     awk -v wanted_type="$ACCESS_KEY_ADDED_TYPE" -v wanted_blob="$ACCESS_KEY_ADDED_BLOB" '
         BEGIN { removed=0 }
         {

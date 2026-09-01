@@ -343,6 +343,44 @@ vps_dns_detect_backend() {
     return 0
 }
 
+vps_dns_alpine_plain_dhcp_conflict() {
+    local backend="${1:-${VPS_DNS_BACKEND:-}}" interfaces udhcpc_conf dhcpcd_conf run_dir pid_file
+    local udhcpc_resolv_disabled=0 dhcpcd_resolv_disabled=0
+
+    [[ "${VPSCTL_ENV_OS_ID:-}" == "alpine" && "$backend" == "plain" ]] || return 1
+    udhcpc_conf="$(vps_dns_path /etc/udhcpc/udhcpc.conf)" || return 1
+    if [[ -r "$udhcpc_conf" ]] && awk '
+        /^[[:space:]]*RESOLV_CONF[[:space:]]*=[[:space:]]*["'"'"']?no["'"'"']?[[:space:]]*(#.*)?$/ { found=1 }
+        END { exit(found ? 0 : 1) }
+    ' "$udhcpc_conf"; then
+        udhcpc_resolv_disabled=1
+    fi
+    dhcpcd_conf="$(vps_dns_path /etc/dhcpcd.conf)" || return 1
+    if [[ -r "$dhcpcd_conf" ]] && awk '
+        /^[[:space:]]*nohook[[:space:]]+/ {
+            for (i=2; i<=NF; i++) if ($i == "resolv.conf") found=1
+        }
+        END { exit(found ? 0 : 1) }
+    ' "$dhcpcd_conf"; then
+        dhcpcd_resolv_disabled=1
+    fi
+    interfaces="$(vps_dns_path /etc/network/interfaces)" || return 1
+    if [[ -r "$interfaces" ]] && awk '
+        /^[[:space:]]*iface[[:space:]]+[^[:space:]]+[[:space:]]+inet6?[[:space:]]+dhcp([[:space:]]|$)/ { found=1 }
+        END { exit(found ? 0 : 1) }
+    ' "$interfaces"; then
+        ((udhcpc_resolv_disabled == 1)) || return 0
+    fi
+    run_dir="$(vps_dns_path /run)" || return 1
+    for pid_file in "$run_dir"/udhcpc.*.pid; do
+        [[ ! -f "$pid_file" ]] || ((udhcpc_resolv_disabled == 1)) || return 0
+    done
+    for pid_file in "$run_dir"/dhcpcd*.pid; do
+        [[ ! -f "$pid_file" ]] || ((dhcpcd_resolv_disabled == 1)) || return 0
+    done
+    return 1
+}
+
 vps_dns_read_servers() {
     local file line key value
     file="$(vps_dns_path /etc/resolv.conf)"
@@ -501,12 +539,15 @@ vps_dns_write_openresolv() {
     if [[ -r "$file" ]]; then
         while IFS= read -r line || [[ -n "$line" ]]; do
             [[ "$line" =~ ^[[:space:]]*(name_servers|name_server_blacklist)[[:space:]]*= ]] && continue
+            case "$line" in
+                'replace="$replace nameserver/*/"' | "replace='\$replace nameserver/*/'") continue ;;
+            esac
             output+="$line"$'\n'
         done <"$file"
     fi
     joined="$(vps_dns_join_servers)"
     output+="name_servers=\"${joined}\""$'\n'
-    output+='name_server_blacklist="*"'$'\n'
+    output+='replace="$replace nameserver/*/"'$'\n'
     printf '%s' "$output" | vps_dns_atomic_write /etc/resolvconf.conf 0644 || return 20
 }
 
@@ -695,6 +736,10 @@ vps_dns_set() {
             return 3
             ;;
     esac
+    if vps_dns_alpine_plain_dhcp_conflict "$backend"; then
+        vps_cmd_error "Alpine DHCP 会覆盖静态 /etc/resolv.conf；请先配置 openresolv，或为 udhcpc 设置 RESOLV_CONF=\"no\"、为 dhcpcd 设置 'nohook resolv.conf'"
+        return 3
+    fi
     case "$backend" in
         systemd-resolved) managed_target="/etc/systemd/resolved.conf.d/90-vpsctl-dns.conf" ;;
         openresolv) managed_target="/etc/resolvconf.conf" ;;

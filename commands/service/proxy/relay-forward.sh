@@ -320,7 +320,8 @@ proxy_relay_forward_manifest_validate() {
         all(.forwards[];
             ((.id | type) == "string" and (.id | test("^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"))) and
             ((.name | type) == "string" and (.name | length) > 0 and (.name | length) <= 128 and (.name | test("[\\r\\n]")) == false) and
-            ((.exit_id | type) == "string" and .exit_id as $id | ([ $root.exits[].id ] | index($id)) != null) and
+            ((.exit_id | type) == "string") and
+            (.exit_id as $id | ([ $root.exits[].id ] | index($id)) != null) and
             ((.listen_port_start | type) == "number" and (.listen_port_start | floor) == .listen_port_start and .listen_port_start >= 1 and .listen_port_start <= 65535) and
             ((.listen_port_end | type) == "number" and (.listen_port_end | floor) == .listen_port_end and .listen_port_end >= .listen_port_start and .listen_port_end <= 65535) and
             (.network == "auto" or .network == "tcp" or .network == "udp" or .network == "both") and
@@ -768,6 +769,7 @@ proxy_relay_forward_install_runtime() {
     local relative source logical_target physical_target mode
     local -a files=(
         lib/command.sh
+        lib/ui.sh
         commands/service/proxy.sh
         commands/service/proxy/common.sh
         commands/service/proxy/protocols-sing-box.sh
@@ -803,17 +805,17 @@ proxy_relay_forward_install_runtime() {
 
 proxy_relay_forward_emit_helper() {
     cat <<EOF
-#!/bin/sh
+#!/usr/bin/env bash
 # Managed by vpsctl proxy relay-forward.
-set -eu
+set -Eeuo pipefail
 mode="\${1:-refresh}"
 case "\$mode" in
-    refresh) exec /usr/bin/env bash ${PROXY_RELAY_FORWARD_RUNTIME_LOGICAL}/commands/service/proxy.sh --non-interactive --quiet relay forward refresh ;;
-    clear) exec /usr/bin/env bash ${PROXY_RELAY_FORWARD_RUNTIME_LOGICAL}/commands/service/proxy.sh --non-interactive relay forward clear ;;
+    refresh) exec bash ${PROXY_RELAY_FORWARD_RUNTIME_LOGICAL}/commands/service/proxy.sh --non-interactive --quiet relay forward refresh ;;
+    clear) exec bash ${PROXY_RELAY_FORWARD_RUNTIME_LOGICAL}/commands/service/proxy.sh --non-interactive relay forward clear ;;
     watch)
         trap 'exit 0' INT TERM
         while :; do
-            /usr/bin/env bash ${PROXY_RELAY_FORWARD_RUNTIME_LOGICAL}/commands/service/proxy.sh --non-interactive --quiet relay forward refresh || true
+            bash ${PROXY_RELAY_FORWARD_RUNTIME_LOGICAL}/commands/service/proxy.sh --non-interactive --quiet relay forward refresh || true
             sleep 300 &
             wait \$! || exit 0
         done
@@ -890,7 +892,15 @@ _proxy_relay_forward_service_action() {
         systemd:reload) vps_cmd_run systemctl reload vpsctl-proxy-forward.service ;;
         openrc:reload-manager) return 0 ;;
         openrc:enable-now) vps_cmd_run rc-update add vpsctl-proxy-forward default && vps_cmd_run rc-service vpsctl-proxy-forward start ;;
-        openrc:disable-now) vps_cmd_run rc-service vpsctl-proxy-forward stop && vps_cmd_run rc-update del vpsctl-proxy-forward default ;;
+        openrc:disable-now)
+            if rc-service vpsctl-proxy-forward status >/dev/null 2>&1; then
+                vps_cmd_run rc-service vpsctl-proxy-forward stop || return $?
+            fi
+            if rc-update show default 2>/dev/null |
+                awk '$1 == "vpsctl-proxy-forward" { found=1 } END { exit(found ? 0 : 1) }'; then
+                vps_cmd_run rc-update del vpsctl-proxy-forward default || return $?
+            fi
+            ;;
         openrc:reload) vps_cmd_run rc-service vpsctl-proxy-forward reload ;;
         *) return 2 ;;
     esac
@@ -909,7 +919,7 @@ proxy_relay_forward_apply() (
         vps_cmd_info "演练：刷新 relay DNS 缓存，预检并原子替换两个受管 nftables 表"
         return 0
     fi
-    tmp="$(mktemp -d --tmpdir="$PROXY_STATE_DIR" .relay-forward.XXXXXX)" || return 20
+    tmp="$(mktemp -d "${PROXY_STATE_DIR}/.relay-forward.XXXXXX")" || return 20
     chmod 0700 -- "$tmp" || { rm -rf -- "$tmp"; return 20; }
     cache_candidate="$tmp/cache.json"
     batch="$tmp/rules.nft"
@@ -1019,7 +1029,10 @@ _proxy_relay_forward_runtime_enabled() {
     [[ "${VPSCTL_TESTING:-0}" != 1 || "${PROXY_RELAY_FORWARD_ALLOW_TEST_RUNTIME:-0}" == 1 ]] || return 1
     case "${PROXY_INIT_SYSTEM:-unknown}" in
         systemd) systemctl is-enabled --quiet vpsctl-proxy-forward.service ;;
-        openrc) rc-update show default 2>/dev/null | awk '{print $1}' | grep -Fxq vpsctl-proxy-forward ;;
+        openrc)
+            rc-update show default 2>/dev/null |
+                awk '$1 == "vpsctl-proxy-forward" { found=1 } END { exit(found ? 0 : 1) }'
+            ;;
         *) return 1 ;;
     esac
 }
@@ -1031,6 +1044,7 @@ proxy_relay_forward_runtime_status() {
     if [[ -f "$PROXY_RELAY_FORWARD_HELPER" && ! -L "$PROXY_RELAY_FORWARD_HELPER" &&
           -f "$PROXY_RELAY_FORWARD_SERVICE" && ! -L "$PROXY_RELAY_FORWARD_SERVICE" &&
           -f "$PROXY_RELAY_FORWARD_SYSCTL" && ! -L "$PROXY_RELAY_FORWARD_SYSCTL" &&
+          -f "$PROXY_RELAY_FORWARD_RUNTIME/lib/ui.sh" && ! -L "$PROXY_RELAY_FORWARD_RUNTIME/lib/ui.sh" &&
           -f "$PROXY_RELAY_FORWARD_RUNTIME/commands/service/proxy.sh" ]]; then
         installed=true
     fi
@@ -1072,7 +1086,7 @@ proxy_relay_forward_install_service() (
         vps_cmd_info "演练：安装 relay forward helper、${PROXY_INIT_SYSTEM} 服务和独立 forwarding sysctl 文件"
         return 0
     fi
-    tmp="$(mktemp -d --tmpdir="$PROXY_STATE_DIR" .relay-forward-install.XXXXXX)" || return 20
+    tmp="$(mktemp -d "${PROXY_STATE_DIR}/.relay-forward-install.XXXXXX")" || return 20
     helper_candidate="$tmp/helper"; service_candidate="$tmp/service"; sysctl_candidate="$tmp/sysctl"
     proxy_relay_forward_emit_helper >"$helper_candidate" || { rm -rf -- "$tmp"; return 20; }
     proxy_relay_forward_emit_service >"$service_candidate" || { rm -rf -- "$tmp"; return 20; }

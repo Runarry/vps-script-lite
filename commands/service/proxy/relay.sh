@@ -275,7 +275,7 @@ proxy_relay_commit_candidate() {
     local config_path="" config_logical="" pending_path="" pending_logical=""
     proxy_relay_validate_file "$candidate" || return $?
     if [[ "$sync_forward" == "1" && "${VPSCTL_DRY_RUN:-0}" != "1" ]]; then
-        rollback_dir="$(mktemp -d --tmpdir="$PROXY_STATE_DIR" .relay-rollback.XXXXXX)" || return 20
+        rollback_dir="$(mktemp -d "${PROXY_STATE_DIR}/.relay-rollback.XXXXXX")" || return 20
         chmod 0700 -- "$rollback_dir" || { rm -rf -- "$rollback_dir"; return 20; }
         if [[ -f "$PROXY_RELAY_FILE" ]]; then
             cp -p -- "$PROXY_RELAY_FILE" "$rollback_dir/relay.json" || { rm -rf -- "$rollback_dir"; return 20; }
@@ -296,7 +296,7 @@ proxy_relay_commit_candidate() {
             vps_cmd_error "建立或修改节点中转需要已安装的 $(proxy_core_label "$core")"
             return 3
         }
-        candidate_config="$(mktemp --tmpdir="$PROXY_STATE_DIR" .relay.config.XXXXXX.json)" || return 20
+        candidate_config="$(proxy_mktemp_json "$PROXY_STATE_DIR" relay.config)" || return 20
         proxy_render_config "$core" "$PROXY_MANIFEST" "$candidate" >"$candidate_config" || status=$?
         if ((status == 0)); then
             proxy_commit_manifest_config "$core" "$PROXY_MANIFEST" "$candidate_config" "$reason" "$candidate" || status=$?
@@ -445,7 +445,7 @@ proxy_relay_exit_show() {
 proxy_relay_candidate_file() {
     local prefix="${1:-state}" directory="$PROXY_STATE_DIR"
     [[ -d "$directory" ]] || directory="${TMPDIR:-/tmp}"
-    mktemp --tmpdir="$directory" ".relay.${prefix}.XXXXXX.json"
+    proxy_mktemp_json "$directory" "relay.${prefix}"
 }
 
 proxy_relay_copy_current() {

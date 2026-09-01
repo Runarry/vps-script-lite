@@ -317,9 +317,10 @@ bbr_status() {
 }
 
 bbr_encode_file() {
-    local path="$1"
+    local path="$1" encoded
     command -v base64 >/dev/null 2>&1 || return 3
-    base64 -w 0 -- "$path"
+    encoded="$(base64 "$path")" || return $?
+    printf '%s' "${encoded//$'\n'/}"
 }
 
 bbr_atomic_write_path() {
