@@ -422,13 +422,40 @@ test_core_choice_crud_pending_and_validation() {
     : >"$MOCK_LOG"
     run_proxy node edit --id "$id" --name x-pending
     assert_equal 0 "$RUN_STATUS" "running edit"
-    [[ -f "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/pending/xray.json" ]] || fail "running edit did not mark pending"
-    ! grep -Fq 'restart vpsctl-proxy-xray.service' "$MOCK_LOG" || fail "running edit restarted automatically"
+    grep -Fq 'restart vpsctl-proxy-xray.service' "$MOCK_LOG" || fail "running edit did not restart automatically"
+    [[ ! -e "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/pending/xray.json" ]] || fail "auto-applied edit left pending state"
+    assert_equal x-pending "$(jq -r '.nodes[0].name' "$(manifest_path)")" "auto-applied edit name"
     run_proxy restart --core xray
     assert_equal 3 "$RUN_STATUS" "restart confirmation"
     run_proxy restart --core xray --confirm-disruptive
     assert_equal 0 "$RUN_STATUS" "explicit restart"
-    [[ ! -e "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/pending/xray.json" ]] || fail "restart did not clear pending"
+
+    touch "${TEST_SYSTEM_ROOT}/run/fail-service-restart-once"
+    run_proxy node edit --id "$id" --name x-fail-apply
+    assert_equal 20 "$RUN_STATUS" "auto-apply restart failure"
+    assert_equal x-pending "$(jq -r '.nodes[0].name' "$(manifest_path)")" "failed auto-apply rolled back name"
+    [[ ! -e "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/pending/xray.json" ]] || fail "failed auto-apply left pending state"
+
+    mkdir -p "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/pending"
+    jq -n --arg core xray '{
+        schema_version:1,core:$core,reason:"core-update",
+        manifest_backup:"",config_backup:"",binary_backup:"",meta_backup:"",
+        relay_backup:"",relay_existed:false,relay_touched:false,
+        relay_runtime_touched:false,relay_cache_backup:"",relay_cache_existed:false,
+        relay_nft_backup:"",relay_nft_existed:false,created_at:"2026-01-01T00:00:00Z"
+    }' >"${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/pending/xray.json"
+    : >"$MOCK_LOG"
+    run_proxy node edit --id "$id" --name x-mixed
+    assert_equal 0 "$RUN_STATUS" "edit with core-update pending"
+    assert_equal x-mixed "$(jq -r '.nodes[0].name' "$(manifest_path)")" "mixed pending wrote new name"
+    [[ -f "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/pending/xray.json" ]] || fail "mixed pending did not retain restart marker"
+    jq -e '.reason | contains("core-update") and contains("node-edit")' \
+        "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/pending/xray.json" >/dev/null || fail "mixed pending reasons"
+    ! grep -Fq 'restart vpsctl-proxy-xray.service' "$MOCK_LOG" || fail "core-update pending caused auto-restart"
+    assert_contains "$RUN_OUTPUT" "请显式 restart 应用" "mixed pending requires explicit restart"
+    run_proxy restart --core xray --confirm-disruptive
+    assert_equal 0 "$RUN_STATUS" "explicit restart applies mixed pending"
+    [[ ! -e "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/pending/xray.json" ]] || fail "mixed pending not cleared"
 
     before="$(sha256sum "$(manifest_path)" | awk '{print $1}')"
     touch "${TEST_SYSTEM_ROOT}/run/fail-core-validation"
@@ -505,15 +532,14 @@ test_tls_certificate_transaction() {
     [[ -f "${TEST_SYSTEM_ROOT}${old_cert}" ]] || fail "initial fingerprinted certificate missing"
 
     touch "${TEST_SYSTEM_ROOT}/run/mock-systemd/active-vpsctl-proxy-sing-box.service"
+    : >"$MOCK_LOG"
     run_proxy node edit --id "$id" --sni new.example --cert-file "$certs/new.example/cert.pem" --key-file "$certs/new.example/key.pem"
     assert_equal 0 "$RUN_STATUS" "running TLS SNI edit"
     new_cert="$(jq -r --arg id "$id" '.nodes[] | select(.id == $id) | .tls.certificate_path' "$(manifest_path)")"
     [[ "$new_cert" =~ /cert-[a-f0-9]{64}\.pem$ && "$new_cert" != "$old_cert" ]] || fail "edited certificate path is not independently fingerprinted"
-    [[ -f "${TEST_SYSTEM_ROOT}${old_cert}" && -f "${TEST_SYSTEM_ROOT}${new_cert}" ]] || fail "pending TLS edit did not retain both certificate generations"
-    [[ -f "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/pending/sing-box.json" ]] || fail "TLS edit did not create pending state"
-    run_proxy restart --core sing-box --confirm-disruptive
-    assert_equal 0 "$RUN_STATUS" "TLS pending restart"
-    [[ ! -e "${TEST_SYSTEM_ROOT}${old_cert}" && -f "${TEST_SYSTEM_ROOT}${new_cert}" ]] || fail "restart did not prune the superseded certificate generation"
+    grep -Fq 'restart vpsctl-proxy-sing-box.service' "$MOCK_LOG" || fail "running TLS edit did not restart automatically"
+    [[ ! -e "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/pending/sing-box.json" ]] || fail "auto-applied TLS edit left pending state"
+    [[ ! -e "${TEST_SYSTEM_ROOT}${old_cert}" && -f "${TEST_SYSTEM_ROOT}${new_cert}" ]] || fail "auto-apply did not prune the superseded certificate generation"
 
     touch "${TEST_SYSTEM_ROOT}/run/fail-core-validation"
     run_proxy node edit --id "$id" --sni failed.example --cert-file "$certs/failed.example/cert.pem" --key-file "$certs/failed.example/key.pem"
@@ -837,11 +863,12 @@ test_node_ip_strategy_and_batch() {
 
     run_proxy start --core sing-box --enable
     assert_equal 0 "$RUN_STATUS" "start sing-box for pending policy test"
+    : >"$MOCK_LOG"
     run_proxy node ip-policy set --core sing-box --ip-strategy prefer_ipv4 --id "$sb1"
     assert_equal 0 "$RUN_STATUS" "active-core policy batch"
+    grep -Fq 'restart vpsctl-proxy-sing-box.service' "$MOCK_LOG" || fail "active policy batch did not restart automatically"
     pending="${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/pending/sing-box.json"
-    [[ -f "$pending" ]] || fail "active policy batch did not mark pending restart"
-    jq -e '.reason == "node-ip-policy"' "$pending" >/dev/null || fail "policy pending reason"
+    [[ ! -e "$pending" ]] || fail "auto-applied policy batch left pending restart"
 }
 
 test_protocol_matrix() {
@@ -1165,20 +1192,20 @@ test_relay_xray_pending_and_validation() {
 
     run_proxy start --core xray --enable
     assert_equal 0 "$RUN_STATUS" "start Xray before relay binding"
+    : >"$MOCK_LOG"
     run_proxy relay bind add --node-id "$node1" --exit-id "$exit_id"
     assert_equal 0 "$RUN_STATUS" "active Xray first relay binding"
+    grep -Fq 'restart vpsctl-proxy-xray.service' "$MOCK_LOG" || fail "first relay binding did not restart automatically"
+    pending="${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/pending/xray.json"
+    [[ ! -e "$pending" ]] || fail "auto-applied first relay binding left pending state"
+    : >"$MOCK_LOG"
     run_proxy relay bind add --node-id "$node2" --exit-id "$exit_id"
     assert_equal 0 "$RUN_STATUS" "active Xray shared relay binding"
-    pending="${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/pending/xray.json"
-    [[ -f "$pending" ]] || fail "active Xray relay binding did not create pending state"
-    jq -e '.relay_touched == true and (.reason | contains("relay-bind-add"))' "$pending" >/dev/null || fail "Xray relay pending metadata"
+    grep -Fq 'restart vpsctl-proxy-xray.service' "$MOCK_LOG" || fail "shared relay binding did not restart automatically"
+    [[ ! -e "$pending" ]] || fail "auto-applied shared relay binding left pending state"
     config="${TEST_SYSTEM_ROOT}/etc/vpsctl/proxy/xray/config.json"
     assert_equal 1 "$(jq -r '[.outbounds[] | select((.tag // "") | startswith("relay-exit-"))] | length' "$config")" "one shared Xray relay outbound"
     assert_equal 2 "$(jq -r '[.routing.rules[] | select((.outboundTag // "") | startswith("relay-exit-"))] | length' "$config")" "two Xray inboundTag rules"
-
-    run_proxy restart --core xray --confirm-disruptive
-    assert_equal 0 "$RUN_STATUS" "apply Xray relay pending configuration"
-    [[ ! -e "$pending" ]] || fail "Xray relay pending state not cleared"
     assert_equal 2 "$(jq -r '.bindings | length' "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/lkg/xray/relay.json")" "Xray relay LKG snapshot"
     [[ -f "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/lkg/xray/relay-resolved.json" ]] || fail "Xray relay LKG DNS cache snapshot"
     [[ -f "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/lkg/xray/relay-nftables.nft" ]] || fail "Xray relay LKG nft snapshot"
@@ -1192,21 +1219,14 @@ test_relay_xray_pending_and_validation() {
 
     new_uri="${node_uri/xray-entry.example/xray-new.example}"
     printf '198.51.100.81\n' >"${TEST_SYSTEM_ROOT}/run/dns-ahostsv4-xray-new.example"
-    run_proxy relay exit edit --id "$exit_id" --uri "$new_uri" --profile shadowsocks-aes-256-gcm --core xray
-    assert_equal 0 "$RUN_STATUS" "active bound exit edit with immediate forward update"
-    jq -e '.relay_touched == true and .relay_runtime_touched == true and
-        .relay_cache_existed == true and .relay_nft_existed == true' "$pending" >/dev/null ||
-        fail "pending relay runtime snapshot metadata"
-    [[ -f "$(jq -r '.relay_cache_backup' "$pending")" ]] || fail "pending relay cache backup"
-    [[ -f "$(jq -r '.relay_nft_backup' "$pending")" ]] || fail "pending relay nft backup"
     rm -f -- "${TEST_SYSTEM_ROOT}/run/dns-ahostsv4-xray-entry.example"
     touch "${TEST_SYSTEM_ROOT}/run/fail-service-restart-once"
-    run_proxy restart --core xray --confirm-disruptive
-    assert_equal 20 "$RUN_STATUS" "failed Xray restart restores previous relay data plane"
-    [[ ! -e "$pending" ]] || fail "failed restart did not consume restored pending state"
-    assert_equal "$node_uri" "$(jq -r --arg id "$exit_id" '.exits[] | select(.id == $id) | .uri' "$(relay_path)")" "failed restart restored relay exit"
-    assert_equal xray-entry.example "$(jq -r --arg id "$exit_id" '.exits[$id].host' "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/relay-resolved.json")" "failed restart restored DNS cache"
-    [[ -f "${TEST_SYSTEM_ROOT}/run/mock-nft/ip-vpsctl_proxy_forward4" ]] || fail "failed restart did not restore managed nft table"
+    run_proxy relay exit edit --id "$exit_id" --uri "$new_uri" --profile shadowsocks-aes-256-gcm --core xray
+    assert_equal 20 "$RUN_STATUS" "failed auto-apply restores previous relay data plane"
+    [[ ! -e "$pending" ]] || fail "failed auto-apply did not consume restored pending state"
+    assert_equal "$node_uri" "$(jq -r --arg id "$exit_id" '.exits[] | select(.id == $id) | .uri' "$(relay_path)")" "failed auto-apply restored relay exit"
+    assert_equal xray-entry.example "$(jq -r --arg id "$exit_id" '.exits[$id].host' "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/relay-resolved.json")" "failed auto-apply restored DNS cache"
+    [[ -f "${TEST_SYSTEM_ROOT}/run/mock-nft/ip-vpsctl_proxy_forward4" ]] || fail "failed auto-apply did not restore managed nft table"
     run_proxy relay forward delete --id "$forward_id" --confirm-delete
     assert_equal 0 "$RUN_STATUS" "Xray forward cleanup after restart rollback"
 }

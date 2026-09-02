@@ -1740,7 +1740,7 @@ proxy_node_delete() (
     rm -f -- "$candidate_manifest" "$candidate_config" "$candidate_relay"
     trap 'vps_cmd_unlock' EXIT
     ((status == 0)) || return "$status"
-    vps_cmd_success "节点 ${name} 已删除；证书会在下一次成功启动/重启后清理"
+    vps_cmd_success "节点 ${name} 已删除"
 )
 
 proxy_cleanup_orphan_certs() {

@@ -1004,6 +1004,24 @@ proxy_clear_pending() {
     [[ ! -e "$pending" ]] || vps_cmd_run rm -f "$pending"
 }
 
+proxy_pending_can_auto_apply() {
+    local pending="$1" reasons reason rest
+    [[ -f "$pending" && ! -L "$pending" ]] || return 1
+    reasons="$(jq -r '.reason // empty' "$pending" 2>/dev/null)" || return 1
+    [[ -n "$reasons" ]] || return 1
+    rest="${reasons},"
+    while [[ -n "$rest" ]]; do
+        reason="${rest%%,*}"
+        rest="${rest#*,}"
+        [[ -n "$reason" ]] || continue
+        case "$reason" in
+            node-add | node-edit | node-delete | node-ip-policy | relay-bind-add | relay-bind-delete | relay-exit-edit | relay-exit-delete) ;;
+            *) return 1 ;;
+        esac
+    done
+    return 0
+}
+
 proxy_commit_manifest_config() {
     local core="$1" candidate_manifest="$2" candidate_config="$3" reason="$4"
     local candidate_relay="${5:-}"
@@ -1026,7 +1044,7 @@ proxy_commit_manifest_config() {
     config_logical="$(proxy_core_config_logical "$core")" || return 2
     config_path="$(proxy_core_config_path "$core")" || return 2
     if [[ "${VPSCTL_DRY_RUN:-0}" == "1" ]]; then
-        vps_cmd_info "演练：提交 ${core} 节点清单和已验证配置；服务不会自动重启"
+        vps_cmd_info "演练：提交 ${core} 节点清单和已验证配置；运行中的内核在仅配置变更时将自动重启"
         return 0
     fi
     if [[ -f "$PROXY_MANIFEST" ]]; then
@@ -1110,7 +1128,12 @@ proxy_commit_manifest_config() {
         return 30
     fi
     if ((active)); then
-        vps_cmd_warning "配置已校验并写入；$(proxy_core_label "$core") 正在运行，请显式 restart 应用"
+        pending_path="$(proxy_core_pending_path "$core")" || return 30
+        if proxy_pending_can_auto_apply "$pending_path"; then
+            _proxy_core_restart_locked "$core" || return $?
+        else
+            vps_cmd_warning "配置已校验并写入；$(proxy_core_label "$core") 正在运行，请显式 restart 应用"
+        fi
     elif ((pending_required)); then
         vps_cmd_info "配置已校验并合并到待生效状态；将在下次启动 $(proxy_core_label "$core") 时应用"
     else

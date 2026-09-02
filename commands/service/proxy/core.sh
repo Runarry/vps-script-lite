@@ -648,6 +648,39 @@ _proxy_core_cleanup_certs_if_available() {
     fi
 }
 
+# Caller must already hold the proxy lock. Does not prompt for confirmation.
+_proxy_core_restart_locked() {
+    local core="$1" pending
+    pending="$(proxy_core_pending_path "$core")" || return $?
+    proxy_service_action "$core" reload-manager || return 20
+    if proxy_service_action "$core" restart && { [[ "${VPSCTL_DRY_RUN:-0}" == "1" ]] || proxy_service_is_active "$core"; }; then
+        if [[ "${VPSCTL_DRY_RUN:-0}" != "1" ]]; then
+            proxy_save_lkg "$core" || return 30
+            proxy_clear_pending "$core" || return 30
+            _proxy_core_cleanup_certs_if_available "$core" || return 20
+        fi
+        vps_cmd_success "$(proxy_core_label "$core") 已重启，配置已生效"
+        return 0
+    fi
+    if [[ -f "$pending" && ! -L "$pending" ]]; then
+        proxy_service_action "$core" stop >/dev/null 2>&1 || true
+        if ! proxy_restore_pending "$core"; then
+            vps_cmd_error "重启失败，且待生效状态回滚不完整"
+            return 30
+        fi
+        if proxy_service_action "$core" start && proxy_service_is_active "$core"; then
+            _proxy_core_cleanup_certs_if_available "$core" || return 20
+            vps_cmd_error "重启失败；已恢复并启动上一版 $(proxy_core_label "$core")"
+            return 20
+        fi
+        vps_cmd_error "重启失败；已回滚文件但无法恢复服务"
+        return 30
+    fi
+    proxy_service_is_active "$core" && return 20
+    vps_cmd_error "重启失败，服务当前未运行"
+    return 30
+}
+
 proxy_core_start() (
     local core="${1:-}" enable=0 arg pending
     (($# >= 1)) || { vps_cmd_error "start 需要 CORE"; return 2; }
@@ -722,7 +755,7 @@ proxy_core_stop() (
 )
 
 proxy_core_restart() (
-    local core="${1:-}" confirmed=0 arg pending rc
+    local core="${1:-}" confirmed=0 arg rc
     (($# >= 1)) || { vps_cmd_error "restart 需要 CORE"; return 2; }
     shift
     while (($#)); do
@@ -746,34 +779,7 @@ proxy_core_restart() (
         [[ "$rc" == "1" ]] && return 0
         return "$rc"
     fi
-    pending="$(proxy_core_pending_path "$core")" || return $?
-    proxy_service_action "$core" reload-manager || return 20
-    if proxy_service_action "$core" restart && { [[ "${VPSCTL_DRY_RUN:-0}" == "1" ]] || proxy_service_is_active "$core"; }; then
-        if [[ "${VPSCTL_DRY_RUN:-0}" != "1" ]]; then
-            proxy_save_lkg "$core" || return 30
-            proxy_clear_pending "$core" || return 30
-            _proxy_core_cleanup_certs_if_available "$core" || return 20
-        fi
-        vps_cmd_success "$(proxy_core_label "$core") 已重启，待生效更改已应用"
-        return 0
-    fi
-    if [[ -f "$pending" && ! -L "$pending" ]]; then
-        proxy_service_action "$core" stop >/dev/null 2>&1 || true
-        if ! proxy_restore_pending "$core"; then
-            vps_cmd_error "重启失败，且待生效状态回滚不完整"
-            return 30
-        fi
-        if proxy_service_action "$core" start && proxy_service_is_active "$core"; then
-            _proxy_core_cleanup_certs_if_available "$core" || return 20
-            vps_cmd_error "重启失败；已恢复并启动上一版 $(proxy_core_label "$core")"
-            return 20
-        fi
-        vps_cmd_error "重启失败；已回滚文件但无法恢复服务"
-        return 30
-    fi
-    proxy_service_is_active "$core" && return 20
-    vps_cmd_error "重启失败，服务当前未运行"
-    return 30
+    _proxy_core_restart_locked "$core"
 )
 
 _proxy_core_status_record() {
