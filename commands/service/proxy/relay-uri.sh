@@ -472,7 +472,7 @@ proxy_relay_uri_parse() {
         vless-reality-vision | vless-grpc-reality | trojan-xhttp-reality | trojan-grpc-reality | anytls-reality)
             tls_enabled='true'; tls_mode='reality'
             [[ -n "$sni" && "$public_key" =~ ^[A-Za-z0-9_-]{32,64}$ && "$short_id" =~ ^([0-9A-Fa-f]{2}){1,8}$ ]] || {
-                _proxy_relay_uri_error 'invalid Reality parameters'; return 10;
+                _proxy_relay_uri_error 'invalid REALITY parameters'; return 10;
             }
             ;;
         vless-ws-tls | trojan-ws-tls | vless-grpc-tls | vless-xhttp-tls | trojan-grpc-tls | anytls-tls)

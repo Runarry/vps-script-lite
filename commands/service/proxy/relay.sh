@@ -244,7 +244,7 @@ proxy_relay_parse_exit_uri() {
     if ((status == 0)); then printf '%s' "$descriptor"; return 0; fi
     if [[ "$status" == 2 ]] && proxy_is_interactive; then
         selected="$(proxy_prompt_select "请选择 URI 对应的 Profile" shadowsocks-2022 \
-            shadowsocks-2022 "Shadowsocks 2022" shadowsocks-2022-padding "Shadowsocks 2022（Padding）")" || return $?
+            shadowsocks-2022 "Shadowsocks 2022" shadowsocks-2022-padding "Shadowsocks 2022 Padding")" || return $?
         proxy_relay_uri_parse "$uri" "$selected"
         return $?
     fi

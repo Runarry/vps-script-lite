@@ -5,21 +5,21 @@
 
 proxy_sb_profiles() {
     cat <<'EOF'
-vless-reality-vision	VLESS Reality Vision（现实流控）
-vless-ws-tls	VLESS WebSocket + TLS
-trojan-ws-tls	Trojan WebSocket + TLS
-vless-grpc-tls	VLESS gRPC + TLS
+vless-reality-vision	VLESS + REALITY + XTLS Vision
+vless-ws-tls	VLESS + WebSocket + TLS
+trojan-ws-tls	Trojan + WebSocket + TLS
+vless-grpc-tls	VLESS + gRPC + TLS
 anytls-tls	AnyTLS + TLS
-anytls-reality	AnyTLS + Reality
-hysteria2	Hysteria2（高速 UDP）
-tuic-v5	TUIC v5（高速 UDP）
+anytls-reality	AnyTLS + REALITY
+hysteria2	Hysteria2
+tuic-v5	TUIC v5
 shadowsocks-aes-256-gcm	Shadowsocks AES-256-GCM
 shadowsocks-chacha20-poly1305	Shadowsocks ChaCha20-Poly1305
 shadowsocks-2022	Shadowsocks 2022
-shadowsocks-2022-padding	Shadowsocks 2022 + 流量填充
+shadowsocks-2022-padding	Shadowsocks 2022 Padding
 shadowsocks-2022-shadowtls	Shadowsocks 2022 + ShadowTLS
-vless-tcp	VLESS TCP（无 TLS）
-socks5	SOCKS5 用户认证
+vless-tcp	VLESS + TCP
+socks5	SOCKS5
 EOF
 }
 
@@ -35,24 +35,14 @@ proxy_sb_supports_profile() {
 }
 
 proxy_sb_profile_label() {
-    case "${1:-}" in
-        vless-reality-vision) printf 'VLESS Reality Vision（现实流控）' ;;
-        vless-ws-tls) printf 'VLESS WebSocket + TLS' ;;
-        trojan-ws-tls) printf 'Trojan WebSocket + TLS' ;;
-        vless-grpc-tls) printf 'VLESS gRPC + TLS' ;;
-        anytls-tls) printf 'AnyTLS + TLS' ;;
-        anytls-reality) printf 'AnyTLS + Reality' ;;
-        hysteria2) printf 'Hysteria2（高速 UDP）' ;;
-        tuic-v5) printf 'TUIC v5（高速 UDP）' ;;
-        shadowsocks-aes-256-gcm) printf 'Shadowsocks AES-256-GCM' ;;
-        shadowsocks-chacha20-poly1305) printf 'Shadowsocks ChaCha20-Poly1305' ;;
-        shadowsocks-2022) printf 'Shadowsocks 2022' ;;
-        shadowsocks-2022-padding) printf 'Shadowsocks 2022 + 流量填充' ;;
-        shadowsocks-2022-shadowtls) printf 'Shadowsocks 2022 + ShadowTLS' ;;
-        vless-tcp) printf 'VLESS TCP（无 TLS）' ;;
-        socks5) printf 'SOCKS5 用户认证' ;;
-        *) return 2 ;;
-    esac
+    local wanted="${1:-}" id label
+    while IFS=$'\t' read -r id label; do
+        if [[ "$id" == "$wanted" ]]; then
+            printf '%s' "$label"
+            return 0
+        fi
+    done < <(proxy_sb_profiles)
+    return 2
 }
 
 proxy_sb_validate_node() {

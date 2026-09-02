@@ -64,10 +64,8 @@ proxy_profile_default_transport() {
 }
 
 proxy_profile_default_name() {
-    local profile="$1" port="$2" label
-    label="$(proxy_profile_label "$profile")" || label="$profile"
-    label="${label// /-}"
-    printf '%s-%s' "$label" "$port"
+    local profile="$1" port="$2"
+    printf '%s-%s' "$profile" "$port"
 }
 
 proxy_ip_strategy_label() {
@@ -285,7 +283,7 @@ proxy_generate_reality_keys() {
         *) return 2 ;;
     esac
     [[ -n "$private_key" && -n "$public_key" && "$private_key" != "$public_key" ]] || {
-        vps_cmd_error "$(proxy_core_label "$core") Reality 密钥生成失败"
+        vps_cmd_error "$(proxy_core_label "$core") REALITY 密钥生成失败"
         return 20
     }
     PROXY_REALITY_PRIVATE_KEY="$private_key"
@@ -1649,7 +1647,7 @@ proxy_node_edit() (
         proxy_cleanup_orphan_certs "$core" >/dev/null 2>&1 || status=30
         return "$status"
     fi
-    vps_cmd_success "节点 ${id} 已更新；凭据与 Reality 密钥保持不变"
+    vps_cmd_success "节点 ${id} 已更新；凭据与 REALITY 密钥保持不变"
 )
 
 proxy_node_delete() (

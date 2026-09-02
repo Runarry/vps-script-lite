@@ -914,7 +914,35 @@ test_protocol_matrix() {
     local cert_dir="${TEST_TEMP}/cert" profile label supported node rendered uri id profile_obfs port=20000 count=0
     local descriptor relay_exit outbound rewritten rewritten_descriptor ss2022_uri="" parse_status=0 parse_error="" legacy_payload legacy_uri
     local profile_count=0 sb_count=0 xray_count=0 overlap_count=0 sb_only_count=0 xray_only_count=0
-    local digest_file="${TEST_TEMP}/xray.dgst" digest digest_status=0
+    local digest_file="${TEST_TEMP}/xray.dgst" digest digest_status=0 label_status=0
+    local -A expected_labels=(
+        [vless-reality-vision]='VLESS + REALITY + XTLS Vision'
+        [vless-ws-tls]='VLESS + WebSocket + TLS'
+        [trojan-ws-tls]='Trojan + WebSocket + TLS'
+        [vless-grpc-tls]='VLESS + gRPC + TLS'
+        [anytls-tls]='AnyTLS + TLS'
+        [anytls-reality]='AnyTLS + REALITY'
+        [hysteria2]='Hysteria2'
+        [tuic-v5]='TUIC v5'
+        [shadowsocks-aes-256-gcm]='Shadowsocks AES-256-GCM'
+        [shadowsocks-chacha20-poly1305]='Shadowsocks ChaCha20-Poly1305'
+        [shadowsocks-2022]='Shadowsocks 2022'
+        [shadowsocks-2022-padding]='Shadowsocks 2022 Padding'
+        [shadowsocks-2022-shadowtls]='Shadowsocks 2022 + ShadowTLS'
+        [vless-tcp]='VLESS + TCP'
+        [socks5]='SOCKS5'
+        [vless-grpc-reality]='VLESS + gRPC + REALITY'
+        [trojan-xhttp-reality]='Trojan + XHTTP + REALITY'
+        [trojan-grpc-reality]='Trojan + gRPC + REALITY'
+        [vless-xhttp-tls]='VLESS + XHTTP + TLS'
+        [trojan-grpc-tls]='Trojan + gRPC + TLS'
+    )
+    assert_equal 'hysteria2-8443' "$(proxy_profile_default_name hysteria2 8443)" "default node name uses profile id"
+    proxy_sb_profile_label 'not-a-profile' >/dev/null || label_status=$?
+    assert_equal 2 "$label_status" "unknown sing-box profile label"
+    label_status=0
+    proxy_xray_profile_label 'not-a-profile' >/dev/null || label_status=$?
+    assert_equal 2 "$label_status" "unknown Xray profile label"
     printf 'SHA2-256= AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n' >"$digest_file"
     digest="$(_proxy_core_xray_dgst_sha256 "$digest_file" Xray-linux-64.zip)"
     assert_equal aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa "$digest" "official Xray dgst format"
@@ -926,6 +954,12 @@ test_protocol_matrix() {
       -addext subjectAltName=DNS:www.amd.com -keyout "$cert_dir/key.pem" -out "$cert_dir/cert.pem" >/dev/null 2>&1
     while IFS=$'\t' read -r profile label; do
         [[ -n "$profile" ]] || continue
+        [[ -n "${expected_labels[$profile]:-}" ]] || fail "$profile missing expected official label"
+        assert_equal "${expected_labels[$profile]}" "$label" "$profile official label"
+        assert_equal "$label" "$(proxy_profile_label "$profile")" "$profile label helper"
+        if proxy_sb_supports_profile "$profile" && proxy_xray_supports_profile "$profile"; then
+            assert_equal "$(proxy_sb_profile_label "$profile")" "$(proxy_xray_profile_label "$profile")" "$profile shared core label"
+        fi
         profile_count=$((profile_count + 1))
         profile_obfs=none
         [[ "$profile" != hysteria2 ]] || profile_obfs=salamander

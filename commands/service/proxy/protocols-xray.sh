@@ -4,17 +4,17 @@
 
 proxy_xray_profiles() {
     cat <<'EOF'
-vless-reality-vision	VLESS Reality Vision（TCP 传输）
-vless-grpc-reality	VLESS Reality（gRPC 传输）
-trojan-xhttp-reality	Trojan Reality（XHTTP 传输）
-trojan-grpc-reality	Trojan Reality（gRPC 传输）
-vless-xhttp-tls	VLESS TLS（XHTTP stream-one）
-vless-grpc-tls	VLESS TLS（gRPC 传输）
-trojan-grpc-tls	Trojan TLS（gRPC 传输）
-shadowsocks-aes-256-gcm	Shadowsocks（AES-256-GCM）
-shadowsocks-chacha20-poly1305	Shadowsocks（ChaCha20-Poly1305）
+vless-reality-vision	VLESS + REALITY + XTLS Vision
+vless-grpc-reality	VLESS + gRPC + REALITY
+trojan-xhttp-reality	Trojan + XHTTP + REALITY
+trojan-grpc-reality	Trojan + gRPC + REALITY
+vless-xhttp-tls	VLESS + XHTTP + TLS
+vless-grpc-tls	VLESS + gRPC + TLS
+trojan-grpc-tls	Trojan + gRPC + TLS
+shadowsocks-aes-256-gcm	Shadowsocks AES-256-GCM
+shadowsocks-chacha20-poly1305	Shadowsocks ChaCha20-Poly1305
 shadowsocks-2022	Shadowsocks 2022
-shadowsocks-2022-padding	Shadowsocks 2022（启用 Padding）
+shadowsocks-2022-padding	Shadowsocks 2022 Padding
 EOF
 }
 
@@ -29,20 +29,14 @@ proxy_xray_supports_profile() {
 }
 
 proxy_xray_profile_label() {
-    case "${1:-}" in
-        vless-reality-vision) printf 'VLESS Reality Vision（TCP 传输）' ;;
-        vless-grpc-reality) printf 'VLESS Reality（gRPC 传输）' ;;
-        trojan-xhttp-reality) printf 'Trojan Reality（XHTTP 传输）' ;;
-        trojan-grpc-reality) printf 'Trojan Reality（gRPC 传输）' ;;
-        vless-xhttp-tls) printf 'VLESS TLS（XHTTP stream-one）' ;;
-        vless-grpc-tls) printf 'VLESS TLS（gRPC 传输）' ;;
-        trojan-grpc-tls) printf 'Trojan TLS（gRPC 传输）' ;;
-        shadowsocks-aes-256-gcm) printf 'Shadowsocks（AES-256-GCM）' ;;
-        shadowsocks-chacha20-poly1305) printf 'Shadowsocks（ChaCha20-Poly1305）' ;;
-        shadowsocks-2022) printf 'Shadowsocks 2022' ;;
-        shadowsocks-2022-padding) printf 'Shadowsocks 2022（启用 Padding）' ;;
-        *) return 2 ;;
-    esac
+    local wanted="${1:-}" id label
+    while IFS=$'\t' read -r id label; do
+        if [[ "$id" == "$wanted" ]]; then
+            printf '%s' "$label"
+            return 0
+        fi
+    done < <(proxy_xray_profiles)
+    return 2
 }
 
 proxy_xray_validate_node() {
