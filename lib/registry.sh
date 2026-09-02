@@ -116,7 +116,7 @@ vps_registry_init() {
     vps_registry_register_domain \
         "security" \
         "安全与访问" \
-        "用户凭据、公钥、SSH 远程访问与 Fail2ban 防护管理"
+        "用户凭据、公钥、SSH 远程访问、TLS 证书与 Fail2ban 防护管理"
 
     vps_registry_register_domain \
         "service" \
@@ -215,6 +215,18 @@ vps_registry_init() {
         "optional-root" \
         "supported" \
         "linux,init:systemd" \
+        "experimental"
+
+    vps_registry_register_command \
+        "security" \
+        "tls" \
+        "TLS 证书" \
+        "管理域名 TLS 证书：导入、申请与自动续期" \
+        "commands/security/tls.sh" \
+        "disruptive" \
+        "optional-root" \
+        "supported" \
+        "linux" \
         "experimental"
 
     vps_registry_register_command \

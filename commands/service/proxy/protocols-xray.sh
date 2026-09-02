@@ -73,12 +73,15 @@ proxy_xray_validate_node() {
             (.credentials.short_id | nonempty);
         def certificate_tls:
             .tls.enabled == true and
-            (.tls.mode == "self-signed" or .tls.mode == "imported") and
+            (.tls.mode == "self-signed" or .tls.mode == "imported" or .tls.mode == "managed") and
             (.tls.server_name | nonempty) and
             (.tls.certificate_path | nonempty) and
             (.tls.key_path | nonempty) and
             ((.tls.insecure | type) == "boolean") and
-            (((.tls.certificate_sha256 // "") | type) == "string");
+            (((.tls.certificate_sha256 // "") | type) == "string") and
+            (if .tls.mode == "managed" then
+                ((.tls.certificate_id // "") | test("^crt-[0-9a-f]{16}$"))
+             else true end);
         common and
         if .profile == "vless-reality-vision" then
             uuid and reality and .transport.type == "tcp" and

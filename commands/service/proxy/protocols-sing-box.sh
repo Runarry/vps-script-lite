@@ -69,11 +69,14 @@ proxy_sb_validate_node() {
         def password: credential("password");
         def tls_common:
             .tls.enabled == true and
-            (.tls.mode == "self-signed" or .tls.mode == "imported") and
+            (.tls.mode == "self-signed" or .tls.mode == "imported" or .tls.mode == "managed") and
             (.tls.server_name | text) and
             (.tls.certificate_path | text) and (.tls.key_path | text) and
             (.tls.insecure | boolean) and
-            ((.tls.certificate_sha256 | type) == "string" and (.tls.certificate_sha256 | test("^[A-Fa-f0-9]{64}$")));
+            ((.tls.certificate_sha256 | type) == "string" and (.tls.certificate_sha256 | test("^[A-Fa-f0-9]{64}$"))) and
+            (if .tls.mode == "managed" then
+                ((.tls.certificate_id // "") | test("^crt-[0-9a-f]{16}$"))
+             else true end);
         def reality:
             .tls.enabled == true and .tls.mode == "reality" and
             (.tls.server_name | text) and credential("private_key") and

@@ -361,11 +361,53 @@ proxy_resolve_import_file() {
 proxy_prepare_certificate() {
     local core="$1" id="$2" mode="$3" sni="$4" import_cert="${5:-}" import_key="${6:-}"
     local logical_dir physical_dir cert_logical key_logical cert_path key_path temp_dir config san fingerprint
-    local resolved_cert="" resolved_key="" existing_fingerprint="" status=0
-    [[ "$mode" == "self-signed" || "$mode" == "imported" ]] || {
-        vps_cmd_error "证书模式必须是 self-signed 或 imported"
+    local resolved_cert="" resolved_key="" existing_fingerprint="" status=0 managed_id="${PROXY_MANAGED_CERT_ID:-}"
+    [[ "$mode" == "self-signed" || "$mode" == "imported" || "$mode" == "managed" ]] || {
+        vps_cmd_error "证书模式必须是 self-signed、imported 或 managed"
         return 2
     }
+    if [[ "$mode" == "managed" ]]; then
+        [[ "$managed_id" =~ ^crt-[0-9a-f]{16}$ ]] || {
+            vps_cmd_error "managed 证书需要有效的 --cert-id"
+            return 2
+        }
+        proxy_valid_host "$sni" || {
+            vps_cmd_error "TLS SNI/域名无效：$sni"
+            return 2
+        }
+        command -v openssl >/dev/null 2>&1 && command -v sha256sum >/dev/null 2>&1 || {
+            vps_cmd_error "证书操作需要 openssl 和 sha256sum"
+            return 3
+        }
+        cert_logical="/var/lib/vpsctl/security/tls/live/${managed_id}/fullchain.pem"
+        key_logical="/var/lib/vpsctl/security/tls/live/${managed_id}/privkey.pem"
+        cert_path="$(vps_cmd_system_path "$cert_logical")" || return $?
+        key_path="$(vps_cmd_system_path "$key_logical")" || return $?
+        vps_cmd_require_no_symlink_components "$cert_path" || return $?
+        vps_cmd_require_no_symlink_components "$key_path" || return $?
+        if [[ "${VPSCTL_DRY_RUN:-0}" == "1" ]]; then
+            PROXY_CERTIFICATE_LOGICAL="$cert_logical"
+            PROXY_KEY_LOGICAL="$key_logical"
+            PROXY_CERTIFICATE_SHA256="0000000000000000000000000000000000000000000000000000000000000000"
+            PROXY_CERTIFICATE_INSECURE=false
+            PROXY_CERTIFICATE_ID="$managed_id"
+            return 0
+        fi
+        [[ -f "$cert_path" && -f "$key_path" && ! -L "$cert_path" && ! -L "$key_path" ]] || {
+            vps_cmd_error "未找到 security tls 证书 $managed_id 的 live 文件"
+            return 3
+        }
+        proxy_validate_certificate_pair "$cert_path" "$key_path" "$sni" || return $?
+        fingerprint="$(openssl x509 -in "$cert_path" -noout -fingerprint -sha256 2>/dev/null | awk -F= 'NR==1 {gsub(":", "", $2); print tolower($2)}')"
+        [[ "$fingerprint" =~ ^[a-f0-9]{64}$ ]] || return 20
+        PROXY_CERTIFICATE_LOGICAL="$cert_logical"
+        PROXY_KEY_LOGICAL="$key_logical"
+        PROXY_CERTIFICATE_SHA256="$fingerprint"
+        PROXY_CERTIFICATE_INSECURE=false
+        PROXY_CERTIFICATE_ID="$managed_id"
+        return 0
+    fi
+    PROXY_CERTIFICATE_ID=""
     proxy_valid_host "$sni" || {
         vps_cmd_error "TLS SNI/域名无效：$sni"
         return 2
@@ -482,7 +524,7 @@ proxy_prepare_node_json() {
     local obfs_type="${14}" up_mbps="${15}" down_mbps="${16}" congestion_control="${17}" ip_strategy="${18:-auto}"
     local binary uuid="" password="" username="" private_key="" public_key="" short_id="" shadowtls_password=""
     local method="" padding=false shadowtls=false obfs_password="" transport flow="" tls_enabled=false tls_mode="none"
-    local cert_path="" key_path="" cert_sha="" insecure=false created_at
+    local cert_path="" key_path="" cert_sha="" insecure=false created_at cert_id=""
     binary="$(proxy_core_binary_path "$core")" || return 3
     transport="$(proxy_profile_default_transport "$profile")"
     created_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -515,6 +557,7 @@ proxy_prepare_node_json() {
         key_path="$PROXY_KEY_LOGICAL"
         cert_sha="$PROXY_CERTIFICATE_SHA256"
         insecure="$PROXY_CERTIFICATE_INSECURE"
+        cert_id="${PROXY_CERTIFICATE_ID:-}"
     fi
 
     case "$profile" in
@@ -543,6 +586,7 @@ proxy_prepare_node_json() {
         --arg private_key "$private_key" --arg public_key "$public_key" --arg short_id "$short_id" \
         --arg shadowtls_password "$shadowtls_password" --arg sni "$sni" \
         --arg cert_mode "$tls_mode" --arg certificate_path "$cert_path" --arg key_path "$key_path" \
+        --arg certificate_id "$cert_id" \
         --arg certificate_sha256 "$cert_sha" --arg transport "$transport" --arg path "$path" \
         --arg service_name "$service_name" --arg flow "$flow" --arg method "$method" \
         --arg obfs_type "$obfs_type" --arg obfs_password "$obfs_password" \
@@ -554,7 +598,7 @@ proxy_prepare_node_json() {
             id:$id, core:$core, profile:$profile, name:$name, listen:$listen,
             port:$port, address:$address, ip_strategy:$ip_strategy, created_at:$created_at, updated_at:$created_at,
             credentials:{uuid:$uuid,password:$password,username:$username,private_key:$private_key,public_key:$public_key,short_id:$short_id,shadowtls_password:$shadowtls_password},
-            tls:{enabled:$tls_enabled,mode:$cert_mode,server_name:$sni,certificate_path:$certificate_path,key_path:$key_path,insecure:$insecure,certificate_sha256:$certificate_sha256},
+            tls:{enabled:$tls_enabled,mode:$cert_mode,server_name:$sni,certificate_path:$certificate_path,key_path:$key_path,insecure:$insecure,certificate_sha256:$certificate_sha256,certificate_id:$certificate_id},
             transport:{type:$transport,path:$path,service_name:$service_name,flow:$flow},
             options:{method:$method,padding:$padding,shadowtls:$shadowtls,obfs_type:$obfs_type,obfs_password:$obfs_password,up_mbps:$up_mbps,down_mbps:$down_mbps,congestion_control:$congestion_control}
         }'
@@ -562,7 +606,7 @@ proxy_prepare_node_json() {
 
 proxy_node_add() (
     local profile="" requested_core="" name="" listen="::" port="" address="" sni="www.amd.com"
-    local path="" service_name="" cert_mode="self-signed" import_cert="" import_key=""
+    local path="" service_name="" cert_mode="self-signed" import_cert="" import_key="" managed_cert_id=""
     local obfs_type="none" up_mbps=10000 down_mbps=10000 congestion_control="bbr" ip_strategy="auto" arg core id node
     local candidate_manifest candidate_config status=0 mode detected_address address_choice transport
     local -a required_tools=(jq openssl ss)
@@ -579,6 +623,7 @@ proxy_node_add() (
             --path) (($# >= 2)) || return 2; path="$2"; shift 2 ;;
             --service-name) (($# >= 2)) || return 2; service_name="$2"; shift 2 ;;
             --cert-mode) (($# >= 2)) || return 2; cert_mode="$2"; shift 2 ;;
+            --cert-id) (($# >= 2)) || return 2; managed_cert_id="$2"; shift 2 ;;
             --cert-file) (($# >= 2)) || return 2; import_cert="$2"; shift 2 ;;
             --key-file) (($# >= 2)) || return 2; import_key="$2"; shift 2 ;;
             --obfs) (($# >= 2)) || return 2; obfs_type="$2"; shift 2 ;;
@@ -621,14 +666,19 @@ proxy_node_add() (
         vps_cmd_error "gRPC serviceName 无效"
         return 2
     fi
-    [[ "$cert_mode" == "self-signed" || "$cert_mode" == "imported" ]] || { vps_cmd_error "--cert-mode 仅支持 self-signed|imported"; return 2; }
-    if ! proxy_profile_requires_tls_certificate "$profile" && [[ "$cert_mode" != "self-signed" || -n "$import_cert$import_key" ]]; then
+    [[ "$cert_mode" == "self-signed" || "$cert_mode" == "imported" || "$cert_mode" == "managed" ]] || { vps_cmd_error "--cert-mode 仅支持 self-signed|imported|managed"; return 2; }
+    if ! proxy_profile_requires_tls_certificate "$profile" && [[ "$cert_mode" != "self-signed" || -n "$import_cert$import_key$managed_cert_id" ]]; then
         vps_cmd_error "${profile} 不使用受管 TLS 证书，不能指定导入证书选项"
         return 2
     fi
     if [[ "$cert_mode" == "imported" ]] && proxy_profile_requires_tls_certificate "$profile"; then
         [[ -n "$import_cert" && -n "$import_key" ]] || { vps_cmd_error "导入证书需要 --cert-file 和 --key-file"; return 2; }
     fi
+    if [[ "$cert_mode" == "managed" ]] && proxy_profile_requires_tls_certificate "$profile"; then
+        [[ "$managed_cert_id" =~ ^crt-[0-9a-f]{16}$ ]] || { vps_cmd_error "managed 证书需要 --cert-id crt-..."; return 2; }
+        [[ -z "$import_cert$import_key" ]] || { vps_cmd_error "managed 证书不能同时使用 --cert-file/--key-file"; return 2; }
+    fi
+    PROXY_MANAGED_CERT_ID="$managed_cert_id"
     [[ "$obfs_type" == "none" || "$obfs_type" == "salamander" ]] || { vps_cmd_error "--obfs 仅支持 none|salamander"; return 2; }
     [[ "$up_mbps" =~ ^[1-9][0-9]*$ && "$down_mbps" =~ ^[1-9][0-9]*$ ]] || { vps_cmd_error "带宽必须是正整数 Mbps"; return 2; }
     case "$congestion_control" in bbr | cubic | new_reno) ;; *) vps_cmd_error "拥塞控制仅支持 bbr|cubic|new_reno"; return 2 ;; esac
@@ -687,10 +737,12 @@ proxy_node_add() (
             esac
             if proxy_profile_requires_tls_certificate "$profile"; then
                 cert_mode="$(proxy_prompt_select "证书方式" "$cert_mode" \
-                    self-signed "生成自签名证书" imported "导入现有证书")" || return $?
+                    self-signed "生成自签名证书" imported "导入现有证书" managed "使用 security tls 证书")" || return $?
                 if [[ "$cert_mode" == "imported" ]]; then
                     import_cert="$(proxy_prompt_value "证书文件绝对路径" "$import_cert")" || return $?
                     import_key="$(proxy_prompt_value "私钥文件绝对路径" "$import_key")" || return $?
+                elif [[ "$cert_mode" == "managed" ]]; then
+                    managed_cert_id="$(proxy_prompt_value "TLS 证书 ID" "$managed_cert_id")" || return $?
                 fi
             fi
             if [[ "$profile" == "hysteria2" ]]; then
@@ -727,15 +779,20 @@ proxy_node_add() (
             [[ "$service_name" =~ ^[A-Za-z0-9._/-]{1,128}$ ]] || { vps_cmd_error "gRPC serviceName 无效"; return 2; }
             ;;
     esac
-    [[ "$cert_mode" == "self-signed" || "$cert_mode" == "imported" ]] || { vps_cmd_error "--cert-mode 仅支持 self-signed|imported"; return 2; }
+    [[ "$cert_mode" == "self-signed" || "$cert_mode" == "imported" || "$cert_mode" == "managed" ]] || { vps_cmd_error "--cert-mode 仅支持 self-signed|imported|managed"; return 2; }
     if ! proxy_profile_requires_tls_certificate "$profile" && \
-        [[ "$cert_mode" != "self-signed" || -n "$import_cert$import_key" ]]; then
+        [[ "$cert_mode" != "self-signed" || -n "$import_cert$import_key$managed_cert_id" ]]; then
         vps_cmd_error "${profile} 不使用受管 TLS 证书，不能指定导入证书选项"
         return 2
     fi
     if [[ "$cert_mode" == "imported" ]] && proxy_profile_requires_tls_certificate "$profile"; then
         [[ -n "$import_cert" && -n "$import_key" ]] || { vps_cmd_error "导入证书需要 --cert-file 和 --key-file"; return 2; }
     fi
+    if [[ "$cert_mode" == "managed" ]] && proxy_profile_requires_tls_certificate "$profile"; then
+        [[ "$managed_cert_id" =~ ^crt-[0-9a-f]{16}$ ]] || { vps_cmd_error "managed 证书需要 --cert-id crt-..."; return 2; }
+        [[ -z "$import_cert$import_key" ]] || { vps_cmd_error "managed 证书不能同时使用 --cert-file/--key-file"; return 2; }
+    fi
+    PROXY_MANAGED_CERT_ID="$managed_cert_id"
     [[ "$obfs_type" == "none" || "$obfs_type" == "salamander" ]] || { vps_cmd_error "--obfs 仅支持 none|salamander"; return 2; }
     [[ "$up_mbps" =~ ^[1-9][0-9]*$ && "$down_mbps" =~ ^[1-9][0-9]*$ ]] || { vps_cmd_error "带宽必须是正整数 Mbps"; return 2; }
     case "$congestion_control" in bbr | cubic | new_reno) ;; *) vps_cmd_error "拥塞控制仅支持 bbr|cubic|new_reno"; return 2 ;; esac
@@ -1300,7 +1357,7 @@ proxy_node_menu_run() {
 
 proxy_node_edit() (
     local id="" name="" listen="" port="" address="" sni="" path="" service_name=""
-    local requested_cert_mode="" import_cert="" import_key="" obfs_type="" up_mbps="" down_mbps="" congestion_control="" ip_strategy="" arg
+    local requested_cert_mode="" import_cert="" import_key="" managed_cert_id="" obfs_type="" up_mbps="" down_mbps="" congestion_control="" ip_strategy="" arg
     local node current_node core profile old_port old_cert_mode cert_mode candidate_node candidate_manifest candidate_config status=0
     local field transport current confirm_status=0 certificate_tools_needed=0
     local -a edit_fields=()
@@ -1317,6 +1374,7 @@ proxy_node_edit() (
             --path) (($# >= 2)) || return 2; path="$2"; shift 2 ;;
             --service-name) (($# >= 2)) || return 2; service_name="$2"; shift 2 ;;
             --cert-mode) (($# >= 2)) || return 2; requested_cert_mode="$2"; shift 2 ;;
+            --cert-id) (($# >= 2)) || return 2; managed_cert_id="$2"; shift 2 ;;
             --cert-file) (($# >= 2)) || return 2; import_cert="$2"; shift 2 ;;
             --key-file) (($# >= 2)) || return 2; import_key="$2"; shift 2 ;;
             --obfs) (($# >= 2)) || return 2; obfs_type="$2"; shift 2 ;;
@@ -1328,7 +1386,7 @@ proxy_node_edit() (
         esac
     done
     local had_explicit_change=0
-    [[ -z "$name$listen$port$address$sni$path$service_name$requested_cert_mode$import_cert$import_key$obfs_type$up_mbps$down_mbps$congestion_control$ip_strategy" ]] || had_explicit_change=1
+    [[ -z "$name$listen$port$address$sni$path$service_name$requested_cert_mode$import_cert$import_key$managed_cert_id$obfs_type$up_mbps$down_mbps$congestion_control$ip_strategy" ]] || had_explicit_change=1
     if [[ -n "$id" && ! "$id" =~ ^node-[a-f0-9]{16}$ ]]; then
         vps_cmd_error "node edit 需要有效 --id"
         return 2
@@ -1348,7 +1406,7 @@ proxy_node_edit() (
     [[ -z "$sni" ]] || proxy_valid_host "$sni" || { vps_cmd_error "SNI 无效"; return 2; }
     [[ -z "$path" ]] || proxy_valid_path "$path" || { vps_cmd_error "传输路径无效"; return 2; }
     [[ -z "$service_name" || "$service_name" =~ ^[A-Za-z0-9._/-]{1,128}$ ]] || { vps_cmd_error "gRPC serviceName 无效"; return 2; }
-    [[ -z "$requested_cert_mode" || "$requested_cert_mode" == "self-signed" || "$requested_cert_mode" == "imported" ]] || { vps_cmd_error "--cert-mode 仅支持 self-signed|imported"; return 2; }
+    [[ -z "$requested_cert_mode" || "$requested_cert_mode" == "self-signed" || "$requested_cert_mode" == "imported" || "$requested_cert_mode" == "managed" ]] || { vps_cmd_error "--cert-mode 仅支持 self-signed|imported|managed"; return 2; }
     [[ -z "$import_cert$import_key" || ( -n "$import_cert" && -n "$import_key" ) ]] || { vps_cmd_error "证书和私钥必须成对提供"; return 2; }
     [[ -z "$obfs_type" || "$obfs_type" == "none" || "$obfs_type" == "salamander" ]] || { vps_cmd_error "--obfs 仅支持 none|salamander"; return 2; }
     [[ -z "$up_mbps" || "$up_mbps" =~ ^[1-9][0-9]*$ ]] || { vps_cmd_error "上行带宽必须是正整数 Mbps"; return 2; }
@@ -1439,12 +1497,15 @@ proxy_node_edit() (
                 certificate)
                     current="${requested_cert_mode:-$(jq -r '.tls.mode' <<<"$node")}"
                     requested_cert_mode="$(proxy_prompt_select "证书方式" "$current" \
-                        self-signed "生成自签名证书" imported "导入现有证书")" || return $?
+                        self-signed "生成自签名证书" imported "导入现有证书" managed "使用 security tls 证书")" || return $?
                     import_cert=""
                     import_key=""
+                    managed_cert_id=""
                     if [[ "$requested_cert_mode" == "imported" ]]; then
                         import_cert="$(proxy_prompt_value "证书文件绝对路径" "")" || return $?
                         import_key="$(proxy_prompt_value "私钥文件绝对路径" "")" || return $?
+                    elif [[ "$requested_cert_mode" == "managed" ]]; then
+                        managed_cert_id="$(proxy_prompt_value "TLS 证书 ID" "$(jq -r '.tls.certificate_id // empty' <<<"$node")")" || return $?
                     fi
                     had_explicit_change=1
                     ;;
@@ -1513,7 +1574,7 @@ proxy_node_edit() (
             esac
         done
     fi
-    if proxy_profile_requires_tls_certificate "$profile" && [[ -n "$requested_cert_mode$import_cert$import_key$sni" ]]; then
+    if proxy_profile_requires_tls_certificate "$profile" && [[ -n "$requested_cert_mode$import_cert$import_key$managed_cert_id$sni" ]]; then
         certificate_tools_needed=1
     fi
     name="${name:-$(jq -r '.name' <<<"$node")}"
@@ -1536,11 +1597,11 @@ proxy_node_edit() (
     [[ "$up_mbps" =~ ^[1-9][0-9]*$ && "$down_mbps" =~ ^[1-9][0-9]*$ ]] || return 2
     case "$congestion_control" in bbr | cubic | new_reno) ;; *) return 2 ;; esac
     proxy_ip_strategy_valid "$ip_strategy" || return 2
-    if [[ -n "$requested_cert_mode" && "$requested_cert_mode" != "self-signed" && "$requested_cert_mode" != "imported" ]]; then
-        vps_cmd_error "--cert-mode 仅支持 self-signed|imported"
+    if [[ -n "$requested_cert_mode" && "$requested_cert_mode" != "self-signed" && "$requested_cert_mode" != "imported" && "$requested_cert_mode" != "managed" ]]; then
+        vps_cmd_error "--cert-mode 仅支持 self-signed|imported|managed"
         return 2
     fi
-    if ! proxy_profile_requires_tls_certificate "$profile" && [[ -n "$requested_cert_mode$import_cert$import_key" ]]; then
+    if ! proxy_profile_requires_tls_certificate "$profile" && [[ -n "$requested_cert_mode$import_cert$import_key$managed_cert_id" ]]; then
         vps_cmd_error "${profile} 不使用受管 TLS 证书，不能修改证书选项"
         return 2
     fi
@@ -1598,15 +1659,28 @@ proxy_node_edit() (
             vps_cmd_error "切换到导入证书或修改其 SNI 时必须同时提供新 --cert-file/--key-file"
             return 2
         fi
-        if [[ "$cert_mode" == "self-signed" && -n "$import_cert" ]]; then
-            vps_cmd_error "--cert-mode self-signed 不能同时使用 --cert-file/--key-file"
+        if [[ "$cert_mode" == "managed" ]]; then
+            [[ -z "$managed_cert_id" ]] && managed_cert_id="$(jq -r '.tls.certificate_id // empty' <<<"$node")"
+            [[ "$managed_cert_id" =~ ^crt-[0-9a-f]{16}$ ]] || {
+                vps_cmd_error "managed 证书需要 --cert-id crt-..."
+                return 2
+            }
+            [[ -z "$import_cert$import_key" ]] || {
+                vps_cmd_error "managed 证书不能同时使用 --cert-file/--key-file"
+                return 2
+            }
+        fi
+        if [[ "$cert_mode" == "self-signed" && -n "$import_cert$managed_cert_id" ]]; then
+            vps_cmd_error "--cert-mode self-signed 不能同时使用 --cert-file/--key-file 或 --cert-id"
             return 2
         fi
-        if [[ "$cert_mode" != "$old_cert_mode" || "$sni" != "$(jq -r '.tls.server_name' <<<"$node")" || -n "$import_cert" ]]; then
+        PROXY_MANAGED_CERT_ID="$managed_cert_id"
+        if [[ "$cert_mode" != "$old_cert_mode" || "$sni" != "$(jq -r '.tls.server_name' <<<"$node")" || -n "$import_cert$managed_cert_id" ]]; then
             proxy_prepare_certificate "$core" "$id" "$cert_mode" "$sni" "$import_cert" "$import_key" || return $?
             candidate_node="$(jq --arg mode "$cert_mode" --arg cert "$PROXY_CERTIFICATE_LOGICAL" --arg key "$PROXY_KEY_LOGICAL" \
                 --arg sha "$PROXY_CERTIFICATE_SHA256" --argjson insecure "$PROXY_CERTIFICATE_INSECURE" \
-                '.tls.mode=$mode | .tls.certificate_path=$cert | .tls.key_path=$key | .tls.certificate_sha256=$sha | .tls.insecure=$insecure' <<<"$candidate_node")" || {
+                --arg cid "${PROXY_CERTIFICATE_ID:-}" \
+                '.tls.mode=$mode | .tls.certificate_path=$cert | .tls.key_path=$key | .tls.certificate_sha256=$sha | .tls.insecure=$insecure | .tls.certificate_id=$cid' <<<"$candidate_node")" || {
                 status=$?
                 proxy_cleanup_orphan_certs "$core" >/dev/null 2>&1 || true
                 return "$status"

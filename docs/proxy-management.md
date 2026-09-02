@@ -126,7 +126,7 @@ vpsctl service proxy node show --id NODE_ID [--uri]
 vpsctl service proxy node add --profile PROFILE [--core CORE] [--name NAME] [--port PORT]
     [--listen ADDRESS] [--address CLIENT_ADDRESS] [--sni HOST]
     [--path PATH] [--service-name NAME]
-    [--cert-mode self-signed|imported --cert-file FILE --key-file FILE]
+    [--cert-mode self-signed|imported|managed --cert-file FILE --key-file FILE --cert-id ID]
     [--obfs none|salamander] [--up-mbps N] [--down-mbps N]
     [--congestion-control bbr|cubic|new_reno]
     [--ip-strategy auto|prefer_ipv4|prefer_ipv6|ipv4_only|ipv6_only]
@@ -167,8 +167,9 @@ vpsctl service proxy subscription [--core CORE|all]
 
 - `--cert-mode self-signed`：在节点专属目录生成自签名证书。客户端必须显式信任该证书或按输出采用不安全验证选项。
 - `--cert-mode imported --cert-file FILE --key-file FILE`：验证证书未过期、未加密私钥与证书匹配，并在 OpenSSL 支持时检查 SNI 覆盖，再复制到项目管理目录；后续运行不依赖原始文件路径。
+- `--cert-mode managed --cert-id crt-...`：引用 [`security tls`](tls-management.md) 的 live 路径，不复制证书。SNI 必须被该证书覆盖。续期后路径不变；指纹变化会使分享 URI 中的证书固定值变化。
 
-私钥和证书均以受限权限保存，并按证书指纹使用不可覆盖的版本化文件名。运行中修改证书时，上一版会保留到本次自动重启（或显式重启）完成：成功后清理未引用版本，失败回滚后清理新版本。代理管理不申请、续期或部署 ACME 证书；如需公有 CA 证书，应在外部完成签发，再使用复制导入模式。
+私钥和证书均以受限权限保存，并按证书指纹使用不可覆盖的版本化文件名。运行中修改证书时，上一版会保留到本次自动重启（或显式重启）完成：成功后清理未引用版本，失败回滚后清理新版本。代理管理不申请、续期或部署 ACME 证书。公有 CA 证书由 [`security tls`](tls-management.md) 维护；节点可继续使用 `self-signed`/`imported`，或在后续版本通过 `managed` 模式引用其 live 路径。当前导入模式仍复制到节点专属目录，后续运行不依赖原始文件路径。
 
 ## 5. 中转管理
 

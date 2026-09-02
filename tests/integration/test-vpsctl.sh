@@ -36,7 +36,7 @@ test_cli() {
     local output status option
 
     output="$("${VPSCTL[@]}" --version)"
-    test_contains "$output" "vpsctl 0.6.0" "version output"
+    test_contains "$output" "vpsctl 0.7.0" "version output"
 
     output="$("${VPSCTL[@]}" --help)"
     test_contains "$output" "<domain> <action>" "help command model"
@@ -71,6 +71,7 @@ test_cli() {
     test_contains "$output" "network rfw" "RFW command listing"
     test_contains "$output" "system kernel" "kernel command listing"
     test_contains "$output" "security access" "access command listing"
+    test_contains "$output" "security tls" "tls command listing"
     test_contains "$output" "service proxy" "proxy command listing"
     test_contains "$output" "test nodequality" "NodeQuality command listing"
     test_contains "$output" "test tcpquality" "TCPQuality command listing"

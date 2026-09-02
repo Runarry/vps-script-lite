@@ -95,6 +95,7 @@ assert_archive_has "${RELEASE_DIR}/vpsctl-network-${RELEASE_VERSION}.tar.gz" com
 assert_archive_has "${RELEASE_DIR}/vpsctl-system-${RELEASE_VERSION}.tar.gz" commands/system/kernel.sh
 assert_archive_has "${RELEASE_DIR}/vpsctl-security-${RELEASE_VERSION}.tar.gz" commands/security/access.sh
 assert_archive_has "${RELEASE_DIR}/vpsctl-security-${RELEASE_VERSION}.tar.gz" commands/security/fail2ban.sh
+assert_archive_has "${RELEASE_DIR}/vpsctl-security-${RELEASE_VERSION}.tar.gz" commands/security/tls.sh
 assert_archive_has "${RELEASE_DIR}/vpsctl-service-${RELEASE_VERSION}.tar.gz" commands/service/proxy.sh
 assert_archive_has "${RELEASE_DIR}/vpsctl-test-${RELEASE_VERSION}.tar.gz" commands/test/nodequality.sh
 assert_archive_has "${RELEASE_DIR}/vpsctl-test-${RELEASE_VERSION}.tar.gz" commands/test/tcpquality.sh

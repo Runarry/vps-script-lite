@@ -157,7 +157,7 @@ test_registry() {
     vps_registry_init
 
     test_assert_equal "6" "${#VPS_DOMAIN_IDS[@]}" "registered domain count"
-    test_assert_equal "13" "${#VPS_COMMAND_KEYS[@]}" "registered command count"
+    test_assert_equal "14" "${#VPS_COMMAND_KEYS[@]}" "registered command count"
     test_assert_equal "network" "${VPS_DOMAIN_IDS[0]}" "network domain id"
     test_assert_equal "system" "${VPS_DOMAIN_IDS[1]}" "system domain id"
     test_assert_equal "security" "${VPS_DOMAIN_IDS[2]}" "security domain id"
@@ -194,6 +194,12 @@ test_registry() {
     test_assert_equal "supported" "${VPS_COMMAND_DRY_RUN["security:fail2ban"]}" "Fail2ban dry-run"
     test_assert_equal "linux,init:systemd" "${VPS_COMMAND_REQUIREMENTS["security:fail2ban"]}" "Fail2ban requirements"
     test_assert_equal "experimental" "${VPS_COMMAND_LIFECYCLE["security:fail2ban"]}" "Fail2ban lifecycle"
+    test_assert_equal "commands/security/tls.sh" "${VPS_COMMAND_PATH["security:tls"]}" "TLS command path"
+    test_assert_equal "disruptive" "${VPS_COMMAND_RISK["security:tls"]}" "TLS risk"
+    test_assert_equal "optional-root" "${VPS_COMMAND_PRIVILEGE["security:tls"]}" "TLS privilege"
+    test_assert_equal "supported" "${VPS_COMMAND_DRY_RUN["security:tls"]}" "TLS dry-run"
+    test_assert_equal "linux" "${VPS_COMMAND_REQUIREMENTS["security:tls"]}" "TLS requirements"
+    test_assert_equal "experimental" "${VPS_COMMAND_LIFECYCLE["security:tls"]}" "TLS lifecycle"
     test_assert_equal "commands/service/proxy.sh" "${VPS_COMMAND_PATH["service:proxy"]}" "proxy command path"
     test_assert_equal "disruptive" "${VPS_COMMAND_RISK["service:proxy"]}" "proxy risk"
     test_assert_equal "optional-root" "${VPS_COMMAND_PRIVILEGE["service:proxy"]}" "proxy privilege"

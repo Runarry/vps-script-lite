@@ -4,9 +4,9 @@
 
 项目采用“一个管理入口、多个独立命令”的结构：管理入口只负责参数解析、固定命令登记、公共上下文和分发；每项实际功能原则上由一个公开入口脚本实现，复杂入口可拆为不单独分发的私有子模块。这样既能通过统一入口使用，也能单独运行、测试和排错。
 
-> 当前版本为 0.6.0，提供网络、系统内核、访问、代理与服务器测试入口。系统变更命令应先使用 `--dry-run` 并阅读对应恢复说明；内核变更需提前确认带外控制台或救援入口可用，服务器测试会下载并运行第三方代码、产生明显 CPU/磁盘/网络负载且不支持演练。
+> 当前版本为 0.7.0，提供网络、系统内核、访问、TLS 证书、代理与服务器测试入口。系统变更命令应先使用 `--dry-run` 并阅读对应恢复说明；内核变更需提前确认带外控制台或救援入口可用，服务器测试会下载并运行第三方代码、产生明显 CPU/磁盘/网络负载且不支持演练。
 
-这里的 `0.6.0` 是现有应用与功能版本。GitHub Release 分发格式始于分发版本 `0.1.0`，当前分发版本为 `0.2.0`（仓库根 `VERSION`、tag `v0.2.0`）；两套版本号用途不同，发布资产、安装目录和 `vpsctl self` 使用分发版本，不回退或改写现有功能版本。
+这里的 `0.7.0` 是现有应用与功能版本。GitHub Release 分发格式始于分发版本 `0.1.0`，当前分发版本为 `0.2.0`（仓库根 `VERSION`、tag `v0.2.0`）；两套版本号用途不同，发布资产、安装目录和 `vpsctl self` 使用分发版本，不回退或改写现有功能版本。
 
 ## 文档
 
@@ -20,6 +20,7 @@
 - [代理管理](docs/proxy-management.md)：Xray/sing-box 内核、节点、出口关联、端口转发、订阅、证书、日志与时间同步。
 - [访问管理](docs/access-management.md)：用户、密码、公钥与 SSH 双端口验证事务、防火墙协同和恢复。
 - [Fail2ban 管理](docs/fail2ban-management.md)：OpenSSH jail 的安装、均衡递增策略、白名单、验证和恢复。
+- [TLS 证书管理](docs/tls-management.md)：域名证书导入、ACME 申请与自动续期。
 - [服务器测试](docs/server-testing.md)：NodeQuality 与 TcpQuality 的上游来源、负载、报告上传、清理和退出码边界。
 
 ## 安装
@@ -40,6 +41,7 @@ apk add --no-cache bash curl ca-certificates
 | `network rfw` | 不支持 Alpine 默认的 OpenRC；仅支持 systemd、`x86_64`/`aarch64`、Linux 5.15+ 及所需 XDP/BPF 能力 |
 | `security access` | SSH 服务编排仅支持 systemd；不能把核心的 OpenRC 支持外推为访问管理支持 |
 | `security fail2ban` | 不支持 `apk`/OpenRC；仅支持文档列出的 systemd 发行版包管理器与 Fail2ban 0.11+ |
+| `security tls` | 导入与查看支持 Alpine；续期 timer 需要 systemd；ACME 的 lego 二进制仅 `x86_64`/`aarch64` |
 | `system kernel` | 不支持 Alpine；仅支持 Debian/Ubuntu amd64 上的 APT/dpkg 和 XanMod 官方构建 |
 | `network ip-policy` | 不支持 Alpine 的 musl；该入口只管理 glibc `getaddrinfo()` 的 `/etc/gai.conf` 排序 |
 | `service proxy` | 支持 OpenRC 与 systemd；具体内核、协议、架构和依赖仍按代理功能文档与运行时门禁判断 |
@@ -123,6 +125,7 @@ bash bin/vpsctl network rfw status
 bash bin/vpsctl system kernel status
 bash bin/vpsctl security access status
 bash bin/vpsctl security fail2ban status
+bash bin/vpsctl security tls status
 bash bin/vpsctl service proxy status
 bash bin/vpsctl service proxy profiles
 bash bin/vpsctl service proxy relay status
@@ -142,10 +145,11 @@ bash bin/vpsctl --dry-run --install-deps network rfw install
 bash bin/vpsctl --dry-run --install-deps system kernel install
 bash bin/vpsctl --dry-run security access ssh prepare --port 2222 --firewall manual
 bash bin/vpsctl --dry-run security fail2ban install
+bash bin/vpsctl --dry-run security tls import --name example --cert-file /path/cert.pem --key-file /path/key.pem
 bash bin/vpsctl --dry-run --install-deps service proxy install --core sing-box
 ```
 
-在主管理菜单中选择 BBR、DNS、IP 地址族偏好、RFW、内核管理、访问管理、Fail2ban、代理管理或两项服务器测试后，会直接进入对应功能入口，不再经过“命令详情”或输入 `r` 才运行的中间页；菜单选项执行的是真实动作，不提供演练、依赖授权、自动同意、非交互、静默或详细日志等执行型全局参数开关。`--dry-run`、`--install-deps`、`--yes`、`--non-interactive`、`--quiet`、`--verbose` 只用于直接功能 CLI，并写在领域之前；服务器测试明确拒绝 `--dry-run`，也不承诺非交互自动化。子动作及选项见[网络设置](docs/network-settings.md)、[系统内核管理](docs/kernel-management.md)、[访问管理](docs/access-management.md)、[Fail2ban 管理](docs/fail2ban-management.md)、[代理管理](docs/proxy-management.md)和[服务器测试](docs/server-testing.md)。机器可读格式开关、`--force` 和 `--confirm-*` 确认标志同样只用于直接 CLI，菜单中的危险动作改用明确的交互提示和必要的强确认短语。
+在主管理菜单中选择 BBR、DNS、IP 地址族偏好、RFW、内核管理、访问管理、Fail2ban、TLS 证书、代理管理或两项服务器测试后，会直接进入对应功能入口，不再经过“命令详情”或输入 `r` 才运行的中间页；菜单选项执行的是真实动作，不提供演练、依赖授权、自动同意、非交互、静默或详细日志等执行型全局参数开关。`--dry-run`、`--install-deps`、`--yes`、`--non-interactive`、`--quiet`、`--verbose` 只用于直接功能 CLI，并写在领域之前；服务器测试明确拒绝 `--dry-run`，也不承诺非交互自动化。子动作及选项见[网络设置](docs/network-settings.md)、[系统内核管理](docs/kernel-management.md)、[访问管理](docs/access-management.md)、[Fail2ban 管理](docs/fail2ban-management.md)、[TLS 证书管理](docs/tls-management.md)、[代理管理](docs/proxy-management.md)和[服务器测试](docs/server-testing.md)。机器可读格式开关、`--force` 和 `--confirm-*` 确认标志同样只用于直接 CLI，菜单中的危险动作改用明确的交互提示和必要的强确认短语。
 
 依赖检查按用户当前选择的动作延迟执行：只有该动作实际缺少可安装工具时，真实执行的交互流程才询问是否安装，不会为其他菜单动作预装依赖；非交互调用和 `--dry-run` 依赖计划仍必须显式提供 `--install-deps`。该授权支持 `apt-get`、`dnf5`、`dnf`、`yum`、`apk`、`pacman` 和 `zypper`，实际安装需要 root，也不会绕过 Linux、init 系统、CPU 架构、内核版本、XDP/BPF 或功能本体等平台门禁。它与 `--dry-run` 组合时只展示固定的软件包安装命令，不实际安装，部分动作会在依赖计划后安全停止并提示安装后重跑。上例中的 `--core` 是直接命令和非交互调用保留的高级消歧参数：只有一个符合条件的内核时通常可自动解析，存在多个候选时应显式指定。
 
@@ -153,8 +157,8 @@ bash bin/vpsctl --dry-run --install-deps service proxy install --core sing-box
 
 - 规范：已建立。
 - 目录骨架：已建立。
-- 当前版本：0.6.0 服务器测试版。
+- 当前版本：0.7.0 TLS 证书管理版。
 - 管理入口：提供环境检测、终端 UI、固定注册表和安全分发。
-- 功能命令：提供 `network bbr`、`network dns`、`network ip-policy`、`network rfw`、`system kernel`、`security access`、`security fail2ban`、`service proxy`、`test nodequality` 和 `test tcpquality`；均处于 `experimental` 生命周期。
+- 功能命令：提供 `network bbr`、`network dns`、`network ip-policy`、`network rfw`、`system kernel`、`security access`、`security fail2ban`、`security tls`、`service proxy`、`test nodequality` 和 `test tcpquality`；均处于 `experimental` 生命周期。
 - 公共函数库：提供环境检测、命令注册、终端 UI 及网络和服务命令所需公共能力。
 - 验收说明：所有项目测试与验证统一通过 `ssh host-vps-scripts` 在专用真实环境中执行；不得在当前系统或 WSL 中测试。发布前仍须按对应功能文档完成真实环境验收。

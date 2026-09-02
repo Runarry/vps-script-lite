@@ -88,7 +88,7 @@ proxy_usage() {
   node add --profile PROFILE [--core CORE] [--name NAME] [--port PORT]
            [--listen ADDRESS] [--address CLIENT_ADDRESS] [--sni HOST]
            [--path PATH] [--service-name NAME]
-           [--cert-mode self-signed|imported --cert-file FILE --key-file FILE]
+           [--cert-mode self-signed|imported|managed --cert-file FILE --key-file FILE --cert-id ID]
            [--obfs none|salamander] [--up-mbps N] [--down-mbps N]
            [--congestion-control bbr|cubic|new_reno] [--ip-strategy STRATEGY]
   node edit --id NODE_ID [可修改 node add 中的非凭据字段]

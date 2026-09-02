@@ -551,6 +551,33 @@ test_tls_certificate_transaction() {
     [[ ! -e "$cert_root/cert-${failed_cert}.pem" && -f "${TEST_SYSTEM_ROOT}${new_cert}" ]] || fail "failed TLS edit left an orphan certificate"
 }
 
+test_tls_managed_certificate() {
+    reset_root
+    install_external sing-box
+    local host=managed.example id cert_id live cert_path mode
+    cert_id="crt-0123456789abcdef"
+    mkdir -p "${TEST_TEMP}/managed" "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/security/tls/live/${cert_id}"
+    openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj "/CN=${host}" \
+        -addext "subjectAltName=DNS:${host}" \
+        -keyout "${TEST_TEMP}/managed/key.pem" -out "${TEST_TEMP}/managed/cert.pem" >/dev/null 2>&1
+    cp -- "${TEST_TEMP}/managed/cert.pem" "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/security/tls/live/${cert_id}/fullchain.pem"
+    cp -- "${TEST_TEMP}/managed/key.pem" "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/security/tls/live/${cert_id}/privkey.pem"
+    chmod 0640 "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/security/tls/live/${cert_id}/fullchain.pem"
+    chmod 0600 "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/security/tls/live/${cert_id}/privkey.pem"
+    run_proxy node add --profile vless-ws-tls --name managed-node --port 19301 --address proxy.example \
+        --sni "$host" --path /managed --cert-mode managed --cert-id "$cert_id"
+    assert_equal 0 "$RUN_STATUS" "managed TLS node add"
+    id="$(node_id_by_name managed-node)"
+    cert_path="$(jq -r --arg id "$id" '.nodes[] | select(.id == $id) | .tls.certificate_path' "$(manifest_path)")"
+    mode="$(jq -r --arg id "$id" '.nodes[] | select(.id == $id) | .tls.mode' "$(manifest_path)")"
+    assert_equal "managed" "$mode" "managed cert mode"
+    assert_equal "/var/lib/vpsctl/security/tls/live/${cert_id}/fullchain.pem" "$cert_path" "managed live path"
+    assert_equal "$cert_id" "$(jq -r --arg id "$id" '.nodes[] | select(.id == $id) | .tls.certificate_id' "$(manifest_path)")" "managed cert id"
+    run_proxy node add --profile vless-ws-tls --name missing-managed --port 19302 --address proxy.example \
+        --sni "$host" --path /missing --cert-mode managed --cert-id crt-ffffffffffffffff
+    assert_equal 3 "$RUN_STATUS" "missing managed cert rejected"
+}
+
 test_unified_interactive_api() (
     local output selected status=0 menu_line status_line install_marker subscription decoded
     local selector_stderr="${TEST_TEMP}/selector.stderr"
@@ -1492,6 +1519,8 @@ printf 'TEST: proxy core choice, ports and uninstall\n'
 test_overlap_port_ambiguity_and_uninstall
 printf 'TEST: proxy TLS certificate transactions\n'
 test_tls_certificate_transaction
+printf 'TEST: proxy managed TLS certificates\n'
+test_tls_managed_certificate
 printf 'TEST: proxy unified interactive API\n'
 test_unified_interactive_api
 printf 'TEST: proxy node IP strategy rendering and atomic batches\n'

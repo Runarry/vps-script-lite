@@ -23,7 +23,9 @@ vps-script-lite/
 │   ├── monitoring/         # 健康检查、资源与告警相关操作
 │   ├── network/            # 网络、DNS、防火墙和连通性
 │   ├── security/           # 加固、审计、证书和访问控制
-│   │   └── access.sh       # 用户、凭据与 SSH 访问管理公开入口
+│   │   ├── access.sh       # 用户、凭据与 SSH 访问管理公开入口
+│   │   ├── fail2ban.sh     # OpenSSH Fail2ban 防护公开入口
+│   │   └── tls.sh          # 域名 TLS 证书管理公开入口
 │   ├── service/            # 系统服务安装、配置和生命周期管理
 │   │   ├── proxy.sh        # 代理管理公开入口
 │   │   └── proxy/          # 仅由 proxy.sh 加载的私有实现模块
@@ -38,7 +40,7 @@ vps-script-lite/
 └── docs/                   # 架构、开发和命令登记规范
 ```
 
-尚未实现功能的空目录暂以 `.gitkeep` 保存；`commands/network/` 包含网络功能脚本，`commands/system/kernel.sh` 实现系统内核管理入口，`commands/security/access.sh` 实现访问管理入口，`commands/security/fail2ban.sh` 及其私有子模块实现 OpenSSH Fail2ban 防护，`commands/service/proxy.sh` 及其私有子模块实现代理管理入口，`commands/test/nodequality.sh` 与 `commands/test/tcpquality.sh` 实现服务器测试入口。
+尚未实现功能的空目录暂以 `.gitkeep` 保存；`commands/network/` 包含网络功能脚本，`commands/system/kernel.sh` 实现系统内核管理入口，`commands/security/access.sh` 实现访问管理入口，`commands/security/fail2ban.sh` 及其私有子模块实现 OpenSSH Fail2ban 防护，`commands/security/tls.sh` 及其私有子模块实现域名 TLS 证书管理，`commands/service/proxy.sh` 及其私有子模块实现代理管理入口，`commands/test/nodequality.sh` 与 `commands/test/tcpquality.sh` 实现服务器测试入口。
 
 ## 3. 组件职责
 
@@ -133,7 +135,7 @@ bundle<TAB>service<TAB>vpsctl-service-0.2.0.tar.gz<TAB>SHA256
 bundle<TAB>test<TAB>vpsctl-test-0.2.0.tar.gz<TAB>SHA256
 ```
 
-manifest 的 `version`、tag、文件名和安装目标版本必须一致。`current` 只在 manifest、core 及必要安装文件完成校验并落盘后切换；更新失败时保留原 current。这里的分发版本 `0.2.0` 与现有应用/功能版本 `0.6.0` 是不同维度，不得用分发版本回退功能文档或功能接口。
+manifest 的 `version`、tag、文件名和安装目标版本必须一致。`current` 只在 manifest、core 及必要安装文件完成校验并落盘后切换；更新失败时保留原 current。这里的分发版本 `0.2.0` 与现有应用/功能版本 `0.7.0` 是不同维度，不得用分发版本回退功能文档或功能接口。
 
 ### 3.5 配置与运行数据
 

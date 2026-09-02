@@ -9,7 +9,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 umask 022
 
-readonly VPSCTL_VERSION="0.6.0"
+readonly VPSCTL_VERSION="0.7.0"
 
 VPSCTL_DRY_RUN=0
 VPSCTL_INSTALL_DEPS=0

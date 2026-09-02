@@ -46,7 +46,7 @@ vpsctl self uninstall [--purge] [--confirm-uninstall] [--confirm-purge]
 
 ## 3. 已登记命令清单
 
-0.6.0 登记以下网络、系统、安全、服务与服务器测试入口。状态列描述接口生命周期，不表示已经完成真实 VPS 或 VM 验证；隔离环境验收要求见[网络设置](network-settings.md)、[系统内核管理](kernel-management.md)、[访问管理](access-management.md)、[Fail2ban 管理](fail2ban-management.md)、[代理管理](proxy-management.md)和[服务器测试](server-testing.md)。
+0.7.0 登记以下网络、系统、安全、服务与服务器测试入口。状态列描述接口生命周期，不表示已经完成真实 VPS 或 VM 验证；隔离环境验收要求见[网络设置](network-settings.md)、[系统内核管理](kernel-management.md)、[访问管理](access-management.md)、[Fail2ban 管理](fail2ban-management.md)、[TLS 证书管理](tls-management.md)、[代理管理](proxy-management.md)和[服务器测试](server-testing.md)。
 
 | 命令 | 文件 | 摘要 | 风险 | 权限 | 演练 | 能力要求 | 状态 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -57,6 +57,7 @@ vpsctl self uninstall [--purge] [--confirm-uninstall] [--confirm-purge]
 | `system kernel` | `commands/system/kernel.sh` | 安装、更新或安全卸载最新 XanMod BBRv3 内核 | `disruptive` | `optional-root` | `supported` | `linux,os:debian-family` | `experimental` |
 | `security access` | `commands/security/access.sh` | 管理用户、密码、公钥与可验证恢复的 SSH 访问变更 | `disruptive` | `optional-root` | `supported` | `linux,init:systemd` | `experimental` |
 | `security fail2ban` | `commands/security/fail2ban.sh` | 安装、配置和管理 OpenSSH 的 Fail2ban 防护 | `disruptive` | `optional-root` | `supported` | `linux,init:systemd` | `experimental` |
+| `security tls` | `commands/security/tls.sh` | 管理域名 TLS 证书：导入、申请与自动续期 | `disruptive` | `optional-root` | `supported` | `linux` | `experimental` |
 | `service proxy` | `commands/service/proxy.sh` | 平级管理 Xray 与 sing-box 内核、节点、日志和时间同步 | `disruptive` | `optional-root` | `supported` | `linux,service:any` | `experimental` |
 | `test nodequality` | `commands/test/nodequality.sh` | 运行 NodeQuality 服务器综合质量测试 | `disruptive` | `root` | `unsupported` | `linux,root` | `experimental` |
 | `test tcpquality` | `commands/test/tcpquality.sh` | 运行 TcpQuality TCP 网络质量测试 | `disruptive` | `root` | `unsupported` | `linux,root` | `experimental` |
@@ -76,6 +77,8 @@ vpsctl self uninstall [--purge] [--confirm-uninstall] [--confirm-purge]
 `security access` 整体登记为 `linux,init:systemd`，当前不承诺 OpenRC SSH 服务编排。帮助、公开状态和第二 SSH 会话证明可由普通用户运行；用户、密码、公钥、SSH 配置、防火墙、事务和备份的变更由功能脚本要求 root。SSH 变更不是单次覆盖：`ssh prepare` 建立保留旧端口的候选配置，新的非 root SSH 会话运行 `session verify` 写入短期证明，再由原管理会话运行 `ssh commit`；验证失败或不再继续时使用 `ssh abort`，历史备份由 `restore` 显式恢复。复杂的 include/Match/多值来源等无法安全归并的配置会在写入前拒绝。完整接口与恢复顺序见[访问管理](access-management.md)。
 
 `security fail2ban` 只管理 systemd 上的 OpenSSH `sshd` jail。受管配置位于独立的 `jail.d/*.local` 文件，安装和配置会先备份、测试完整 Fail2ban 配置，再启动或 reload 服务；状态会报告受管文件漂移和 SSH 端口不同步。已有非受管 `sshd` jail 时必须显式接管，卸载只撤销 vpsctl 配置，不删除软件包、用户配置或历史备份。完整接口与恢复顺序见[Fail2ban 管理](fail2ban-management.md)。
+
+`security tls` 登记为 `linux`，导入和查看不要求 systemd；续期 timer 由功能脚本在 systemd 上安装。帮助、状态、列表、详情和路径查询可由普通用户运行；导入、申请、续期、删除和卸载需要 root。ACME 使用钉死版本的 lego，live 证书是无符号链接的普通文件。完整接口见[TLS 证书管理](tls-management.md)。
 
 ## 4. 单命令说明模板
 
