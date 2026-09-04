@@ -19,6 +19,8 @@ bash bin/vpsctl service proxy status
 bash bin/vpsctl service proxy profiles
 bash bin/vpsctl --dry-run --install-deps service proxy install --core sing-box
 bash bin/vpsctl service proxy install --core sing-box
+bash bin/vpsctl service proxy install --core all --release-channel prerelease
+bash bin/vpsctl service proxy update --core xray --version vX.Y.Z
 bash bin/vpsctl service proxy node add --profile hysteria2 --core sing-box --port 8443 --address 203.0.113.10 --sni example.com
 bash bin/vpsctl service proxy relay status
 bash bin/vpsctl service proxy start --core sing-box --enable
@@ -39,7 +41,7 @@ bash bin/vpsctl service proxy start --core sing-box --enable
 - 查看与输出：订阅、日志和支持的协议。
 - 系统工具：系统时间状态与同步。
 
-生命周期和服务动作会按实时状态筛选候选，例如安装只列出未安装内核，更新、卸载和日志只列出已经登记的内核，启动不会列出已经运行的内核，停止和重启只面向当前运行的内核。多个候选可供安装或更新时，交互界面还提供“全部”选择；卸载和可能中断连接的服务动作仍逐个选择内核并执行相应确认。筛选只减少无效选项，不改变强确认、权限或待重启策略。
+生命周期和服务动作会按实时状态筛选候选，例如安装只列出未安装内核，更新、卸载和日志只列出已经登记的内核，启动不会列出已经运行的内核，停止和重启只面向当前运行的内核。多个候选可供安装或更新时，交互界面还提供“全部”选择；随后用编号选择“使用最新稳定版（推荐）”“使用最新预发布版”或“输入精确 Release tag”。为“全部”输入精确 tag 时会分别询问两个项目的 tag。卸载和可能中断连接的服务动作仍逐个选择内核并执行相应确认。筛选只减少无效选项，不改变强确认、权限或待重启策略。
 
 命令模式可单独查询相同状态：
 
@@ -69,21 +71,23 @@ Xray 与 sing-box 使用相同的命令模式生命周期接口：
 
 | 动作 | 用法与行为 |
 | --- | --- |
-| `install` | `install --core CORE|all [--version TAG]`；按需安装指定内核，写入最小配置和服务定义，但不自动启动或设为开机启动。 |
-| `update` | `update [--core CORE|all] [--version TAG] [--confirm-external-update]`；下载并校验目标版本，原子替换二进制，不自动重启。 |
+| `install` | `install --core CORE|all [--release-channel stable\|prerelease] [--version TAG]`；按需安装指定内核，写入最小配置和服务定义，但不自动启动或设为开机启动。 |
+| `update` | `update [--core CORE\|all] [--release-channel stable\|prerelease] [--version TAG] [--confirm-external-update]`；下载并校验目标版本，原子替换二进制，不自动重启。 |
 | `uninstall` | `uninstall [--core CORE] [--purge] [--confirm-purge]`；停止、禁用并移除受管服务，默认保留配置、节点和备份。 |
 | `start` | `start [--core CORE] [--enable]`；启动内核，`--enable` 同时加入开机启动。 |
 | `stop` | `stop [--core CORE] [--disable]`；停止内核，`--disable` 同时取消开机启动。 |
 | `restart` | `restart [--core CORE] [--confirm-disruptive]`；显式确认后重启，并提交或回退待生效事务。 |
 | `logs` | `logs [--core CORE] [--lines N] [--follow] [--since VALUE]`；systemd 读取 journal，OpenRC 读取项目日志；OpenRC 不支持 `--since`。 |
 
-`CORE` 为 `sing-box` 或 `xray`。只有 `install` 和 `update` 接受 `all`；`install --core all` 处理两个内核，`update --core all` 只处理当前已经登记的内核。这与交互界面中安装/更新动作的“全部”选项对应。两个项目的 tag 空间不同，因此 `--core all` 不能与单个 `--version` 共用。卸载、服务控制和日志必须解析到单个已经登记的内核。
+`CORE` 为 `sing-box` 或 `xray`。只有 `install` 和 `update` 接受 `all`；`install --core all` 处理两个内核，`update --core all` 只处理当前已经登记的内核。这与交互界面中安装/更新动作的“全部”选项对应。`--core all` 可以把同一个 `--release-channel` 转发给两个内核。两个项目的 tag 空间不同，因此它不能与单个 `--version` 共用。卸载、服务控制和日志必须解析到单个已经登记的内核。
 
-没有指定 `--version` 时，安装和更新从对应项目的 GitHub `latest` Release 选择当前稳定版本；指定 `TAG` 时则保留并精确请求该 tag，不会自动改选其他版本。SHA-256 校验值随所选 Release 动态取得并验证，不是仓库内的固定版本或固定摘要锁定。
+`--release-channel` 与 `--version` 互斥。默认或显式选择 `stable` 时，安装和更新从对应项目的 GitHub `latest` Release 选择当前稳定版本，并拒绝 draft 或被标记为 prerelease 的响应。选择 `prerelease` 时，命令分页读取 Releases 列表并选择返回顺序中首个非 draft 的预发布版本；如果没有可用预发布版本会明确失败，不回退稳定版。指定 `TAG` 时则精确请求该 tag，可接受稳定版或预发布版，但仍拒绝 draft、tag 回显不一致或无效格式，不会自动改选其他版本。安装通道不写入元数据，也不会由后续更新自动跟随；以后不带 `--release-channel` 或 `--version` 执行 `update` 仍选择最新稳定版。
+
+无论选择哪个通道或精确 tag，下载与替换仍执行相同的安全检查：只接受对应官方 GitHub HTTPS Release 的唯一匹配资产，动态取得并验证 digest 或 `.dgst` 中的 SHA-256，检查解压目标和二进制版本，验证现有配置兼容性，再原子替换。摘要不是仓库内的固定版本或固定值。
 
 ### 外部二进制所有权
 
-安装时，如果系统中已经存在可安全复用的 Xray 或 sing-box 普通可执行文件，命令会校验版本和生成配置，并将其登记为 `owned=false`，不会再次下载或复制。没有可复用文件时，安装和更新只接受对应官方 GitHub Release 的稳定版本资产，匹配当前架构，验证 SHA-256 摘要并核对解压后二进制版本后才替换。此后：
+安装时，如果系统中已经存在可安全复用的 Xray 或 sing-box 普通可执行文件，命令会校验版本和生成配置，并将其登记为 `owned=false`，不会再次下载或复制。指定精确 tag 时，现有二进制版本必须与 tag 一致。选择最新预发布版时会先解析目标 tag，也只有外部二进制版本与该 tag 一致才会登记；不一致时应先按现有版本登记，再使用带强确认的 `update --release-channel prerelease` 替换，避免把稳定版误登记成预发布版。没有可复用文件时按所选 Release 下载并执行上述完整校验。此后：
 
 - 更新外部二进制属于原地替换，交互模式要求输入强确认令牌；非交互模式必须额外传入 `--confirm-external-update`。
 - 更新后仍保留“外部所有权”记录，不会把该文件变成 vpsctl 所有。

@@ -73,8 +73,9 @@ proxy_usage() {
 
 核心：
   status [--core CORE|all] [--json]
-  install [--version TAG]
-  update [--version TAG] [--confirm-external-update]
+  install [--release-channel stable|prerelease] [--version TAG]
+  update [--release-channel stable|prerelease] [--version TAG]
+         [--confirm-external-update]
   uninstall [--purge] [--confirm-purge]
   start [--enable]
   stop [--disable]
@@ -130,6 +131,11 @@ proxy_usage() {
 高级脚本用法：CORE 为 sing-box 或 xray；生命周期操作可显式传入
 --core CORE，install/update 还支持 --core all。非交互模式存在多个候选
 时必须显式指定 --core。
+
+安装和更新默认使用最新稳定版；--release-channel prerelease 选择最新
+预发布版，--version TAG 精确选择稳定或预发布 Release。两个选项互斥。
+--core all 可共用 release channel，但不能共用一个 --version。选择的通道
+不会保存；后续不带版本选项的 update 仍使用稳定版，且更新后不自动重启。
 
 全局选项 --dry-run、--install-deps、--yes、--non-interactive、--quiet、
 --verbose、--no-color 应放在 service 之前；直接执行本脚本时也可放在
@@ -310,16 +316,25 @@ proxy_forward_has_option() {
 
 proxy_prompt_release_options() {
     local action="$1" core="${2:-sing-box}" mode tag label candidate
-    proxy_forward_has_option --version && return 0
+    if proxy_forward_has_option --version || proxy_forward_has_option --release-channel; then
+        return 0
+    fi
     if [[ "$core" == all ]]; then
         label="全部候选内核"
     else
         label="$(proxy_core_label "$core")"
     fi
-    mode="$(proxy_prompt_quick_custom \
-        "${label} ${action} 版本：" \
-        "使用最新稳定版（推荐）" "输入 Release tag")" || return $?
-    [[ "$mode" == quick ]] && return 0
+    mode="$(proxy_prompt_select "${label} ${action} 版本：" stable \
+        stable "使用最新稳定版（推荐）" \
+        prerelease "使用最新预发布版" \
+        tag "输入精确 Release tag")" || return $?
+    case "$mode" in
+        stable) return 0 ;;
+        prerelease)
+            PROXY_FORWARD_ARGS+=(--release-channel prerelease)
+            return 0
+            ;;
+    esac
     if [[ "$core" == all ]]; then
         PROXY_ALL_CUSTOM_VERSIONS=1
         while IFS= read -r candidate; do

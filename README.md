@@ -147,9 +147,13 @@ bash bin/vpsctl --dry-run security access ssh prepare --port 2222 --firewall man
 bash bin/vpsctl --dry-run security fail2ban install
 bash bin/vpsctl --dry-run security tls import --name example --cert-file /path/cert.pem --key-file /path/key.pem
 bash bin/vpsctl --dry-run --install-deps service proxy install --core sing-box
+bash bin/vpsctl --dry-run --install-deps service proxy install --core all --release-channel prerelease
+bash bin/vpsctl service proxy update --core xray --version vX.Y.Z
 ```
 
-在主管理菜单中选择 BBR、DNS、IP 地址族偏好、RFW、内核管理、访问管理、Fail2ban、TLS 证书、代理管理或两项服务器测试后，会直接进入对应功能入口，不再经过“命令详情”或输入 `r` 才运行的中间页；菜单选项执行的是真实动作，不提供演练、依赖授权、自动同意、非交互、静默或详细日志等执行型全局参数开关。`--dry-run`、`--install-deps`、`--yes`、`--non-interactive`、`--quiet`、`--verbose` 只用于直接功能 CLI，并写在领域之前；服务器测试明确拒绝 `--dry-run`，也不承诺非交互自动化。子动作及选项见[网络设置](docs/network-settings.md)、[系统内核管理](docs/kernel-management.md)、[访问管理](docs/access-management.md)、[Fail2ban 管理](docs/fail2ban-management.md)、[TLS 证书管理](docs/tls-management.md)、[代理管理](docs/proxy-management.md)和[服务器测试](docs/server-testing.md)。机器可读格式开关、`--force` 和 `--confirm-*` 确认标志同样只用于直接 CLI，菜单中的危险动作改用明确的交互提示和必要的强确认短语。
+代理内核安装和更新默认选择最新稳定版，也可用 `--release-channel prerelease` 选择最新预发布版，或用 `--version TAG` 精确选择稳定或预发布 Release；后两项互斥。`--core all` 可共享 release channel，但不能共享一个 `--version`，因为 Xray 与 sing-box 的 tag 空间不同。安装时选择的通道不会写入状态；以后不带版本选项执行 `update` 仍选择最新稳定版。内核资产继续执行官方来源、唯一资产、SHA-256、解压目标、二进制版本和现有配置兼容性校验，更新完成后不会自动重启服务。
+
+在主管理菜单中选择 BBR、DNS、IP 地址族偏好、RFW、内核管理、访问管理、Fail2ban、TLS 证书、代理管理或两项服务器测试后，会直接进入对应功能入口，不再经过“命令详情”或输入 `r` 才运行的中间页；菜单选项执行的是真实动作，不提供演练、依赖授权、自动同意、非交互、静默或详细日志等执行型全局参数开关。代理内核的安装和更新会用编号选择最新稳定版（推荐）、最新预发布版或精确 Release tag。`--dry-run`、`--install-deps`、`--yes`、`--non-interactive`、`--quiet`、`--verbose` 只用于直接功能 CLI，并写在领域之前；服务器测试明确拒绝 `--dry-run`，也不承诺非交互自动化。子动作及选项见[网络设置](docs/network-settings.md)、[系统内核管理](docs/kernel-management.md)、[访问管理](docs/access-management.md)、[Fail2ban 管理](docs/fail2ban-management.md)、[TLS 证书管理](docs/tls-management.md)、[代理管理](docs/proxy-management.md)和[服务器测试](docs/server-testing.md)。机器可读格式开关、`--force` 和 `--confirm-*` 确认标志同样只用于直接 CLI，菜单中的危险动作改用明确的交互提示和必要的强确认短语。
 
 依赖检查按用户当前选择的动作延迟执行：只有该动作实际缺少可安装工具时，真实执行的交互流程才询问是否安装，不会为其他菜单动作预装依赖；非交互调用和 `--dry-run` 依赖计划仍必须显式提供 `--install-deps`。该授权支持 `apt-get`、`dnf5`、`dnf`、`yum`、`apk`、`pacman` 和 `zypper`，实际安装需要 root，也不会绕过 Linux、init 系统、CPU 架构、内核版本、XDP/BPF 或功能本体等平台门禁。它与 `--dry-run` 组合时只展示固定的软件包安装命令，不实际安装，部分动作会在依赖计划后安全停止并提示安装后重跑。上例中的 `--core` 是直接命令和非交互调用保留的高级消歧参数：只有一个符合条件的内核时通常可自动解析，存在多个候选时应显式指定。
 

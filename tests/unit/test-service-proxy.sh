@@ -134,9 +134,129 @@ fi
 exit 2'
 make_mock ss '[[ ! -f "${VPSCTL_SYSTEM_ROOT}/run/listening-port" ]] || printf "tcp LISTEN 0 128 0.0.0.0:%s 0.0.0.0:*\n" "$(<"${VPSCTL_SYSTEM_ROOT}/run/listening-port")"'
 make_mock flock 'exit 0'
-make_mock curl 'printf "unexpected curl %s\n" "$*" >>"$MOCK_LOG"; exit 99'
-make_mock unzip 'printf "unexpected unzip %s\n" "$*" >>"$MOCK_LOG"; exit 99'
-make_mock tar 'printf "unexpected tar %s\n" "$*" >>"$MOCK_LOG"; exit 99'
+make_mock curl '
+printf "curl %s\n" "$*" >>"$MOCK_LOG"
+scenario_file="${VPSCTL_SYSTEM_ROOT}/run/release-fixture-scenario"
+[[ -f "$scenario_file" ]] || { printf "unexpected curl %s\n" "$*" >>"$MOCK_LOG"; exit 99; }
+scenario="$(<"$scenario_file")"
+output=""; url=""
+while (($#)); do
+  case "$1" in
+    -o) output="${2:-}"; shift 2 ;;
+    https://*) url="$1"; shift ;;
+    *) shift ;;
+  esac
+done
+[[ -n "$output" && -n "$url" ]] || exit 98
+case "$url" in
+  *SagerNet/sing-box*) core=sing-box; repository=SagerNet/sing-box ;;
+  *XTLS/Xray-core*) core=xray; repository=XTLS/Xray-core ;;
+  *) exit 97 ;;
+esac
+release() {
+  local tag="$1" draft="$2" prerelease="$3" version asset payload digest asset_url dgst_url
+  version="${tag#v}"
+  if [[ "$core" == sing-box ]]; then
+    asset="sing-box-${version}-linux-amd64.tar.gz"
+  else
+    asset="Xray-linux-64.zip"
+  fi
+  payload="fixture:${core}:${version}"
+  digest="$(printf "%s\n" "$payload" | "$REAL_SHA256SUM" | cut -d " " -f 1)"
+  [[ "$scenario" != bad-digest ]] || digest=0000000000000000000000000000000000000000000000000000000000000000
+  asset_url="https://github.com/${repository}/releases/download/${tag}/${asset}"
+  if [[ "$core" == sing-box ]]; then
+    printf "{\"tag_name\":\"%s\",\"draft\":%s,\"prerelease\":%s,\"assets\":[{\"name\":\"%s\",\"browser_download_url\":\"%s\",\"digest\":\"sha256:%s\"}]}" \
+      "$tag" "$draft" "$prerelease" "$asset" "$asset_url" "$digest"
+  else
+    dgst_url="${asset_url}.dgst"
+    printf "{\"tag_name\":\"%s\",\"draft\":%s,\"prerelease\":%s,\"assets\":[{\"name\":\"%s\",\"browser_download_url\":\"%s\"},{\"name\":\"%s.dgst\",\"browser_download_url\":\"%s\"}]}" \
+      "$tag" "$draft" "$prerelease" "$asset" "$asset_url" "$asset" "$dgst_url"
+  fi
+}
+non_prerelease_page() {
+  local index
+  printf "["
+  for ((index = 0; index < 99; index += 1)); do
+    ((index == 0)) || printf ","
+    printf "{\"tag_name\":\"v1.0.%s\",\"draft\":false,\"prerelease\":false,\"assets\":[]}" "$index"
+  done
+  printf ","
+  release "$( [[ "$core" == sing-box ]] && printf v1.12.0-beta.0 || printf v25.2.0-rc.0 )" true true
+  printf "]"
+}
+if [[ "$url" == *"/releases/latest" ]]; then
+  case "$scenario" in
+    latest-prerelease) release "$( [[ "$core" == sing-box ]] && printf v1.12.0-beta.1 || printf v25.2.0-rc.1 )" false true >"$output" ;;
+    malformed-latest) printf "{}" >"$output" ;;
+    *) release "$( [[ "$core" == sing-box ]] && printf v1.11.0 || printf v25.1.1 )" false false >"$output" ;;
+  esac
+  exit 0
+fi
+if [[ "$url" == *"/releases/tags/"* ]]; then
+  requested="${url##*/}"
+  case "$scenario" in
+    draft-tag) release "$requested" true "$( [[ "$requested" == *-* ]] && printf true || printf false )" >"$output" ;;
+    mismatched-tag) release v9.9.9 false false >"$output" ;;
+    *) release "$requested" false "$( [[ "$requested" == *-* ]] && printf true || printf false )" >"$output" ;;
+  esac
+  exit 0
+fi
+if [[ "$url" == *"/releases?per_page=100&page="* ]]; then
+  page="${url##*page=}"
+  case "$scenario:$page" in
+    malformed-list:1) printf "{}" >"$output" ;;
+    repeated-full:*) non_prerelease_page >"$output" ;;
+    no-prerelease:1) non_prerelease_page >"$output" ;;
+    no-prerelease:2) printf "[]" >"$output" ;;
+    *:1) non_prerelease_page >"$output" ;;
+    *:2)
+      printf "[" >"$output"; release "$( [[ "$core" == sing-box ]] && printf v1.12.0-beta.1 || printf v25.2.0-rc.1 )" false true >>"$output"
+      printf "," >>"$output"; release "$( [[ "$core" == sing-box ]] && printf v1.12.0-beta.2 || printf v25.2.0-rc.2 )" false true >>"$output"; printf "]" >>"$output" ;;
+    *) printf "[]" >"$output" ;;
+  esac
+  exit 0
+fi
+if [[ "$url" == *.dgst ]]; then
+  tag="${url#*/releases/download/}"; tag="${tag%%/*}"; version="${tag#v}"
+  payload="fixture:${core}:${version}"
+  digest="$(printf "%s\n" "$payload" | "$REAL_SHA256SUM" | cut -d " " -f 1)"
+  [[ "$scenario" != bad-digest ]] || digest=0000000000000000000000000000000000000000000000000000000000000000
+  printf "SHA2-256= %s\n" "$digest" >"$output"
+  exit 0
+fi
+if [[ "$url" == https://github.com/*/releases/download/* ]]; then
+  tag="${url#*/releases/download/}"; tag="${tag%%/*}"; version="${tag#v}"
+  printf "fixture:%s:%s\n" "$core" "$version" >"$output"
+  exit 0
+fi
+exit 96'
+make_mock unzip '
+printf "unzip %s\n" "$*" >>"$MOCK_LOG"
+archive=""; destination=""
+while (($#)); do
+  case "$1" in -d) destination="${2:-}"; shift 2 ;; -*) shift ;; xray) shift ;; *) archive="$1"; shift ;; esac
+done
+IFS=: read -r marker core version <"$archive"
+[[ "$marker" == fixture && "$core" == xray && -n "$destination" ]] || exit 20
+scenario="$(<"${VPSCTL_SYSTEM_ROOT}/run/release-fixture-scenario")"
+[[ "$scenario" != bad-version ]] || version=9.9.9
+mkdir -p "$destination"
+printf "#!/usr/bin/env bash\nprintf \"downloaded xray %%s\\\\n\" \"\$*\" >>\"\$MOCK_LOG\"\nif [[ \"\$(<\"\${VPSCTL_SYSTEM_ROOT}/run/release-fixture-scenario\")\" == bad-config && \"\$*\" == \"run -test -c \"* ]]; then exit 10; fi\nprintf \"Xray %s\\\\n\"\n" "$version" >"${destination}/xray"
+chmod +x "${destination}/xray"'
+make_mock tar '
+printf "tar %s\n" "$*" >>"$MOCK_LOG"
+archive=""; destination=""; member=""
+while (($#)); do
+  case "$1" in -xzf) archive="${2:-}"; shift 2 ;; -C) destination="${2:-}"; shift 2 ;; -*) shift ;; *) member="$1"; shift ;; esac
+done
+IFS=: read -r marker core version <"$archive"
+[[ "$marker" == fixture && "$core" == sing-box && -n "$destination" && -n "$member" ]] || exit 20
+scenario="$(<"${VPSCTL_SYSTEM_ROOT}/run/release-fixture-scenario")"
+[[ "$scenario" != bad-version ]] || version=9.9.9
+mkdir -p "${destination}/${member%/*}"
+printf "#!/usr/bin/env bash\nprintf \"downloaded sing-box %%s\\\\n\" \"\$*\" >>\"\$MOCK_LOG\"\nif [[ \"\$(<\"\${VPSCTL_SYSTEM_ROOT}/run/release-fixture-scenario\")\" == bad-config && \"\$*\" == \"check -c \"* ]]; then exit 10; fi\nprintf \"sing-box version %s\\\\n\"\n" "$version" >"${destination}/${member}"
+chmod +x "${destination}/${member}"'
 make_mock sha256sum 'printf "sha256sum %s\n" "$*" >>"$MOCK_LOG"; exec "$REAL_SHA256SUM" "$@"'
 make_mock jq 'set -o pipefail; "$REAL_JQ" "$@" | tr -d "\r"; exit "${PIPESTATUS[0]}"'
 make_mock apt-get 'printf "apt-get %s\n" "$*" >>"$MOCK_LOG"'
@@ -180,9 +300,18 @@ reset_root() {
     : >"$MOCK_LOG"
 }
 
+set_release_scenario() {
+    printf '%s\n' "${1:-default}" >"${TEST_SYSTEM_ROOT}/run/release-fixture-scenario"
+}
+
 write_core_binary() {
-    local core="$1" logical path
+    local core="$1" logical path version
     logical="${2:-/usr/bin/$1}"
+    case "$core" in
+        sing-box) version="${3:-1.11.0}" ;;
+        xray) version="${3:-25.1.1}" ;;
+        *) fail "unknown fixture core: $core" ;;
+    esac
     path="${TEST_SYSTEM_ROOT}${logical}"
     mkdir -p "${path%/*}"
     printf '%s\n' '#!/usr/bin/env bash' \
@@ -190,10 +319,10 @@ write_core_binary() {
         '[[ ! -e "${VPSCTL_SYSTEM_ROOT}/run/fail-core-validation" ]] || { case "$*" in *" -c "*|*" -test "*) printf "fixture core validation rejected:%0600d\\n" 0 >&2; exit 10;; esac; }' \
         '[[ "$core" != xray || "$*" != "run -test -c "* || "${*: -1}" == *.json ]] || { printf "Xray fixture requires a .json config path\\n" >&2; exit 10; }' \
         'case "$core:$*" in' \
-        '  "sing-box:version") printf "sing-box version 1.11.0\\n" ;;' \
+        "  \"sing-box:version\") printf \"sing-box version ${version}\\\\n\" ;;" \
         '  "sing-box:generate uuid") printf "11111111-1111-4111-8111-111111111111\\n" ;;' \
         '  "sing-box:generate reality-keypair") printf "PrivateKey: private-secret\\nPublicKey: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\\n" ;;' \
-        '  "xray:version"|"xray:-version") printf "Xray 25.1.1\\n" ;;' \
+        "  \"xray:version\"|\"xray:-version\") printf \"Xray ${version}\\\\n\" ;;" \
         '  "xray:uuid") printf "22222222-2222-4222-8222-222222222222\\n" ;;' \
         '  "xray:x25519") printf "PrivateKey: private-secret\\nPublicKey: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\\n" ;;' \
         'esac' >"$path"
@@ -246,14 +375,220 @@ test_arguments_dry_run_and_time() {
     assert_equal 2 "$RUN_STATUS" "time status arguments"
 
     reset_root
+    set_release_scenario default
     write_core_binary xray
     run_proxy install --core xray --version v25.1.1
     assert_equal 0 "$RUN_STATUS" "external Xray version matches v-prefixed tag"
 
     reset_root
+    set_release_scenario default
     write_core_binary xray
     run_proxy install --core xray --version 25.1.1
     assert_equal 0 "$RUN_STATUS" "external Xray version matches unprefixed tag"
+}
+
+test_core_release_channels() {
+    local sing_meta xray_meta core meta
+    sing_meta="${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/cores/sing-box.json"
+    xray_meta="${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/cores/xray.json"
+
+    reset_root
+    run_proxy install --core sing-box --release-channel
+    assert_equal 2 "$RUN_STATUS" "release channel missing value"
+    run_proxy install --core sing-box --release-channel beta
+    assert_equal 2 "$RUN_STATUS" "invalid release channel"
+    run_proxy install --core sing-box --release-channel stable --release-channel prerelease
+    assert_equal 2 "$RUN_STATUS" "duplicate release channel"
+    run_proxy install --core sing-box --version
+    assert_equal 2 "$RUN_STATUS" "exact version missing value"
+    run_proxy install --core sing-box --version v1.11.0 --version v1.12.0-beta.1
+    assert_equal 2 "$RUN_STATUS" "duplicate exact version"
+    run_proxy install --core sing-box --version v1.11.0 --release-channel stable
+    assert_equal 2 "$RUN_STATUS" "version and channel conflict"
+    run_proxy update --core sing-box --release-channel
+    assert_equal 2 "$RUN_STATUS" "update release channel missing value"
+    run_proxy update --core sing-box --release-channel prerelease --version v1.12.0-beta.1
+    assert_equal 2 "$RUN_STATUS" "update version and channel conflict"
+    run_proxy update --core sing-box --release-channel stable --release-channel stable
+    assert_equal 2 "$RUN_STATUS" "update duplicate release channel"
+    run_proxy install --core all --version v1.11.0
+    assert_equal 2 "$RUN_STATUS" "all cores reject shared exact version"
+    assert_not_contains "$(<"$MOCK_LOG")" "curl " "invalid release arguments avoid network"
+
+    run_proxy --dry-run install --core sing-box --release-channel prerelease
+    assert_equal 0 "$RUN_STATUS" "prerelease install dry-run"
+    assert_contains "$RUN_OUTPUT" "Pre-release" "prerelease dry-run channel"
+    [[ ! -e "$sing_meta" ]] || fail "prerelease dry-run wrote metadata"
+    run_proxy --dry-run install --core xray --version v25.2.0-rc.1
+    assert_equal 0 "$RUN_STATUS" "exact prerelease dry-run"
+    assert_contains "$RUN_OUTPUT" "v25.2.0-rc.1" "exact tag dry-run output"
+
+    reset_root
+    set_release_scenario default
+    run_proxy install --core sing-box
+    assert_equal 0 "$RUN_STATUS" "default stable managed install"
+    jq -e '.owned == true and .version == "1.11.0" and .release_tag == "v1.11.0" and (has("release_channel") | not)' \
+        "$sing_meta" >/dev/null || fail "default stable metadata"
+    assert_file_contains "$MOCK_LOG" "/SagerNet/sing-box/releases/latest" "default stable endpoint"
+    assert_not_contains "$(<"$MOCK_LOG")" "/releases?per_page=" "default stable avoids release list"
+    assert_file_contains "$MOCK_LOG" "sing-box-1.11.0-linux-amd64.tar.gz" "stable sing-box asset"
+    assert_file_contains "$MOCK_LOG" "downloaded sing-box version" "stable sing-box version smoke test"
+    assert_file_contains "$MOCK_LOG" "downloaded sing-box check -c" "stable sing-box config validation"
+
+    reset_root
+    set_release_scenario default
+    run_proxy install --core xray --version v25.2.0-rc.1
+    assert_equal 0 "$RUN_STATUS" "exact prerelease managed install"
+    jq -e '.owned == true and .version == "25.2.0-rc.1" and .release_tag == "v25.2.0-rc.1"' \
+        "$xray_meta" >/dev/null || fail "exact prerelease metadata"
+    assert_file_contains "$MOCK_LOG" "/XTLS/Xray-core/releases/tags/v25.2.0-rc.1" "exact prerelease endpoint"
+    assert_file_contains "$MOCK_LOG" "Xray-linux-64.zip.dgst" "exact prerelease Xray digest"
+
+    reset_root
+    set_release_scenario default
+    run_proxy install --core xray --version v25.1.1
+    assert_equal 0 "$RUN_STATUS" "exact stable managed install"
+    jq -e '.version == "25.1.1" and .release_tag == "v25.1.1"' "$xray_meta" >/dev/null || fail "exact stable metadata"
+
+    reset_root
+    set_release_scenario draft-tag
+    run_proxy install --core xray --version v25.2.0-rc.1
+    assert_equal 20 "$RUN_STATUS" "exact draft release rejection"
+    [[ ! -e "$xray_meta" ]] || fail "draft release wrote metadata"
+    assert_not_contains "$(<"$MOCK_LOG")" "/releases/download/" "draft release downloaded asset"
+
+    reset_root
+    set_release_scenario mismatched-tag
+    run_proxy install --core sing-box --version v1.12.0-beta.1
+    assert_equal 20 "$RUN_STATUS" "exact tag echo mismatch rejection"
+    assert_contains "$RUN_OUTPUT" "非请求版本" "exact tag mismatch message"
+    [[ ! -e "$sing_meta" ]] || fail "tag mismatch wrote metadata"
+
+    reset_root
+    set_release_scenario latest-prerelease
+    run_proxy install --core sing-box --release-channel stable
+    assert_equal 20 "$RUN_STATUS" "stable channel rejects prerelease latest response"
+    [[ ! -e "$sing_meta" ]] || fail "prerelease latest wrote stable metadata"
+
+    reset_root
+    set_release_scenario default
+    run_proxy install --core all --release-channel prerelease
+    assert_equal 0 "$RUN_STATUS" "all cores prerelease install"
+    jq -e '.owned == true and .version == "1.12.0-beta.1" and .release_tag == "v1.12.0-beta.1"' \
+        "$sing_meta" >/dev/null || fail "sing-box prerelease metadata"
+    jq -e '.owned == true and .version == "25.2.0-rc.1" and .release_tag == "v25.2.0-rc.1"' \
+        "$xray_meta" >/dev/null || fail "Xray prerelease metadata"
+    assert_file_contains "$MOCK_LOG" "/SagerNet/sing-box/releases?per_page=100&page=1" "sing-box prerelease first page"
+    assert_file_contains "$MOCK_LOG" "/SagerNet/sing-box/releases?per_page=100&page=2" "sing-box prerelease pagination"
+    assert_file_contains "$MOCK_LOG" "/XTLS/Xray-core/releases?per_page=100&page=2" "Xray prerelease pagination"
+    assert_not_contains "$(<"$MOCK_LOG")" "/releases/latest" "prerelease avoids stable endpoint"
+    assert_not_contains "$(<"$MOCK_LOG")" "beta.2/sing-box" "prerelease uses first matching release"
+    assert_not_contains "$(<"$MOCK_LOG")" "rc.2/Xray" "Xray prerelease uses first matching release"
+    assert_file_contains "$MOCK_LOG" "sing-box-1.12.0-beta.1-linux-amd64.tar.gz" "prerelease sing-box asset"
+    assert_file_contains "$MOCK_LOG" "Xray-linux-64.zip.dgst" "prerelease Xray digest fallback"
+    assert_file_contains "$MOCK_LOG" "downloaded sing-box check -c" "prerelease sing-box config validation"
+    assert_file_contains "$MOCK_LOG" "downloaded xray run -test -c" "prerelease Xray config validation"
+
+    : >"$MOCK_LOG"
+    run_proxy update --core all --release-channel prerelease
+    assert_equal 0 "$RUN_STATUS" "repeated prerelease update"
+    assert_file_contains "$MOCK_LOG" "/releases?per_page=100&page=2" "repeated prerelease resolution"
+    jq -e '.release_tag == "v1.12.0-beta.1"' "$sing_meta" >/dev/null || fail "repeated sing-box prerelease tag"
+    jq -e '.release_tag == "v25.2.0-rc.1"' "$xray_meta" >/dev/null || fail "repeated Xray prerelease tag"
+
+    : >"$MOCK_LOG"
+    run_proxy update --core all
+    assert_equal 0 "$RUN_STATUS" "default update returns to stable channel"
+    jq -e '.release_tag == "v1.11.0"' "$sing_meta" >/dev/null || fail "default sing-box update stable tag"
+    jq -e '.release_tag == "v25.1.1"' "$xray_meta" >/dev/null || fail "default Xray update stable tag"
+    assert_file_contains "$MOCK_LOG" "/SagerNet/sing-box/releases/latest" "default sing-box update stable endpoint"
+    assert_file_contains "$MOCK_LOG" "/XTLS/Xray-core/releases/latest" "default Xray update stable endpoint"
+    assert_not_contains "$(<"$MOCK_LOG")" "/releases?per_page=" "default update does not follow prior channel"
+
+    for core in sing-box xray; do
+        case "$core" in sing-box) meta="$sing_meta" ;; xray) meta="$xray_meta" ;; esac
+        reset_root
+        set_release_scenario bad-digest
+        run_proxy install --core "$core" --release-channel prerelease
+        assert_equal 20 "$RUN_STATUS" "$core prerelease digest mismatch rejection"
+        assert_contains "$RUN_OUTPUT" "SHA256 校验失败" "$core prerelease digest error"
+        assert_not_contains "$(<"$MOCK_LOG")" "/releases/latest" "$core digest failure does not fall back"
+        [[ ! -e "$meta" ]] || fail "$core digest mismatch wrote metadata"
+
+        reset_root
+        set_release_scenario bad-version
+        run_proxy install --core "$core" --release-channel prerelease
+        assert_equal 20 "$RUN_STATUS" "$core prerelease binary version mismatch rejection"
+        assert_contains "$RUN_OUTPUT" "二进制版本 9.9.9" "$core prerelease binary version error"
+        assert_not_contains "$(<"$MOCK_LOG")" "/releases/latest" "$core version failure does not fall back"
+        [[ ! -e "$meta" ]] || fail "$core version mismatch wrote metadata"
+
+        reset_root
+        set_release_scenario bad-config
+        run_proxy install --core "$core" --release-channel prerelease
+        assert_equal 10 "$RUN_STATUS" "$core prerelease config compatibility rejection"
+        assert_contains "$RUN_OUTPUT" "拒绝当前配置" "$core prerelease config compatibility error"
+        assert_not_contains "$(<"$MOCK_LOG")" "/releases/latest" "$core config failure does not fall back"
+        [[ ! -e "$meta" ]] || fail "$core incompatible prerelease wrote metadata"
+    done
+
+    reset_root
+    set_release_scenario no-prerelease
+    run_proxy install --core sing-box --release-channel prerelease
+    assert_equal 20 "$RUN_STATUS" "missing prerelease fails safely"
+    assert_file_contains "$MOCK_LOG" "/releases?per_page=100&page=2" "missing prerelease reaches empty page"
+    assert_not_contains "$(<"$MOCK_LOG")" "/releases/latest" "missing prerelease does not fall back"
+    [[ ! -e "$sing_meta" ]] || fail "missing prerelease wrote metadata"
+
+    reset_root
+    set_release_scenario repeated-full
+    run_proxy install --core xray --release-channel prerelease
+    assert_equal 20 "$RUN_STATUS" "repeated full prerelease pages stop safely"
+    assert_contains "$RUN_OUTPUT" "超过 10 页" "prerelease page limit message"
+    assert_file_contains "$MOCK_LOG" "/releases?per_page=100&page=10" "prerelease page limit reached"
+    assert_not_contains "$(<"$MOCK_LOG")" "/releases?per_page=100&page=11" "prerelease page limit prevents unbounded query"
+    [[ ! -e "$xray_meta" ]] || fail "page limit wrote metadata"
+
+    reset_root
+    set_release_scenario malformed-list
+    run_proxy install --core xray --release-channel prerelease
+    assert_equal 20 "$RUN_STATUS" "malformed prerelease list rejection"
+    [[ ! -e "$xray_meta" ]] || fail "malformed prerelease response wrote metadata"
+
+    reset_root
+    set_release_scenario default
+    write_core_binary sing-box /usr/bin/sing-box 1.11.0
+    run_proxy install --core sing-box --release-channel prerelease
+    assert_equal 3 "$RUN_STATUS" "external stable binary not registered as prerelease"
+    assert_contains "$RUN_OUTPUT" "先不带 --release-channel/--version" "external prerelease mismatch guidance"
+    assert_file_contains "$MOCK_LOG" "/releases?per_page=100&page=2" "external prerelease target resolved"
+    [[ ! -e "$sing_meta" ]] || fail "mismatched external prerelease wrote metadata"
+
+    reset_root
+    set_release_scenario default
+    write_core_binary sing-box /usr/bin/sing-box 1.12.0-beta.1
+    run_proxy install --core sing-box --release-channel prerelease
+    assert_equal 0 "$RUN_STATUS" "matching external prerelease registration"
+    jq -e '.owned == false and .version == "1.12.0-beta.1"' "$sing_meta" >/dev/null || fail "matching external prerelease metadata"
+
+    reset_root
+    set_release_scenario default
+    write_core_binary xray /usr/bin/xray 25.2.0-rc.1
+    run_proxy install --core xray --version v25.2.0-rc.1
+    assert_equal 0 "$RUN_STATUS" "matching external exact prerelease registration"
+    jq -e '.owned == false and .version == "25.2.0-rc.1"' "$xray_meta" >/dev/null || fail "external exact prerelease metadata"
+
+    reset_root
+    set_release_scenario default
+    install_external sing-box
+    : >"$MOCK_LOG"
+    run_proxy update --core sing-box --release-channel prerelease
+    assert_equal 3 "$RUN_STATUS" "external prerelease update requires strong confirmation"
+    assert_not_contains "$(<"$MOCK_LOG")" "curl " "unconfirmed external prerelease update avoids network"
+    run_proxy update --core sing-box --release-channel prerelease --confirm-external-update
+    assert_equal 0 "$RUN_STATUS" "confirmed external prerelease update"
+    jq -e '.owned == false and .version == "1.12.0-beta.1" and .release_tag == "v1.12.0-beta.1"' \
+        "$sing_meta" >/dev/null || fail "confirmed external prerelease update metadata"
 }
 
 test_dependency_install_plans() {
@@ -583,6 +918,7 @@ test_unified_interactive_api() (
     local selector_stderr="${TEST_TEMP}/selector.stderr"
     local guided_stderr="${TEST_TEMP}/guided.stderr"
     local subscription_stderr="${TEST_TEMP}/subscription.stderr"
+    local release_stderr="${TEST_TEMP}/release.stderr"
 
     reset_root
     # Source the production entry point once with a harmless action so its
@@ -629,6 +965,23 @@ test_unified_interactive_api() (
     status=0
     proxy_menu_action proxy_test_fail_action >/dev/null 2>&1 || status=$?
     assert_equal 3 "$status" "menu action preserves real failures"
+
+    PROXY_INTERACTIVE=1
+    PROXY_FORWARD_ARGS=()
+    proxy_prompt_release_options install sing-box <<<2 2>"$release_stderr"
+    assert_equal $'--release-channel\nprerelease' "$(printf '%s\n' "${PROXY_FORWARD_ARGS[@]}")" "interactive prerelease forwarding"
+    output="$(<"$release_stderr")"
+    assert_contains "$output" "使用最新稳定版（推荐）" "interactive stable release choice"
+    assert_contains "$output" "使用最新预发布版" "interactive prerelease choice"
+    assert_contains "$output" "输入精确 Release tag" "interactive exact tag choice"
+
+    PROXY_FORWARD_ARGS=()
+    proxy_prompt_release_options update xray <<< $'3\nv25.2.0-rc.1' 2>"$release_stderr"
+    assert_equal $'--version\nv25.2.0-rc.1' "$(printf '%s\n' "${PROXY_FORWARD_ARGS[@]}")" "interactive exact tag forwarding"
+    PROXY_FORWARD_ARGS=()
+    proxy_prompt_release_options install sing-box <<<1 2>"$release_stderr"
+    assert_equal '' "$(printf '%s' "${PROXY_FORWARD_ARGS[*]}")" "interactive stable release default"
+    PROXY_INTERACTIVE=0
 
     assert_equal $'sing-box\nxray' "$(proxy_lifecycle_candidates install 1)" "install candidates are unregistered cores"
     install_external sing-box
@@ -1499,6 +1852,7 @@ test_relay_forward_service_lifecycle() {
 }
 
 case "${VPSCTL_TEST_ONLY:-}" in
+    core-release) test_core_release_channels; printf 'PASS: proxy core release tests\n'; exit 0 ;;
     node-ip-policy) test_node_ip_strategy_and_batch; printf 'PASS: node IP policy tests\n'; exit 0 ;;
     relay-state) test_relay_state_bindings_and_purge; printf 'PASS: relay state tests\n'; exit 0 ;;
     relay-xray) test_relay_xray_pending_and_validation; printf 'PASS: relay Xray tests\n'; exit 0 ;;
@@ -1509,6 +1863,8 @@ esac
 
 printf 'TEST: proxy arguments, dry-run and time\n'
 test_arguments_dry_run_and_time
+printf 'TEST: proxy core release channels\n'
+test_core_release_channels
 printf 'TEST: proxy dependency installation plans\n'
 test_dependency_install_plans
 printf 'TEST: proxy status, services and logs\n'

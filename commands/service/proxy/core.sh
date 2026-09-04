@@ -147,41 +147,99 @@ _proxy_core_xray_dgst_sha256() {
     printf '%s' "$value"
 }
 
-# Writes a verified, extracted executable to OUTPUT and release details to INFO.
-_proxy_core_fetch_release() {
-    local core="$1" requested_tag="$2" output="$3" info="$4" repository api
-    local release_json asset_json tag version asset url digest expected actual archive dgst_url dgst extract candidate="" member
+# Writes one validated GitHub Release object to OUTPUT. Exact tags may resolve
+# to either stable or pre-release versions, but drafts are never accepted.
+_proxy_core_resolve_release() {
+    local core="$1" release_channel="$2" requested_tag="$3" output="$4" repository api page=1 page_json count
+    local max_pages=10
     repository="$(_proxy_core_release_repository "$core")" || return $?
-    command -v curl >/dev/null 2>&1 || { vps_cmd_error "代理内核下载需要 curl"; return 3; }
-    command -v jq >/dev/null 2>&1 || { vps_cmd_error "代理内核下载需要 jq"; return 3; }
-    command -v sha256sum >/dev/null 2>&1 || { vps_cmd_error "代理内核下载需要 sha256sum"; return 3; }
+    case "$release_channel" in stable | prerelease) ;; *) vps_cmd_error "Release channel 无效：$release_channel"; return 2 ;; esac
     if [[ -n "$requested_tag" ]]; then
         [[ "$requested_tag" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$ ]] || {
             vps_cmd_error "Release tag 格式无效：$requested_tag"
             return 2
         }
         api="https://api.github.com/repos/${repository}/releases/tags/${requested_tag}"
-    else
-        api="https://api.github.com/repos/${repository}/releases/latest"
+        _proxy_core_curl 120 -o "$output" "$api" || {
+            vps_cmd_error "查询 $(proxy_core_label "$core") 官方 Release 失败"
+            return 20
+        }
+        jq -e '.draft == false and ((.prerelease | type) == "boolean") and ((.tag_name | type) == "string" and (.tag_name | length) > 0) and ((.assets | type) == "array")' \
+            "$output" >/dev/null 2>&1 || {
+            vps_cmd_error "$(proxy_core_label "$core") Release 无效、为草稿或字段不完整"
+            return 20
+        }
+        [[ "$(jq -r '.tag_name' "$output")" == "$requested_tag" ]] || {
+            vps_cmd_error "Release API 返回了非请求版本：$(jq -r '.tag_name // "<无>"' "$output" 2>/dev/null || printf '<无>')"
+            return 20
+        }
+        return 0
     fi
+
+    if [[ "$release_channel" == "stable" ]]; then
+        api="https://api.github.com/repos/${repository}/releases/latest"
+        _proxy_core_curl 120 -o "$output" "$api" || {
+            vps_cmd_error "查询 $(proxy_core_label "$core") 官方稳定 Release 失败"
+            return 20
+        }
+        jq -e '.draft == false and .prerelease == false and ((.tag_name | type) == "string" and (.tag_name | length) > 0) and ((.assets | type) == "array")' \
+            "$output" >/dev/null 2>&1 || {
+            vps_cmd_error "$(proxy_core_label "$core") Release 不是明确声明的稳定版本"
+            return 20
+        }
+        return 0
+    fi
+
+    while :; do
+        api="https://api.github.com/repos/${repository}/releases?per_page=100&page=${page}"
+        page_json="${output}.page-${page}"
+        _proxy_core_curl 120 -o "$page_json" "$api" || {
+            vps_cmd_error "查询 $(proxy_core_label "$core") 官方 Pre-release 列表失败（第 ${page} 页）"
+            return 20
+        }
+        jq -e 'type == "array" and all(.[]; type == "object" and ((.draft | type) == "boolean") and ((.prerelease | type) == "boolean"))' \
+            "$page_json" >/dev/null 2>&1 || {
+            vps_cmd_error "$(proxy_core_label "$core") Pre-release 列表响应格式无效"
+            return 20
+        }
+        if jq -e 'any(.[]; .draft == false and .prerelease == true)' "$page_json" >/dev/null 2>&1; then
+            jq -ce 'first(.[] | select(.draft == false and .prerelease == true))' "$page_json" >"$output" || {
+                vps_cmd_error "解析 $(proxy_core_label "$core") Pre-release 列表失败"
+                return 20
+            }
+            jq -e '.draft == false and .prerelease == true and ((.tag_name | type) == "string" and (.tag_name | length) > 0) and ((.assets | type) == "array")' \
+                "$output" >/dev/null 2>&1 || {
+                vps_cmd_error "$(proxy_core_label "$core") Pre-release 字段不完整"
+                return 20
+            }
+            return 0
+        fi
+        count="$(jq -r 'length' "$page_json")" || return 20
+        if ((count < 100)); then
+            vps_cmd_error "$(proxy_core_label "$core") 没有可用的 Pre-release；未回退到稳定版"
+            return 20
+        fi
+        if ((page >= max_pages)); then
+            vps_cmd_error "$(proxy_core_label "$core") Pre-release 列表超过 ${max_pages} 页仍无可用版本；已停止查询且未回退到稳定版"
+            return 20
+        fi
+        page=$((page + 1))
+    done
+}
+
+# Writes a verified, extracted executable to OUTPUT and release details to INFO.
+_proxy_core_fetch_release() {
+    local core="$1" release_channel="$2" requested_tag="$3" output="$4" info="$5"
+    local release_json asset_json tag version asset url digest expected actual archive dgst_url dgst extract candidate="" member
+    command -v curl >/dev/null 2>&1 || { vps_cmd_error "代理内核下载需要 curl"; return 3; }
+    command -v jq >/dev/null 2>&1 || { vps_cmd_error "代理内核下载需要 jq"; return 3; }
+    command -v sha256sum >/dev/null 2>&1 || { vps_cmd_error "代理内核下载需要 sha256sum"; return 3; }
     release_json="${output}.release.json"
-    _proxy_core_curl 120 -o "$release_json" "$api" || {
-        vps_cmd_error "查询 $(proxy_core_label "$core") 官方 Release 失败"
-        return 20
-    }
-    jq -e '.draft == false and .prerelease == false and ((.tag_name | type) == "string" and (.tag_name | length) > 0) and ((.assets | type) == "array")' \
-        "$release_json" >/dev/null 2>&1 || {
-        vps_cmd_error "$(proxy_core_label "$core") Release 不是明确声明的稳定版本"
-        return 20
-    }
+    _proxy_core_resolve_release "$core" "$release_channel" "$requested_tag" "$release_json" || return $?
     tag="$(jq -r '.tag_name' "$release_json")"
-    [[ -z "$requested_tag" || "$tag" == "$requested_tag" ]] || {
-        vps_cmd_error "Release API 返回了非请求版本：$tag"
-        return 20
-    }
     version="${tag#v}"
     [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([._+-][0-9A-Za-z.-]+)?$ ]] || {
-        vps_cmd_error "稳定 Release tag 格式不受支持：$tag"
+        vps_cmd_error "Release tag 格式不受支持：$tag"
         return 20
     }
     asset="$(_proxy_core_asset_name "$core" "$version")" || {
@@ -378,7 +436,7 @@ _proxy_core_restore_or_remove() {
 }
 
 proxy_core_install() (
-    local core="${1:-}" requested_tag="" version_set=0 arg external="" binary_logical owned=true
+    local core="${1:-}" release_channel=stable channel_set=0 requested_tag="" version_set=0 arg external="" binary_logical owned=true
     local tmp="" candidate_config downloaded info version tag sha service_path service_logical config_logical meta_path pending_path
     local config_backup="" service_backup="" failed=0
     local -a required_tools=(jq curl sha256sum)
@@ -387,6 +445,11 @@ proxy_core_install() (
     while (($#)); do
         arg="$1"
         case "$arg" in
+            --release-channel)
+                (($# >= 2)) || { vps_cmd_error "--release-channel 需要 stable 或 prerelease"; return 2; }
+                ((channel_set == 0)) || { vps_cmd_error "--release-channel 不能重复"; return 2; }
+                case "$2" in stable | prerelease) release_channel="$2" ;; *) vps_cmd_error "Release channel 无效：$2"; return 2 ;; esac
+                channel_set=1; shift 2; continue ;;
             --version)
                 (($# >= 2)) || { vps_cmd_error "--version 需要 TAG"; return 2; }
                 ((version_set == 0)) || { vps_cmd_error "--version 不能重复"; return 2; }
@@ -395,6 +458,7 @@ proxy_core_install() (
             *) vps_cmd_error "install 的未知选项：$arg"; return 2 ;;
         esac
     done
+    ((channel_set == 0 || version_set == 0)) || { vps_cmd_error "--release-channel 与 --version 不能同时使用"; return 2; }
     _proxy_core_require_name "$core" || return $?
     proxy_require_platform || return $?
     vps_cmd_require_root || return $?
@@ -444,9 +508,21 @@ proxy_core_install() (
     fi
     if [[ "${VPSCTL_DRY_RUN:-0}" == "1" ]]; then
         if [[ "$owned" == "true" ]]; then
-            vps_cmd_info "演练：下载并验证 $(proxy_core_label "$core") 官方稳定 Release"
+            if [[ -n "$requested_tag" ]]; then
+                vps_cmd_info "演练：下载并验证 $(proxy_core_label "$core") 官方 Release tag $requested_tag（允许稳定版或 Pre-release，拒绝草稿）"
+            elif [[ "$release_channel" == "prerelease" ]]; then
+                vps_cmd_info "演练：查找、下载并验证 $(proxy_core_label "$core") 最新官方 Pre-release（无可用版本时不回退稳定版）"
+            else
+                vps_cmd_info "演练：下载并验证 $(proxy_core_label "$core") 最新官方稳定 Release"
+            fi
         else
-            vps_cmd_info "演练：复用外部普通可执行文件 $binary_logical（owned=false）"
+            if [[ -n "$requested_tag" ]]; then
+                vps_cmd_info "演练：仅在外部二进制 $binary_logical 匹配官方 Release tag $requested_tag 时登记（owned=false）"
+            elif [[ "$release_channel" == "prerelease" ]]; then
+                vps_cmd_info "演练：仅在外部二进制 $binary_logical 匹配最新官方 Pre-release 时登记（owned=false）"
+            else
+                vps_cmd_info "演练：复用外部普通可执行文件 $binary_logical（owned=false）"
+            fi
         fi
         vps_cmd_info "演练：写入 $config_logical、$service_logical 和内核元数据；不启动、不启用服务"
         return 0
@@ -457,20 +533,29 @@ proxy_core_install() (
     info="${tmp}/release-info.json"
     _proxy_core_render_candidate "$core" "$candidate_config" || { local rc=$?; _proxy_core_remove_tmp "$tmp"; return "$rc"; }
     if [[ "$owned" == "true" ]]; then
-        _proxy_core_fetch_release "$core" "$requested_tag" "$downloaded" "$info" || { local rc=$?; _proxy_core_remove_tmp "$tmp"; return "$rc"; }
+        _proxy_core_fetch_release "$core" "$release_channel" "$requested_tag" "$downloaded" "$info" || { local rc=$?; _proxy_core_remove_tmp "$tmp"; return "$rc"; }
         version="$(jq -r '.version' "$info")"; tag="$(jq -r '.release_tag' "$info")"; sha="$(jq -r '.sha256' "$info")"
         _proxy_core_validate_binary_config "$core" "$downloaded" "$candidate_config" || { local rc=$?; _proxy_core_remove_tmp "$tmp"; return "$rc"; }
     else
-        local external_path
+        local external_path target_release target_tag=""
         external_path="$(vps_cmd_system_path "$binary_logical")" || { _proxy_core_remove_tmp "$tmp"; return 3; }
         version="$(_proxy_core_binary_version "$core" "$external_path")" || { local rc=$?; _proxy_core_remove_tmp "$tmp"; return "$rc"; }
-        if [[ -n "$requested_tag" && "$version" != "${requested_tag#v}" ]]; then
-            vps_cmd_error "外部二进制版本 ${version} 与请求的 ${requested_tag} 不一致；请先单独登记，再使用带强确认的 update"
-            _proxy_core_remove_tmp "$tmp"
-            return 3
+        if [[ -n "$requested_tag" || "$release_channel" == "prerelease" ]]; then
+            target_release="${tmp}/target-release.json"
+            _proxy_core_resolve_release "$core" "$release_channel" "$requested_tag" "$target_release" || { local rc=$?; _proxy_core_remove_tmp "$tmp"; return "$rc"; }
+            target_tag="$(jq -r '.tag_name' "$target_release")"
+            if [[ "$version" != "${target_tag#v}" ]]; then
+                if [[ -n "$requested_tag" ]]; then
+                    vps_cmd_error "外部二进制版本 ${version} 与目标 Release ${target_tag} 不一致；请先不带 --release-channel/--version 执行 install 登记现有内核，再使用 update --version ${requested_tag} --confirm-external-update 替换"
+                else
+                    vps_cmd_error "外部二进制版本 ${version} 与目标 Release ${target_tag} 不一致；请先不带 --release-channel/--version 执行 install 登记现有内核，再使用 update --release-channel prerelease --confirm-external-update 替换"
+                fi
+                _proxy_core_remove_tmp "$tmp"
+                return 3
+            fi
         fi
         sha="$(_proxy_core_sha256 "$external_path")" || { local rc=$?; _proxy_core_remove_tmp "$tmp"; return "$rc"; }
-        tag=""
+        tag="$target_tag"
         _proxy_core_validate_binary_config "$core" "$external_path" "$candidate_config" || { local rc=$?; _proxy_core_remove_tmp "$tmp"; return "$rc"; }
     fi
     mkdir -p -- "$(dirname -- "$(proxy_core_config_path "$core")")" "$(dirname -- "$service_path")" \
@@ -520,7 +605,7 @@ _proxy_core_confirm_external_update() {
 }
 
 proxy_core_update() (
-    local core="${1:-}" requested_tag="" version_set=0 confirmed=0 arg meta binary_logical binary_path owned installed_at
+    local core="${1:-}" release_channel=stable channel_set=0 requested_tag="" version_set=0 confirmed=0 arg meta binary_logical binary_path owned installed_at
     local tmp downloaded info config version tag sha old_sha binary_backup meta_backup active=0 failed=0 rc
     local -a required_tools=(jq curl sha256sum)
     (($# >= 1)) || { vps_cmd_error "update 需要 CORE"; return 2; }
@@ -528,6 +613,11 @@ proxy_core_update() (
     while (($#)); do
         arg="$1"
         case "$arg" in
+            --release-channel)
+                (($# >= 2)) || { vps_cmd_error "--release-channel 需要 stable 或 prerelease"; return 2; }
+                ((channel_set == 0)) || { vps_cmd_error "--release-channel 不能重复"; return 2; }
+                case "$2" in stable | prerelease) release_channel="$2" ;; *) vps_cmd_error "Release channel 无效：$2"; return 2 ;; esac
+                channel_set=1; shift 2; continue ;;
             --version)
                 (($# >= 2)) || { vps_cmd_error "--version 需要 TAG"; return 2; }
                 ((version_set == 0)) || { vps_cmd_error "--version 不能重复"; return 2; }
@@ -538,6 +628,7 @@ proxy_core_update() (
         esac
         shift
     done
+    ((channel_set == 0 || version_set == 0)) || { vps_cmd_error "--release-channel 与 --version 不能同时使用"; return 2; }
     _proxy_core_require_name "$core" || return $?
     proxy_require_platform || return $?
     vps_cmd_require_root || return $?
@@ -569,12 +660,18 @@ proxy_core_update() (
     config="$(proxy_core_config_path "$core")" || return $?
     [[ -f "$config" && ! -L "$config" ]] || { vps_cmd_error "现有配置不安全或不存在：$config"; return 3; }
     if [[ "${VPSCTL_DRY_RUN:-0}" == "1" ]]; then
-        vps_cmd_info "演练：下载、校验并原子更新 $binary_logical；不重启服务"
+        if [[ -n "$requested_tag" ]]; then
+            vps_cmd_info "演练：下载并验证官方 Release tag $requested_tag 后原子更新 $binary_logical；不重启服务"
+        elif [[ "$release_channel" == "prerelease" ]]; then
+            vps_cmd_info "演练：查找并验证最新官方 Pre-release 后原子更新 $binary_logical（无可用版本时不回退稳定版）；不重启服务"
+        else
+            vps_cmd_info "演练：下载并验证最新官方稳定 Release 后原子更新 $binary_logical；不重启服务"
+        fi
         return 0
     fi
     tmp="$(mktemp -d "${TMPDIR:-/tmp}/vpsctl-proxy.XXXXXX")" || return 20
     downloaded="${tmp}/${core}"; info="${tmp}/release-info.json"
-    _proxy_core_fetch_release "$core" "$requested_tag" "$downloaded" "$info" || { rc=$?; _proxy_core_remove_tmp "$tmp"; return "$rc"; }
+    _proxy_core_fetch_release "$core" "$release_channel" "$requested_tag" "$downloaded" "$info" || { rc=$?; _proxy_core_remove_tmp "$tmp"; return "$rc"; }
     _proxy_core_validate_binary_config "$core" "$downloaded" "$config" || { rc=$?; _proxy_core_remove_tmp "$tmp"; return "$rc"; }
     version="$(jq -r '.version' "$info")"; tag="$(jq -r '.release_tag' "$info")"; sha="$(jq -r '.sha256' "$info")"
     old_sha="$(_proxy_core_sha256 "$binary_path")" || { rc=$?; _proxy_core_remove_tmp "$tmp"; return "$rc"; }
