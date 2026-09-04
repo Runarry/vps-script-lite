@@ -123,6 +123,122 @@ while IFS=$'\t' read -r profile _label; do
     done < <(proxy_profile_cores "$profile")
 done < <(proxy_all_profiles)
 
+switch_profile_count=0
+switch_count=0
+if [[ -n "$SING_BOX_BINARY" && -n "$XRAY_BINARY" ]]; then
+    while IFS=$'\t' read -r profile _label; do
+        [[ -n "$profile" ]] || continue
+        cores="$(proxy_profile_cores "$profile")" || continue
+        [[ "$cores" == $'sing-box\nxray' ]] || continue
+        switch_profile_count=$((switch_profile_count + 1))
+
+        for source_core in sing-box xray; do
+            case "$source_core" in
+                sing-box) target_core=xray ;;
+                xray) target_core=sing-box ;;
+            esac
+            switch_count=$((switch_count + 1))
+            printf -v node_id 'node-%016x' "$((0x1000 + switch_count))"
+            port=$((52000 + switch_count))
+            node="$(proxy_prepare_node_json "$source_core" "$profile" "$node_id" \
+                "real-switch-${profile}-${source_core}" 127.0.0.1 "$port" 198.51.100.10 \
+                www.amd.com /relay-switch relay-switch self-signed '' '' none 100 200 bbr)" || {
+                    printf 'FAIL: core switch source fixture %s/%s\n' "$profile" "$source_core" >&2
+                    exit 1
+                }
+            case "$source_core" in
+                sing-box) source_uri="$(proxy_sb_render_uri "$node")" ;;
+                xray) source_uri="$(proxy_xray_render_uri "$node")" ;;
+            esac
+            source_descriptor="$(proxy_relay_uri_parse "$source_uri" "$profile")" || {
+                printf 'FAIL: core switch source URI parse %s/%s\n' "$profile" "$source_core" >&2
+                exit 1
+            }
+            source_descriptor="$(jq -Sc . <<<"$source_descriptor")"
+
+            switched_node="$(jq --arg core "$target_core" '.core=$core' <<<"$node")"
+            if proxy_profile_requires_tls_certificate "$profile"; then
+                source_cert_logical="$(jq -r '.tls.certificate_path' <<<"$node")"
+                source_key_logical="$(jq -r '.tls.key_path' <<<"$node")"
+                target_cert_logical="${source_cert_logical/\/${source_core}\//\/${target_core}\/}"
+                target_key_logical="${source_key_logical/\/${source_core}\//\/${target_core}\/}"
+                mkdir -p -- "${TEST_SYSTEM_ROOT}${target_cert_logical%/*}"
+                cp -p -- "${TEST_SYSTEM_ROOT}${source_cert_logical}" "${TEST_SYSTEM_ROOT}${target_cert_logical}"
+                cp -p -- "${TEST_SYSTEM_ROOT}${source_key_logical}" "${TEST_SYSTEM_ROOT}${target_key_logical}"
+                switched_node="$(jq --arg cert "$target_cert_logical" --arg key "$target_key_logical" \
+                    '.tls.certificate_path=$cert | .tls.key_path=$key' <<<"$switched_node")"
+                source_cert_sha="$(sha256sum "${TEST_SYSTEM_ROOT}${source_cert_logical}")"
+                target_cert_sha="$(sha256sum "${TEST_SYSTEM_ROOT}${target_cert_logical}")"
+                source_key_sha="$(sha256sum "${TEST_SYSTEM_ROOT}${source_key_logical}")"
+                target_key_sha="$(sha256sum "${TEST_SYSTEM_ROOT}${target_key_logical}")"
+                [[ "${source_cert_sha%% *}" == "${target_cert_sha%% *}" && \
+                    "${source_key_sha%% *}" == "${target_key_sha%% *}" ]] || {
+                        printf 'FAIL: core switch TLS material changed %s/%s->%s\n' \
+                            "$profile" "$source_core" "$target_core" >&2
+                        exit 1
+                    }
+            fi
+            jq -e --argjson before "$node" '
+                .credentials == $before.credentials and
+                (.tls | del(.certificate_path,.key_path)) ==
+                    ($before.tls | del(.certificate_path,.key_path))
+            ' <<<"$switched_node" >/dev/null || {
+                printf 'FAIL: core switch credentials or TLS semantics changed %s/%s->%s\n' \
+                    "$profile" "$source_core" "$target_core" >&2
+                exit 1
+            }
+
+            case "$target_core" in
+                sing-box) target_uri="$(proxy_sb_render_uri "$switched_node")" ;;
+                xray) target_uri="$(proxy_xray_render_uri "$switched_node")" ;;
+            esac
+            target_descriptor="$(proxy_relay_uri_parse "$target_uri" "$profile")" || {
+                printf 'FAIL: core switch target URI parse %s/%s->%s\n' \
+                    "$profile" "$source_core" "$target_core" >&2
+                exit 1
+            }
+            target_descriptor="$(jq -Sc . <<<"$target_descriptor")"
+            [[ "$source_descriptor" == "$target_descriptor" ]] || {
+                printf 'FAIL: core switch descriptor changed %s/%s->%s\n' \
+                    "$profile" "$source_core" "$target_core" >&2
+                exit 1
+            }
+
+            render_node="$switched_node"
+            if proxy_profile_requires_tls_certificate "$profile"; then
+                render_node="$(jq \
+                    --arg cert "${TEST_SYSTEM_ROOT}${target_cert_logical}" \
+                    --arg key "${TEST_SYSTEM_ROOT}${target_key_logical}" \
+                    '.tls.certificate_path=$cert | .tls.key_path=$key' <<<"$render_node")"
+            fi
+            manifest="${TEST_TEMP}/nodes-switch-${switch_count}.json"
+            relay="${TEST_TEMP}/relay-switch-${switch_count}.json"
+            config="${TEST_TEMP}/config-switch-${switch_count}.json"
+            jq -n --argjson node "$render_node" '{schema_version:1,nodes:[$node]}' >"$manifest"
+            proxy_relay_forward_manifest_default >"$relay"
+            proxy_render_config "$target_core" "$manifest" "$relay" >"$config" || {
+                printf 'FAIL: core switch target config render %s/%s->%s\n' \
+                    "$profile" "$source_core" "$target_core" >&2
+                exit 1
+            }
+            validation_output=""
+            case "$target_core" in
+                sing-box) validation_output="$("${TEST_SYSTEM_ROOT}/usr/local/bin/sing-box" check -c "$config" 2>&1)" ;;
+                xray) validation_output="$("${TEST_SYSTEM_ROOT}/usr/local/bin/xray" run -test -c "$config" 2>&1)" ;;
+            esac || {
+                printf 'FAIL: real target core rejected switch %s/%s->%s: %s\n' \
+                    "$profile" "$source_core" "$target_core" "$validation_output" >&2
+                exit 1
+            }
+        done
+    done < <(proxy_all_profiles)
+    [[ "$switch_profile_count" == 6 && "$switch_count" == 12 ]] || {
+        printf 'FAIL: expected 6 dual-core profiles and 12 core switches, got %s and %s\n' \
+            "$switch_profile_count" "$switch_count" >&2
+        exit 1
+    }
+fi
+
 policy_count=0
 for core in sing-box xray; do
     binary=""
@@ -246,4 +362,5 @@ for core in sing-box xray; do
     esac
 done
 
-printf 'PASS: %s real relay profile/core configurations and %s node IP policy configurations\n' "$count" "$policy_count"
+printf 'PASS: %s real relay profile/core configurations, %s node core switches, and %s node IP policy configurations\n' \
+    "$count" "$switch_count" "$policy_count"

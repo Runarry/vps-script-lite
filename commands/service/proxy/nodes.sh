@@ -944,6 +944,316 @@ proxy_node_select_interactive() {
     proxy_prompt_select "$prompt" "${choices[0]}" "${choices[@]}"
 }
 
+proxy_node_render_uri_json() {
+    local node="$1" core
+    core="$(jq -r '.core' <<<"$node")" || return 10
+    case "$core" in
+        sing-box) proxy_sb_render_uri "$node" ;;
+        xray) proxy_xray_render_uri "$node" ;;
+        *) return 2 ;;
+    esac
+}
+
+proxy_node_core_set_select_interactive() {
+    local node id source_core target_core profile name label
+    local -a choices=()
+    proxy_is_interactive || return 2
+    [[ -f "$PROXY_MANIFEST" ]] || { vps_cmd_error "当前没有节点"; return 3; }
+    proxy_manifest_validate_file "$PROXY_MANIFEST" || return $?
+    while IFS= read -r node; do
+        id="$(jq -r '.id' <<<"$node")"
+        source_core="$(jq -r '.core' <<<"$node")"
+        profile="$(jq -r '.profile' <<<"$node")"
+        name="$(jq -r '.name' <<<"$node")"
+        case "$source_core" in sing-box) target_core=xray ;; xray) target_core=sing-box ;; *) continue ;; esac
+        proxy_profile_cores "$profile" | grep -Fxq "$target_core" || continue
+        proxy_core_registered "$target_core" || continue
+        label="$(proxy_profile_label "$profile" 2>/dev/null || printf '%s' "$profile")"
+        choices+=("$id" "${name} · $(proxy_core_label "$source_core") → $(proxy_core_label "$target_core") · ${label}")
+    done < <(jq -c '.nodes[]' "$PROXY_MANIFEST")
+    ((${#choices[@]} > 0)) || {
+        vps_cmd_error "没有可切换的节点；请确认协议兼容且目标内核已安装"
+        return 3
+    }
+    proxy_prompt_select "请选择要切换内核的节点" "${choices[0]}" "${choices[@]}"
+}
+
+proxy_node_core_set_prepare_relay() {
+    local node_id="$1" target_core="$2" updated_at="$3" candidate_file="${4:-}"
+    local binding exit_id exit refs binding_count forward_count migrated_exit
+    PROXY_SWITCH_RELAY_TOUCHED=false
+    PROXY_SWITCH_RELAY_LABEL=""
+    [[ -f "${PROXY_RELAY_FILE:-}" ]] || return 0
+    proxy_relay_validate_file "$PROXY_RELAY_FILE" || return $?
+    binding="$(proxy_relay_node_binding "$node_id" 2>/dev/null || true)"
+    [[ -n "$binding" ]] || return 0
+    exit_id="$(jq -r '.exit_id' <<<"$binding")"
+    exit="$(proxy_relay_exit "$exit_id" 2>/dev/null || true)"
+    [[ -n "$exit" && "$(jq -r '.type' <<<"$exit")" == protocol ]] || {
+        vps_cmd_error "节点绑定的协议出口不存在或无效：$exit_id"
+        return 10
+    }
+    refs="$(proxy_relay_exit_references "$exit_id")" || return 10
+    binding_count="$(jq -r '.bindings | length' <<<"$refs")"
+    forward_count="$(jq -r '.forwards | length' <<<"$refs")"
+    if [[ "$binding_count" != 1 || "$forward_count" != 0 ]]; then
+        vps_cmd_error "节点的中转出口被其他入口或端口转发复用，无法随节点切核：$exit_id"
+        proxy_relay_print_exit_references "$exit_id"
+        return 3
+    fi
+    jq -e --arg core "$target_core" '.descriptor.compatible_cores | index($core) != null' <<<"$exit" >/dev/null 2>&1 || {
+        vps_cmd_error "节点的中转出口不兼容目标内核：$exit_id"
+        return 3
+    }
+    migrated_exit="$(jq --arg core "$target_core" --arg updated_at "$updated_at" '.core=$core | .updated_at=$updated_at' <<<"$exit")" || return 10
+    proxy_relay_render_outbound "$target_core" "$migrated_exit" >/dev/null || {
+        vps_cmd_error "节点的中转出口无法由目标内核安全渲染：$exit_id"
+        return 10
+    }
+    if [[ -n "$candidate_file" ]]; then
+        jq --arg id "$exit_id" --arg core "$target_core" --arg updated_at "$updated_at" \
+            '(.exits[] | select(.id == $id)) |= (.core=$core | .updated_at=$updated_at)' \
+            "$PROXY_RELAY_FILE" >"$candidate_file" || return 10
+    fi
+    PROXY_SWITCH_RELAY_TOUCHED=true
+    PROXY_SWITCH_RELAY_LABEL="$(jq -r '.name' <<<"$exit")（${exit_id}）"
+}
+
+proxy_node_core_set_prepare_certificate() {
+    local node="$1" source_core="$2" target_core="$3" id mode sni
+    local source_cert_logical source_key_logical target_dir_logical target_dir
+    local target_cert_logical target_key_logical source_cert source_key target_cert target_key
+    local source_hash target_hash temporary logical source target created='[]' stage_json status=0
+    PROXY_SWITCH_NODE_JSON="$node"
+    PROXY_SWITCH_CREATED_CERTS='[]'
+    mode="$(jq -r '.tls.mode // "none"' <<<"$node")"
+    [[ "$mode" == self-signed || "$mode" == imported ]] || return 0
+    id="$(jq -r '.id' <<<"$node")"
+    sni="$(jq -r '.tls.server_name' <<<"$node")"
+    source_cert_logical="$(jq -r '.tls.certificate_path' <<<"$node")"
+    source_key_logical="$(jq -r '.tls.key_path' <<<"$node")"
+    if ! [[ "$source_cert_logical" =~ ^${PROXY_ETC_LOGICAL}/${source_core}/certs/${id}/cert(-[a-f0-9]{64})?\.pem$ &&
+            "$source_key_logical" =~ ^${PROXY_ETC_LOGICAL}/${source_core}/certs/${id}/key(-[a-f0-9]{64})?\.pem$ ]]; then
+        vps_cmd_error "节点证书路径不属于源内核受管目录，拒绝自动迁移"
+        return 30
+    fi
+    target_dir_logical="$(proxy_certificate_logical_dir "$target_core" "$id")"
+    target_cert_logical="${target_dir_logical}/${source_cert_logical##*/}"
+    target_key_logical="${target_dir_logical}/${source_key_logical##*/}"
+    source_cert="$(vps_cmd_system_path "$source_cert_logical")" || return $?
+    source_key="$(vps_cmd_system_path "$source_key_logical")" || return $?
+    target_dir="$(vps_cmd_system_path "$target_dir_logical")" || return $?
+    target_cert="$(vps_cmd_system_path "$target_cert_logical")" || return $?
+    target_key="$(vps_cmd_system_path "$target_key_logical")" || return $?
+    vps_cmd_require_no_symlink_components "$source_cert" || return $?
+    vps_cmd_require_no_symlink_components "$source_key" || return $?
+    vps_cmd_require_no_symlink_components "$target_dir" || return $?
+    [[ -f "$source_cert" && ! -L "$source_cert" && -f "$source_key" && ! -L "$source_key" ]] || {
+        vps_cmd_error "源内核受管证书不完整或不安全"
+        return 30
+    }
+    proxy_validate_certificate_pair "$source_cert" "$source_key" "$sni" || return $?
+    [[ -e "$target_cert" || -L "$target_cert" ]] || created="$(jq -cn --argjson current "$created" --arg path "$target_cert_logical" '$current + [$path]')" || return 20
+    [[ -e "$target_key" || -L "$target_key" ]] || created="$(jq -cn --argjson current "$created" --arg path "$target_key_logical" '$current + [$path]')" || return 20
+    PROXY_SWITCH_CREATED_CERTS="$created"
+    if [[ "$(jq -r 'length' <<<"$created")" != 0 ]]; then
+        [[ ! -e "$PROXY_CORE_SWITCH_CERT_TRANSACTION" && ! -L "$PROXY_CORE_SWITCH_CERT_TRANSACTION" ]] || {
+            vps_cmd_error "已存在节点切核证书预备事务，拒绝覆盖"
+            return 30
+        }
+        stage_json="$(jq -n --argjson cert_created "$created" --arg created_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '{schema_version:1,kind:"node-core-switch-cert-stage",cert_created:$cert_created,created_at:$created_at}')" || return 20
+        proxy_atomic_write_json "${PROXY_STATE_LOGICAL}/transaction-core-switch-certs.json" 0600 "$stage_json" || return 20
+    fi
+    mkdir -p -- "$target_dir" || { proxy_abort_core_switch_cert_stage "$created" >/dev/null 2>&1 || true; return 20; }
+    chmod 0700 -- "$target_dir" || { proxy_abort_core_switch_cert_stage "$created" >/dev/null 2>&1 || true; return 20; }
+    for logical in "$target_cert_logical" "$target_key_logical"; do
+        if [[ "$logical" == "$target_cert_logical" ]]; then source="$source_cert"; target="$target_cert"; else source="$source_key"; target="$target_key"; fi
+        if [[ -e "$target" || -L "$target" ]]; then
+            [[ -f "$target" && ! -L "$target" ]] || { status=30; break; }
+            source_hash="$(sha256sum "$source" | awk '{print $1}')" || { status=20; break; }
+            target_hash="$(sha256sum "$target" | awk '{print $1}')" || { status=20; break; }
+            [[ "$source_hash" == "$target_hash" ]] || { status=30; break; }
+            continue
+        fi
+        temporary="$(mktemp "${target_dir}/.switch.XXXXXX")" || { status=20; break; }
+        if ! cp -p -- "$source" "$temporary" || ! chmod 0600 -- "$temporary" || ! mv -- "$temporary" "$target"; then
+            rm -f -- "$temporary"
+            status=20
+            break
+        fi
+    done
+    if ((status == 0)); then
+        proxy_validate_certificate_pair "$target_cert" "$target_key" "$sni" || status=$?
+    fi
+    if ((status != 0)); then
+        proxy_abort_core_switch_cert_stage "$created" >/dev/null 2>&1 || true
+        return "$status"
+    fi
+    PROXY_SWITCH_NODE_JSON="$(jq --arg cert "$target_cert_logical" --arg key "$target_key_logical" \
+        '.tls.certificate_path=$cert | .tls.key_path=$key' <<<"$node")" || {
+        proxy_abort_core_switch_cert_stage "$created" >/dev/null 2>&1 || true
+        return 10
+    }
+    PROXY_SWITCH_CREATED_CERTS="$created"
+}
+
+proxy_node_core_set_confirm() {
+    local id="$1" name="$2" source_core="$3" target_core="$4" confirmed="$5" relay_label="${6:-}" status token
+    [[ "${VPSCTL_DRY_RUN:-0}" == "1" ]] && return 0
+    if [[ "${VPSCTL_NON_INTERACTIVE:-0}" == "1" || ! -t 0 || ! -t 1 ]]; then
+        [[ "$confirmed" == 1 ]] && return 0
+        vps_cmd_error "node core set 是中断性操作；非交互模式需 --confirm-disruptive"
+        return 3
+    fi
+    token="SWITCH-${target_core^^}"
+    vps_cmd_warning "节点：${name}（${id}）"
+    vps_cmd_warning "内核：$(proxy_core_label "$source_core") → $(proxy_core_label "$target_core")"
+    [[ -z "$relay_label" ]] || vps_cmd_warning "将同时迁移独占中转出口：$relay_label"
+    vps_cmd_confirm_token "切核会短暂中断源内核与目标内核上的代理连接" "$token" && return 0
+    status=$?
+    [[ "$status" == 130 ]] && return 130
+    vps_cmd_info "已取消节点切核，未做更改"
+    return 1
+}
+
+proxy_node_core_set() (
+    local id="" target_core="" confirmed=0 arg initial_node node source_core profile name updated_at current_node
+    local source_uri target_uri source_descriptor target_descriptor candidate_node candidate_manifest candidate_relay
+    local source_candidate_config target_candidate_config relay_for_render="" status=0 confirm_status=0
+    local source_pending target_pending relay_touched=false created_json='[]'
+    while (($#)); do
+        arg="$1"
+        case "$arg" in
+            --id) (($# >= 2)) || return 2; id="$2"; shift 2 ;;
+            --core) (($# >= 2)) || return 2; target_core="$2"; shift 2 ;;
+            --confirm-disruptive) confirmed=1; shift ;;
+            *) vps_cmd_error "node core set 的未知选项：$arg"; return 2 ;;
+        esac
+    done
+    [[ -z "$id" || "$id" =~ ^node-[a-f0-9]{16}$ ]] || { vps_cmd_error "node core set 需要有效 --id"; return 2; }
+    [[ -z "$target_core" ]] || proxy_core_valid "$target_core" || { vps_cmd_error "无效目标内核：$target_core"; return 2; }
+    if ! proxy_is_interactive; then
+        [[ "$id" =~ ^node-[a-f0-9]{16}$ ]] || { vps_cmd_error "node core set 需要有效 --id"; return 2; }
+        [[ -n "$target_core" ]] || { vps_cmd_error "node core set 需要 --core"; return 2; }
+    fi
+    vps_cmd_require_root || return $?
+    proxy_require_platform || return $?
+    proxy_ensure_mutation_tools node-core-set jq openssl sha256sum || return $?
+    if proxy_stop_after_dependency_plan; then return 0; fi
+    proxy_prepare_manifest_state || return $?
+    if [[ -z "$id" ]]; then id="$(proxy_node_core_set_select_interactive)" || return $?; fi
+    initial_node="$(proxy_manifest_node "$id")" || { vps_cmd_error "未找到节点：$id"; return 3; }
+    source_core="$(jq -r '.core' <<<"$initial_node")"
+    profile="$(jq -r '.profile' <<<"$initial_node")"
+    name="$(jq -r '.name' <<<"$initial_node")"
+    if [[ -z "$target_core" ]]; then case "$source_core" in sing-box) target_core=xray ;; xray) target_core=sing-box ;; esac; fi
+    [[ "$target_core" != "$source_core" ]] || { vps_cmd_error "节点已经属于 $(proxy_core_label "$target_core")"; return 3; }
+    proxy_profile_cores "$profile" | grep -Fxq "$target_core" || {
+        vps_cmd_error "$(proxy_core_label "$target_core") 不支持节点配置 ${profile}"
+        return 3
+    }
+    proxy_core_registered "$target_core" || {
+        vps_cmd_error "目标内核 $(proxy_core_label "$target_core") 尚未安装或登记；请先安装"
+        return 3
+    }
+    source_pending="$(proxy_core_pending_path "$source_core")" || return 2
+    target_pending="$(proxy_core_pending_path "$target_core")" || return 2
+    [[ ! -e "$source_pending" && ! -L "$source_pending" && ! -e "$target_pending" && ! -L "$target_pending" ]] || {
+        vps_cmd_error "源内核或目标内核存在待生效更改；请先分别 restart 后再切换节点"
+        return 3
+    }
+    updated_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    candidate_node="$(jq --arg core "$target_core" --arg updated_at "$updated_at" '.core=$core | .updated_at=$updated_at' <<<"$initial_node")" || return 10
+    source_uri="$(proxy_node_render_uri_json "$initial_node")" || return $?
+    target_uri="$(proxy_node_render_uri_json "$candidate_node")" || return $?
+    source_descriptor="$(proxy_relay_uri_parse "$source_uri" "$profile")" || return $?
+    target_descriptor="$(proxy_relay_uri_parse "$target_uri" "$profile")" || return $?
+    jq -e -n --argjson source "$source_descriptor" --argjson target "$target_descriptor" '$source == $target' >/dev/null || {
+        vps_cmd_error "切核后的客户端连接参数与原节点不一致，拒绝切换"
+        return 10
+    }
+    proxy_node_core_set_prepare_relay "$id" "$target_core" "$updated_at" || return $?
+    if [[ "${VPSCTL_DRY_RUN:-0}" == 1 ]]; then
+        vps_cmd_info "演练：节点 ${name}（${id}）将从 $(proxy_core_label "$source_core") 切换到 $(proxy_core_label "$target_core")"
+        [[ "$PROXY_SWITCH_RELAY_TOUCHED" != true ]] || vps_cmd_info "演练：同时迁移独占中转出口 $PROXY_SWITCH_RELAY_LABEL"
+        vps_cmd_info "演练：客户端端点、凭据、TLS、传输和 IP 策略保持不变；不会写文件或启停服务"
+        return 0
+    fi
+
+    vps_cmd_lock proxy || return $?
+    trap 'vps_cmd_unlock' EXIT
+    proxy_recover_transaction || return $?
+    current_node="$(proxy_manifest_node "$id")" || { vps_cmd_error "节点在切核期间已被删除，请重试：$id"; return 3; }
+    [[ "$current_node" == "$initial_node" ]] || { vps_cmd_error "节点在切核期间已发生变化，请重新读取后重试：$id"; return 3; }
+    proxy_core_registered "$target_core" || { vps_cmd_error "目标内核在切核期间变为不可用"; return 3; }
+    [[ ! -e "$source_pending" && ! -L "$source_pending" && ! -e "$target_pending" && ! -L "$target_pending" ]] || {
+        vps_cmd_error "源内核或目标内核在切核期间出现待生效更改，请重试"
+        return 3
+    }
+    candidate_relay="$(proxy_mktemp_json "$PROXY_STATE_DIR" relay.core-set)" || return 20
+    trap 'rm -f -- "$candidate_relay"; vps_cmd_unlock' EXIT
+    proxy_node_core_set_prepare_relay "$id" "$target_core" "$updated_at" "$candidate_relay" || return $?
+    relay_touched="$PROXY_SWITCH_RELAY_TOUCHED"
+    if proxy_node_core_set_confirm "$id" "$name" "$source_core" "$target_core" "$confirmed" "$PROXY_SWITCH_RELAY_LABEL"; then
+        :
+    else
+        confirm_status=$?
+        [[ "$confirm_status" == 1 ]] && return 0
+        return "$confirm_status"
+    fi
+    proxy_node_core_set_prepare_certificate "$candidate_node" "$source_core" "$target_core" || return $?
+    candidate_node="$PROXY_SWITCH_NODE_JSON"
+    created_json="$PROXY_SWITCH_CREATED_CERTS"
+    candidate_manifest="$(mktemp "${PROXY_STATE_DIR}/.nodes.core-set.XXXXXX")" || {
+        proxy_abort_core_switch_cert_stage "$created_json" >/dev/null 2>&1 || true
+        return 20
+    }
+    source_candidate_config="$(proxy_mktemp_json "$PROXY_STATE_DIR" config.core-set-source)" || {
+        rm -f -- "$candidate_manifest"
+        proxy_abort_core_switch_cert_stage "$created_json" >/dev/null 2>&1 || true
+        return 20
+    }
+    target_candidate_config="$(proxy_mktemp_json "$PROXY_STATE_DIR" config.core-set-target)" || {
+        rm -f -- "$candidate_manifest" "$source_candidate_config"
+        proxy_abort_core_switch_cert_stage "$created_json" >/dev/null 2>&1 || true
+        return 20
+    }
+    trap 'rm -f -- "$candidate_relay" "$candidate_manifest" "$source_candidate_config" "$target_candidate_config"; vps_cmd_unlock' EXIT
+    jq --arg id "$id" --argjson node "$candidate_node" '(.nodes[] | select(.id == $id)) = $node' \
+        "$PROXY_MANIFEST" >"$candidate_manifest" || status=10
+    if ((status == 0)); then proxy_manifest_validate_file "$candidate_manifest" || status=$?; fi
+    if [[ "$relay_touched" == true ]]; then relay_for_render="$candidate_relay"; elif [[ -f "${PROXY_RELAY_FILE:-}" ]]; then relay_for_render="$PROXY_RELAY_FILE"; fi
+    if ((status == 0)); then
+        if [[ -n "$relay_for_render" ]]; then
+            proxy_render_config "$source_core" "$candidate_manifest" "$relay_for_render" >"$source_candidate_config" || status=$?
+        else
+            proxy_render_config "$source_core" "$candidate_manifest" >"$source_candidate_config" || status=$?
+        fi
+    fi
+    if ((status == 0)); then
+        if [[ -n "$relay_for_render" ]]; then
+            proxy_render_config "$target_core" "$candidate_manifest" "$relay_for_render" >"$target_candidate_config" || status=$?
+        else
+            proxy_render_config "$target_core" "$candidate_manifest" >"$target_candidate_config" || status=$?
+        fi
+    fi
+    if ((status == 0)); then
+        proxy_commit_core_switch "$source_core" "$target_core" "$candidate_manifest" \
+            "$source_candidate_config" "$target_candidate_config" "$candidate_relay" "$relay_touched" "$created_json" || status=$?
+    fi
+    rm -f -- "$candidate_relay" "$candidate_manifest" "$source_candidate_config" "$target_candidate_config"
+    trap 'vps_cmd_unlock' EXIT
+    if ((status != 0)); then
+        if [[ "$PROXY_CORE_SWITCH_COMMITTED" != 1 ]]; then
+            proxy_abort_core_switch_cert_stage "$created_json" >/dev/null 2>&1 || status=30
+        fi
+        return "$status"
+    fi
+    vps_cmd_success "节点 ${name}（${id}）已从 $(proxy_core_label "$source_core") 切换到 $(proxy_core_label "$target_core")"
+    [[ "$relay_touched" != true ]] || vps_cmd_success "独占中转出口已同步迁移：$PROXY_SWITCH_RELAY_LABEL"
+)
+
 proxy_node_details_print() {
     local node="$1" profile transport ip_strategy relay_bound=0 strategy_suffix=""
     profile="$(jq -r '.profile' <<<"$node")"
@@ -1333,7 +1643,7 @@ proxy_node_menu_run() {
     local action status=0 prompt_status=0 ignored
     while true; do
         action="$(proxy_prompt_select "节点管理" view \
-            add "添加节点" view "查看节点" edit "编辑节点" delete "删除节点" \
+            add "添加节点" view "查看节点" edit "编辑节点" core_set "切换内核" delete "删除节点" \
             ip_policy "批量设置出站 IP 策略" subscription "输出节点订阅" back "返回代理管理")" || prompt_status=$?
         if ((prompt_status != 0)); then
             [[ "$prompt_status" == "130" ]] && return "$status"
@@ -1343,6 +1653,7 @@ proxy_node_menu_run() {
             add) proxy_menu_action proxy_node_add || status=$? ;;
             view) proxy_menu_action proxy_node_view_interactive || status=$? ;;
             edit) proxy_menu_action proxy_node_edit || status=$? ;;
+            core_set) proxy_menu_action proxy_node_core_set || status=$? ;;
             delete) proxy_menu_action proxy_node_delete || status=$? ;;
             ip_policy) proxy_menu_action proxy_node_ip_policy_interactive || status=$? ;;
             subscription) proxy_menu_action proxy_subscription_interactive || status=$? ;;

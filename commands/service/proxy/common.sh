@@ -14,9 +14,11 @@ PROXY_BACKUP_DIR=""
 PROXY_LOG_DIR=""
 PROXY_MANIFEST=""
 PROXY_TRANSACTION=""
+PROXY_CORE_SWITCH_CERT_TRANSACTION=""
 PROXY_INIT_SYSTEM="unknown"
 PROXY_PACKAGE_MANAGER="unknown"
 PROXY_ARCH="unknown"
+PROXY_CORE_SWITCH_COMMITTED=0
 
 proxy_ensure_tools() {
     local feature="${1:-}"
@@ -148,6 +150,7 @@ proxy_common_init() {
     PROXY_LOG_DIR="$(vps_cmd_system_path "$PROXY_LOG_LOGICAL")" || return $?
     PROXY_MANIFEST="${PROXY_STATE_DIR}/nodes.json"
     PROXY_TRANSACTION="${PROXY_STATE_DIR}/transaction.json"
+    PROXY_CORE_SWITCH_CERT_TRANSACTION="${PROXY_STATE_DIR}/transaction-core-switch-certs.json"
     PROXY_INIT_SYSTEM="${VPSCTL_ENV_INIT:-unknown}"
     PROXY_PACKAGE_MANAGER="${VPSCTL_ENV_PACKAGE_MANAGER:-unknown}"
     PROXY_ARCH="${VPSCTL_ENV_ARCH:-unknown}"
@@ -867,10 +870,184 @@ proxy_write_transaction() {
     proxy_atomic_write_json "${PROXY_STATE_LOGICAL}/transaction.json" 0600 "$json"
 }
 
+proxy_remove_core_switch_cert_files() {
+    local created_json="${1:-[]}" logical physical directory failed=0
+    jq -e 'type == "array" and all(.[]; type == "string")' <<<"$created_json" >/dev/null 2>&1 || return 2
+    while IFS= read -r logical; do
+        [[ "$logical" =~ ^${PROXY_ETC_LOGICAL}/(sing-box|xray)/certs/node-[a-f0-9]{16}/(cert|key)(-[a-f0-9]{64})?\.pem$ ]] || {
+            vps_cmd_error "切核事务包含不安全的证书路径：$logical"
+            failed=1
+            continue
+        }
+        physical="$(vps_cmd_system_path "$logical")" || { failed=1; continue; }
+        [[ ! -L "$physical" ]] || {
+            vps_cmd_error "拒绝删除符号链接证书：$physical"
+            failed=1
+            continue
+        }
+        if [[ -e "$physical" ]] && ! rm -f -- "$physical"; then failed=1; fi
+        directory="${physical%/*}"
+        [[ "$directory" == "$PROXY_ETC_DIR/"*"/certs/node-"* ]] || { failed=1; continue; }
+        rmdir -- "$directory" >/dev/null 2>&1 || true
+    done < <(jq -r '.[]' <<<"$created_json")
+    ((failed == 0))
+}
+
+proxy_abort_core_switch_cert_stage() {
+    local created_json="${1:-[]}" failed=0
+    proxy_remove_core_switch_cert_files "$created_json" || failed=1
+    if [[ -e "$PROXY_CORE_SWITCH_CERT_TRANSACTION" || -L "$PROXY_CORE_SWITCH_CERT_TRANSACTION" ]]; then
+        [[ -f "$PROXY_CORE_SWITCH_CERT_TRANSACTION" && ! -L "$PROXY_CORE_SWITCH_CERT_TRANSACTION" ]] || return 30
+        rm -f -- "$PROXY_CORE_SWITCH_CERT_TRANSACTION" || failed=1
+    fi
+    ((failed == 0))
+}
+
+proxy_recover_core_switch_cert_stage() {
+    local created_json
+    [[ -f "$PROXY_CORE_SWITCH_CERT_TRANSACTION" && ! -L "$PROXY_CORE_SWITCH_CERT_TRANSACTION" ]] || {
+        vps_cmd_error "节点切核证书预备事务不安全：$PROXY_CORE_SWITCH_CERT_TRANSACTION"
+        return 30
+    }
+    if [[ "${VPSCTL_DRY_RUN:-0}" == 1 ]]; then
+        vps_cmd_warning "演练检测到未完成的节点切核证书事务；实际执行前必须先恢复"
+        return 30
+    fi
+    jq -e '
+        .schema_version == 1 and .kind == "node-core-switch-cert-stage" and
+        ((.cert_created | type) == "array") and all(.cert_created[]; type == "string")
+    ' "$PROXY_CORE_SWITCH_CERT_TRANSACTION" >/dev/null 2>&1 || {
+        vps_cmd_error "节点切核证书预备事务无法解析：$PROXY_CORE_SWITCH_CERT_TRANSACTION"
+        return 30
+    }
+    created_json="$(jq -c '.cert_created' "$PROXY_CORE_SWITCH_CERT_TRANSACTION")"
+    proxy_abort_core_switch_cert_stage "$created_json" || return 30
+    vps_cmd_success "未完成的节点切核证书预备事务已清理"
+}
+
+proxy_core_switch_restore_file() {
+    local backup="$1" existed="$2" logical="$3" mode="$4" physical
+    if [[ "$existed" == true ]]; then
+        proxy_restore_backup "$backup" "$logical" "$mode"
+        return
+    fi
+    physical="$(vps_cmd_system_path "$logical")" || return $?
+    [[ ! -L "$physical" ]] || return 30
+    rm -f -- "$physical"
+}
+
+proxy_core_switch_restore_service() {
+    local core="$1" registered="$2" wanted_active="$3" wanted_enabled="$4" failed=0
+    [[ "$registered" == true ]] || return 0
+    if [[ "$wanted_enabled" == true ]]; then
+        proxy_service_is_enabled "$core" || proxy_service_action "$core" enable || failed=1
+    elif proxy_service_is_enabled "$core"; then
+        proxy_service_action "$core" disable || failed=1
+    fi
+    if [[ "$wanted_active" == true ]]; then
+        proxy_service_action "$core" reload-manager || failed=1
+        if ! proxy_service_is_active "$core"; then
+            proxy_service_action "$core" start || failed=1
+        fi
+        proxy_service_is_active "$core" || failed=1
+    elif proxy_service_is_active "$core"; then
+        proxy_service_action "$core" stop || failed=1
+    fi
+    ((failed == 0))
+}
+
+proxy_recover_core_switch_transaction() {
+    local source_core target_core source_registered target_registered
+    local source_active source_enabled target_active target_enabled
+    local manifest_backup manifest_existed source_config_backup source_config_existed
+    local target_config_backup target_config_existed relay_backup relay_existed relay_touched
+    local created_json failed=0 core registered
+    [[ -f "$PROXY_TRANSACTION" && ! -L "$PROXY_TRANSACTION" ]] || return 30
+    if [[ "${VPSCTL_DRY_RUN:-0}" == "1" ]]; then
+        vps_cmd_warning "演练检测到未完成的节点切核事务；实际执行前必须先恢复"
+        return 30
+    fi
+    jq -e '
+        .schema_version == 2 and .kind == "node-core-switch" and
+        (.source_core == "sing-box" or .source_core == "xray") and
+        (.target_core == "sing-box" or .target_core == "xray") and
+        .source_core != .target_core and
+        ((.source_registered | type) == "boolean") and ((.target_registered | type) == "boolean") and
+        ((.source_active | type) == "boolean") and ((.source_enabled | type) == "boolean") and
+        ((.target_active | type) == "boolean") and ((.target_enabled | type) == "boolean") and
+        ((.manifest_backup | type) == "string") and ((.manifest_existed | type) == "boolean") and
+        ((.source_config_backup | type) == "string") and ((.source_config_existed | type) == "boolean") and
+        ((.target_config_backup | type) == "string") and ((.target_config_existed | type) == "boolean") and
+        ((.relay_backup | type) == "string") and ((.relay_existed | type) == "boolean") and
+        ((.relay_touched | type) == "boolean") and
+        ((.cert_created | type) == "array") and all(.cert_created[]; type == "string")
+    ' "$PROXY_TRANSACTION" >/dev/null 2>&1 || {
+        vps_cmd_error "发现无法解析的节点切核事务：$PROXY_TRANSACTION"
+        return 30
+    }
+    source_core="$(jq -r '.source_core' "$PROXY_TRANSACTION")"
+    target_core="$(jq -r '.target_core' "$PROXY_TRANSACTION")"
+    source_registered="$(jq -r '.source_registered' "$PROXY_TRANSACTION")"
+    target_registered="$(jq -r '.target_registered' "$PROXY_TRANSACTION")"
+    source_active="$(jq -r '.source_active' "$PROXY_TRANSACTION")"
+    source_enabled="$(jq -r '.source_enabled' "$PROXY_TRANSACTION")"
+    target_active="$(jq -r '.target_active' "$PROXY_TRANSACTION")"
+    target_enabled="$(jq -r '.target_enabled' "$PROXY_TRANSACTION")"
+    manifest_backup="$(jq -r '.manifest_backup' "$PROXY_TRANSACTION")"
+    manifest_existed="$(jq -r '.manifest_existed' "$PROXY_TRANSACTION")"
+    source_config_backup="$(jq -r '.source_config_backup' "$PROXY_TRANSACTION")"
+    source_config_existed="$(jq -r '.source_config_existed' "$PROXY_TRANSACTION")"
+    target_config_backup="$(jq -r '.target_config_backup' "$PROXY_TRANSACTION")"
+    target_config_existed="$(jq -r '.target_config_existed' "$PROXY_TRANSACTION")"
+    relay_backup="$(jq -r '.relay_backup' "$PROXY_TRANSACTION")"
+    relay_existed="$(jq -r '.relay_existed' "$PROXY_TRANSACTION")"
+    relay_touched="$(jq -r '.relay_touched' "$PROXY_TRANSACTION")"
+    created_json="$(jq -c '.cert_created' "$PROXY_TRANSACTION")"
+
+    vps_cmd_warning "检测到未完成的节点切核事务，正在恢复原配置与服务状态"
+    for core in "$source_core" "$target_core"; do
+        if [[ "$core" == "$source_core" ]]; then registered="$source_registered"; else registered="$target_registered"; fi
+        [[ "$registered" == true ]] || continue
+        if proxy_service_is_active "$core"; then proxy_service_action "$core" stop || failed=1; fi
+    done
+    proxy_core_switch_restore_file "$source_config_backup" "$source_config_existed" \
+        "$(proxy_core_config_logical "$source_core")" 0600 || failed=1
+    proxy_core_switch_restore_file "$target_config_backup" "$target_config_existed" \
+        "$(proxy_core_config_logical "$target_core")" 0600 || failed=1
+    proxy_core_switch_restore_file "$manifest_backup" "$manifest_existed" "${PROXY_STATE_LOGICAL}/nodes.json" 0600 || failed=1
+    if [[ "$relay_touched" == true ]]; then
+        proxy_core_switch_restore_file "$relay_backup" "$relay_existed" "${PROXY_STATE_LOGICAL}/relay.json" 0600 || failed=1
+    fi
+    proxy_remove_core_switch_cert_files "$created_json" || failed=1
+    proxy_core_switch_restore_service "$target_core" "$target_registered" "$target_active" "$target_enabled" || failed=1
+    proxy_core_switch_restore_service "$source_core" "$source_registered" "$source_active" "$source_enabled" || failed=1
+    if ((failed)); then
+        vps_cmd_error "节点切核事务恢复不完整；事务记录已保留"
+        return 30
+    fi
+    rm -f -- "$PROXY_TRANSACTION" || return 30
+    if [[ -e "$PROXY_CORE_SWITCH_CERT_TRANSACTION" || -L "$PROXY_CORE_SWITCH_CERT_TRANSACTION" ]]; then
+        [[ -f "$PROXY_CORE_SWITCH_CERT_TRANSACTION" && ! -L "$PROXY_CORE_SWITCH_CERT_TRANSACTION" ]] || return 30
+        rm -f -- "$PROXY_CORE_SWITCH_CERT_TRANSACTION" || return 30
+    fi
+    vps_cmd_success "未完成的节点切核事务已恢复"
+}
+
 proxy_recover_transaction() {
     local core manifest_backup config_backup manifest_existed config_existed config_logical failed=0
     local relay_backup relay_existed relay_touched
-    [[ -e "$PROXY_TRANSACTION" ]] || return 0
+    if [[ ! -e "$PROXY_TRANSACTION" && ! -L "$PROXY_TRANSACTION" ]]; then
+        if [[ -e "$PROXY_CORE_SWITCH_CERT_TRANSACTION" || -L "$PROXY_CORE_SWITCH_CERT_TRANSACTION" ]]; then
+            proxy_recover_core_switch_cert_stage
+            return $?
+        fi
+        return 0
+    fi
+    if [[ -f "$PROXY_TRANSACTION" && ! -L "$PROXY_TRANSACTION" ]] &&
+       jq -e '.schema_version == 2 and .kind == "node-core-switch"' "$PROXY_TRANSACTION" >/dev/null 2>&1; then
+        proxy_recover_core_switch_transaction
+        return $?
+    fi
     if [[ "${VPSCTL_DRY_RUN:-0}" == "1" ]]; then
         vps_cmd_warning "演练检测到未完成的代理配置事务；实际执行前必须先恢复"
         return 30
@@ -922,6 +1099,165 @@ proxy_recover_transaction() {
         proxy_relay_forward_sync || return 30
     fi
     vps_cmd_success "未完成事务已恢复"
+}
+
+proxy_commit_core_switch() {
+    local source_core="$1" target_core="$2" candidate_manifest="$3"
+    local source_candidate_config="$4" target_candidate_config="$5"
+    local candidate_relay="${6:-}" relay_touched="${7:-false}" created_json="${8:-[]}"
+    local source_registered=false target_registered=false source_active=false source_enabled=false
+    local target_active=false target_enabled=false source_remaining=0 target_want_enabled=false source_want_enabled=false
+    local manifest_backup="" manifest_existed=false source_config_backup="" source_config_existed=false
+    local target_config_backup="" target_config_existed=false relay_backup="" relay_existed=false
+    local source_config_logical target_config_logical source_config_path target_config_path
+    local source_pending target_pending transaction_json failed=0 post_commit_failed=0
+    PROXY_CORE_SWITCH_COMMITTED=0
+    proxy_core_valid "$source_core" && proxy_core_valid "$target_core" && [[ "$source_core" != "$target_core" ]] || return 2
+    [[ -f "$candidate_manifest" && -f "$source_candidate_config" && -f "$target_candidate_config" ]] || return 2
+    [[ "$relay_touched" == true || "$relay_touched" == false ]] || return 2
+    jq -e 'type == "array" and all(.[]; type == "string")' <<<"$created_json" >/dev/null 2>&1 || return 2
+    proxy_manifest_validate_file "$candidate_manifest" || return $?
+    if [[ "$relay_touched" == true ]]; then
+        [[ -n "$candidate_relay" ]] || return 2
+        proxy_relay_validate_file "$candidate_relay" "$candidate_manifest" || return $?
+    fi
+    proxy_core_registered "$target_core" || {
+        vps_cmd_error "切换节点前必须先安装或登记 $(proxy_core_label "$target_core")"
+        return 3
+    }
+    target_registered=true
+    proxy_core_registered "$source_core" && source_registered=true
+    proxy_validate_config_with_binary "$target_core" "$target_candidate_config" || return $?
+    if [[ "$source_registered" == true ]]; then
+        proxy_validate_config_with_binary "$source_core" "$source_candidate_config" || return $?
+    fi
+    source_remaining="$(jq -r --arg core "$source_core" '[.nodes[] | select(.core == $core)] | length' "$candidate_manifest")" || return 10
+    source_pending="$(proxy_core_pending_path "$source_core")" || return 2
+    target_pending="$(proxy_core_pending_path "$target_core")" || return 2
+    if [[ -e "$source_pending" || -L "$source_pending" || -e "$target_pending" || -L "$target_pending" ]]; then
+        vps_cmd_error "源内核或目标内核存在待生效更改；请先分别 restart 后再切换节点"
+        return 3
+    fi
+    if [[ "${VPSCTL_DRY_RUN:-0}" == "1" ]]; then
+        vps_cmd_info "演练：原子写入 ${source_core}/${target_core} 配置与节点清单，随后由目标内核立即接管"
+        [[ "$relay_touched" != true ]] || vps_cmd_info "演练：同时迁移节点的独占中转出口到 ${target_core}"
+        return 0
+    fi
+    source_config_logical="$(proxy_core_config_logical "$source_core")" || return 2
+    target_config_logical="$(proxy_core_config_logical "$target_core")" || return 2
+    source_config_path="$(proxy_core_config_path "$source_core")" || return 2
+    target_config_path="$(proxy_core_config_path "$target_core")" || return 2
+    if [[ -f "$PROXY_MANIFEST" ]]; then
+        manifest_existed=true
+        manifest_backup="$(proxy_backup_file "$source_core" "${PROXY_STATE_LOGICAL}/nodes.json" nodes-before-core-switch.json)" || return 20
+    fi
+    if [[ -f "$source_config_path" ]]; then
+        source_config_existed=true
+        source_config_backup="$(proxy_backup_file "$source_core" "$source_config_logical" config-before-core-switch.json)" || return 20
+    fi
+    if [[ -f "$target_config_path" ]]; then
+        target_config_existed=true
+        target_config_backup="$(proxy_backup_file "$target_core" "$target_config_logical" config-before-core-switch.json)" || return 20
+    fi
+    if [[ "$relay_touched" == true && -f "${PROXY_RELAY_FILE:-}" ]]; then
+        relay_existed=true
+        relay_backup="$(proxy_backup_file relay "${PROXY_RELAY_LOGICAL}" relay-before-core-switch.json)" || return 20
+    fi
+    if [[ "$source_registered" == true ]]; then
+        proxy_service_is_active "$source_core" && source_active=true
+        proxy_service_is_enabled "$source_core" && source_enabled=true
+    fi
+    proxy_service_is_active "$target_core" && target_active=true
+    proxy_service_is_enabled "$target_core" && target_enabled=true
+    [[ "$target_enabled" == true || "$source_enabled" == true ]] && target_want_enabled=true
+    [[ "$source_enabled" == true && "$source_remaining" != 0 ]] && source_want_enabled=true
+    transaction_json="$(jq -n \
+        --arg source_core "$source_core" --arg target_core "$target_core" \
+        --argjson source_registered "$source_registered" --argjson target_registered "$target_registered" \
+        --argjson source_active "$source_active" --argjson source_enabled "$source_enabled" \
+        --argjson target_active "$target_active" --argjson target_enabled "$target_enabled" \
+        --arg manifest_backup "$manifest_backup" --argjson manifest_existed "$manifest_existed" \
+        --arg source_config_backup "$source_config_backup" --argjson source_config_existed "$source_config_existed" \
+        --arg target_config_backup "$target_config_backup" --argjson target_config_existed "$target_config_existed" \
+        --arg relay_backup "$relay_backup" --argjson relay_existed "$relay_existed" --argjson relay_touched "$relay_touched" \
+        --argjson cert_created "$created_json" --arg created_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        '{schema_version:2,kind:"node-core-switch",source_core:$source_core,target_core:$target_core,
+          source_registered:$source_registered,target_registered:$target_registered,
+          source_active:$source_active,source_enabled:$source_enabled,target_active:$target_active,target_enabled:$target_enabled,
+          manifest_backup:$manifest_backup,manifest_existed:$manifest_existed,
+          source_config_backup:$source_config_backup,source_config_existed:$source_config_existed,
+          target_config_backup:$target_config_backup,target_config_existed:$target_config_existed,
+          relay_backup:$relay_backup,relay_existed:$relay_existed,relay_touched:$relay_touched,
+          cert_created:$cert_created,created_at:$created_at}')" || return 20
+    proxy_atomic_write_json "${PROXY_STATE_LOGICAL}/transaction.json" 0600 "$transaction_json" || return 20
+    if [[ -e "$PROXY_CORE_SWITCH_CERT_TRANSACTION" || -L "$PROXY_CORE_SWITCH_CERT_TRANSACTION" ]]; then
+        if [[ ! -f "$PROXY_CORE_SWITCH_CERT_TRANSACTION" || -L "$PROXY_CORE_SWITCH_CERT_TRANSACTION" ]] ||
+           ! rm -f -- "$PROXY_CORE_SWITCH_CERT_TRANSACTION"; then
+            proxy_recover_core_switch_transaction || return 30
+            return 20
+        fi
+    fi
+    proxy_atomic_write_from_file "$source_candidate_config" "$source_config_logical" 0600 || failed=1
+    ((failed)) || proxy_atomic_write_from_file "$target_candidate_config" "$target_config_logical" 0600 || failed=1
+    ((failed)) || proxy_atomic_write_from_file "$candidate_manifest" "${PROXY_STATE_LOGICAL}/nodes.json" 0600 || failed=1
+    if ((failed == 0)) && [[ "$relay_touched" == true ]]; then
+        proxy_atomic_write_from_file "$candidate_relay" "${PROXY_RELAY_LOGICAL}" 0600 || failed=1
+    fi
+    if ((failed == 0)) && [[ "$source_active" == true ]]; then
+        proxy_service_action "$source_core" stop || failed=1
+    fi
+    if ((failed == 0)); then
+        proxy_service_action "$target_core" reload-manager || failed=1
+    fi
+    if ((failed == 0)); then
+        if [[ "$target_active" == true ]]; then
+            proxy_service_action "$target_core" restart || failed=1
+        else
+            proxy_service_action "$target_core" start || failed=1
+        fi
+        proxy_service_is_active "$target_core" || failed=1
+    fi
+    if ((failed == 0)) && [[ "$source_registered" == true && "$source_active" == true && "$source_remaining" != 0 ]]; then
+        proxy_service_action "$source_core" reload-manager || failed=1
+        proxy_service_action "$source_core" start || failed=1
+        proxy_service_is_active "$source_core" || failed=1
+    fi
+    if ((failed == 0)); then
+        if [[ "$target_want_enabled" == true ]]; then
+            proxy_service_is_enabled "$target_core" || proxy_service_action "$target_core" enable || failed=1
+        elif proxy_service_is_enabled "$target_core"; then
+            proxy_service_action "$target_core" disable || failed=1
+        fi
+    fi
+    if ((failed == 0)) && [[ "$source_registered" == true ]]; then
+        if [[ "$source_want_enabled" == true ]]; then
+            proxy_service_is_enabled "$source_core" || proxy_service_action "$source_core" enable || failed=1
+        elif proxy_service_is_enabled "$source_core"; then
+            proxy_service_action "$source_core" disable || failed=1
+        fi
+    fi
+    if ((failed)); then
+        if ! proxy_recover_core_switch_transaction; then return 30; fi
+        return 20
+    fi
+    if ! rm -f -- "$PROXY_TRANSACTION"; then
+        proxy_recover_core_switch_transaction || return 30
+        return 20
+    fi
+    # shellcheck disable=SC2034 # Read by the node command after this helper returns.
+    PROXY_CORE_SWITCH_COMMITTED=1
+    proxy_save_lkg "$target_core" || post_commit_failed=1
+    if [[ "$source_registered" == true && "$source_active" == true && "$source_remaining" != 0 ]]; then
+        proxy_save_lkg "$source_core" || post_commit_failed=1
+    fi
+    if declare -F proxy_cleanup_orphan_certs >/dev/null 2>&1; then
+        proxy_cleanup_orphan_certs "$source_core" || post_commit_failed=1
+        proxy_cleanup_orphan_certs "$target_core" || post_commit_failed=1
+    fi
+    if ((post_commit_failed)); then
+        vps_cmd_warning "节点已完成切核，但 LKG 或孤立证书整理未完整完成"
+        return 30
+    fi
 }
 
 proxy_mark_pending() {

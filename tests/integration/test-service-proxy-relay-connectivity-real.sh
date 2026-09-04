@@ -45,6 +45,7 @@ SING_BOX_BINARY="${SING_BOX_BINARY:-$(command -v sing-box 2>/dev/null || true)}"
 XRAY_BINARY="${XRAY_BINARY:-$(command -v xray 2>/dev/null || true)}"
 CONNECTIVITY_CORE="${CONNECTIVITY_CORE:-all}"
 CONNECTIVITY_PROFILE="${CONNECTIVITY_PROFILE:-all}"
+CONNECTIVITY_SWITCH_SMOKE_ONLY="${CONNECTIVITY_SWITCH_SMOKE_ONLY:-0}"
 # Xray's official gRPC REALITY example uses Yahoo; unlike some otherwise valid
 # TLS sites it consistently supports the complete REALITY+HTTP/2 handshake.
 CONNECTIVITY_SNI="${CONNECTIVITY_SNI:-www.yahoo.com}"
@@ -55,6 +56,11 @@ ALLOW_XRAY_TROJAN_GRPC_REALITY_XFAIL="${ALLOW_XRAY_TROJAN_GRPC_REALITY_XFAIL:-0}
     exit 3
 }
 case "$CONNECTIVITY_CORE" in all | sing-box | xray) ;; *) printf 'FAIL: invalid CONNECTIVITY_CORE\n' >&2; exit 2 ;; esac
+case "$CONNECTIVITY_SWITCH_SMOKE_ONLY" in 0 | 1) ;; *)
+    printf 'FAIL: CONNECTIVITY_SWITCH_SMOKE_ONLY must be 0 or 1\n' >&2
+    exit 2
+    ;;
+esac
 case "$ALLOW_XRAY_TROJAN_GRPC_REALITY_XFAIL" in 0 | 1) ;; *)
     printf 'FAIL: ALLOW_XRAY_TROJAN_GRPC_REALITY_XFAIL must be 0 or 1\n' >&2
     exit 2
@@ -178,6 +184,185 @@ validate_config() {
         xray) "$binary" run -test -c "$config" >/dev/null ;;
     esac
 }
+
+render_shadowsocks_client_config() {
+    local uri="$1" port="$2" output="$3" descriptor client_exit bundle
+    descriptor="$(proxy_relay_uri_parse "$uri" shadowsocks-aes-256-gcm)" || return $?
+    client_exit="$(jq -cn --arg id exit-fffffffffffffffe --arg name switch-client \
+        --arg uri "$uri" --argjson descriptor "$descriptor" '
+        {id:$id,name:$name,type:"protocol",core:"sing-box",profile:"shadowsocks-aes-256-gcm",uri:$uri,
+         descriptor:$descriptor,endpoint:$descriptor.endpoint,network_hint:$descriptor.network_hint}')" || return 10
+    bundle="$(proxy_relay_render_outbound sing-box "$client_exit")" || return $?
+    jq -n --argjson bundle "$bundle" --argjson port "$port" '{
+        log:{level:"warn"},
+        inbounds:[{type:"socks",tag:"client",listen:"127.0.0.1",listen_port:$port}],
+        outbounds:$bundle.outbounds,
+        route:{rules:[{inbound:["client"],action:"route",outbound:$bundle.target_tag}],final:$bundle.target_tag}
+    }' >"$output"
+}
+
+assert_switch_curl() {
+    local socks_port="$1" label="$2" response='' curl_status=0
+    response="$(curl --noproxy '' --socks5-hostname "127.0.0.1:${socks_port}" \
+        --connect-timeout 5 --max-time 15 -fsS "http://127.0.0.1:${TARGET_PORT}/core-switch")" || curl_status=$?
+    if ((curl_status != 0)) || [[ "$response" != vpsctl-relay-ok ]]; then
+        printf 'FAIL: %s (curl=%s, response=%s)\n' "$label" "$curl_status" "$response" >&2
+        show_case_logs
+        return 1
+    fi
+    printf 'PASS: %s\n' "$label"
+}
+
+run_node_core_switch_smoke() {
+    local case_dir="${TEST_TEMP}/core-switch-shared" server_port=57101 socks_port=57102
+    local node_id=node-fffffffffffff001 source_node target_node source_uri target_uri
+    local source_manifest target_manifest empty_relay source_config target_config client_config
+    local server_pid client_pid
+    mkdir -p -- "$case_dir"
+
+    source_node="$(proxy_prepare_node_json sing-box shadowsocks-aes-256-gcm "$node_id" \
+        switch-shared 127.0.0.1 "$server_port" 127.0.0.1 "$CONNECTIVITY_SNI" /unused unused \
+        self-signed '' '' none 100 200 bbr)" || return 1
+    target_node="$(jq '.core="xray"' <<<"$source_node")" || return 1
+    source_uri="$(render_uri sing-box "$source_node")" || return 1
+    target_uri="$(render_uri xray "$target_node")" || return 1
+    [[ "$target_uri" == "$source_uri" ]] || {
+        printf 'FAIL: shared node client URI changed across core switch\n' >&2
+        return 1
+    }
+
+    source_manifest="${case_dir}/source-nodes.json"
+    target_manifest="${case_dir}/target-nodes.json"
+    empty_relay="${case_dir}/empty-relay.json"
+    source_config="${case_dir}/source.json"
+    target_config="${case_dir}/target.json"
+    client_config="${case_dir}/client.json"
+    jq -n --argjson node "$source_node" '{schema_version:1,nodes:[$node]}' >"$source_manifest"
+    jq -n --argjson node "$target_node" '{schema_version:1,nodes:[$node]}' >"$target_manifest"
+    proxy_relay_default >"$empty_relay"
+    proxy_render_config sing-box "$source_manifest" "$empty_relay" >"$source_config" || return 1
+    proxy_render_config xray "$target_manifest" "$empty_relay" >"$target_config" || return 1
+    render_shadowsocks_client_config "$source_uri" "$socks_port" "$client_config" || return 1
+    validate_config sing-box "$SING_BOX_BINARY" "$source_config" || return 1
+    validate_config xray "$XRAY_BINARY" "$target_config" || return 1
+    validate_config sing-box "$SING_BOX_BINARY" "$client_config" || return 1
+
+    start_core sing-box "$SING_BOX_BINARY" "$source_config" "${case_dir}/source.log"
+    server_pid="${CASE_PIDS[-1]}"
+    wait_listener tcp "$server_port" "$server_pid" "${case_dir}/source.log" || { show_case_logs; return 1; }
+    start_core sing-box "$SING_BOX_BINARY" "$client_config" "${case_dir}/client-source.log"
+    client_pid="${CASE_PIDS[-1]}"
+    wait_listener tcp "$socks_port" "$client_pid" "${case_dir}/client-source.log" || { show_case_logs; return 1; }
+    assert_switch_curl "$socks_port" 'shared Shadowsocks node before sing-box to Xray switch' || return 1
+    stop_case
+
+    start_core xray "$XRAY_BINARY" "$target_config" "${case_dir}/target.log"
+    server_pid="${CASE_PIDS[-1]}"
+    wait_listener tcp "$server_port" "$server_pid" "${case_dir}/target.log" || { show_case_logs; return 1; }
+    start_core sing-box "$SING_BOX_BINARY" "$client_config" "${case_dir}/client-target.log"
+    client_pid="${CASE_PIDS[-1]}"
+    wait_listener tcp "$socks_port" "$client_pid" "${case_dir}/client-target.log" || { show_case_logs; return 1; }
+    assert_switch_curl "$socks_port" 'shared Shadowsocks node after sing-box to Xray switch' || return 1
+    stop_case
+}
+
+run_relay_core_switch_smoke() {
+    local case_dir="${TEST_TEMP}/core-switch-relay" landing_port=57111 entry_port=57112 socks_port=57113
+    local landing_id=node-fffffffffffff011 entry_id=node-fffffffffffff012
+    local exit_id=exit-fffffffffffff011 bind_id=bind-fffffffffffff011 now
+    local landing entry_source entry_target landing_uri entry_source_uri entry_target_uri descriptor
+    local landing_manifest source_manifest target_manifest empty_relay source_relay target_relay
+    local landing_config source_config target_config client_config landing_pid relay_pid client_pid
+    mkdir -p -- "$case_dir"
+
+    landing="$(proxy_prepare_node_json sing-box shadowsocks-aes-256-gcm "$landing_id" \
+        switch-relay-landing 127.0.0.1 "$landing_port" 127.0.0.1 "$CONNECTIVITY_SNI" /unused unused \
+        self-signed '' '' none 100 200 bbr)" || return 1
+    entry_source="$(proxy_prepare_node_json sing-box shadowsocks-aes-256-gcm "$entry_id" \
+        switch-relay-entry 127.0.0.1 "$entry_port" 127.0.0.1 "$CONNECTIVITY_SNI" /unused unused \
+        self-signed '' '' none 100 200 bbr)" || return 1
+    entry_target="$(jq '.core="xray"' <<<"$entry_source")" || return 1
+    landing_uri="$(render_uri sing-box "$landing")" || return 1
+    entry_source_uri="$(render_uri sing-box "$entry_source")" || return 1
+    entry_target_uri="$(render_uri xray "$entry_target")" || return 1
+    [[ "$entry_target_uri" == "$entry_source_uri" ]] || {
+        printf 'FAIL: relay entry client URI changed across core switch\n' >&2
+        return 1
+    }
+    descriptor="$(proxy_relay_uri_parse "$landing_uri" shadowsocks-aes-256-gcm)" || return 1
+    now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+    landing_manifest="${case_dir}/landing-nodes.json"
+    source_manifest="${case_dir}/source-nodes.json"
+    target_manifest="${case_dir}/target-nodes.json"
+    empty_relay="${case_dir}/empty-relay.json"
+    source_relay="${case_dir}/source-relay.json"
+    target_relay="${case_dir}/target-relay.json"
+    landing_config="${case_dir}/landing.json"
+    source_config="${case_dir}/source.json"
+    target_config="${case_dir}/target.json"
+    client_config="${case_dir}/client.json"
+    jq -n --argjson node "$landing" '{schema_version:1,nodes:[$node]}' >"$landing_manifest"
+    jq -n --argjson node "$entry_source" '{schema_version:1,nodes:[$node]}' >"$source_manifest"
+    jq -n --argjson node "$entry_target" '{schema_version:1,nodes:[$node]}' >"$target_manifest"
+    proxy_relay_default >"$empty_relay"
+    jq -n --arg exit_id "$exit_id" --arg bind_id "$bind_id" --arg node_id "$entry_id" \
+        --arg uri "$landing_uri" --arg now "$now" --argjson descriptor "$descriptor" '
+        {schema_version:1,
+         exits:[{id:$exit_id,name:"switch-relay-exit",type:"protocol",core:"sing-box",
+                 profile:"shadowsocks-aes-256-gcm",uri:$uri,descriptor:$descriptor,
+                 endpoint:$descriptor.endpoint,network_hint:$descriptor.network_hint,
+                 created_at:$now,updated_at:$now}],
+         bindings:[{id:$bind_id,node_id:$node_id,exit_id:$exit_id,created_at:$now,updated_at:$now}],
+         forwards:[]}' >"$source_relay"
+    jq '(.exits[0].core)="xray"' "$source_relay" >"$target_relay"
+    proxy_render_config sing-box "$landing_manifest" "$empty_relay" >"$landing_config" || return 1
+    proxy_render_config sing-box "$source_manifest" "$source_relay" >"$source_config" || return 1
+    proxy_render_config xray "$target_manifest" "$target_relay" >"$target_config" || return 1
+    render_shadowsocks_client_config "$entry_source_uri" "$socks_port" "$client_config" || return 1
+    validate_config sing-box "$SING_BOX_BINARY" "$landing_config" || return 1
+    validate_config sing-box "$SING_BOX_BINARY" "$source_config" || return 1
+    validate_config xray "$XRAY_BINARY" "$target_config" || return 1
+    validate_config sing-box "$SING_BOX_BINARY" "$client_config" || return 1
+
+    start_core sing-box "$SING_BOX_BINARY" "$landing_config" "${case_dir}/landing-source.log"
+    landing_pid="${CASE_PIDS[-1]}"
+    wait_listener tcp "$landing_port" "$landing_pid" "${case_dir}/landing-source.log" || { show_case_logs; return 1; }
+    start_core sing-box "$SING_BOX_BINARY" "$source_config" "${case_dir}/source.log"
+    relay_pid="${CASE_PIDS[-1]}"
+    wait_listener tcp "$entry_port" "$relay_pid" "${case_dir}/source.log" || { show_case_logs; return 1; }
+    start_core sing-box "$SING_BOX_BINARY" "$client_config" "${case_dir}/client-source.log"
+    client_pid="${CASE_PIDS[-1]}"
+    wait_listener tcp "$socks_port" "$client_pid" "${case_dir}/client-source.log" || { show_case_logs; return 1; }
+    assert_switch_curl "$socks_port" 'exclusive Shadowsocks relay before synchronized core switch' || return 1
+    stop_case
+
+    start_core sing-box "$SING_BOX_BINARY" "$landing_config" "${case_dir}/landing-target.log"
+    landing_pid="${CASE_PIDS[-1]}"
+    wait_listener tcp "$landing_port" "$landing_pid" "${case_dir}/landing-target.log" || { show_case_logs; return 1; }
+    start_core xray "$XRAY_BINARY" "$target_config" "${case_dir}/target.log"
+    relay_pid="${CASE_PIDS[-1]}"
+    wait_listener tcp "$entry_port" "$relay_pid" "${case_dir}/target.log" || { show_case_logs; return 1; }
+    start_core sing-box "$SING_BOX_BINARY" "$client_config" "${case_dir}/client-target.log"
+    client_pid="${CASE_PIDS[-1]}"
+    wait_listener tcp "$socks_port" "$client_pid" "${case_dir}/client-target.log" || { show_case_logs; return 1; }
+    assert_switch_curl "$socks_port" 'exclusive Shadowsocks relay after synchronized core switch' || return 1
+    stop_case
+}
+
+switch_smoke_count=0
+if [[ -n "$SING_BOX_BINARY" && -n "$XRAY_BINARY" ]]; then
+    run_node_core_switch_smoke || exit 1
+    switch_smoke_count=$((switch_smoke_count + 1))
+    run_relay_core_switch_smoke || exit 1
+    switch_smoke_count=$((switch_smoke_count + 1))
+else
+    printf 'SKIP: real node core switch smoke requires both sing-box and Xray binaries\n'
+fi
+if [[ "$CONNECTIVITY_SWITCH_SMOKE_ONLY" == 1 ]]; then
+    printf 'PASS: %s real node core switch smoke cases\n' "$switch_smoke_count"
+    exit 0
+fi
 
 count=0
 pass_count=0
@@ -323,3 +508,4 @@ done < <(proxy_all_profiles)
 ((count > 0)) || { printf 'FAIL: no matching profile/core cases\n' >&2; exit 3; }
 printf 'PASS: %s real protocol relay connectivity cases (%s passed, %s expected upstream failure)\n' \
     "$count" "$pass_count" "$xfail_count"
+printf 'PASS: %s real node core switch smoke cases\n' "$switch_smoke_count"

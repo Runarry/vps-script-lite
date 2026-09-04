@@ -93,6 +93,7 @@ proxy_usage() {
            [--obfs none|salamander] [--up-mbps N] [--down-mbps N]
            [--congestion-control bbr|cubic|new_reno] [--ip-strategy STRATEGY]
   node edit --id NODE_ID [可修改 node add 中的非凭据字段]
+  node core set --id NODE_ID --core sing-box|xray [--confirm-disruptive]
   node ip-policy set --core sing-box|xray --ip-strategy STRATEGY
                      (--id NODE_ID [...] | --profile PROFILE | --all)
   STRATEGY: auto | prefer_ipv4 | prefer_ipv6 | ipv4_only | ipv6_only
@@ -675,7 +676,7 @@ proxy_dispatch() {
             proxy_profiles_show
             ;;
         node)
-            (($# >= 1)) || { vps_cmd_error "node 需要 list|show|add|edit|ip-policy|delete"; return 2; }
+            (($# >= 1)) || { vps_cmd_error "node 需要 list|show|add|edit|core|ip-policy|delete"; return 2; }
             subaction="$1"
             shift
             case "$subaction" in
@@ -683,6 +684,15 @@ proxy_dispatch() {
                 show) proxy_node_show "$@" ;;
                 add) proxy_node_add "$@" ;;
                 edit) proxy_node_edit "$@" ;;
+                core)
+                    (($# >= 1)) || { vps_cmd_error "node core 需要 set"; return 2; }
+                    subaction="$1"
+                    shift
+                    case "$subaction" in
+                        set) proxy_node_core_set "$@" ;;
+                        *) vps_cmd_error "未知 node core 动作：$subaction"; return 2 ;;
+                    esac
+                    ;;
                 ip-policy)
                     (($# >= 1)) || { vps_cmd_error "node ip-policy 需要 set"; return 2; }
                     subaction="$1"

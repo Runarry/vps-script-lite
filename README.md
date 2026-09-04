@@ -128,12 +128,15 @@ bash bin/vpsctl security fail2ban status
 bash bin/vpsctl security tls status
 bash bin/vpsctl service proxy status
 bash bin/vpsctl service proxy profiles
+bash bin/vpsctl service proxy node core set --id NODE_ID --core xray --confirm-disruptive
 bash bin/vpsctl service proxy relay status
 bash bin/vpsctl test nodequality
 bash bin/vpsctl test tcpquality
 ```
 
-直接运行 `bash bin/vpsctl service proxy` 会进入统一代理界面。界面首先同时显示 Xray 与 sing-box 的安装/运行状态、配置路径、各自节点数和节点总数，再按内核生命周期、服务控制、节点管理、中转管理、查看输出和系统工具等能力分组提供操作。中转管理按编号提供“出口管理 / 节点中转 / 纯端口转发 / 状态与刷新”；一个出口可供多个入口复用，节点 URI 不因关联而改变。交互过程对内核、节点、出口、模式和开关等固定值统一使用编号选择；地址、端口、名称等开放值则在输入后立即校验，不要求输入 `--core` 等 CLI 参数。订阅可按编号选择全部，或只输出当前确有普通节点或端口转发 URI 的 sing-box/Xray 范围。
+直接运行 `bash bin/vpsctl service proxy` 会进入统一代理界面。界面首先同时显示 Xray 与 sing-box 的安装/运行状态、配置路径、各自节点数和节点总数，再按内核生命周期、服务控制、节点管理、中转管理、查看输出和系统工具等能力分组提供操作。节点管理包含将单个节点切换到另一兼容内核；中转管理按编号提供“出口管理 / 节点中转 / 纯端口转发 / 状态与刷新”。一个出口可供多个入口复用，节点 URI 不因关联而改变。交互过程对内核、节点、出口、模式和开关等固定值统一使用编号选择；地址、端口、名称等开放值则在输入后立即校验，不要求输入 `--core` 等 CLI 参数。订阅可按编号选择全部，或只输出当前确有普通节点或端口转发 URI 的 sing-box/Xray 范围。
+
+`node core set` 只接受已经安装且支持该节点 profile 的另一内核，不会代为安装。切换保持客户端端点、凭据、TLS、传输和 IP 策略语义；重新生成的 URI 可能采用不同的字符串编码或参数顺序，自签名和导入证书的受管内部路径会随内核迁移。绑定的协议出口只有在该节点独占、没有端口转发引用且与目标内核兼容时才会一并迁移；共享、有端口转发或不兼容都会拒绝。切换会立即接管并可能短暂中断连接，非交互调用必须提供 `--confirm-disruptive`；目标服务的 active/enabled 状态按源服务可用性继承，任一步失败都会回滚节点、配置、中转、证书与服务状态。
 
 先查看变更计划的示例：
 

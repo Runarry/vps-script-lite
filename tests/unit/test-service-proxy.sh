@@ -1851,6 +1851,298 @@ test_relay_forward_service_lifecycle() {
     [[ ! -e "${TEST_SYSTEM_ROOT}/run/mock-openrc/enabled-vpsctl-proxy-forward" ]] || fail "OpenRC relay service not disabled"
 }
 
+test_node_core_switch() {
+    local switch_id incompatible_id peer_id binding_id exit_id state_hash relay_hash
+    local before_semantic after_semantic old_updated old_cert old_key new_cert new_key
+    local source_config target_config source_config_hash target_config_hash
+    local source_stop_line target_apply_line source_restore_line exit_uri
+    local profile source_core target_core matrix_name matrix_id matrix_before matrix_after port=35400
+    local cert_dir="${TEST_TEMP}/node-core-switch-cert"
+    local -a shared_profiles=(
+        vless-reality-vision vless-grpc-tls shadowsocks-aes-256-gcm
+        shadowsocks-chacha20-poly1305 shadowsocks-2022 shadowsocks-2022-padding
+    )
+
+    # Confirmation, registration, compatibility, pending state, and relay safety guards.
+    reset_root
+    install_external sing-box
+    install_external xray
+    run_proxy node add --profile shadowsocks-aes-256-gcm --core sing-box \
+        --name switch-guard --port 35101 --address switch.example
+    assert_equal 0 "$RUN_STATUS" "core switch guard node add"
+    switch_id="$(node_id_by_name switch-guard)"
+    state_hash="$(sha256sum "$(manifest_path)" | awk '{print $1}')"
+    source_config_hash="$(sha256sum "${TEST_SYSTEM_ROOT}/etc/vpsctl/proxy/sing-box/config.json" | awk '{print $1}')"
+    target_config_hash="$(sha256sum "${TEST_SYSTEM_ROOT}/etc/vpsctl/proxy/xray/config.json" | awk '{print $1}')"
+    run_proxy --dry-run node core set --id "$switch_id" --core xray
+    assert_equal 0 "$RUN_STATUS" "core switch dry-run"
+    assert_contains "$RUN_OUTPUT" "演练" "core switch dry-run output"
+    assert_equal "$state_hash" "$(sha256sum "$(manifest_path)" | awk '{print $1}')" "core switch dry-run manifest"
+    assert_equal "$source_config_hash" "$(sha256sum "${TEST_SYSTEM_ROOT}/etc/vpsctl/proxy/sing-box/config.json" | awk '{print $1}')" "core switch dry-run source config"
+    assert_equal "$target_config_hash" "$(sha256sum "${TEST_SYSTEM_ROOT}/etc/vpsctl/proxy/xray/config.json" | awk '{print $1}')" "core switch dry-run target config"
+    [[ ! -e "${TEST_SYSTEM_ROOT}/run/mock-systemd/active-vpsctl-proxy-xray.service" ]] || fail "core switch dry-run started target"
+    run_proxy node core set --id "$switch_id" --core xray
+    assert_equal 3 "$RUN_STATUS" "core switch requires disruptive confirmation"
+    assert_equal "$state_hash" "$(sha256sum "$(manifest_path)" | awk '{print $1}')" "unconfirmed core switch state"
+    run_proxy --yes node core set --id "$switch_id" --core xray
+    assert_equal 3 "$RUN_STATUS" "core switch --yes does not replace disruptive confirmation"
+    run_proxy node core set --id "$switch_id" --core sing-box --confirm-disruptive
+    assert_equal 3 "$RUN_STATUS" "same-core switch rejection"
+
+    run_proxy uninstall --core xray
+    assert_equal 0 "$RUN_STATUS" "remove target registration fixture"
+    run_proxy node core set --id "$switch_id" --core xray --confirm-disruptive
+    assert_equal 3 "$RUN_STATUS" "unregistered target core rejection"
+    write_core_binary xray
+    run_proxy install --core xray
+    assert_equal 0 "$RUN_STATUS" "restore target registration fixture"
+
+    run_proxy node add --profile vless-tcp --core sing-box \
+        --name switch-incompatible --port 35102 --address switch.example
+    assert_equal 0 "$RUN_STATUS" "incompatible core switch node add"
+    incompatible_id="$(node_id_by_name switch-incompatible)"
+    run_proxy node core set --id "$incompatible_id" --core xray --confirm-disruptive
+    assert_equal 3 "$RUN_STATUS" "incompatible profile core switch rejection"
+
+    mkdir -p "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/pending"
+    jq -n --arg core xray '{
+        schema_version:1,core:$core,reason:"core-update",
+        manifest_backup:"",config_backup:"",binary_backup:"",meta_backup:"",
+        relay_backup:"",relay_existed:false,relay_touched:false,
+        relay_runtime_touched:false,relay_cache_backup:"",relay_cache_existed:false,
+        relay_nft_backup:"",relay_nft_existed:false,created_at:"2026-01-01T00:00:00Z"
+    }' >"${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/pending/xray.json"
+    state_hash="$(sha256sum "$(manifest_path)" | awk '{print $1}')"
+    run_proxy node core set --id "$switch_id" --core xray --confirm-disruptive
+    assert_equal 3 "$RUN_STATUS" "pending target core switch rejection"
+    assert_equal "$state_hash" "$(sha256sum "$(manifest_path)" | awk '{print $1}')" "pending rejection manifest state"
+    rm -f -- "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/pending/xray.json"
+
+    run_proxy node add --profile shadowsocks-aes-256-gcm --core sing-box \
+        --name switch-peer --port 35103 --address switch.example
+    assert_equal 0 "$RUN_STATUS" "shared relay switch peer add"
+    peer_id="$(node_id_by_name switch-peer)"
+    run_proxy relay exit add --name switch-guard-exit \
+        --uri 'socks5://relay-user:relay-pass@198.51.100.20:1080#switch-guard' --core sing-box
+    assert_equal 0 "$RUN_STATUS" "core switch guard relay exit add"
+    exit_id="$(jq -r '.exits[] | select(.name == "switch-guard-exit") | .id' "$(relay_path)")"
+    run_proxy relay bind add --node-id "$switch_id" --exit-id "$exit_id"
+    assert_equal 0 "$RUN_STATUS" "core switch first shared binding"
+    run_proxy relay bind add --node-id "$peer_id" --exit-id "$exit_id"
+    assert_equal 0 "$RUN_STATUS" "core switch second shared binding"
+    relay_hash="$(sha256sum "$(relay_path)" | awk '{print $1}')"
+    run_proxy node core set --id "$switch_id" --core xray --confirm-disruptive
+    assert_equal 3 "$RUN_STATUS" "shared relay exit core switch rejection"
+    assert_equal "$relay_hash" "$(sha256sum "$(relay_path)" | awk '{print $1}')" "shared exit rejection relay state"
+
+    binding_id="$(jq -r --arg node "$peer_id" '.bindings[] | select(.node_id == $node) | .id' "$(relay_path)")"
+    run_proxy relay bind delete --id "$binding_id" --confirm-delete
+    assert_equal 0 "$RUN_STATUS" "make core switch relay exit exclusive"
+    run_proxy relay forward add --name switch-guard-forward --exit-id "$exit_id" \
+        --listen-ports 35150 --network tcp --address relay.example
+    assert_equal 0 "$RUN_STATUS" "core switch relay forward fixture"
+    relay_hash="$(sha256sum "$(relay_path)" | awk '{print $1}')"
+    run_proxy node core set --id "$switch_id" --core xray --confirm-disruptive
+    assert_equal 3 "$RUN_STATUS" "forwarded relay exit core switch rejection"
+    assert_equal "$relay_hash" "$(sha256sum "$(relay_path)" | awk '{print $1}')" "forward rejection relay state"
+
+    # A retained node can leave an unregistered source core; removing it still produces a valid retained source config.
+    reset_root
+    install_external sing-box
+    install_external xray
+    run_proxy node add --profile shadowsocks-aes-256-gcm --core sing-box \
+        --name switch-unregistered-source --port 35170 --address switch.example
+    assert_equal 0 "$RUN_STATUS" "unregistered source movable node add"
+    switch_id="$(node_id_by_name switch-unregistered-source)"
+    run_proxy node add --profile shadowsocks-aes-256-gcm --core sing-box \
+        --name switch-unregistered-remaining --port 35171 --address switch.example
+    assert_equal 0 "$RUN_STATUS" "unregistered source remaining node add"
+    peer_id="$(node_id_by_name switch-unregistered-remaining)"
+    run_proxy uninstall --core sing-box
+    assert_equal 0 "$RUN_STATUS" "unregister retained source core"
+    run_proxy node core set --id "$switch_id" --core xray --confirm-disruptive
+    assert_equal 0 "$RUN_STATUS" "switch from unregistered retained source"
+    assert_equal xray "$(jq -r --arg id "$switch_id" '.nodes[] | select(.id == $id) | .core' "$(manifest_path)")" "unregistered source switched node"
+    jq -e --arg id "$peer_id" '[.inbounds[] | select(.tag == $id)] | length == 1' \
+        "${TEST_SYSTEM_ROOT}/etc/vpsctl/proxy/sing-box/config.json" >/dev/null || fail "unregistered source config lost retained node"
+    jq -e --arg id "$switch_id" '[.inbounds[] | select(.tag == $id)] | length == 1' \
+        "${TEST_SYSTEM_ROOT}/etc/vpsctl/proxy/xray/config.json" >/dev/null || fail "unregistered source target config missing node"
+    [[ -f "${TEST_SYSTEM_ROOT}/run/mock-systemd/active-vpsctl-proxy-xray.service" ]] || fail "unregistered source switch did not start target"
+
+    # A compatible, exclusive binding follows the node. TLS paths are rewritten for the target core.
+    reset_root
+    install_external sing-box
+    install_external xray
+    mkdir -p "$cert_dir"
+    openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj '/CN=switch.example' \
+        -addext 'subjectAltName=DNS:switch.example' \
+        -keyout "${cert_dir}/key.pem" -out "${cert_dir}/cert.pem" >/dev/null 2>&1
+    run_proxy node add --profile vless-grpc-tls --core sing-box --name switch-tls \
+        --port 35201 --address switch.example --sni switch.example --service-name switch \
+        --cert-mode imported --cert-file "${cert_dir}/cert.pem" --key-file "${cert_dir}/key.pem"
+    assert_equal 0 "$RUN_STATUS" "TLS core switch node add"
+    switch_id="$(node_id_by_name switch-tls)"
+    run_proxy node add --profile shadowsocks-aes-256-gcm --core sing-box \
+        --name switch-remaining --port 35202 --address switch.example
+    assert_equal 0 "$RUN_STATUS" "source remaining node add"
+    peer_id="$(node_id_by_name switch-remaining)"
+    old_cert="$(jq -r --arg id "$switch_id" '.nodes[] | select(.id == $id) | .tls.certificate_path' "$(manifest_path)")"
+    old_key="$(jq -r --arg id "$switch_id" '.nodes[] | select(.id == $id) | .tls.key_path' "$(manifest_path)")"
+    new_cert="${old_cert/sing-box/xray}"
+    new_key="${old_key/sing-box/xray}"
+    mkdir -p "${TEST_SYSTEM_ROOT}${new_cert%/*}"
+    cp -- "${TEST_SYSTEM_ROOT}${old_cert}" "${TEST_SYSTEM_ROOT}${new_cert}"
+    cp -- "${TEST_SYSTEM_ROOT}${old_key}" "${TEST_SYSTEM_ROOT}${new_key}"
+    jq -n --arg cert "$new_cert" --arg key "$new_key" \
+        '{schema_version:1,kind:"node-core-switch-cert-stage",cert_created:[$cert,$key],created_at:"2026-01-01T00:00:00Z"}' \
+        >"${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/transaction-core-switch-certs.json"
+    run_proxy node edit --id "$switch_id" --name switch-tls-stage-recovered
+    assert_equal 0 "$RUN_STATUS" "recover interrupted core switch certificate stage"
+    [[ ! -e "${TEST_SYSTEM_ROOT}${new_cert}" && ! -e "${TEST_SYSTEM_ROOT}${new_key}" ]] || fail "certificate stage recovery left target copies"
+    [[ ! -e "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/transaction-core-switch-certs.json" ]] || fail "certificate stage recovery left journal"
+    jq --arg id "$switch_id" '(.nodes[] | select(.id == $id) | .updated_at) = "2000-01-01T00:00:00Z"' \
+        "$(manifest_path)" >"${TEST_TEMP}/node-core-switch-manifest.json"
+    cp -- "${TEST_TEMP}/node-core-switch-manifest.json" "$(manifest_path)"
+    before_semantic="$(jq -c --arg id "$switch_id" '.nodes[] | select(.id == $id) |
+        {id,profile,name,listen,port,address,ip_strategy,created_at,credentials,
+         tls:(.tls | del(.certificate_path,.key_path)),transport,options}' "$(manifest_path)")"
+    old_updated="$(jq -r --arg id "$switch_id" '.nodes[] | select(.id == $id) | .updated_at' "$(manifest_path)")"
+    old_cert="$(jq -r --arg id "$switch_id" '.nodes[] | select(.id == $id) | .tls.certificate_path' "$(manifest_path)")"
+    old_key="$(jq -r --arg id "$switch_id" '.nodes[] | select(.id == $id) | .tls.key_path' "$(manifest_path)")"
+    run_proxy node show --id "$peer_id" --uri
+    assert_equal 0 "$RUN_STATUS" "core switch movable relay URI"
+    exit_uri="$RUN_OUTPUT"
+    run_proxy relay exit add --name switch-follow-exit --uri "$exit_uri" --core sing-box
+    assert_equal 0 "$RUN_STATUS" "core switch movable relay exit add"
+    exit_id="$(jq -r '.exits[] | select(.name == "switch-follow-exit") | .id' "$(relay_path)")"
+    run_proxy relay bind add --node-id "$switch_id" --exit-id "$exit_id"
+    assert_equal 0 "$RUN_STATUS" "core switch movable relay binding"
+
+    run_proxy start --core sing-box --enable
+    assert_equal 0 "$RUN_STATUS" "start enabled source before core switch"
+    : >"$MOCK_LOG"
+    run_proxy node core set --id "$switch_id" --core xray --confirm-disruptive
+    assert_equal 0 "$RUN_STATUS" "compatible node core switch"
+    assert_equal xray "$(jq -r --arg id "$switch_id" '.nodes[] | select(.id == $id) | .core' "$(manifest_path)")" "switched node target core"
+    after_semantic="$(jq -c --arg id "$switch_id" '.nodes[] | select(.id == $id) |
+        {id,profile,name,listen,port,address,ip_strategy,created_at,credentials,
+         tls:(.tls | del(.certificate_path,.key_path)),transport,options}' "$(manifest_path)")"
+    assert_equal "$before_semantic" "$after_semantic" "core switch preserved node semantics"
+    [[ "$(jq -r --arg id "$switch_id" '.nodes[] | select(.id == $id) | .updated_at' "$(manifest_path)")" != "$old_updated" ]] || \
+        fail "core switch did not update updated_at"
+    new_cert="$(jq -r --arg id "$switch_id" '.nodes[] | select(.id == $id) | .tls.certificate_path' "$(manifest_path)")"
+    new_key="$(jq -r --arg id "$switch_id" '.nodes[] | select(.id == $id) | .tls.key_path' "$(manifest_path)")"
+    [[ "$new_cert" == /etc/vpsctl/proxy/xray/certs/"${switch_id}"/* && "$new_cert" != "$old_cert" ]] || fail "core switch certificate path was not moved to Xray"
+    [[ "$new_key" == /etc/vpsctl/proxy/xray/certs/"${switch_id}"/* && "$new_key" != "$old_key" ]] || fail "core switch key path was not moved to Xray"
+    [[ -f "${TEST_SYSTEM_ROOT}${new_cert}" && -f "${TEST_SYSTEM_ROOT}${new_key}" ]] || fail "core switch target certificate material missing"
+
+    source_config="${TEST_SYSTEM_ROOT}/etc/vpsctl/proxy/sing-box/config.json"
+    target_config="${TEST_SYSTEM_ROOT}/etc/vpsctl/proxy/xray/config.json"
+    jq -e --arg id "$switch_id" '[.inbounds[] | select(.tag == $id)] | length == 0' "$source_config" >/dev/null || fail "source config retained switched inbound"
+    jq -e --arg id "$peer_id" '[.inbounds[] | select(.tag == $id)] | length == 1' "$source_config" >/dev/null || fail "source config lost remaining inbound"
+    jq -e --arg id "$switch_id" '[.inbounds[] | select(.tag == $id)] | length == 1' "$target_config" >/dev/null || fail "target config missing switched inbound"
+    jq -e --arg id "$exit_id" --arg node "$switch_id" '
+        (.exits[] | select(.id == $id) | .core) == "xray" and
+        ([.bindings[] | select(.node_id == $node)] | length == 1)
+    ' "$(relay_path)" >/dev/null || fail "exclusive relay binding or exit did not follow switched node"
+    assert_equal 0 "$(jq -r '[.outbounds[] | select((.tag // "") | startswith("relay-exit-"))] | length' "$source_config")" "source relay outbound removed after switch"
+    assert_equal 1 "$(jq -r '[.outbounds[] | select((.tag // "") | startswith("relay-exit-"))] | length' "$target_config")" "target relay outbound added after switch"
+
+    source_stop_line="$(grep -nF 'systemctl stop vpsctl-proxy-sing-box.service' "$MOCK_LOG" | head -n 1 | cut -d: -f1)"
+    target_apply_line="$(grep -nE 'systemctl (start|restart) vpsctl-proxy-xray.service' "$MOCK_LOG" | head -n 1 | cut -d: -f1)"
+    source_restore_line="$(grep -nE 'systemctl (start|restart) vpsctl-proxy-sing-box.service' "$MOCK_LOG" | head -n 1 | cut -d: -f1)"
+    [[ -n "$source_stop_line" && -n "$target_apply_line" && -n "$source_restore_line" ]] || fail "core switch service transition calls missing: $(<"$MOCK_LOG")"
+    ((source_stop_line < target_apply_line && target_apply_line < source_restore_line)) || fail "core switch service transition order invalid: $(<"$MOCK_LOG")"
+    [[ -f "${TEST_SYSTEM_ROOT}/run/mock-systemd/active-vpsctl-proxy-xray.service" ]] || fail "target core was not started immediately"
+    [[ -f "${TEST_SYSTEM_ROOT}/run/mock-systemd/active-vpsctl-proxy-sing-box.service" ]] || fail "source core with remaining nodes was not restored"
+    [[ -f "${TEST_SYSTEM_ROOT}/run/mock-systemd/enabled-vpsctl-proxy-xray.service" ]] || fail "target core did not inherit enabled state"
+    [[ -f "${TEST_SYSTEM_ROOT}/run/mock-systemd/enabled-vpsctl-proxy-sing-box.service" ]] || fail "source core with remaining nodes lost enabled state"
+
+    # Moving the final source node restarts the already-active target and disables the empty source.
+    : >"$MOCK_LOG"
+    run_proxy node core set --id "$peer_id" --core xray --confirm-disruptive
+    assert_equal 0 "$RUN_STATUS" "last source node core switch"
+    assert_file_contains "$MOCK_LOG" "systemctl stop vpsctl-proxy-sing-box.service" "last-node source stop"
+    assert_file_contains "$MOCK_LOG" "systemctl restart vpsctl-proxy-xray.service" "active target restart"
+    assert_file_contains "$MOCK_LOG" "systemctl disable vpsctl-proxy-sing-box.service" "empty source disable"
+    [[ ! -e "${TEST_SYSTEM_ROOT}/run/mock-systemd/active-vpsctl-proxy-sing-box.service" ]] || fail "empty source remained active"
+    [[ ! -e "${TEST_SYSTEM_ROOT}/run/mock-systemd/enabled-vpsctl-proxy-sing-box.service" ]] || fail "empty source remained enabled"
+    [[ -f "${TEST_SYSTEM_ROOT}/run/mock-systemd/active-vpsctl-proxy-xray.service" ]] || fail "target inactive after last-node switch"
+    [[ -f "${TEST_SYSTEM_ROOT}/run/mock-systemd/enabled-vpsctl-proxy-xray.service" ]] || fail "target disabled after inheriting source state"
+
+    # A target restart failure restores manifests, configs, relay state, pending markers, and services.
+    reset_root
+    install_external sing-box
+    install_external xray
+    run_proxy node add --profile shadowsocks-aes-256-gcm --core sing-box \
+        --name switch-rollback --port 35301 --address rollback.example
+    assert_equal 0 "$RUN_STATUS" "core switch rollback node add"
+    switch_id="$(node_id_by_name switch-rollback)"
+    run_proxy node show --id "$switch_id" --uri
+    assert_equal 0 "$RUN_STATUS" "core switch rollback relay URI"
+    exit_uri="$RUN_OUTPUT"
+    run_proxy relay exit add --name switch-rollback-exit --uri "$exit_uri" --core sing-box
+    assert_equal 0 "$RUN_STATUS" "core switch rollback exit add"
+    exit_id="$(jq -r '.exits[] | select(.name == "switch-rollback-exit") | .id' "$(relay_path)")"
+    run_proxy relay bind add --node-id "$switch_id" --exit-id "$exit_id"
+    assert_equal 0 "$RUN_STATUS" "core switch rollback binding add"
+    source_config="${TEST_SYSTEM_ROOT}/etc/vpsctl/proxy/sing-box/config.json"
+    target_config="${TEST_SYSTEM_ROOT}/etc/vpsctl/proxy/xray/config.json"
+    state_hash="$(sha256sum "$(manifest_path)" | awk '{print $1}')"
+    relay_hash="$(sha256sum "$(relay_path)" | awk '{print $1}')"
+    source_config_hash="$(sha256sum "$source_config" | awk '{print $1}')"
+    target_config_hash="$(sha256sum "$target_config" | awk '{print $1}')"
+    touch "${TEST_SYSTEM_ROOT}/run/mock-systemd/active-vpsctl-proxy-sing-box.service"
+    touch "${TEST_SYSTEM_ROOT}/run/mock-systemd/enabled-vpsctl-proxy-sing-box.service"
+    touch "${TEST_SYSTEM_ROOT}/run/mock-systemd/active-vpsctl-proxy-xray.service"
+    : >"$MOCK_LOG"
+    touch "${TEST_SYSTEM_ROOT}/run/fail-service-restart-once"
+    run_proxy node core set --id "$switch_id" --core xray --confirm-disruptive
+    assert_equal 20 "$RUN_STATUS" "core switch target restart failure"
+    assert_equal "$state_hash" "$(sha256sum "$(manifest_path)" | awk '{print $1}')" "core switch rollback manifest"
+    assert_equal "$relay_hash" "$(sha256sum "$(relay_path)" | awk '{print $1}')" "core switch rollback relay state"
+    assert_equal "$source_config_hash" "$(sha256sum "$source_config" | awk '{print $1}')" "core switch rollback source config"
+    assert_equal "$target_config_hash" "$(sha256sum "$target_config" | awk '{print $1}')" "core switch rollback target config"
+    assert_equal sing-box "$(jq -r --arg id "$switch_id" '.nodes[] | select(.id == $id) | .core' "$(manifest_path)")" "core switch rollback node core"
+    assert_equal sing-box "$(jq -r --arg id "$exit_id" '.exits[] | select(.id == $id) | .core' "$(relay_path)")" "core switch rollback relay exit core"
+    [[ ! -e "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/pending/sing-box.json" && \
+       ! -e "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/pending/xray.json" ]] || fail "core switch rollback left pending state"
+    [[ -f "${TEST_SYSTEM_ROOT}/run/mock-systemd/active-vpsctl-proxy-sing-box.service" ]] || fail "core switch rollback did not restore source activity"
+    [[ -f "${TEST_SYSTEM_ROOT}/run/mock-systemd/enabled-vpsctl-proxy-sing-box.service" ]] || fail "core switch rollback did not restore source enablement"
+    [[ -f "${TEST_SYSTEM_ROOT}/run/mock-systemd/active-vpsctl-proxy-xray.service" ]] || fail "core switch rollback changed prior target activity"
+    [[ ! -e "${TEST_SYSTEM_ROOT}/run/mock-systemd/enabled-vpsctl-proxy-xray.service" ]] || fail "core switch rollback changed prior target enablement"
+
+    # Every profile shared by the public matrix can reuse source-generated credentials in both directions.
+    reset_root
+    install_external sing-box
+    install_external xray
+    for profile in "${shared_profiles[@]}"; do
+        for source_core in sing-box xray; do
+            case "$source_core" in sing-box) target_core=xray ;; xray) target_core=sing-box ;; esac
+            port=$((port + 1))
+            matrix_name="matrix-${profile}-${source_core}"
+            if [[ "$profile" == vless-grpc-tls ]]; then
+                run_proxy node add --profile "$profile" --core "$source_core" --name "$matrix_name" \
+                    --port "$port" --address matrix.example --sni matrix.example --service-name matrix
+            else
+                run_proxy node add --profile "$profile" --core "$source_core" --name "$matrix_name" \
+                    --port "$port" --address matrix.example --sni matrix.example
+            fi
+            assert_equal 0 "$RUN_STATUS" "matrix source node add ${profile}/${source_core}"
+            matrix_id="$(node_id_by_name "$matrix_name")"
+            matrix_before="$(jq -c --arg id "$matrix_id" '.nodes[] | select(.id == $id) |
+                del(.core,.updated_at,.tls.certificate_path,.tls.key_path)' "$(manifest_path)")"
+            run_proxy node core set --id "$matrix_id" --core "$target_core" --confirm-disruptive
+            assert_equal 0 "$RUN_STATUS" "matrix core switch ${profile}/${source_core}"
+            matrix_after="$(jq -c --arg id "$matrix_id" '.nodes[] | select(.id == $id) |
+                del(.core,.updated_at,.tls.certificate_path,.tls.key_path)' "$(manifest_path)")"
+            assert_equal "$matrix_before" "$matrix_after" "matrix semantics ${profile}/${source_core}"
+            assert_equal "$target_core" "$(jq -r --arg id "$matrix_id" '.nodes[] | select(.id == $id) | .core' "$(manifest_path)")" \
+                "matrix target core ${profile}/${source_core}"
+        done
+    done
+}
+
 case "${VPSCTL_TEST_ONLY:-}" in
     core-release) test_core_release_channels; printf 'PASS: proxy core release tests\n'; exit 0 ;;
     node-ip-policy) test_node_ip_strategy_and_batch; printf 'PASS: node IP policy tests\n'; exit 0 ;;
@@ -1859,6 +2151,7 @@ case "${VPSCTL_TEST_ONLY:-}" in
     relay-forward) test_relay_forwarding_subscription_and_rollback; printf 'PASS: relay forward tests\n'; exit 0 ;;
     relay-family) test_relay_forward_family_modes; printf 'PASS: relay forward family tests\n'; exit 0 ;;
     relay-service) test_relay_forward_service_lifecycle; printf 'PASS: relay service tests\n'; exit 0 ;;
+    node-core) test_node_core_switch; printf 'PASS: node core switch tests\n'; exit 0 ;;
 esac
 
 printf 'TEST: proxy arguments, dry-run and time\n'
@@ -1893,4 +2186,6 @@ printf 'TEST: proxy relay forward address-family modes\n'
 test_relay_forward_family_modes
 printf 'TEST: proxy relay service lifecycle and failures\n'
 test_relay_forward_service_lifecycle
+printf 'TEST: proxy node core switching\n'
+test_node_core_switch
 printf 'PASS: service proxy tests\n'

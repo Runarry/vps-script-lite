@@ -36,7 +36,7 @@ bash bin/vpsctl service proxy start --core sing-box --enable
 
 - 内核生命周期：安装、更新和卸载。
 - 服务控制：启动、停止和重启。
-- 节点管理：添加、查看、修改、批量设置出站 IP 策略和删除。
+- 节点管理：添加、查看、修改、切换内核、批量设置出站 IP 策略和删除。
 - 中转管理：出口管理、节点中转、纯端口转发、状态与刷新。
 - 查看与输出：订阅、日志和支持的协议。
 - 系统工具：系统时间状态与同步。
@@ -135,6 +135,7 @@ vpsctl service proxy node add --profile PROFILE [--core CORE] [--name NAME] [--p
     [--congestion-control bbr|cubic|new_reno]
     [--ip-strategy auto|prefer_ipv4|prefer_ipv6|ipv4_only|ipv6_only]
 vpsctl service proxy node edit --id NODE_ID [可修改上述非凭据字段]
+vpsctl service proxy node core set --id NODE_ID --core sing-box|xray [--confirm-disruptive]
 vpsctl service proxy node ip-policy set --core sing-box|xray --ip-strategy STRATEGY
     (--id NODE_ID [--id NODE_ID ...] | --profile PROFILE | --all)
 vpsctl service proxy node delete --id NODE_ID [--cascade-relay] [--confirm-delete]
@@ -147,7 +148,15 @@ vpsctl service proxy subscription [--core CORE|all]
 
 如果当前没有已安装且兼容所选 profile 的内核，界面会列出兼容内核并询问是否先安装；用户确认并完成安装后继续原节点向导，拒绝或取消则不创建节点。一个内核兼容时自动使用，多个已安装内核兼容时按编号选择。这个引导不改变非交互接口：自动化调用在没有兼容内核时仍会失败并要求先安装，在多个候选可用时使用 `--core` 消歧。
 
-交互式节点列表默认展示全部内核的节点，每一项都明确标注所属 Xray 或 sing-box。查看、编辑和删除从这份完整列表按编号选取节点；命令模式仍使用稳定的 `--id NODE_ID`，便于脚本精确引用。命令模式的 `node list` 默认同样返回全部节点并标注 `core`，只有显式传入 `--core` 时才筛选。
+交互式节点列表默认展示全部内核的节点，每一项都明确标注所属 Xray 或 sing-box。查看、编辑、切换内核和删除从这份完整列表按编号选取节点；切换内核时，菜单只列出已经安装且支持该节点 profile 的另一内核，并在执行立即接管前要求交互确认。命令模式仍使用稳定的 `--id NODE_ID`，便于脚本精确引用。命令模式的 `node list` 默认同样返回全部节点并标注 `core`，只有显式传入 `--core` 时才筛选。
+
+### 切换节点内核
+
+`node core set` 将一个节点从当前内核切换到 `--core` 指定的另一内核。目标内核必须已经安装，命令不会自动安装；目标还必须支持节点当前 profile，不能借此改变 profile 或绕过协议矩阵。切换保留客户端连接端点、节点 ID、凭据、TLS、传输参数和 `ip_strategy` 的语义；目标内核重新生成分享 URI 后，URI 的字符串编码或参数顺序可能不同，不应据此判断客户端参数发生变化。`self-signed` 和 `imported` 模式的受管证书及私钥会在事务中迁移到目标内核对应的内部路径，外部原始导入路径仍不会成为运行依赖。
+
+没有中转绑定的节点可以直接切换。若节点绑定协议出口，只有该出口仅由这个节点独占、没有任何端口转发引用，并且出口 profile 也兼容目标内核时，命令才会把出口及绑定一并迁移。出口被其他节点共享、存在任意 forward 引用，或出口与目标内核不兼容时，切换会在写入前拒绝，不会只迁移节点而留下不一致的中转关系。
+
+切换属于立即接管的中断性事务，不采用普通配置变更的待重启流程；非交互调用必须显式传入 `--confirm-disruptive`，全局 `--yes` 不能替代该确认。目标服务的 active/enabled 状态按源服务可用性继承。命令会先验证目标清单、目标内核配置、中转和证书迁移计划，再一次提交并完成服务接管；任何阶段失败都会回滚节点清单、两侧内核配置、中转状态、证书内部路径以及服务 active/enabled 状态。
 
 每个节点独立保存 `ip_strategy`；旧清单缺失该字段时按 `auto` 处理，列表和详情 JSON 始终补出有效默认值。`auto` 使用代理内核自身默认行为，且不会继承 [`network ip-policy`](network-settings.md#4-ip-地址族偏好) 的系统策略。其他策略通过节点专属直连出站和入站标签路由实现：
 
