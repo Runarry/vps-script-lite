@@ -1251,6 +1251,37 @@ test_node_ip_strategy_and_batch() {
     [[ ! -e "$pending" ]] || fail "auto-applied policy batch left pending restart"
 }
 
+# Runtime-loaded validation calls the function overrides below.
+# shellcheck disable=SC1091,SC2317
+test_profile_membership_pipe_consumption() (
+    local status=0
+
+    reset_root
+    # Load the real node validation path, then make its supported-core producer
+    # exceed a pipe buffer after emitting the requested core. A grep -q consumer
+    # closes early and deterministically gives the producer SIGPIPE under pipefail.
+    source "${TEST_ROOT}/lib/command.sh"
+    vps_cmd_init "proxy membership tests" "$TEST_ROOT"
+    source "${TEST_ROOT}/commands/service/proxy/common.sh"
+    source "${TEST_ROOT}/commands/service/proxy/protocols-sing-box.sh"
+    source "${TEST_ROOT}/commands/service/proxy/protocols-xray.sh"
+    source "${TEST_ROOT}/commands/service/proxy/nodes.sh"
+
+    proxy_profile_cores() {
+        local index
+        printf 'sing-box\n'
+        for ((index = 0; index < 20000; index += 1)); do
+            printf 'xray\n'
+        done
+    }
+    vps_cmd_require_root() { return 77; }
+
+    proxy_node_add --profile vless-grpc-tls --core sing-box \
+        --name pipe-consumption --port 35099 --address pipe.example \
+        --sni pipe.example --service-name pipe >/dev/null 2>&1 || status=$?
+    assert_equal 77 "$status" "profile membership consumes complete producer output"
+)
+
 test_protocol_matrix() {
     reset_root
     write_core_binary sing-box
@@ -2152,6 +2183,7 @@ case "${VPSCTL_TEST_ONLY:-}" in
     relay-family) test_relay_forward_family_modes; printf 'PASS: relay forward family tests\n'; exit 0 ;;
     relay-service) test_relay_forward_service_lifecycle; printf 'PASS: relay service tests\n'; exit 0 ;;
     node-core) test_node_core_switch; printf 'PASS: node core switch tests\n'; exit 0 ;;
+    profile-membership) test_profile_membership_pipe_consumption; printf 'PASS: profile membership tests\n'; exit 0 ;;
 esac
 
 printf 'TEST: proxy arguments, dry-run and time\n'
@@ -2174,6 +2206,8 @@ printf 'TEST: proxy unified interactive API\n'
 test_unified_interactive_api
 printf 'TEST: proxy node IP strategy rendering and atomic batches\n'
 test_node_ip_strategy_and_batch
+printf 'TEST: proxy profile membership pipe consumption\n'
+test_profile_membership_pipe_consumption
 printf 'TEST: proxy protocol renderer matrix\n'
 test_protocol_matrix
 printf 'TEST: proxy relay state, bindings and purge guards\n'

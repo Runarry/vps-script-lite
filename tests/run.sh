@@ -6,7 +6,7 @@ IFS=$'\n\t'
 TEST_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 readonly TEST_ROOT
 
-bash -n \
+for syntax_file in \
     "${TEST_ROOT}/vpsctl.sh" \
     "${TEST_ROOT}/bin/vpsctl" \
     "${TEST_ROOT}/lib/environment.sh" \
@@ -20,6 +20,7 @@ bash -n \
     "${TEST_ROOT}/commands/network/ip-policy.sh" \
     "${TEST_ROOT}/commands/network/rfw.sh" \
     "${TEST_ROOT}/commands/system/kernel.sh" \
+    "${TEST_ROOT}"/commands/system/kernel/*.sh \
     "${TEST_ROOT}/commands/security/access.sh" \
     "${TEST_ROOT}"/commands/security/access/*.sh \
     "${TEST_ROOT}/commands/security/fail2ban.sh" \
@@ -39,6 +40,9 @@ bash -n \
     "${TEST_ROOT}/tests/unit/test-network-ip-policy.sh" \
     "${TEST_ROOT}/tests/unit/test-network-rfw.sh" \
     "${TEST_ROOT}/tests/unit/test-system-kernel.sh" \
+    "${TEST_ROOT}/tests/unit/test-system-kernel-providers.sh" \
+    "${TEST_ROOT}/tests/unit/test-system-kernel-inventory.sh" \
+    "${TEST_ROOT}/tests/unit/test-system-kernel-grub.sh" \
     "${TEST_ROOT}/tests/unit/test-security-access.sh" \
     "${TEST_ROOT}/tests/unit/test-security-fail2ban.sh" \
     "${TEST_ROOT}/tests/unit/test-security-tls.sh" \
@@ -50,7 +54,9 @@ bash -n \
     "${TEST_ROOT}/tests/integration/test-service-proxy-relay-real.sh" \
     "${TEST_ROOT}/tests/integration/test-security-fail2ban-real.sh" \
     "${TEST_ROOT}/tests/integration/test-security-tls-real.sh" \
-    "${TEST_ROOT}/tests/integration/test-vpsctl.sh"
+    "${TEST_ROOT}/tests/integration/test-vpsctl.sh"; do
+    bash -n "$syntax_file"
+done
 
 bash "${TEST_ROOT}/tests/unit/test-libraries.sh"
 bash "${TEST_ROOT}/tests/unit/test-command.sh"
@@ -61,6 +67,9 @@ bash "${TEST_ROOT}/tests/unit/test-network-dns.sh"
 bash "${TEST_ROOT}/tests/unit/test-network-ip-policy.sh"
 bash "${TEST_ROOT}/tests/unit/test-network-rfw.sh"
 bash "${TEST_ROOT}/tests/unit/test-system-kernel.sh"
+bash "${TEST_ROOT}/tests/unit/test-system-kernel-providers.sh"
+bash "${TEST_ROOT}/tests/unit/test-system-kernel-inventory.sh"
+bash "${TEST_ROOT}/tests/unit/test-system-kernel-grub.sh"
 bash "${TEST_ROOT}/tests/unit/test-security-access.sh"
 bash "${TEST_ROOT}/tests/unit/test-security-fail2ban.sh"
 bash "${TEST_ROOT}/tests/unit/test-security-tls.sh"

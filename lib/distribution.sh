@@ -142,7 +142,8 @@ vps_distribution_parse_manifest() {
                 ;;
             asset)
                 ((line_number == 4 && ${#fields[@]} == 4)) && [[ "${fields[1]}" == launcher ]] && ((launcher_count == 0)) || return 10
-                filename="${fields[2]}"; sha="${fields[3]}"
+                filename="${fields[2]}"
+                sha="${fields[3]}"
                 [[ "$line" == $'asset\tlauncher\tvpsctl.sh\t'"$sha" && "$sha" =~ ^[0-9a-f]{64}$ ]] || return 10
                 VPS_DISTRIBUTION_LAUNCHER_FILE="$filename"
                 VPS_DISTRIBUTION_LAUNCHER_SHA256="${sha,,}"
@@ -150,7 +151,9 @@ vps_distribution_parse_manifest() {
                 ;;
             bundle)
                 ((line_number >= 5 && line_number <= 10 && ${#fields[@]} == 4)) || return 10
-                name="${fields[1]}"; filename="${fields[2]}"; sha="${fields[3]}"
+                name="${fields[1]}"
+                filename="${fields[2]}"
+                sha="${fields[3]}"
                 case "$line_number" in
                     5) expected_name='core' ;; 6) expected_name='network' ;; 7) expected_name='system' ;;
                     8) expected_name='security' ;; 9) expected_name='service' ;; 10) expected_name='test' ;;
@@ -237,7 +240,11 @@ vps_distribution_validate_archive() {
         }
     done
     while IFS= read -r type; do
-        case "${type:0:1}" in - | d) ;; *) vps_distribution_error '领域包不得包含链接或特殊文件'; return 10 ;; esac
+        case "${type:0:1}" in - | d) ;; *)
+            vps_distribution_error '领域包不得包含链接或特殊文件'
+            return 10
+            ;;
+        esac
     done < <(tar -tvzf "$archive")
 }
 
@@ -267,7 +274,7 @@ vps_distribution_validate_domain_tree() {
         network)
             required_files=(commands/network/bbr.sh commands/network/dns.sh commands/network/ip-policy.sh commands/network/rfw.sh)
             ;;
-        system) required_files=(commands/system/kernel.sh) ;;
+        system) required_files=(commands/system/kernel.sh commands/system/kernel/providers.sh commands/system/kernel/inventory.sh commands/system/kernel/grub.sh) ;;
         security) required_files=(commands/security/access.sh commands/security/fail2ban.sh commands/security/tls.sh) ;;
         service) required_files=(commands/service/proxy.sh) ;;
         test) required_files=(commands/test/nodequality.sh commands/test/tcpquality.sh lib/server-test.sh) ;;
@@ -296,7 +303,10 @@ vps_distribution_acquire_lock() {
     local lock="$1" owner pid=""
     owner="${lock}/pid"
     if mkdir -- "$lock" 2>/dev/null; then
-        printf '%s\n' "$$" >"$owner" || { rmdir -- "$lock" 2>/dev/null || true; return 20; }
+        printf '%s\n' "$$" >"$owner" || {
+            rmdir -- "$lock" 2>/dev/null || true
+            return 20
+        }
         return 0
     fi
     if [[ -f "$owner" && ! -L "$owner" ]]; then
@@ -305,7 +315,10 @@ vps_distribution_acquire_lock() {
     if [[ "$pid" =~ ^[1-9][0-9]*$ ]] && ! kill -0 "$pid" 2>/dev/null; then
         rm -f -- "$owner"
         if rmdir -- "$lock" 2>/dev/null && mkdir -- "$lock" 2>/dev/null; then
-            printf '%s\n' "$$" >"$owner" || { rmdir -- "$lock" 2>/dev/null || true; return 20; }
+            printf '%s\n' "$$" >"$owner" || {
+                rmdir -- "$lock" 2>/dev/null || true
+                return 20
+            }
             return 0
         fi
     fi
@@ -435,7 +448,10 @@ vps_distribution_validate_managed_install() {
         return 3
     }
     current="${VPSCTL_INSTALL_ROOT}/current"
-    [[ -L "$current" ]] || { vps_distribution_error '受管 current 必须是符号链接'; return 3; }
+    [[ -L "$current" ]] || {
+        vps_distribution_error '受管 current 必须是符号链接'
+        return 3
+    }
     target="$(readlink "$current")" || return 3
     if [[ "$target" =~ ^releases/[A-Za-z0-9][A-Za-z0-9.-]*$ ]]; then
         resolved="$(cd -- "${VPSCTL_INSTALL_ROOT}/${target}" 2>/dev/null && pwd -P)" || return 3
@@ -527,7 +543,8 @@ vps_distribution_self_status() {
         for domain in core network system security service test; do
             marker="${VPSCTL_PROJECT_ROOT}/.bundles/${domain}.sha256"
             [[ -f "$marker" && ! -L "$marker" && "$(<"$marker")" == "${VPS_DISTRIBUTION_BUNDLE_SHA256[$domain]}" ]] || continue
-            cached+="${separator}${domain}"; separator=', '
+            cached+="${separator}${domain}"
+            separator=', '
         done
         printf '缓存领域：%s\n' "${cached:-无}"
     else
@@ -547,12 +564,23 @@ vps_distribution_self_update_locked() {
     old_state_launcher="${work_root}/old-vpsctl.sh"
     old_state_manifest="${work_root}/old-manifest.tsv"
     old_state_sha="${work_root}/old-entry.sha256"
-    cp -p -- "$VPSCTL_SELF_STATE_ROOT/vpsctl.sh" "$old_state_launcher" || { rm -rf -- "$work_root"; return 20; }
-    cp -p -- "$VPSCTL_SELF_STATE_ROOT/manifest.tsv" "$old_state_manifest" || { rm -rf -- "$work_root"; return 20; }
-    printf '%s\n' "$(vps_distribution_sha256 "$VPSCTL_MANAGED_ENTRY")" >"$old_state_sha" || { rm -rf -- "$work_root"; return 20; }
+    cp -p -- "$VPSCTL_SELF_STATE_ROOT/vpsctl.sh" "$old_state_launcher" || {
+        rm -rf -- "$work_root"
+        return 20
+    }
+    cp -p -- "$VPSCTL_SELF_STATE_ROOT/manifest.tsv" "$old_state_manifest" || {
+        rm -rf -- "$work_root"
+        return 20
+    }
+    printf '%s\n' "$(vps_distribution_sha256 "$VPSCTL_MANAGED_ENTRY")" >"$old_state_sha" || {
+        rm -rf -- "$work_root"
+        return 20
+    }
     manifest="${work_root}/vpsctl-manifest.tsv"
     if vps_distribution_fetch_manifest "$requested" "$manifest"; then :; else
-        status=$?; rm -rf -- "$work_root"; return "$status"
+        status=$?
+        rm -rf -- "$work_root"
+        return "$status"
     fi
     version="$VPS_DISTRIBUTION_MANIFEST_VERSION"
     release_target="${VPSCTL_INSTALL_ROOT}/releases/${version}"
@@ -567,13 +595,21 @@ vps_distribution_self_update_locked() {
         return 3
     fi
     staging="${VPSCTL_INSTALL_ROOT}/releases/.staging-${version}.$$.${RANDOM}"
-    mkdir -p -- "$staging/.release" || { rm -rf -- "$work_root"; return 20; }
-    cp -- "$manifest" "$staging/.release/manifest.tsv" || { rm -rf -- "$staging" "$work_root"; return 20; }
+    mkdir -p -- "$staging/.release" || {
+        rm -rf -- "$work_root"
+        return 20
+    }
+    cp -- "$manifest" "$staging/.release/manifest.tsv" || {
+        rm -rf -- "$staging" "$work_root"
+        return 20
+    }
     mapfile -t domains < <(vps_distribution_cached_domains "$VPSCTL_PROJECT_ROOT")
     base_url="https://github.com/Runarry/vps-script-lite/releases/download/v${version}"
     for domain in "${domains[@]}"; do
         if vps_distribution_install_bundle "$staging" "$domain" "$base_url" "$work_root"; then :; else
-            status=$?; rm -rf -- "$staging" "$work_root"; return "$status"
+            status=$?
+            rm -rf -- "$staging" "$work_root"
+            return "$status"
         fi
     done
     [[ -f "$staging/VERSION" && "$(<"$staging/VERSION")" == "$version" && -f "$staging/bin/vpsctl" && -f "$staging/lib/distribution.sh" && -f "$staging/commands/self/status.sh" ]] || {
@@ -586,11 +622,28 @@ vps_distribution_self_update_locked() {
         return 20
     }
     launcher="${work_root}/${VPS_DISTRIBUTION_LAUNCHER_FILE}"
-    vps_distribution_download "${base_url}/${VPS_DISTRIBUTION_LAUNCHER_FILE}" "$launcher" || { status=$?; rm -rf -- "$staging" "$work_root"; return "$status"; }
-    vps_distribution_verify_sha256 "$launcher" "$VPS_DISTRIBUTION_LAUNCHER_SHA256" || { status=$?; rm -rf -- "$staging" "$work_root"; return "$status"; }
-    BASH_ENV='' ENV='' bash --noprofile --norc -n "$launcher" || { rm -rf -- "$staging" "$work_root"; return 10; }
-    vps_distribution_require_no_symlink_components "$VPSCTL_SELF_STATE_ROOT" || { rm -rf -- "$staging" "$work_root"; return 3; }
-    mkdir -p -- "$VPSCTL_SELF_STATE_ROOT" || { rm -rf -- "$staging" "$work_root"; return 20; }
+    vps_distribution_download "${base_url}/${VPS_DISTRIBUTION_LAUNCHER_FILE}" "$launcher" || {
+        status=$?
+        rm -rf -- "$staging" "$work_root"
+        return "$status"
+    }
+    vps_distribution_verify_sha256 "$launcher" "$VPS_DISTRIBUTION_LAUNCHER_SHA256" || {
+        status=$?
+        rm -rf -- "$staging" "$work_root"
+        return "$status"
+    }
+    BASH_ENV='' ENV='' bash --noprofile --norc -n "$launcher" || {
+        rm -rf -- "$staging" "$work_root"
+        return 10
+    }
+    vps_distribution_require_no_symlink_components "$VPSCTL_SELF_STATE_ROOT" || {
+        rm -rf -- "$staging" "$work_root"
+        return 3
+    }
+    mkdir -p -- "$VPSCTL_SELF_STATE_ROOT" || {
+        rm -rf -- "$staging" "$work_root"
+        return 20
+    }
     vps_distribution_require_no_symlink_components "${VPSCTL_MANAGED_ENTRY%/*}" || {
         rm -rf -- "$staging" "$work_root"
         return 3

@@ -108,7 +108,7 @@ proxy_choose_core_for_profile() {
             vps_cmd_error "内核尚未登记：$requested"
             return 3
         }
-        if ! proxy_profile_cores "$profile" | grep -Fxq "$requested"; then
+        if ! proxy_profile_cores "$profile" | grep -Fx "$requested" >/dev/null; then
             vps_cmd_error "${requested} 不支持节点配置 ${profile}"
             return 3
         fi
@@ -642,7 +642,7 @@ proxy_node_add() (
     proxy_profile_cores "$profile" >/dev/null || { vps_cmd_error "未知节点配置：$profile"; return 2; }
     if [[ -n "$requested_core" ]]; then
         proxy_core_valid "$requested_core" || { vps_cmd_error "无效内核：$requested_core"; return 2; }
-        proxy_profile_cores "$profile" | grep -Fxq "$requested_core" || {
+        proxy_profile_cores "$profile" | grep -Fx "$requested_core" >/dev/null || {
             vps_cmd_error "${requested_core} 不支持节点配置 ${profile}"
             return 3
         }
@@ -966,7 +966,7 @@ proxy_node_core_set_select_interactive() {
         profile="$(jq -r '.profile' <<<"$node")"
         name="$(jq -r '.name' <<<"$node")"
         case "$source_core" in sing-box) target_core=xray ;; xray) target_core=sing-box ;; *) continue ;; esac
-        proxy_profile_cores "$profile" | grep -Fxq "$target_core" || continue
+        proxy_profile_cores "$profile" | grep -Fx "$target_core" >/dev/null || continue
         proxy_core_registered "$target_core" || continue
         label="$(proxy_profile_label "$profile" 2>/dev/null || printf '%s' "$profile")"
         choices+=("$id" "${name} · $(proxy_core_label "$source_core") → $(proxy_core_label "$target_core") · ${label}")
@@ -1149,7 +1149,7 @@ proxy_node_core_set() (
     name="$(jq -r '.name' <<<"$initial_node")"
     if [[ -z "$target_core" ]]; then case "$source_core" in sing-box) target_core=xray ;; xray) target_core=sing-box ;; esac; fi
     [[ "$target_core" != "$source_core" ]] || { vps_cmd_error "节点已经属于 $(proxy_core_label "$target_core")"; return 3; }
-    proxy_profile_cores "$profile" | grep -Fxq "$target_core" || {
+    proxy_profile_cores "$profile" | grep -Fx "$target_core" >/dev/null || {
         vps_cmd_error "$(proxy_core_label "$target_core") 不支持节点配置 ${profile}"
         return 3
     }
@@ -1499,7 +1499,7 @@ proxy_node_ip_policy_set() (
     elif ((${#profiles[@]} > 0)); then
         selector_mode="profile"
         for profile in "${profiles[@]}"; do
-            proxy_profile_cores "$profile" | grep -Fxq "$core" || {
+            proxy_profile_cores "$profile" | grep -Fx "$core" >/dev/null || {
                 vps_cmd_error "${core} 不支持节点配置 ${profile}"
                 return 2
             }

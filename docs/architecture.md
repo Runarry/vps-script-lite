@@ -31,6 +31,8 @@ vps-script-lite/
 │   │   └── proxy/          # 仅由 proxy.sh 加载的私有实现模块
 │   ├── test/               # 服务器综合质量与网络质量测试
 │   └── system/             # 系统信息、内核、软件包和基础维护
+│       ├── kernel.sh       # 系统内核管理公开入口
+│       └── kernel/         # providers、inventory、grub 私有实现模块
 ├── config/                 # 可提交的默认配置与示例；禁止存放真实密钥
 ├── lib/                    # 可被入口或功能脚本复用的稳定公共函数
 ├── tests/
@@ -40,7 +42,7 @@ vps-script-lite/
 └── docs/                   # 架构、开发和命令登记规范
 ```
 
-尚未实现功能的空目录暂以 `.gitkeep` 保存；`commands/network/` 包含网络功能脚本，`commands/system/kernel.sh` 实现系统内核管理入口，`commands/security/access.sh` 实现访问管理入口，`commands/security/fail2ban.sh` 及其私有子模块实现 OpenSSH Fail2ban 防护，`commands/security/tls.sh` 及其私有子模块实现域名 TLS 证书管理，`commands/service/proxy.sh` 及其私有子模块实现代理管理入口，`commands/test/nodequality.sh` 与 `commands/test/tcpquality.sh` 实现服务器测试入口。
+尚未实现功能的空目录暂以 `.gitkeep` 保存；`commands/network/` 包含网络功能脚本，`commands/system/kernel.sh` 是系统内核管理的唯一公开入口，并固定加载 `commands/system/kernel/providers.sh`、`inventory.sh` 与 `grub.sh` 私有模块；`commands/security/access.sh` 实现访问管理入口，`commands/security/fail2ban.sh` 及其私有子模块实现 OpenSSH Fail2ban 防护，`commands/security/tls.sh` 及其私有子模块实现域名 TLS 证书管理，`commands/service/proxy.sh` 及其私有子模块实现代理管理入口，`commands/test/nodequality.sh` 与 `commands/test/tcpquality.sh` 实现服务器测试入口。
 
 ## 3. 组件职责
 

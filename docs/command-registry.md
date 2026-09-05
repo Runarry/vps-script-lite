@@ -54,7 +54,7 @@ vpsctl self uninstall [--purge] [--confirm-uninstall] [--confirm-purge]
 | `network dns` | `commands/network/dns.sh` | 检测、测试、设置、刷新、验证或恢复 DNS | `disruptive` | `optional-root` | `supported` | `linux` | `experimental` |
 | `network ip-policy` | `commands/network/ip-policy.sh` | 查看、设置或恢复 glibc IPv4/IPv6 地址排序偏好 | `disruptive` | `optional-root` | `supported` | `linux,libc:glibc` | `experimental` |
 | `network rfw` | `commands/network/rfw.sh` | 安装、配置和管理 RFW systemd 服务 | `disruptive` | `optional-root` | `supported` | `linux,init:systemd` | `experimental` |
-| `system kernel` | `commands/system/kernel.sh` | 安装、更新或安全卸载最新 XanMod BBRv3 内核 | `disruptive` | `optional-root` | `supported` | `linux,os:debian-family` | `experimental` |
+| `system kernel` | `commands/system/kernel.sh` | 查看、安装、固定切换或按版本安全卸载系统内核 | `disruptive` | `optional-root` | `supported` | `linux,os:debian-family` | `experimental` |
 | `security access` | `commands/security/access.sh` | 管理用户、密码、公钥与可验证恢复的 SSH 访问变更 | `disruptive` | `optional-root` | `supported` | `linux,init:systemd` | `experimental` |
 | `security fail2ban` | `commands/security/fail2ban.sh` | 安装、配置和管理 OpenSSH 的 Fail2ban 防护 | `disruptive` | `optional-root` | `supported` | `linux,init:systemd` | `experimental` |
 | `security tls` | `commands/security/tls.sh` | 管理域名 TLS 证书：导入、申请与自动续期 | `disruptive` | `optional-root` | `supported` | `linux` | `experimental` |
@@ -66,11 +66,11 @@ vpsctl self uninstall [--purge] [--confirm-uninstall] [--confirm-purge]
 
 在 Release 安装态，注册表仍登记相同的公开命令，但命令文件按领域来自当前分发版本的 bundle：`network`、`system`、`security`、`service` 和 `test` 分别对应同名 bundle，`self` 来自常驻 core。某领域首次分发前必须从 current 对应的同一个 GitHub Release 下载其资产，并以 `vpsctl-manifest.tsv` 中的 SHA-256 校验后缓存到版本隔离目录；未校验文件、其他版本缓存或临时下载都不得进入注册表解析与分发。源码树运行继续直接使用仓库固定路径。
 
-`system kernel` 的状态可由普通用户读取，安装和卸载要求 root 与独立强确认，`--yes` 不能绕过。它只支持 Debian/Ubuntu amd64，从 XanMod 官方 APT 源动态选择当前候选版本，固定验证完整仓库密钥指纹；ARM、容器、WSL、Secure Boot 和不受支持的 suite 在任何写入前停止。卸载只传递经过校验的确切 XanMod 包名，必须先证明非 XanMod 回退内核存在，不运行 `autoremove`。完整恢复边界见[系统内核管理](kernel-management.md)。
+`system kernel` 的状态可由普通用户读取，安装、切换和卸载要求 root 与各自的强确认短语，`--yes` 不能绕过。它只支持 Debian/Ubuntu amd64：可从当前发行版受信 APT 源安装官方标准内核、Debian Cloud 或有候选的 Ubuntu LTS HWE，也可从 XanMod 官方源安装 BBRv3 并验证完整仓库密钥指纹。直接 CLI 省略安装类型仍默认 XanMod，交互菜单默认推荐官方标准内核。状态按 release 展示来源、关联包、启动完整性和 current/default/next/保护状态；标准 GRUB 2 环境可把具体 release 的稳定 entry ID 固定为默认项，其他启动器或无法解析的默认项拒绝危险动作。卸载必须明确指定非 current/default/next 的 release，只提交经过模拟验证的精确包数组，保护共享包和其他版本，不使用通配符或 `autoremove`。完整恢复边界见[系统内核管理](kernel-management.md)。
 
 主管理菜单选中登记功能后直接进入该功能 UI，不插入命令详情或二次运行页。封闭枚举由编号选择，开放值沿用命令参数校验；菜单真实执行动作，不暴露执行型全局参数、机器输出开关、`--force` 或 `--confirm-*` 标志。上述参数仅供直接功能 CLI；菜单中的危险动作使用对应交互确认及强确认短语。
 
-入口按“命令 + 完整子参数形状”计算本次调用的能力要求。`network ip-policy` 的帮助不要求 `libc:glibc`，但状态和变更都要求 glibc；`system kernel` 的帮助与无参数 `status` 不要求 `os:debian-family`，安装、卸载和交互入口仍要求 Debian/Ubuntu。`network rfw` 的无附加参数 `help`/`--help`/`-h` 与 `status`，以及 `security fail2ban` 的帮助与 `status [--json]`，在 Linux 上不要求 `init:systemd`；`service proxy` 的无附加参数 `help`/`--help`/`-h`、`profiles`、`status`，以及 `time status [--json]` 在 Linux 上不要求 `service:any`。`test nodequality` 和 `test tcpquality` 的单个 `help`/`--help`/`-h` 参数不要求 `root`，但仍保留 `linux` 能力要求。未列出的参数形状和两项测试的无参数真实执行不能使用这些例外；服务器测试完整边界见[服务器测试](server-testing.md)。
+入口按“命令 + 完整子参数形状”计算本次调用的能力要求。`network ip-policy` 的帮助不要求 `libc:glibc`，但状态和变更都要求 glibc；`system kernel` 的帮助与无参数 `status` 不要求 `os:debian-family`，安装、切换、卸载和交互入口仍要求 Debian/Ubuntu。`network rfw` 的无附加参数 `help`/`--help`/`-h` 与 `status`，以及 `security fail2ban` 的帮助与 `status [--json]`，在 Linux 上不要求 `init:systemd`；`service proxy` 的无附加参数 `help`/`--help`/`-h`、`profiles`、`status`，以及 `time status [--json]` 在 Linux 上不要求 `service:any`。`test nodequality` 和 `test tcpquality` 的单个 `help`/`--help`/`-h` 参数不要求 `root`，但仍保留 `linux` 能力要求。未列出的参数形状和两项测试的无参数真实执行不能使用这些例外；服务器测试完整边界见[服务器测试](server-testing.md)。
 
 `service proxy` 的 `service:any` 能力要求由入口解析为可用服务管理器，功能脚本会进一步限制为 systemd 或 OpenRC。注册表只登记公开入口 `commands/service/proxy.sh`；其 `commands/service/proxy/` 子模块是固定加载的私有实现，不单独登记，也不构成可直接分发的命令。交互菜单统一展示双核状态并按能力分组，通过状态筛选、枚举和编号选择解析内核或节点；订阅可选全部，或选择当前确有节点的 sing-box/Xray 范围。直接命令与非交互模式保留 `--core` 和 `--id` 作为精确消歧接口。帮助、协议矩阵和系统时间状态可由普通用户执行；内核状态与节点/订阅会读取受限状态文件，因此和安装、更新、卸载、服务控制、节点写操作及时间同步一样要求 root。运行中的节点和中转配置变更会自动重启对应内核；显式重启、外部二进制原地更新与 `--purge` 另有不能被 `--yes` 绕过的强确认。完整接口见[代理管理](proxy-management.md)。
 

@@ -1,4 +1,5 @@
 # shellcheck shell=bash
+# shellcheck source-path=SCRIPTDIR
 # Shared command safety helpers. Sourcing this file only defines functions.
 
 if [[ -z "${VPS_UI_LOADED:-}" ]]; then
@@ -533,7 +534,7 @@ vps_cmd_package_for_tool() {
                 *) printf 'iproute2\n' ;;
             esac
             ;;
-        base64 | sha256sum | tr | mktemp | sort | head | install | od) printf 'coreutils\n' ;;
+        base64 | sha256sum | tr | mktemp | sort | head | install | od | readlink) printf 'coreutils\n' ;;
         awk) printf 'gawk\n' ;;
         flock)
             if [[ "$manager" == apk ]]; then printf 'flock\n'; else printf 'util-linux\n'; fi
@@ -541,7 +542,7 @@ vps_cmd_package_for_tool() {
         mountpoint)
             if [[ "$manager" == apk ]]; then printf 'util-linux-misc\n'; else printf 'util-linux\n'; fi
             ;;
-        curl | jq | openssl | unzip | tar | chrony) printf '%s\n' "$tool" ;;
+        curl | jq | openssl | unzip | tar | chrony | efibootmgr) printf '%s\n' "$tool" ;;
         gpg) printf 'gnupg\n' ;;
         chronyc) printf 'chrony\n' ;;
         *)
@@ -680,6 +681,8 @@ vps_cmd_ensure_tools() {
     vps_cmd_info "缺少工具：${missing_join}；将安装软件包：${packages_join}"
     vps_cmd_install_packages "$manager" "${packages[@]}" || return $?
     if [[ "${VPSCTL_DRY_RUN:-0}" == 1 ]]; then
+        # Public result consumed by feature commands after dependency planning.
+        # shellcheck disable=SC2034
         VPS_CMD_DEPENDENCIES_PLANNED=1
         return 0
     fi

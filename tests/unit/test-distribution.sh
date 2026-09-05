@@ -27,7 +27,10 @@ export VPSCTL_ASSUME_YES=1
 # shellcheck source=../../lib/distribution.sh
 source "$TEST_ROOT/lib/distribution.sh"
 
-fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
+fail() {
+    printf 'FAIL: %s\n' "$1" >&2
+    exit 1
+}
 assert_equal() { [[ "$1" == "$2" ]] || fail "$3: expected '$1', got '$2'"; }
 assert_contains() { [[ "$1" == *"$2"* ]] || fail "$3: missing '$2'"; }
 
@@ -80,7 +83,10 @@ test_source_mode_is_offline_and_mutations_refuse() (
     local calls=0 status=0
     VPSCTL_DISTRIBUTED=0
     VPSCTL_PROJECT_ROOT="$TEST_ROOT"
-    vps_distribution_download() { calls=$((calls + 1)); return 20; }
+    vps_distribution_download() {
+        calls=$((calls + 1))
+        return 20
+    }
     vps_distribution_ensure_domain network || fail 'source mode ensure failed'
     assert_equal 0 "$calls" 'source mode network calls'
     vps_distribution_self_update '' >/dev/null 2>&1 || status=$?
@@ -120,7 +126,10 @@ test_status_is_offline() (
     local release="${TEST_INSTALL_ROOT}/releases/0.1.0" output calls=0
     VPSCTL_DISTRIBUTED=1
     VPSCTL_PROJECT_ROOT="$release"
-    vps_distribution_download() { calls=$((calls + 1)); return 20; }
+    vps_distribution_download() {
+        calls=$((calls + 1))
+        return 20
+    }
     output="$(vps_distribution_self_status)"
     assert_contains "$output" '分发版本：0.1.0' 'status version'
     assert_contains "$output" 'network' 'status cached domain'
@@ -243,6 +252,27 @@ test_purge_removes_only_self_state() (
     [[ -e "$TEST_SYSTEM_ROOT/etc/vpsctl/purge-keep" && -e "$TEST_SYSTEM_ROOT/var/lib/vpsctl/security/purge-keep" && -e "$TEST_SYSTEM_ROOT/usr/local/libexec/purge-keep" ]] || fail 'purge removed preserved data'
 )
 
+test_system_bundle_requires_kernel_modules() (
+    local tree="${TEST_TEMP}/kernel-bundle" module status
+    mkdir -p "$tree/commands/system/kernel"
+    printf '#!/usr/bin/env bash\n' >"$tree/commands/system/kernel.sh"
+    status=0
+    vps_distribution_validate_domain_tree "$tree" system >/dev/null 2>&1 || status=$?
+    assert_equal 10 "$status" 'incomplete system kernel bundle rejected'
+    for module in providers inventory grub; do
+        printf '#!/usr/bin/env bash\n' >"$tree/commands/system/kernel/$module.sh"
+    done
+    vps_distribution_validate_domain_tree "$tree" system || fail 'complete system kernel bundle rejected'
+    for module in providers inventory grub; do
+        mv "$tree/commands/system/kernel/$module.sh" "$tree/$module.sh"
+        status=0
+        vps_distribution_validate_domain_tree "$tree" system >/dev/null 2>&1 || status=$?
+        assert_equal 10 "$status" "system bundle missing $module rejected"
+        mv "$tree/$module.sh" "$tree/commands/system/kernel/$module.sh"
+    done
+)
+
+test_system_bundle_requires_kernel_modules
 test_source_mode_is_offline_and_mutations_refuse
 test_manifest_is_strict
 test_lazy_domain_install_and_cache

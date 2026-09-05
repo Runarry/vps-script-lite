@@ -93,6 +93,9 @@ done
 
 assert_archive_has "${RELEASE_DIR}/vpsctl-network-${RELEASE_VERSION}.tar.gz" commands/network/bbr.sh
 assert_archive_has "${RELEASE_DIR}/vpsctl-system-${RELEASE_VERSION}.tar.gz" commands/system/kernel.sh
+for member in providers inventory grub; do
+    assert_archive_has "${RELEASE_DIR}/vpsctl-system-${RELEASE_VERSION}.tar.gz" "commands/system/kernel/${member}.sh"
+done
 assert_archive_has "${RELEASE_DIR}/vpsctl-security-${RELEASE_VERSION}.tar.gz" commands/security/access.sh
 assert_archive_has "${RELEASE_DIR}/vpsctl-security-${RELEASE_VERSION}.tar.gz" commands/security/fail2ban.sh
 assert_archive_has "${RELEASE_DIR}/vpsctl-security-${RELEASE_VERSION}.tar.gz" commands/security/tls.sh
