@@ -77,4 +77,8 @@
 
 真实 APT 2.6.1 的受管索引输出包含 `Identifier: Packages`、`Trusted: yes`、`Codename: bookworm`、`Site: https://deb.xanmod.org` 和指向受管源的 `Sourcesentry`，没有 `Signed-By` 字段；源文件中的专用 `Signed-By` 和密钥指纹均正确，确认旧版误判来自输出字段缺失。旧版失败后的检查确认新建源/keyring 已回滚，内核包清单、原内核镜像、initramfs 和固定 GRUB 片段均未改变。
 
+修复版完整安装计划校验返回 0，实际 CLI 安装同样返回 0，成功新增 `linux-xanmod-lts-x64v3=6.18.49-xanmod1-0` 及对应的 image/headers，共 3 包、0 升级、0 删除。安装后 `6.18.49-x64v3-xanmod1` 的镜像、initramfs、模块和普通 GRUB 条目齐全，`lsinitramfs` 完整读取新 initramfs 成功；`dpkg --audit` 无输出。原内核的镜像、initramfs 和固定默认配置 SHA-256 校验通过，current/default 均保持 `6.1.0-52-cloud-amd64`、next 无，boot ID 未变。此次验证实际安装及默认项保留，未重启进入新内核。
+
 宿主检查日志位于 `/root/vpsctl-xanmod-compat-20260906/validation/`：`static-checks.log`、`providers-test.log`、`full-suite.log`、`debian13-real-apt-plan.log` 和 `source-sha256.txt`。Debian 12 环境与对照材料位于 `/root/vpsctl-kernel-bookworm-20260906/`。
+
+Debian 12 对照日志包括 `baseline-and-old-repro.log`、`old-postcheck.log`、`new-plan.log`、`install-and-postcheck.log`、`finish-postcheck.log` 和导出的 `evidence/validation/`。验收辅助脚本修正过提前结束管道及将实际 `xanmod:lts` 系列误写为 `xanmod` 的断言，项目安装未因此重复执行。虚拟机已正常关机，QEMU 进程及转发端口关闭，`qemu-img-check.log` 确认磁盘无错误；镜像、日志、基线和 `RESTORE.txt` 保留，宿主未增加临时 swap。
