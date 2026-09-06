@@ -65,26 +65,26 @@
 
 ## 4. Release 资产与发布流程
 
-分发版本与现有应用/功能版本分别维护。仓库根 `VERSION` 是分发版本的规范来源；首个分发版本为 `0.1.0`，对应历史 tag `v0.1.0`，当前分发版本为 `0.2.0`。现有功能版本为 `0.7.0`，不能因建立分发流程而回退功能说明。发布前必须明确检查两种版本各自的来源和展示位置，禁止把其中一个静默改写成另一个。
+仓库根 `VERSION` 是项目版本的规范来源；首个采用当前分发格式的版本为 `0.1.0`，对应历史 tag `v0.1.0`，当前版本为 `0.8.0`。应用、功能、tag、发布资产、安装目录和命令行展示必须使用同一版本号。
 
-每个分发 Release 必须一次性提供安装器、严格 TSV 清单、core bundle 和五个领域 bundle。当前 `0.2.0` 的规范资产集为：
+每个 Release 必须一次性提供安装器、严格 TSV 清单、core bundle 和五个领域 bundle。当前 `0.8.0` 的规范资产集为：
 
 ```text
 vpsctl.sh
 vpsctl-manifest.tsv
-vpsctl-core-0.2.0.tar.gz
-vpsctl-network-0.2.0.tar.gz
-vpsctl-system-0.2.0.tar.gz
-vpsctl-security-0.2.0.tar.gz
-vpsctl-service-0.2.0.tar.gz
-vpsctl-test-0.2.0.tar.gz
+vpsctl-core-0.8.0.tar.gz
+vpsctl-network-0.8.0.tar.gz
+vpsctl-system-0.8.0.tar.gz
+vpsctl-security-0.8.0.tar.gz
+vpsctl-service-0.8.0.tar.gz
+vpsctl-test-0.8.0.tar.gz
 ```
 
 每个 tar 包内使用项目根相对路径，不包含额外顶级包目录。`vpsctl-manifest.tsv` 依次包含 `schema_version<TAB>1`、`version<TAB>VERSION`、`repository<TAB>Runarry/vps-script-lite`、安装器的 `asset<TAB>launcher<TAB>FILENAME<TAB>SHA256` 行，以及 core 和五个领域各自的 `bundle<TAB>NAME<TAB>FILENAME<TAB>SHA256` 行；不允许缺行、重复名称、未登记资产或非 64 位小写十六进制摘要。
 
 发布按以下顺序进行：
 
-1. 固定仓库根 `VERSION`，并确认 tag、manifest 版本、资产文件名完全一致，同时保留现有功能版本语义。
+1. 固定仓库根 `VERSION`，并确认应用展示、tag、manifest 版本和资产文件名完全一致。
 2. 从目标提交构建六个不带顶级目录的 bundle 和 `vpsctl.sh`，计算所有资产的 SHA-256，最后生成 `vpsctl-manifest.tsv`；清单不能自我登记。
 3. 只通过 `ssh host-vps-scripts` 验证清单严格解析、摘要、tar 路径安全、全新安装、重复安装、首次领域下载、离线缓存、显式更新、指定版本更新、失败回退、普通卸载和 purge 边界。不得在当前系统或 WSL 运行这些检查。
 4. 先创建 draft Release 并上传同一版本的完整资产集；资产未齐全或摘要不符时不得发布，也不得让 `latest` 提前指向该版本。

@@ -16,7 +16,7 @@ source "${KERNEL_PROJECT_ROOT}/lib/command.sh"
 readonly KERNEL_MANAGED_MARKER='# Managed by vpsctl system kernel.'
 readonly KERNEL_XANMOD_KEY_URL='https://dl.xanmod.org/archive.key'
 readonly KERNEL_XANMOD_REPO_URL='https://deb.xanmod.org'
-readonly KERNEL_DOWNLOAD_USER_AGENT='Mozilla/5.0 (compatible; vpsctl-system-kernel/0.7.0)'
+readonly KERNEL_DOWNLOAD_USER_AGENT='Mozilla/5.0 (compatible; vpsctl-system-kernel/0.8.0)'
 readonly KERNEL_XANMOD_KEY_FINGERPRINT='D38D7D1DA1349567ADED882D86F7D09EE734E623'
 readonly KERNEL_REPO_LOGICAL='/etc/apt/sources.list.d/vpsctl-xanmod.sources'
 readonly KERNEL_KEY_LOGICAL='/etc/apt/keyrings/vpsctl-xanmod-archive-keyring.gpg'
