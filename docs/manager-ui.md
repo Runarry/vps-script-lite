@@ -86,7 +86,7 @@ UI 显示以下摘要：
         └── 卸载受管脚本（uninstall）
 ```
 
-主菜单不会扫描目录或推测功能分类，只显示固定注册表中已经登记的真实功能。0.8.1 登记 `network`、`system`、`security`、`service` 与 `test` 五个领域，以及 `bbr`、`dns`、`ip-policy`、`rfw`、`kernel`、`access`、`fail2ban`、`tls`、`proxy`、`nodequality`、`tcpquality` 十一个入口。用户选择功能后，入口立即无附加参数分发该公开脚本，由功能脚本进入自己的交互 UI 或开始测试；不再显示命令详情页，也不再要求输入 `r` 才运行。环境详情仍可通过非菜单命令 `vpsctl env` 查看。
+主菜单不会扫描目录或推测功能分类，只显示固定注册表中已经登记的真实功能。0.8.2 登记 `network`、`system`、`security`、`service` 与 `test` 五个领域，以及 `bbr`、`dns`、`ip-policy`、`rfw`、`kernel`、`access`、`fail2ban`、`tls`、`proxy`、`nodequality`、`tcpquality` 十一个入口。用户选择功能后，入口立即无附加参数分发该公开脚本，由功能脚本进入自己的交互 UI 或开始测试；不再显示命令详情页，也不再要求输入 `r` 才运行。环境详情仍可通过非菜单命令 `vpsctl env` 查看。
 
 `system kernel` 的菜单展示当前运行版本，并以编号选择查看完整状态、安装/更新、固定默认版本或卸载指定版本。状态页按完整 release 汇总内核与启动信息。安装类型默认推荐发行版官方标准内核；Debian 可选 Cloud，Ubuntu LTS 仅在适配 HWE 元包有候选时显示，XanMod 继续提供 auto/main/lts 和 CPU 等级选择。切换与卸载候选由 current、default、next、启动文件完整性和 dpkg 归属状态过滤，用户无需手工输入 release。安装、切换、卸载分别要求 `INSTALL-KERNEL`、`SWITCH-KERNEL`、`REMOVE-KERNEL` 强确认；菜单不会自动重启，流程提示重启核对后再卸载旧版本。
 
@@ -136,7 +136,7 @@ UI 使用 ASCII 边框和可选 ANSI 语义色，适合普通 SSH 终端：青�
 
 ## 5. 当前边界
 
-0.8.1 的管理入口已登记网络功能、系统内核、访问管理、Fail2ban 防护、TLS 证书、代理管理与服务器测试。UI 只负责展示元数据、收集用户选择并分发，不实现 BBR、DNS、IP 地址族偏好、RFW、内核、用户凭据、SSH 事务、Fail2ban、TLS、代理或测试业务逻辑。
+0.8.2 的管理入口已登记网络功能、系统内核、访问管理、Fail2ban 防护、TLS 证书、代理管理与服务器测试。UI 只负责展示元数据、收集用户选择并分发，不实现 BBR、DNS、IP 地址族偏好、RFW、内核、用户凭据、SSH 事务、Fail2ban、TLS、代理或测试业务逻辑。
 
 网络功能的当前边界为：
 
