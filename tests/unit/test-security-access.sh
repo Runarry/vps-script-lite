@@ -80,8 +80,8 @@ printf "%s\n" "$*" >>"${VPSCTL_SYSTEM_ROOT}/run/userdel.log"'
 
 make_mock id '
 case "${1:-}" in
-    -u) printf "1001\n" ;;
-    -un) printf "alice\n" ;;
+    -u) printf "%s\n" "${ACCESS_TEST_UID:-1001}" ;;
+    -un) printf "%s\n" "${ACCESS_TEST_USER:-alice}" ;;
     -nG)
         if [[ "${VPSCTL_ENV_OS_ID:-}" == rocky ]]; then printf "deploy wheel\n"; else printf "deploy sudo\n"; fi
         ;;
@@ -91,7 +91,7 @@ esac'
 make_mock stat '
 target="${!#}"
 if [[ "${1:-} ${2:-}" == "-c %u" && "$target" == */*auth-info ]]; then
-    printf "1001\n"
+    printf "%s\n" "${ACCESS_TEST_UID:-1001}"
     exit 0
 fi
 if [[ "${1:-} ${2:-}" == "-c %u" && "$target" == */proof.1001 ]]; then
@@ -355,6 +355,80 @@ verify_transaction() {
     printf -v command 'env SSH_CONNECTION=%q SSH_TTY=/dev/pts/9 SSH_USER_AUTH=%q bash %q --no-color session verify --transaction %q' \
         "192.0.2.10 43100 192.0.2.20 $port" "$auth_file" "$TEST_ROOT/commands/security/access.sh" "$tx_id"
     assert_status 0 "session verification" script -q -e -c "$command" /dev/null
+}
+
+test_target_login_policy() {
+    local tx auth_file="$TEST_SYSTEM_ROOT/run/auth-info" proof
+
+    reset_system
+    prepare_transaction 2250
+    tx="$ACCESS_TEST_TX"
+    printf 'password\n' >"$auth_file"
+    chmod 0600 "$auth_file"
+    # A root login through the candidate port works without TTY or sudo.
+    assert_status 0 "root password port-only proof without TTY" env \
+        ACCESS_TEST_UID=0 ACCESS_TEST_USER=root SSH_TTY= SSH_USER_AUTH="$auth_file" \
+        SSH_CONNECTION='192.0.2.10 43100 192.0.2.20 2250' \
+        bash "$TEST_ROOT/commands/security/access.sh" --no-color session verify --transaction "$tx"
+    proof="$TEST_SYSTEM_ROOT/var/lib/vpsctl/security/access/transactions/$tx/proofs/proof.0"
+    assert_file_contains "$proof" $'user\troot' "root proof recorded"
+    assert_status 0 "commit root port-only proof" run_access ssh commit --transaction "$tx" --confirm-apply "$tx"
+
+    reset_system
+    # Disabling root does not require keys if password login is retained.
+    prepare_transaction 2251 --root-login deny --fallback-user alice
+    tx="$ACCESS_TEST_TX"
+    printf 'password\n' >"$auth_file"
+    chmod 0600 "$auth_file"
+    assert_status 0 "non-root password proof without TTY" env SSH_TTY= SSH_USER_AUTH="$auth_file" \
+        SSH_CONNECTION='192.0.2.10 43100 192.0.2.20 2251' \
+        bash "$TEST_ROOT/commands/security/access.sh" --no-color session verify --transaction "$tx"
+    assert_status 0 "commit password fallback" run_access ssh commit --transaction "$tx" --confirm-apply "$tx"
+
+    reset_system
+    sed -i 's/permitrootlogin yes/permitrootlogin no/' "$TEST_SYSTEM_ROOT/run/sshd-effective"
+    prepare_transaction 2252
+    tx="$ACCESS_TEST_TX"
+    printf 'publickey ssh-ed25519 SHA256:test\n' >"$auth_file"
+    chmod 0600 "$auth_file"
+    assert_status 3 "root rejected when target disables root" env \
+        ACCESS_TEST_UID=0 ACCESS_TEST_USER=root SSH_TTY= SSH_USER_AUTH="$auth_file" \
+        SSH_CONNECTION='192.0.2.10 43100 192.0.2.20 2252' \
+        bash "$TEST_ROOT/commands/security/access.sh" --no-color session verify --transaction "$tx"
+    assert_contains "$ACCESS_TEST_OUTPUT" '不允许 root' "target root policy diagnostic"
+    verify_transaction "$tx" 2252
+    assert_status 0 "commit unchanged root-denied policy without fallback" run_access ssh commit --transaction "$tx" --confirm-apply "$tx"
+
+    reset_system
+    prepare_transaction 2253 --password-login deny
+    tx="$ACCESS_TEST_TX"
+    printf 'password\n' >"$auth_file"
+    chmod 0600 "$auth_file"
+    assert_status 3 "password proof rejected by target policy" env \
+        ACCESS_TEST_UID=0 ACCESS_TEST_USER=root SSH_TTY= SSH_USER_AUTH="$auth_file" \
+        SSH_CONNECTION='192.0.2.10 43100 192.0.2.20 2253' \
+        bash "$TEST_ROOT/commands/security/access.sh" --no-color session verify --transaction "$tx"
+    assert_contains "$ACCESS_TEST_OUTPUT" '不符合目标 SSH 策略' "target auth policy diagnostic"
+    printf 'publickey ssh-ed25519 SHA256:test\n' >"$auth_file"
+    assert_status 0 "root publickey proof when disabling passwords" env \
+        ACCESS_TEST_UID=0 ACCESS_TEST_USER=root SSH_TTY= SSH_USER_AUTH="$auth_file" \
+        SSH_CONNECTION='192.0.2.10 43100 192.0.2.20 2253' \
+        bash "$TEST_ROOT/commands/security/access.sh" --no-color session verify --transaction "$tx"
+    proof="$TEST_SYSTEM_ROOT/var/lib/vpsctl/security/access/transactions/$tx/proofs/proof.0"
+    sed -i 's/^auth_method\t.*/auth_method\tpassword/' "$proof"
+    assert_status 3 "commit rechecks target authentication policy" run_access ssh commit --transaction "$tx" --confirm-apply "$tx"
+    assert_status 0 "abort policy rejection" run_access ssh abort --transaction "$tx"
+
+    reset_system
+    sed -i 's/passwordauthentication yes/passwordauthentication no/' "$TEST_SYSTEM_ROOT/run/sshd-effective"
+    prepare_transaction 2254
+    tx="$ACCESS_TEST_TX"
+    printf 'keyboard-interactive\n' >"$auth_file"
+    chmod 0600 "$auth_file"
+    assert_status 0 "port change preserves keyboard-interactive authentication" env SSH_TTY= SSH_USER_AUTH="$auth_file" \
+        SSH_CONNECTION='192.0.2.10 43100 192.0.2.20 2254' \
+        bash "$TEST_ROOT/commands/security/access.sh" --no-color session verify --transaction "$tx"
+    assert_status 0 "commit keyboard-interactive proof" run_access ssh commit --transaction "$tx" --confirm-apply "$tx"
 }
 
 test_cli_validation_and_status() {
@@ -890,6 +964,7 @@ test_proof_and_configuration_integrity() {
 }
 
 test_cli_validation_and_status
+test_target_login_policy
 test_user_password_and_keys
 test_key_pubkey_enable
 test_sshd_shape_and_firewall_rejections

@@ -109,32 +109,32 @@ vps-script-lite/
 
 `core` 随每个分发版本常驻，必须足以完成启动、帮助、版本解析、固定登记、自管理和领域资产装载。`network`、`system`、`security`、`service` 与 `test` 是按领域发布的 bundle；首次分发某领域命令时，core 从当前版本对应的同一个 GitHub Release 下载 bundle，先按清单中的 SHA-256 校验，再写入该版本缓存并执行。校验失败、版本不匹配或资产缺失时不得执行已有临时文件，也不得回退到其他分发版本的 bundle。正常启动和菜单刷新均不检查更新，不应因为 GitHub 不可用而阻断已经缓存的功能。
 
-仓库根 `VERSION` 是项目版本的规范来源。当前版本 `0.8.3` 的 tag 为 `v0.8.3`，Release 必须同时包含：
+仓库根 `VERSION` 是项目版本的规范来源。当前版本 `0.8.4` 的 tag 为 `v0.8.4`，Release 必须同时包含：
 
 ```text
 vpsctl.sh
 vpsctl-manifest.tsv
-vpsctl-core-0.8.3.tar.gz
-vpsctl-network-0.8.3.tar.gz
-vpsctl-system-0.8.3.tar.gz
-vpsctl-security-0.8.3.tar.gz
-vpsctl-service-0.8.3.tar.gz
-vpsctl-test-0.8.3.tar.gz
+vpsctl-core-0.8.4.tar.gz
+vpsctl-network-0.8.4.tar.gz
+vpsctl-system-0.8.4.tar.gz
+vpsctl-security-0.8.4.tar.gz
+vpsctl-service-0.8.4.tar.gz
+vpsctl-test-0.8.4.tar.gz
 ```
 
 bundle 内部使用项目根相对路径，不能再包一层顶级目录。`vpsctl-manifest.tsv` 是严格 TSV，字段顺序如下；SHA-256 使用 64 位小写十六进制：
 
 ```text
 schema_version<TAB>1
-version<TAB>0.8.3
+version<TAB>0.8.4
 repository<TAB>Runarry/vps-script-lite
 asset<TAB>launcher<TAB>vpsctl.sh<TAB>SHA256
-bundle<TAB>core<TAB>vpsctl-core-0.8.3.tar.gz<TAB>SHA256
-bundle<TAB>network<TAB>vpsctl-network-0.8.3.tar.gz<TAB>SHA256
-bundle<TAB>system<TAB>vpsctl-system-0.8.3.tar.gz<TAB>SHA256
-bundle<TAB>security<TAB>vpsctl-security-0.8.3.tar.gz<TAB>SHA256
-bundle<TAB>service<TAB>vpsctl-service-0.8.3.tar.gz<TAB>SHA256
-bundle<TAB>test<TAB>vpsctl-test-0.8.3.tar.gz<TAB>SHA256
+bundle<TAB>core<TAB>vpsctl-core-0.8.4.tar.gz<TAB>SHA256
+bundle<TAB>network<TAB>vpsctl-network-0.8.4.tar.gz<TAB>SHA256
+bundle<TAB>system<TAB>vpsctl-system-0.8.4.tar.gz<TAB>SHA256
+bundle<TAB>security<TAB>vpsctl-security-0.8.4.tar.gz<TAB>SHA256
+bundle<TAB>service<TAB>vpsctl-service-0.8.4.tar.gz<TAB>SHA256
+bundle<TAB>test<TAB>vpsctl-test-0.8.4.tar.gz<TAB>SHA256
 ```
 
 manifest 的 `version`、tag、文件名、安装目标版本和应用展示版本必须一致。`current` 只在 manifest、core 及必要安装文件完成校验并落盘后切换；更新失败时保留原 current。
@@ -151,7 +151,7 @@ manifest 的 `version`、tag、文件名、安装目标版本和应用展示版�
 
 密码、令牌、私钥、真实主机清单和包含隐私的数据不得提交到仓库。
 
-访问管理把 SSH 加固视为跨会话事务：公开入口可以暂时并存旧端口与候选端口，但只有新的非 root SSH 会话提交一次性证明后才允许提交最终配置。事务状态和备份属于运行数据，不得放入仓库；功能脚本必须在写入前拒绝无法安全归并的复杂 SSH 配置，且不能把当前仍存活的旧会话当作新路径验证结果。
+访问管理把 SSH 加固视为跨会话事务：公开入口可以暂时并存旧端口与候选端口，但只有新的、符合目标登录策略的 SSH 会话提交一次性证明后才允许提交最终配置。事务状态和备份属于运行数据，不得放入仓库；功能脚本必须在写入前拒绝无法安全归并的复杂 SSH 配置，且不能把当前仍存活的旧会话当作新路径验证结果。
 
 ## 4. 调用关系
 

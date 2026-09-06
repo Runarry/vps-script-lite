@@ -46,7 +46,7 @@ vpsctl self uninstall [--purge] [--confirm-uninstall] [--confirm-purge]
 
 ## 3. 已登记命令清单
 
-0.8.3 登记以下网络、系统、安全、服务与服务器测试入口。状态列描述接口生命周期，不表示已经完成真实 VPS 或 VM 验证；隔离环境验收要求见[网络设置](network-settings.md)、[系统内核管理](kernel-management.md)、[访问管理](access-management.md)、[Fail2ban 管理](fail2ban-management.md)、[TLS 证书管理](tls-management.md)、[代理管理](proxy-management.md)和[服务器测试](server-testing.md)。
+0.8.4 登记以下网络、系统、安全、服务与服务器测试入口。状态列描述接口生命周期，不表示已经完成真实 VPS 或 VM 验证；隔离环境验收要求见[网络设置](network-settings.md)、[系统内核管理](kernel-management.md)、[访问管理](access-management.md)、[Fail2ban 管理](fail2ban-management.md)、[TLS 证书管理](tls-management.md)、[代理管理](proxy-management.md)和[服务器测试](server-testing.md)。
 
 | 命令 | 文件 | 摘要 | 风险 | 权限 | 演练 | 能力要求 | 状态 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -74,7 +74,7 @@ vpsctl self uninstall [--purge] [--confirm-uninstall] [--confirm-purge]
 
 `service proxy` 的 `service:any` 能力要求由入口解析为可用服务管理器，功能脚本会进一步限制为 systemd 或 OpenRC。注册表只登记公开入口 `commands/service/proxy.sh`；其 `commands/service/proxy/` 子模块是固定加载的私有实现，不单独登记，也不构成可直接分发的命令。交互菜单统一展示双核状态并按能力分组，通过状态筛选、枚举和编号选择解析内核或节点；订阅可选全部，或选择当前确有节点的 sing-box/Xray 范围。直接命令与非交互模式保留 `--core` 和 `--id` 作为精确消歧接口。帮助、协议矩阵和系统时间状态可由普通用户执行；内核状态与节点/订阅会读取受限状态文件，因此和安装、更新、卸载、服务控制、节点写操作及时间同步一样要求 root。运行中的节点和中转配置变更会自动重启对应内核；显式重启、外部二进制原地更新与 `--purge` 另有不能被 `--yes` 绕过的强确认。完整接口见[代理管理](proxy-management.md)。
 
-`security access` 整体登记为 `linux,init:systemd`，当前不承诺 OpenRC SSH 服务编排。帮助、公开状态和第二 SSH 会话证明可由普通用户运行；用户、密码、公钥、SSH 配置、防火墙、事务和备份的变更由功能脚本要求 root。SSH 变更不是单次覆盖：`ssh prepare` 建立保留旧端口的候选配置，新的非 root SSH 会话运行 `session verify` 写入短期证明，再由原管理会话运行 `ssh commit`；验证失败或不再继续时使用 `ssh abort`，历史备份由 `restore` 显式恢复。复杂的 include/Match/多值来源等无法安全归并的配置会在写入前拒绝。完整接口与恢复顺序见[访问管理](access-management.md)。
+`security access` 整体登记为 `linux,init:systemd`，当前不承诺 OpenRC SSH 服务编排。帮助、公开状态和第二 SSH 会话证明可由普通用户运行；用户、密码、公钥、SSH 配置、防火墙、事务和备份的变更由功能脚本要求 root。SSH 变更不是单次覆盖：`ssh prepare` 建立保留旧端口的候选配置，新的、符合目标登录策略的 SSH 会话运行 `session verify` 写入短期证明，再由原管理会话运行 `ssh commit`；验证失败或不再继续时使用 `ssh abort`，历史备份由 `restore` 显式恢复。复杂的 include/Match/多值来源等无法安全归并的配置会在写入前拒绝。完整接口与恢复顺序见[访问管理](access-management.md)。
 
 `security fail2ban` 只管理 systemd 上的 OpenSSH `sshd` jail。受管配置位于独立的 `jail.d/*.local` 文件，安装和配置会先备份、测试完整 Fail2ban 配置，再启动或 reload 服务；状态会报告受管文件漂移和 SSH 端口不同步。已有非受管 `sshd` jail 时必须显式接管，卸载只撤销 vpsctl 配置，不删除软件包、用户配置或历史备份。完整接口与恢复顺序见[Fail2ban 管理](fail2ban-management.md)。
 

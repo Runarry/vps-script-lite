@@ -49,8 +49,8 @@ abort_on_signal() {
 }
 trap abort_on_signal HUP INT TERM
 
-[[ "$user" =~ ^[a-z_][a-z0-9_-]{0,31}$ && "$user" != root ]] || {
-    printf 'FAIL: set VPSCTL_REAL_ACCESS_USER to a non-root login user\n' >&2
+[[ "$user" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || {
+    printf 'FAIL: set VPSCTL_REAL_ACCESS_USER to a login user\n' >&2
     exit 2
 }
 [[ "$key_file" =~ ^/[A-Za-z0-9._/-]+$ && -f "$key_file" && ! -L "$key_file" ]] || {
@@ -66,8 +66,10 @@ getent passwd "$user" >/dev/null
 sshd_effective="$(sshd -T)"
 current_port="$(awk '$1 == "port" {print $2; exit}' <<<"$sshd_effective")"
 [[ "$current_port" =~ ^[0-9]+$ ]] || exit 10
-ssh -tt -i "$key_file" -o BatchMode=yes -o StrictHostKeyChecking=no \
-    -o UserKnownHostsFile=/dev/null -p "$current_port" "$user@127.0.0.1" sudo -n true
+login_check=(sudo -n true)
+[[ "$user" != root ]] || login_check=(true)
+ssh -T -i "$key_file" -o BatchMode=yes -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null -p "$current_port" "$user@127.0.0.1" "${login_check[@]}"
 [[ ! -f /var/lib/vpsctl/security/access/active ]] || {
     printf 'FAIL: an access transaction is already active\n' >&2
     exit 3
@@ -78,9 +80,11 @@ ssh -tt -i "$key_file" -o BatchMode=yes -o StrictHostKeyChecking=no \
 }
 
 sha256sum "${ssh_configs[@]}" >"$before_hashes"
+policy_args=(--root-login allow --password-login deny --fallback-user "$user")
+# Root acceptance exercises a pure port change with existing login policy.
+[[ "$user" != root ]] || policy_args=()
 prepare_output="$(bash "$TEST_ROOT/bin/vpsctl" --no-color security access ssh prepare \
-    --port "$port" --root-login allow --password-login deny \
-    --fallback-user "$user" --firewall manual 2>&1)"
+    --port "$port" "${policy_args[@]}" --firewall manual 2>&1)"
 printf '%s\n' "$prepare_output"
 tx_id="$(grep -Eo 'tx-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{16}' <<<"$prepare_output" | tail -n 1)"
 [[ -n "$tx_id" ]] || {
@@ -88,7 +92,7 @@ tx_id="$(grep -Eo 'tx-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{16}' <<<"$prepare_output" | ta
     exit 20
 }
 
-ssh -tt -i "$key_file" -o BatchMode=yes -o StrictHostKeyChecking=no \
+ssh -T -i "$key_file" -o BatchMode=yes -o StrictHostKeyChecking=no \
     -o UserKnownHostsFile=/dev/null -p "$port" "$user@127.0.0.1" \
     bash "$public_root/bin/vpsctl" --no-color security access session verify --transaction "$tx_id"
 

@@ -59,7 +59,7 @@ access_usage() {
 
 安全事务：
   prepare 先验证标准 sshd_config，创建受管 drop-in，并在端口变更时让旧、新
-  端口并行监听。必须在 15 分钟内从新端口建立第二个非 root SSH 会话，运行
+  端口并行监听。必须在 15 分钟内从新端口建立第二个 SSH 会话，运行
   session verify，再以事务 ID 显式 commit；否则 systemd 定时任务自动 abort。
   密码登录将被禁用时，证明会话必须使用 publickey。复杂 Include、Match、
   多端口或条件访问配置会被拒绝，不会猜测合并。

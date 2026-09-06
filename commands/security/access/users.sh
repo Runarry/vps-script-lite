@@ -10,6 +10,7 @@ access_user_admin_group() {
 access_user_has_admin_access() {
     local user="$1" admin_group
 
+    [[ "$(access_user_field "$user" uid)" != 0 ]] || return 0
     admin_group="$(access_user_admin_group)" || return $?
     id -nG -- "$user" 2>/dev/null | tr ' ' '\n' | grep -Fqx "$admin_group" || return 1
     command -v sudo >/dev/null 2>&1 || return 1

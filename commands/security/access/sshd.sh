@@ -892,20 +892,20 @@ access_ssh_prepare() {
     fi
     if [[ -n "$fallback_user" ]]; then
         access_require_login_user "$fallback_user" || return $?
-        [[ "$(access_user_field "$fallback_user" uid)" != 0 ]] || {
-            vps_cmd_error "--fallback-user 必须是非 root 用户"
+        [[ "$root_value" != no || "$(access_user_field "$fallback_user" uid)" != 0 ]] || {
+            vps_cmd_error "禁用 root 登录时 --fallback-user 必须是非 root 用户"
             return 2
         }
         access_user_has_admin_access "$fallback_user" || {
             vps_cmd_error "fallback 用户 $fallback_user 未通过 sudo/wheel 管理员能力检查"
             return 3
         }
-        access_user_has_authorized_key "$fallback_user" || {
+        if [[ "$password_value" == no && "$kbd_value" == no ]] && ! access_user_has_authorized_key "$fallback_user"; then
             vps_cmd_error "fallback 用户 $fallback_user 尚无有效 authorized_keys 公钥"
             return 3
-        }
-    elif [[ "$root_value" == no ]]; then
-        vps_cmd_error "禁用 root SSH 登录时必须指定已有公钥的 --fallback-user"
+        fi
+    elif [[ "$root_value" == no && "$current_root" != no ]]; then
+        vps_cmd_error "本次禁用 root SSH 登录时必须指定 --fallback-user"
         return 3
     fi
     access_prepare_layout || return $?
@@ -1063,12 +1063,46 @@ access_ssh_prepare() {
     fi
     vps_cmd_unlock
     vps_cmd_success "SSH 访问事务已准备；旧端口 $old_port 与新端口 $new_port 将并行监听 15 分钟"
-    vps_cmd_warning "请从第二个非 root SSH 会话连接新端口并运行：vpsctl security access session verify --transaction $tx_id"
+    vps_cmd_warning "请用目标策略允许的账户${fallback_user:+（$fallback_user）}建立第二个 SSH 会话连接新端口并运行：vpsctl security access session verify --transaction $tx_id"
     printf '%s\n' "$tx_id"
 }
 
+# Apply the same target-policy checks when recording and consuming a proof.
+access_sshd_proof_policy() {
+    local state="$1" user="$2" method="$3" root_policy password kbd pubkey uid
+
+    root_policy="$(access_kv_get "$state" permit_root_login)" || return 30
+    password="$(access_kv_get "$state" password_authentication)" || return 30
+    kbd="$(access_kv_get "$state" kbd_interactive_authentication)" || return 30
+    pubkey="$(access_kv_get "$state" pubkey_authentication)" || return 30
+    uid="$(access_user_field "$user" uid)" || return 3
+    if [[ "$uid" == 0 ]]; then
+        case "$root_policy" in
+            yes) ;;
+            prohibit-password | without-password)
+                [[ "$method" == publickey ]] || {
+                    vps_cmd_error "目标 root 登录策略要求 publickey 会话证明"
+                    return 3
+                }
+                ;;
+            *)
+                vps_cmd_error "目标策略不允许 root 交互登录，请使用非 root 管理员验证"
+                return 3
+                ;;
+        esac
+    fi
+    case "$method" in
+        publickey) [[ "$pubkey" == yes ]] && return 0 ;;
+        password) [[ "$password" == yes ]] && return 0 ;;
+        keyboard-interactive) [[ "$kbd" == yes ]] && return 0 ;;
+    esac
+    vps_cmd_error "当前会话认证方式 $method 不符合目标 SSH 策略；禁用密码登录时请使用 publickey"
+    return 3
+}
+
 access_session_verify() {
-    local tx_id="$1" tx_dir state status expires now new_port password_login fallback_user actual_user actual_uid
+    local tx_id="$1" tx_dir state status expires now new_port fallback_user actual_user actual_uid
+    local -a privilege=()
     local client_ip client_port server_ip server_port extra auth_file auth_method proof_tmp proof auth_mtime auth_uid auth_mode proof_mode proof_owner
 
     tx_dir="$(access_transaction_path "$tx_id")" || return $?
@@ -1093,10 +1127,6 @@ access_session_verify() {
         return 3
     }
     actual_uid="$(id -u)" || return 20
-    ((actual_uid != 0)) || {
-        vps_cmd_error "session verify 必须从第二个非 root SSH 会话执行"
-        return 4
-    }
     actual_user="$(id -un)" || return 20
     access_require_login_user "$actual_user" || return $?
     fallback_user="$(access_kv_get "$state" fallback_user)" || return 30
@@ -1104,17 +1134,22 @@ access_session_verify() {
         vps_cmd_error "证明会话必须使用 fallback 用户 $fallback_user"
         return 3
     }
-    [[ -n "${SSH_CONNECTION:-}" && -n "${SSH_TTY:-}" && "${SSH_TTY:-}" == /dev/* ]] || {
-        vps_cmd_error "未检测到带 TTY 的 SSH 会话"
+    [[ -n "${SSH_CONNECTION:-}" ]] || {
+        vps_cmd_error "未检测到 SSH 会话"
         return 3
     }
-    command -v sudo >/dev/null 2>&1 || {
-        vps_cmd_error "证明用户缺少 sudo"
-        return 3
-    }
-    if ! sudo -v </dev/tty; then
-        vps_cmd_error "sudo -v 未通过；证明用户不是可用管理员"
-        return 3
+    if ((actual_uid != 0)); then
+        privilege=(sudo)
+        command -v sudo >/dev/null 2>&1 || {
+            vps_cmd_error "证明用户缺少 sudo"
+            return 3
+        }
+        # The login user intentionally opens their own terminal for sudo's prompt.
+        # shellcheck disable=SC2024
+        if ! sudo -n true 2>/dev/null && ! { [[ -n "${SSH_TTY:-}" ]] && sudo -v </dev/tty; }; then
+            vps_cmd_error "sudo 验证未通过；请使用可提权账户，需要密码时通过 ssh -t 连接"
+            return 3
+        fi
     fi
     IFS=' ' read -r client_ip client_port server_ip server_port extra <<<"$SSH_CONNECTION"
     [[ -n "$client_ip" && -n "$client_port" && -n "$server_ip" && -n "$server_port" && -z "$extra" ]] || return 3
@@ -1141,19 +1176,17 @@ access_session_verify() {
     }
     if grep -Eq '^publickey([[:space:]]|$)' "$auth_file"; then
         auth_method=publickey
-    elif grep -Eq '^(password|keyboard-interactive)([[:space:]]|$)' "$auth_file"; then
+    elif grep -Eq '^password([[:space:]]|$)' "$auth_file"; then
         auth_method=password
+    elif grep -Eq '^keyboard-interactive([[:space:]]|$)' "$auth_file"; then
+        auth_method=keyboard-interactive
     else
         vps_cmd_error "无法识别当前 SSH 会话的认证方式"
         return 3
     fi
-    password_login="$(access_kv_get "$state" password_authentication)" || return 30
-    [[ "$password_login" != no || "$auth_method" == publickey ]] || {
-        vps_cmd_error "事务将禁用密码登录，证明会话必须使用 publickey"
-        return 3
-    }
+    access_sshd_proof_policy "$state" "$actual_user" "$auth_method" || return $?
     if [[ "${VPSCTL_DRY_RUN:-0}" == 1 ]]; then
-        vps_cmd_info "演练：第二会话已通过端口、用户、sudo 与认证方式检查；不会写入证明"
+        vps_cmd_info "演练：第二会话已通过端口、用户、管理员权限与认证方式检查；不会写入证明"
         return 0
     fi
     proof="$tx_dir/proofs/proof.${actual_uid}"
@@ -1175,15 +1208,15 @@ access_session_verify() {
         rm -f -- "$proof_tmp"
         return 20
     }
-    sudo install -o root -g root -m 0600 -- "$proof_tmp" "$proof" || {
+    "${privilege[@]}" install -o root -g root -m 0600 -- "$proof_tmp" "$proof" || {
         rm -f -- "$proof_tmp"
         return 20
     }
     rm -f -- "$proof_tmp"
-    proof_mode="$(sudo stat -c %a -- "$proof" 2>/dev/null || true)"
-    proof_owner="$(sudo stat -c %u -- "$proof" 2>/dev/null || true)"
+    proof_mode="$("${privilege[@]}" stat -c %a -- "$proof" 2>/dev/null || true)"
+    proof_owner="$("${privilege[@]}" stat -c %u -- "$proof" 2>/dev/null || true)"
     [[ "$proof_mode" == 600 && "$proof_owner" == 0 ]] || {
-        sudo rm -f -- "$proof" || true
+        "${privilege[@]}" rm -f -- "$proof" || true
         return 20
     }
     vps_cmd_success "已记录事务 $tx_id 的第二会话证明（$actual_user，$auth_method，端口 $server_port）"
@@ -1212,7 +1245,7 @@ access_sshd_find_proof() {
         recorded_uid="$(access_kv_get "$proof" uid 2>/dev/null || true)"
         user="$(access_kv_get "$proof" user 2>/dev/null || true)"
         verified="$(access_kv_get "$proof" verified_epoch 2>/dev/null || true)"
-        [[ "$mode" == 600 && "$recorded_uid" =~ ^[0-9]+$ ]] && ((recorded_uid != 0)) || continue
+        [[ "$mode" == 600 && "$recorded_uid" =~ ^[0-9]+$ ]] || continue
         [[ -n "$user" && "$(access_user_field "$user" uid 2>/dev/null || true)" == "$recorded_uid" && "$verified" =~ ^[0-9]+$ ]] || continue
         printf '%s\n' "$proof"
         return 0
@@ -1266,7 +1299,7 @@ access_ssh_commit() {
     }
     proof="$(access_sshd_find_proof "$tx_dir" "$fallback")" || {
         vps_cmd_unlock
-        vps_cmd_error "尚无合格的第二个非 root SSH 会话证明"
+        vps_cmd_error "尚无合格的第二个 SSH 会话证明"
         return 3
     }
     proof_tx="$(access_kv_get "$proof" transaction_id)" || {
@@ -1311,9 +1344,8 @@ access_ssh_commit() {
         vps_cmd_error "会话证明时间无效"
         return 30
     }
-    [[ "$password_value" != no || "$proof_auth" == publickey ]] || {
+    access_sshd_proof_policy "$state" "$proof_user" "$proof_auth" || {
         vps_cmd_unlock
-        vps_cmd_error "禁用密码登录需要 publickey 会话证明"
         return 3
     }
     old_port="$(access_kv_get "$state" old_port)" || {
