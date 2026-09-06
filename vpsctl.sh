@@ -3,7 +3,6 @@
 set -euo pipefail
 IFS=$'\n\t'
 umask 022
-export LC_ALL=C
 
 VPSCTL_DISTRIBUTION_VERSION=''
 readonly VPSCTL_RELEASE_REPOSITORY='Runarry/vps-script-lite'
@@ -65,6 +64,8 @@ vpsctl_download() {
 }
 
 vpsctl_validate_manifest() {
+    # Keep strict ASCII validation local; upstream commands inherit the caller's locale.
+    local LC_ALL=C
     local manifest=$1
     local -a lines=()
     local -a bundle_names=(core network system security service test)
@@ -175,6 +176,7 @@ vpsctl_prepare_directory() {
 }
 
 vpsctl_validate_archive_paths() {
+    local LC_ALL=C
     local archive=$1
     local entry=''
     local listing_line=''

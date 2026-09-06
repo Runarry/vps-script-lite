@@ -66,3 +66,15 @@
 验收结束后已停用并删除宿主的 `host-test.swap`，恢复原有交换分区配置；前后状态分别保存于 Ubuntu 验收目录的 `host-swap-before.txt` 和 `host-swap-restored.txt`。镜像、日志及恢复材料继续保留，虚拟机不占用运行资源。
 
 这些结果覆盖上述发行版和两种实际 GRUB 启动环境，不将其扩大为其他发行版、架构或启动器的实测结论。功能仍保持 `experimental` 生命周期。
+
+## 2026-09-06：Debian 12 XanMod 来源兼容回归
+
+本次代码副本在 `host-vps-scripts` 上通过 `bash -n`、`shellcheck -x`、`shfmt -d -i 4 -ci`、内核 provider 单元测试和 `bash tests/run.sh` 全量回归。新增用例覆盖旧 APT 缺少 `Signed-By`、新 APT 正常输出字段、显式空值/错误密钥、源配置漂移/符号链接、异常索引和查询失败，以及 main/LTS 元包携带发行版依赖、同版本第三方来源拒绝。宿主 Debian 13 / APT 3.0.3 上，真实受管索引查询和 `linux-xanmod-lts-x64v3=6.18.49-xanmod1-0` 完整安装计划校验通过。
+
+另建独立 Debian 12 QEMU TCG 虚拟机，官方 genericcloud 镜像构建 `20260903-2590` 经官方 SHA-512 清单校验。实际系统为 bookworm、APT 2.6.1，运行 `6.1.0-52-cloud-amd64`。镜像需补装官方 `grub-pc`，并由项目 `switch` 将原内核固定为默认；环境准备及原启动配置均已记录。
+
+旧版 CLI 在真实 APT 刷新和候选选择后，精确复现 `linux-xanmod-lts-x64v3=6.18.49-xanmod1-0 的 APT 来源不符合 xanmod 信任策略`，返回 30，未开始安装内核包。
+
+真实 APT 2.6.1 的受管索引输出包含 `Identifier: Packages`、`Trusted: yes`、`Codename: bookworm`、`Site: https://deb.xanmod.org` 和指向受管源的 `Sourcesentry`，没有 `Signed-By` 字段；源文件中的专用 `Signed-By` 和密钥指纹均正确，确认旧版误判来自输出字段缺失。旧版失败后的检查确认新建源/keyring 已回滚，内核包清单、原内核镜像、initramfs 和固定 GRUB 片段均未改变。
+
+宿主检查日志位于 `/root/vpsctl-xanmod-compat-20260906/validation/`：`static-checks.log`、`providers-test.log`、`full-suite.log`、`debian13-real-apt-plan.log` 和 `source-sha256.txt`。Debian 12 环境与对照材料位于 `/root/vpsctl-kernel-bookworm-20260906/`。

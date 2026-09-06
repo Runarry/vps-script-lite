@@ -124,6 +124,14 @@ APT_INDEX_MODE=official
 APT_POLICY_MODE=official
 APT_PLAN_MODE=''
 PLAN_POLICY_MODE=''
+XANMOD_INDEX_SIGNED_BY=valid
+XANMOD_INDEX_TRUSTED=yes
+XANMOD_INDEX_CODENAME=trixie
+XANMOD_INDEX_SITE=https://deb.xanmod.org
+XANMOD_INDEX_IDENTIFIER=Packages
+XANMOD_INDEX_DESCRIPTION='https://deb.xanmod.org trixie/main amd64 Packages'
+XANMOD_PLAN_PACKAGE=linux-xanmod-x64v3
+XANMOD_PLAN_VERSION=7.1.11-xanmod1-0
 
 apt-get() {
     if [[ "${1:-}" == --simulate ]]; then
@@ -148,9 +156,9 @@ apt-get() {
             xanmod-with-distribution-dependency)
                 printf '%s\n' \
                     'Inst initramfs-tools (0.148.3 Debian:13/stable [all])' \
-                    'Inst linux-xanmod-x64v3 (7.1.11-xanmod1-0 XanMod:trixie [amd64])' \
+                    "Inst $XANMOD_PLAN_PACKAGE ($XANMOD_PLAN_VERSION XanMod:trixie [amd64])" \
                     'Conf initramfs-tools (0.148.3 Debian:13/stable [all])' \
-                    'Conf linux-xanmod-x64v3 (7.1.11-xanmod1-0 XanMod:trixie [amd64])'
+                    "Conf $XANMOD_PLAN_PACKAGE ($XANMOD_PLAN_VERSION XanMod:trixie [amd64])"
                 ;;
             unknown-conf)
                 printf '%s\n' 'Conf half-configured (1.0 Debian:13/stable [amd64])'
@@ -184,6 +192,25 @@ apt-get() {
         return 0
     fi
     [[ "${1:-}" == indextargets ]] || return 2
+    if (($# > 1)); then
+        [[ $# == 5 && "${2:-}" == -o && "${3:-}" == "Dir::Etc::sourcelist=$KERNEL_REPO_FILE" && "${4:-}" == -o && "${5:-}" == Dir::Etc::sourceparts=- ]] || return 97
+        [[ -z "${XANMOD_INDEX_CALL_LOG:-}" ]] || printf 'scoped\n' >>"$XANMOD_INDEX_CALL_LOG"
+        [[ "$APT_INDEX_MODE" != failure ]] || return 100
+        printf '%s\n' \
+            "Description: $XANMOD_INDEX_DESCRIPTION" \
+            "Codename: $XANMOD_INDEX_CODENAME" \
+            "Site: $XANMOD_INDEX_SITE" \
+            "Trusted: $XANMOD_INDEX_TRUSTED" \
+            "Identifier: $XANMOD_INDEX_IDENTIFIER"
+        case "$XANMOD_INDEX_SIGNED_BY" in
+            valid) printf 'Signed-By: %s\n' "$KERNEL_KEY_LOGICAL" ;;
+            missing) ;;
+            empty) printf 'Signed-By: \n' ;;
+            *) printf 'Signed-By: %s\n' "$XANMOD_INDEX_SIGNED_BY" ;;
+        esac
+        printf '\n'
+        return 0
+    fi
     case "$APT_INDEX_MODE" in
         official)
             printf '%s\n' \
@@ -293,13 +320,14 @@ apt-get() {
 }
 
 apt-cache() {
-    [[ "${1:-}" == policy ]] || return 2
+    [[ "${1:-}" == policy && $# == 2 ]] || return 2
     if [[ -n "$PLAN_POLICY_MODE" ]]; then
         local package="${2:-}" version source
         case "$package" in
             linux-image-amd64 | linux-image-6.12.107+deb13-amd64) version=6.12.107-1 ;;
             initramfs-tools) version=0.148.3 ;;
             linux-xanmod-x64v3) version=7.1.11-xanmod1-0 ;;
+            linux-xanmod-lts-x64v3) version=6.18.49-xanmod1-0 ;;
             linux-virtual) version=6.8.0-139.139 ;;
             *) return 99 ;;
         esac
@@ -317,7 +345,7 @@ apt-cache() {
                     '        100 https://packages.example trixie/main amd64 Packages'
                 return 0
                 ;;
-            xanmod:linux-xanmod-x64v3)
+            xanmod:linux-xanmod* | xanmod-mixed:linux-xanmod*)
                 source='https://deb.xanmod.org trixie/main amd64 Packages'
                 ;;
             ubuntu:linux-virtual)
@@ -337,6 +365,9 @@ apt-cache() {
             '  Version table:' \
             "     $version 500" \
             "        500 $source"
+        if [[ "$PLAN_POLICY_MODE" == xanmod-mixed && "$package" == linux-xanmod* ]]; then
+            printf '%s\n' '        100 https://packages.example trixie/main amd64 Packages'
+        fi
         return 0
     fi
     case "$APT_POLICY_MODE" in
@@ -584,16 +615,134 @@ test_ubuntu_install_plan_dependency_state() (
     test_assert_equal 0 "${#KERNEL_INSTALL_EXPECTED_VERSIONS[@]}" 'invalid dependency-state leaves no expected packages'
 )
 
+test_write_xanmod_repository() {
+    mkdir -p -- "${KERNEL_REPO_FILE%/*}"
+    printf '%s\n' \
+        '# Managed by vpsctl system kernel.' \
+        'Types: deb' \
+        'URIs: https://deb.xanmod.org' \
+        "Suites: $KERNEL_OS_CODENAME" \
+        'Components: main' \
+        'Architectures: amd64' \
+        'Signed-By: /etc/apt/keyrings/vpsctl-xanmod-archive-keyring.gpg' >"$KERNEL_REPO_FILE"
+}
+
+test_xanmod_index_metadata() (
+    local mode output status
+    test_reset_platform
+    KERNEL_OS_VERSION_ID=12
+    KERNEL_OS_CODENAME=bookworm
+    XANMOD_INDEX_CODENAME=bookworm
+    XANMOD_INDEX_DESCRIPTION='https://deb.xanmod.org bookworm/main amd64 Packages'
+    KERNEL_REPO_FILE="$TEST_TEMP/index-metadata/vpsctl-xanmod.sources"
+    local XANMOD_INDEX_CALL_LOG="$TEST_TEMP/scoped-index-calls"
+    test_write_xanmod_repository
+    kernel_primary_key_fingerprint() { printf '%s\n' "$KERNEL_XANMOD_KEY_FINGERPRINT"; }
+    for mode in missing valid; do
+        XANMOD_INDEX_SIGNED_BY="$mode"
+        output="$(_kernel_xanmod_index_descriptions)"
+        test_assert_equal "$XANMOD_INDEX_DESCRIPTION" "$output" "XanMod $mode Signed-By acceptance"
+    done
+    test_assert_equal $'scoped\nscoped' "$(<"$XANMOD_INDEX_CALL_LOG")" 'XanMod scoped indextargets arguments'
+
+    for mode in empty /etc/apt/keyrings/foreign.gpg; do
+        status=0
+        XANMOD_INDEX_SIGNED_BY="$mode"
+        output="$(_kernel_xanmod_index_descriptions 2>&1)" || status=$?
+        test_assert_equal 30 "$status" "XanMod $mode Signed-By rejection"
+        [[ -n "$output" ]] || test_fail 'missing invalid index diagnostic'
+    done
+    XANMOD_INDEX_SIGNED_BY=missing
+    for mode in trusted codename site identifier description; do
+        status=0
+        output="$(
+            case "$mode" in
+                trusted) XANMOD_INDEX_TRUSTED=no ;;
+                codename) XANMOD_INDEX_CODENAME=foreign ;;
+                site) XANMOD_INDEX_SITE=https://packages.example ;;
+                identifier) XANMOD_INDEX_IDENTIFIER=Sources ;;
+                description) XANMOD_INDEX_DESCRIPTION='' ;;
+            esac
+            _kernel_xanmod_index_descriptions 2>&1
+        )" || status=$?
+        test_assert_equal 30 "$status" "XanMod invalid $mode rejection"
+        [[ -n "$output" ]] || test_fail "missing $mode index diagnostic"
+    done
+
+    status=0
+    APT_INDEX_MODE=failure
+    _kernel_xanmod_index_descriptions >/dev/null 2>&1 || status=$?
+    test_assert_equal 20 "$status" 'XanMod scoped index query failure'
+    APT_INDEX_MODE=official
+    status=0
+    kernel_primary_key_fingerprint() { printf '%s\n' 'BAD-FINGERPRINT'; }
+    _kernel_xanmod_index_descriptions >/dev/null 2>&1 || status=$?
+    test_assert_equal 30 "$status" 'XanMod incorrect key fingerprint rejection'
+)
+
+test_xanmod_repository_configuration() (
+    local field content status
+    local rejected_query_log="$TEST_TEMP/rejected-source-query"
+    test_reset_platform
+    KERNEL_REPO_FILE="$TEST_TEMP/repository-config/vpsctl-xanmod.sources"
+    kernel_primary_key_fingerprint() { printf '%s\n' "$KERNEL_XANMOD_KEY_FINGERPRINT"; }
+    apt-get() {
+        printf 'unexpected query\n' >>"$rejected_query_log"
+        return 98
+    }
+    for field in marker uri suite component architecture key options missing symlink; do
+        test_write_xanmod_repository
+        content="$(<"$KERNEL_REPO_FILE")"
+        case "$field" in
+            marker) content="${content/'# Managed by vpsctl system kernel.'/'# User source'}" ;;
+            uri) content="${content/https:\/\/deb.xanmod.org/https:\/\/packages.example}" ;;
+            suite) content="${content/'Suites: trixie'/'Suites: bookworm'}" ;;
+            component) content="${content/'Components: main'/'Components: other'}" ;;
+            architecture) content="${content/'Architectures: amd64'/'Architectures: arm64'}" ;;
+            key) content="${content/\/etc\/apt\/keyrings\/vpsctl-xanmod-archive-keyring.gpg/\/etc\/apt\/keyrings\/foreign.gpg}" ;;
+            options) content+=$'\nTrusted: yes' ;;
+        esac
+        printf '%s\n' "$content" >"$KERNEL_REPO_FILE"
+        if [[ "$field" == missing || "$field" == symlink ]]; then
+            mv -- "$KERNEL_REPO_FILE" "$KERNEL_REPO_FILE.target"
+            [[ "$field" != symlink ]] || ln -s "$KERNEL_REPO_FILE.target" "$KERNEL_REPO_FILE"
+        fi
+        status=0
+        _kernel_xanmod_index_descriptions >/dev/null 2>&1 || status=$?
+        test_assert_equal 30 "$status" "XanMod $field source configuration rejection"
+        [[ ! -e "$rejected_query_log" ]] || test_fail 'invalid repository configuration reached apt-get'
+    done
+)
+
 test_xanmod_install_plan_distribution_dependency() (
+    local mode status
     test_reset_platform
     KERNEL_TYPE=xanmod
+    KERNEL_REPO_FILE="$TEST_TEMP/install-plan/vpsctl-xanmod.sources"
+    test_write_xanmod_repository
     APT_INDEX_MODE=combined
     APT_PLAN_MODE=xanmod-with-distribution-dependency
     PLAN_POLICY_MODE=xanmod
     kernel_primary_key_fingerprint() { printf '%s\n' "$KERNEL_XANMOD_KEY_FINGERPRINT"; }
-    kernel_validate_install_plan linux-xanmod-x64v3 7.1.11-xanmod1-0
-    test_assert_equal 7.1.11-xanmod1-0 "${KERNEL_INSTALL_EXPECTED_VERSIONS["linux-xanmod-x64v3"]}" 'XanMod plan meta version'
-    test_assert_equal 0.148.3 "${KERNEL_INSTALL_EXPECTED_VERSIONS["initramfs-tools"]}" 'XanMod plan distribution dependency'
+    for mode in valid missing; do
+        XANMOD_INDEX_SIGNED_BY="$mode"
+        for XANMOD_PLAN_PACKAGE in linux-xanmod-x64v3 linux-xanmod-lts-x64v3; do
+            if [[ "$XANMOD_PLAN_PACKAGE" == linux-xanmod-lts-x64v3 ]]; then
+                XANMOD_PLAN_VERSION=6.18.49-xanmod1-0
+            else
+                XANMOD_PLAN_VERSION=7.1.11-xanmod1-0
+            fi
+            kernel_validate_install_plan "$XANMOD_PLAN_PACKAGE" "$XANMOD_PLAN_VERSION"
+            test_assert_equal "$XANMOD_PLAN_VERSION" "${KERNEL_INSTALL_EXPECTED_VERSIONS["$XANMOD_PLAN_PACKAGE"]}" "XanMod $mode Signed-By plan meta version"
+            test_assert_equal 0.148.3 "${KERNEL_INSTALL_EXPECTED_VERSIONS["initramfs-tools"]}" 'XanMod plan distribution dependency'
+        done
+        status=0
+        PLAN_POLICY_MODE=xanmod-mixed
+        kernel_validate_install_plan "$XANMOD_PLAN_PACKAGE" "$XANMOD_PLAN_VERSION" >/dev/null 2>&1 || status=$?
+        test_assert_equal 30 "$status" "XanMod $mode Signed-By same-version foreign plan rejection"
+        test_assert_equal 0 "${#KERNEL_INSTALL_EXPECTED_VERSIONS[@]}" 'failed XanMod mixed plan leaves no expected packages'
+        PLAN_POLICY_MODE=xanmod
+    done
 )
 
 test_secure_boot_provider_gate() (
@@ -687,6 +836,8 @@ test_ubuntu_pocket_suite_validation
 test_xanmod_same_version_foreign_origin
 test_install_plan_validation
 test_ubuntu_install_plan_dependency_state
+test_xanmod_index_metadata
+test_xanmod_repository_configuration
 test_xanmod_install_plan_distribution_dependency
 test_secure_boot_provider_gate
 test_uninstall_uses_common_gate_only

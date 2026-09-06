@@ -51,6 +51,29 @@ bash bin/vpsctl test tcpquality --help
 
 ## 4. 退出与恢复
 
+### 字符显示与语言环境
+
+安装启动器和服务器测试包装器保留调用者的 `LANG`、`LC_*` 环境，不强制设置全局 locale。启动器仅在 manifest 和归档路径校验函数内部使用 `LC_ALL=C`，避免影响上游生成 Unicode 图形。
+
+旧安装启动器曾全局导出 `LC_ALL=C`，会覆盖 NetQuality 设置的 UTF-8 `LC_CTYPE`，使延迟图形显示成 `\u28FC`、`\u28E4` 等转义文本。修复必须随安装启动器一起交付，仅替换服务器测试模块不能解决问题。更新后应退出旧管理菜单，重新运行 `vpsctl`；旧进程已继承的环境不会随文件更新而恢复。调用者显式设置的 `LC_ALL=C` 仍会原样保留。
+
+### 退出状态
+
 共同基础退出码沿用项目约定：参数错误为 `2`，平台或命令不可用为 `3`，真实执行缺少 root 为 `4`，下载失败或上游执行失败使用入口或上游返回的其他非零状态，被 `vpsctl` 的中断处理终止通常为 `130`。NodeQuality 的状态 `1` 规范化是上节所述唯一命令特例。
 
 失败或中断后不要立即重跑。先确认测试子进程已经退出、系统负载恢复、没有意外残留的挂载或临时数据，再检查网络配额和上游输出。若异常发生在报告上传阶段，远端可能已经收到部分或完整数据，即使本地没有打印报告链接；本地清理不能撤回已经上传的报告。
+
+## 5. Unicode 修复验收（2026-09-06）
+
+所有检查均通过 `ssh host-vps-scripts` 在专用环境执行，本机未运行项目代码。
+
+- `vpsctl.sh` 与 `tests/integration/test-distribution-real.sh` 的 `bash -n`、ShellCheck 均通过。
+- `test-libraries.sh`、`test-server-test.sh`、`test-distribution.sh`、`test-release-build.sh` 单元测试，以及 `test-vpsctl.sh`、`test-distribution-real.sh` 集成测试均通过。
+- 安装集成测试新增 24 个场景：两种测速命令 × 首次安装立即启动/已安装启动 × 六种 locale 配置（`LC_ALL` 未设置、空值、UTF-8、仅 `LANG` 为 UTF-8、`LC_CTYPE` 覆盖 `LANG=C`、显式 `LC_ALL=C`）。通过本地下载夹具检查上游收到的变量状态和图形输出字节。
+- 在远端旧版副本恢复全局 `export LC_ALL=C` 后，同一测试在 `nodequality/unset/fresh` 场景失败，确认能捕获原回归。
+
+真实报告验收固定使用同一份 NetQuality `net.sh`，SHA-256 为 `6c40fe1ae40d969255cb63075c94882733b82ba43831341eb1aadeea7b1fbfcd`。直接运行与安装入口均使用 `-4 -n -p -S 123567`，禁用报告上传，只验证 TCP 延迟章节。为控制耗时，省份列表下载夹具只保留一个省份，三网延迟使用真实探测；两份报告均含 15 个非空 Unicode 图形字符，严格 UTF-8 解码成功，无 `\u28xx` 残留或替换字符。直接上游返回 1，NodeQuality 包装器按既有规则返回 0，报告均已生成。
+
+该验收将真实 NetQuality 子脚本通过测试适配脚本接入 NodeQuality 包装器，安装路径隔离在远端验收目录；未执行完整 NodeQuality BenchOS 流程、全省份或吞吐测速。首次全省份直接探测因耗时主动中止，随后完成上述限定范围验收。
+
+恢复信息：安装集成测试备份并恢复 `/usr/local/bin/vpsctl`、`/usr/local/lib/vpsctl` 和 `/var/lib/vpsctl/self`，确认原安装仍指向 `0.1.0`。真实报告验收安装了 `bc`、`mtr-tiny` 及依赖 `libncurses6:amd64`，保留在专用测试机；原包清单、原始报告和测试日志仅保留在远端 `/var/tmp/vpsctl-locale-check.fhe0930Q`，不提交含主机信息的原始报告。

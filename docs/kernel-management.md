@@ -70,6 +70,10 @@ D38D7D1DA1349567ADED882D86F7D09EE734E623
 
 软件包和仓库元数据随后由 APT 使用专用 keyring 验签。入口不使用 `apt-key`，也不执行远程脚本。
 
+Debian 12 等使用旧版 APT 的系统，其 `apt-get indextargets` 不输出 `Signed-By`（该输出字段从 [APT 2.9.34](https://tracker.debian.org/news/1630162/accepted-apt-2934-source-into-unstable/) 起提供）。XanMod 校验先核对受管 `.sources` 的完整内容及密钥指纹，再将索引查询限定到这一个源文件，兼容字段缺失；若字段存在但为空或指向其他密钥，仍拒绝。
+
+索引必须同时满足 `Packages`、`Trusted: yes`、官方来源和本机发行版代号，全局逐包版本来源检查继续拒绝同版本混入第三方源。受管源配置异常、密钥异常和未匹配可信索引分别报告。
+
 | 路径 | 用途 |
 | --- | --- |
 | `/etc/apt/sources.list.d/vpsctl-xanmod.sources` | vpsctl 独立 DEB822 XanMod 源 |

@@ -356,21 +356,46 @@ _kernel_official_index_descriptions() {
     done <<<"${output}"$'\n'
 }
 
+_kernel_render_xanmod_repository() {
+    printf '%s\n' "$KERNEL_MANAGED_MARKER"
+    printf 'Types: deb\n'
+    printf 'URIs: %s\n' "$KERNEL_XANMOD_REPO_URL"
+    printf 'Suites: %s\n' "$KERNEL_OS_CODENAME"
+    printf 'Components: main\n'
+    printf 'Architectures: amd64\n'
+    printf 'Signed-By: %s\n' "$KERNEL_KEY_LOGICAL"
+}
+
 _kernel_xanmod_index_descriptions() {
     local output line key value description='' identifier='' trusted='' codename='' site='' signed_by='' fingerprint
-    if ! output="$(LC_ALL=C apt-get indextargets 2>&1)"; then
-        vps_cmd_error "APT 索引元数据查询失败：$output"
-        return 20
+    local expected_repository actual_repository signed_by_present=0
+    local -a descriptions=()
+    # Old APT omits Signed-By from indextargets. Bind the query to the exact
+    # managed source instead of treating a missing field as proof of trust.
+    if ! vps_cmd_require_no_symlink_components "$KERNEL_REPO_FILE" ||
+        [[ ! -f "$KERNEL_REPO_FILE" || ! -r "$KERNEL_REPO_FILE" ]]; then
+        vps_cmd_error 'XanMod 受管 APT 源配置不是可读取的安全普通文件'
+        return 30
+    fi
+    expected_repository="$(_kernel_render_xanmod_repository)" || return 30
+    if ! actual_repository="$(cat -- "$KERNEL_REPO_FILE")" || [[ "$actual_repository" != "$expected_repository" ]]; then
+        vps_cmd_error 'XanMod 受管 APT 源配置与预期不符（来源、发行版、组件、架构或 Signed-By）'
+        return 30
     fi
     fingerprint="$(kernel_primary_key_fingerprint "$KERNEL_KEY_FILE" 2>/dev/null || true)"
     [[ "$fingerprint" == "$KERNEL_XANMOD_KEY_FINGERPRINT" ]] || {
         vps_cmd_error 'XanMod APT 源密钥指纹无法验证'
         return 30
     }
+    if ! output="$(LC_ALL=C apt-get indextargets -o "Dir::Etc::sourcelist=$KERNEL_REPO_FILE" -o Dir::Etc::sourceparts=- 2>&1)"; then
+        vps_cmd_error "XanMod APT 索引元数据查询失败：$output"
+        return 20
+    fi
     while IFS= read -r line; do
         if [[ -z "$line" ]]; then
-            if [[ "$identifier" == Packages && "$trusted" == yes && "$codename" == "$KERNEL_OS_CODENAME" && "$site" == "$KERNEL_XANMOD_REPO_URL" && "$signed_by" == "$KERNEL_KEY_LOGICAL" && -n "$description" ]]; then
-                printf '%s\n' "$description"
+            if [[ "$identifier" == Packages && "$trusted" == yes && "$codename" == "$KERNEL_OS_CODENAME" && "$site" == "$KERNEL_XANMOD_REPO_URL" && -n "$description" ]] &&
+                { ((signed_by_present == 0)) || [[ "$signed_by" == "$KERNEL_KEY_LOGICAL" ]]; }; then
+                descriptions+=("$description")
             fi
             description=''
             identifier=''
@@ -378,6 +403,7 @@ _kernel_xanmod_index_descriptions() {
             codename=''
             site=''
             signed_by=''
+            signed_by_present=0
             continue
         fi
         key="${line%%:*}"
@@ -389,9 +415,17 @@ _kernel_xanmod_index_descriptions() {
             Trusted) trusted="${value,,}" ;;
             Codename) codename="${value,,}" ;;
             Site) site="${value%/}" ;;
-            Signed-By) signed_by="$value" ;;
+            Signed-By)
+                signed_by="$value"
+                signed_by_present=1
+                ;;
         esac
     done <<<"${output}"$'\n'
+    if ((${#descriptions[@]} == 0)); then
+        vps_cmd_error 'XanMod 未匹配可信 APT 索引（需 Packages、Trusted: yes、正确来源/发行版及匹配的 Signed-By（若输出））'
+        return 30
+    fi
+    printf '%s\n' "${descriptions[@]}"
 }
 
 _kernel_xanmod_candidate_version() {
@@ -746,15 +780,7 @@ kernel_prepare_repository() {
     }
     vps_cmd_run gpg --batch --yes --dearmor --output "$key_gpg" "$key_asc" || return 20
     vps_cmd_atomic_write "$KERNEL_KEY_LOGICAL" 0644 <"$key_gpg" || return 20
-    {
-        printf '%s\n' "$KERNEL_MANAGED_MARKER"
-        printf 'Types: deb\n'
-        printf 'URIs: %s\n' "$KERNEL_XANMOD_REPO_URL"
-        printf 'Suites: %s\n' "$KERNEL_OS_CODENAME"
-        printf 'Components: main\n'
-        printf 'Architectures: amd64\n'
-        printf 'Signed-By: %s\n' "$KERNEL_KEY_LOGICAL"
-    } | vps_cmd_atomic_write "$KERNEL_REPO_LOGICAL" 0644 || return 20
+    _kernel_render_xanmod_repository | vps_cmd_atomic_write "$KERNEL_REPO_LOGICAL" 0644 || return 20
 }
 
 kernel_write_state() {

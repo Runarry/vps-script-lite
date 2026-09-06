@@ -80,7 +80,15 @@ while (($# > 0)); do
 done
 [[ "${VPSCTL_TEST_CURL_FAIL:-0}" != 1 ]] || exit 77
 [[ -n "$destination" && -n "$url" ]] || exit 2
-cp -- "${VPSCTL_TEST_ASSET_DIR:?}/${url##*/}" "$destination"
+case "$url" in
+    https://run.NodeQuality.com | https://raw.githubusercontent.com/ibsgss/TcpQuality/main/runTcpQuality.sh)
+        cp -- "${VPSCTL_TEST_LOCALE_UPSTREAM:?}" "$destination"
+        ;;
+    https://github.com/Runarry/vps-script-lite/releases/*)
+        cp -- "${VPSCTL_TEST_ASSET_DIR:?}/${url##*/}" "$destination"
+        ;;
+    *) exit 2 ;;
+esac
 MOCK_CURL
 chmod 0755 "$MOCK_BIN/curl"
 export VPSCTL_TEST_ASSET_DIR="$RELEASE_DIR"
@@ -164,5 +172,67 @@ PATH="$MOCK_BIN:$PATH" bash "$RELEASE_DIR/vpsctl.sh" \
 [[ ! -e "$SELF_ROOT" ]] || fail 'purge retained self metadata'
 [[ -f "$ETC_MARKER" && -f "$STATE_MARKER" && -f "$LIBEXEC_MARKER" ]] ||
     fail 'purge removed protected feature data'
+
+# Run after the lazy-bundle assertions: each fresh install deliberately requests
+# the test bundle immediately. All upstream downloads remain local fixtures.
+export VPSCTL_TEST_LOCALE_UPSTREAM="$TEST_TEMP/locale-upstream.sh"
+export VPSCTL_TEST_LOCALE_TRACE="$TEST_TEMP/locale-trace"
+cat >"$VPSCTL_TEST_LOCALE_UPSTREAM" <<'LOCALE_UPSTREAM'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'LC_ALL=%s:%s\nLANG=%s:%s\nLC_CTYPE=%s:%s\n' \
+    "${LC_ALL+x}" "${LC_ALL-}" "${LANG+x}" "${LANG-}" \
+    "${LC_CTYPE+x}" "${LC_CTYPE-}" >"${VPSCTL_TEST_LOCALE_TRACE:?}"
+printf 'locale-spinner=\u28FC\u28E4\n'
+LOCALE_UPSTREAM
+
+locale_regression() {
+    local kind="$1" scenario="$2" launch output
+    local lang=C.UTF-8 ctype=C.UTF-8 ctype_state=x all_state=x all_value=''
+    local expected_trace="$TEST_TEMP/locale-expected" expected_spinner
+    local -a locale_env=(env -u LC_ALL -u LANG -u LC_CTYPE)
+
+    case "$scenario" in
+        unset) all_state='' ;;
+        empty) locale_env+=(LC_ALL=) ;;
+        utf8) all_value=C.UTF-8; locale_env+=(LC_ALL=C.UTF-8) ;;
+        lang) all_state=''; ctype_state=''; ctype='' ;;
+        ctype) all_state=''; lang=C ;;
+        c) all_value=C; locale_env+=(LC_ALL=C) ;;
+    esac
+    locale_env+=("LANG=$lang" "PATH=$MOCK_BIN:$PATH")
+    [[ "$ctype_state" != x ]] || locale_env+=("LC_CTYPE=$ctype")
+    printf 'LC_ALL=%s:%s\nLANG=x:%s\nLC_CTYPE=%s:%s\n' \
+        "$all_state" "$all_value" "$lang" "$ctype_state" "$ctype" >"$expected_trace"
+    # Use fixed UTF-8 octets, independent of the test runner's own locale.
+    expected_spinner="$(printf 'locale-spinner=\342\243\274\342\243\244')"
+    if [[ "$scenario" == c ]]; then
+        expected_spinner='locale-spinner=\u28FC\u28E4'
+    fi
+
+    rm -f -- "$ENTRY"
+    rm -rf -- "$INSTALL_ROOT" "$SELF_ROOT"
+    for launch in fresh installed; do
+        rm -f -- "$VPSCTL_TEST_LOCALE_TRACE"
+        if [[ "$launch" == fresh ]]; then
+            output="$("${locale_env[@]}" bash "$RELEASE_DIR/vpsctl.sh" \
+                --verified-manifest "$RELEASE_DIR/vpsctl-manifest.tsv" \
+                --quiet --yes test "$kind")" || fail "$kind/$scenario fresh launch failed"
+        else
+            output="$("${locale_env[@]}" "$ENTRY" --quiet --yes test "$kind")" ||
+                fail "$kind/$scenario installed launch failed"
+        fi
+        cmp -s -- "$expected_trace" "$VPSCTL_TEST_LOCALE_TRACE" ||
+            fail "$kind/$scenario/$launch changed the upstream locale environment"
+        printf '%s\n' "$output" | grep -Fx -- "$expected_spinner" >/dev/null ||
+            fail "$kind/$scenario/$launch changed upstream Unicode output bytes"
+    done
+}
+
+for locale_kind in nodequality tcpquality; do
+    for locale_scenario in unset empty utf8 lang ctype c; do
+        locale_regression "$locale_kind" "$locale_scenario"
+    done
+done
 
 printf 'PASS: distribution real integration test\n'
