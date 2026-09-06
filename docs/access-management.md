@@ -1,6 +1,6 @@
 # 访问管理
 
-`security access` 统一管理本机用户凭据、公钥和 SSH 远程访问。它不会把 SSH 加固当作一次覆盖写入：中断性变更必须先准备双端口候选配置，再由一个新建立且符合目标登录策略的 SSH 会话生成短期证明，最后才能提交。这样仍不能消除云安全组、上游 ACL、NAT 或错误人工操作造成的失联风险；执行前必须保留云厂商串行控制台、VNC、救援系统或其他带外入口。
+`security access` 统一管理本机用户凭据、公钥和 SSH 远程访问。root 与密码登录策略可在确认后直接应用，完成备份、配置校验、reload 和失败恢复。端口变更仍先准备双端口候选配置，再由新 SSH 会话生成短期证明后提交。执行前应保留当前会话及云厂商串行控制台、VNC、救援系统或其他带外入口；配置校验不能证明新的认证路径或外部网络可用。
 
 ## 1. 登记信息与支持边界
 
@@ -14,7 +14,7 @@
 | 能力要求 | `linux,init:systemd` |
 | 生命周期 | `experimental` |
 
-当前 SSH 服务编排只支持 systemd。项目其他功能对 OpenRC 的支持不代表本命令支持 OpenRC；在 OpenRC、SysV、WSL、容器或无法唯一确定 SSH systemd unit 的环境中，不应尝试 SSH 准备、提交、中止或恢复。功能脚本还会检查账户工具、OpenSSH 服务端、`sshd -t` 等动作实际需要的前置条件。
+当前 SSH 服务编排只支持 systemd。项目其他功能对 OpenRC 的支持不代表本命令支持 OpenRC；在 OpenRC、SysV、WSL、容器或无法唯一确定 SSH systemd unit 的环境中，不应尝试 SSH 应用、准备、提交、中止或恢复。功能脚本还会检查账户工具、OpenSSH 服务端、`sshd -t` 等动作实际需要的前置条件。
 
 本命令只管理本机账户、密码、`authorized_keys` 和自己的 SSH drop-in。它不管理云安全组、托管防火墙、路由器端口映射、堡垒机策略、PAM/LDAP/SSSD 身份源、SELinux 自定义端口标签或发行版之外的 SSH 守护进程。
 
@@ -26,6 +26,8 @@ vpsctl security access user add --name USER [--set-password]
 vpsctl security access password set --user USER
 vpsctl security access key add --user USER (--stdin | --public-key-file FILE)
 vpsctl security access key generate --user USER
+vpsctl security access ssh apply [--root-login allow|deny]
+    [--password-login allow|deny]
 vpsctl security access ssh prepare [--port PORT]
     [--root-login allow|deny]
     [--password-login allow|deny]
@@ -37,10 +39,11 @@ vpsctl security access ssh abort --transaction ID
 vpsctl security access restore --backup ID
 ```
 
-`ssh prepare` 至少需要一项待变更设置。全局参数必须写在领域之前，例如：
+`ssh apply` 至少指定一个登录策略，仅接受 `allow|deny`，未指定的策略保持原值；它不接受端口、防火墙或回退用户参数。`ssh prepare` 至少需要一项待变更设置，继续兼容登录策略事务。全局参数必须写在领域之前，例如：
 
 ```text
 bash bin/vpsctl --dry-run security access ssh prepare --port 2222 --firewall manual
+bash bin/vpsctl --yes --non-interactive security access ssh apply --password-login deny
 ```
 
 `--json` 只用于 `status`。密码不接受命令行明文参数；公钥从标准输入或明确文件读取。`--confirm-apply` 的值必须与事务 ID 相同，不能由全局 `--yes` 替代。
@@ -69,7 +72,17 @@ bash bin/vpsctl --dry-run security access ssh prepare --port 2222 --firewall man
 
 未确认保存而撤销新公钥时，已成功启用的公钥认证保留，避免影响其他已有密钥。启用公钥认证不会绕过 `PermitRootLogin` 等现有登录限制。
 
-## 4. SSH 变更事务
+## 4. SSH 登录策略与变更事务
+
+### 4.0 直接应用登录策略
+
+菜单「修改 SSH 设置」中的 root 登录与密码登录选项使用 `ssh apply`。操作展示目标策略并确认后，备份当前配置、校验候选配置、写入受管配置并 reload，再检查有效配置和监听状态；应用或验证失败会恢复原配置。当前端口与防火墙保持不变，不创建待提交事务、自动回滚定时任务或第二会话证明，也不询问回退管理员。存在活动 SSH 事务或不支持的复杂配置时拒绝应用。
+
+交互模式完成一次普通确认；`--yes` 可跳过该确认，非交互应用必须显式提供 `--yes`。`--dry-run` 只展示计划。成功后输出备份 ID，可用 `restore --backup ID` 恢复。禁用登录方式前应自行确认仍有可用的登录方式，并保留当前会话；本流程不会替操作者证明新的登录路径可用。
+
+`--password-login deny` 同时关闭密码和键盘交互认证；公钥认证尚未启用时拒绝该操作。`--password-login allow` 只开启密码认证，保留键盘交互认证原值。`--root-login allow|deny` 对应 `PermitRootLogin yes|no`，未指定的认证策略保持原值。
+
+端口修改继续使用以下事务流程。已有的登录策略 `ssh prepare` 调用和待处理事务仍可验证、提交或中止。
 
 ### 4.1 准备
 
@@ -112,7 +125,7 @@ bash bin/vpsctl security access ssh commit \
 
 提交只接受尚未消费且仍在 15 分钟期限内的匹配证明。它把候选配置转为最终配置，移除事务性旧端口和验证用设置，按事务记录收敛受管防火墙规则，运行 `sshd -t`，再 reload 并检查 SSH 服务。任何校验失败都必须报告备份和中止/恢复入口；不要在结果不明确时手工删除事务目录。
 
-端口未变化而只调整 root 或密码认证策略时，仍必须走新会话证明和提交，避免把“配置语法正确”误当作“保留了可用认证路径”。
+显式使用 `ssh prepare` 只调整 root 或密码认证策略时，仍须完成新会话证明和提交；候选端口就是当前端口，提交只应用最终策略，不关闭该端口。希望直接应用登录策略时使用 `ssh apply`。
 
 ### 4.4 中止
 
@@ -150,7 +163,7 @@ prepare 先放行候选端口；commit 在新会话证明通过后才移除本�
 
 `status [--user USER]` 显示 SSH 服务、受管配置、有效端口、实际监听、防火墙后端与显式端口规则、待处理事务；指定用户时附加账户和公钥状态。防火墙字段不把云安全组、默认策略或复杂规则集猜测成“可达”，外部可达性仍由第二会话验证。`--json` 输出同一状态的机器可读表示，但不得包含密码、私钥、公钥正文或一次性证明秘密。
 
-`restore --backup ID` 根据备份类型恢复一次 SSH 事务（受管配置、被迁移的 Port 来源文件和 vpsctl 自有防火墙状态）或一次 `authorized_keys` 修改。恢复是中断性动作，要求 root、强确认与当前内容哈希漂移检查；它不是账户数据库、密码哈希、全部公钥或外部防火墙的全机快照。存在待处理 SSH 事务时优先使用对应 `ssh abort`，不要用历史 restore 跨过活动事务。
+`restore --backup ID` 根据备份类型恢复一次直接登录策略应用（`ssh-policy`）、一次 SSH 事务（`ssh`：受管配置、被迁移的 Port 来源文件和 vpsctl 自有防火墙状态）或一次 `authorized_keys` 修改。直接策略备份恢复不调整端口或防火墙。恢复是中断性动作，要求 root、强确认与当前内容哈希漂移检查；它不是账户数据库、密码哈希、全部公钥或外部防火墙的全机快照。存在待处理 SSH 事务时优先使用对应 `ssh abort`，不要用历史 restore 跨过活动事务。
 
 建议恢复顺序：
 
@@ -168,8 +181,16 @@ prepare 先放行候选端口；commit 在新会话证明通过后才移除本�
 
 常见退出码遵循项目统一约定：`2` 参数错误，`3` 前置条件或依赖不满足，`4` 权限不足，`10` 配置或输入校验失败，`20` 外部命令或服务操作失败，`30` 部分完成或需要人工恢复，`130` 用户中断。发生 `30` 时应立即保留当前会话并按命令输出的事务/备份路径恢复。
 
-所有验证必须通过 `ssh host-vps-scripts` 在专用真实环境执行，不得在当前系统或 WSL 运行项目代码。至少覆盖：普通用户/root 权限、用户和密码失败后的部分完成、公钥去重与权限、dry-run 零写入、复杂配置写前拒绝、双端口监听、新非 root 会话证明、证明过期/复用/错误端口拒绝、commit 后旧端口收敛、abort、历史 restore、防火墙自动与手工模式，以及断开原会话后仍可从候选会话恢复。OpenRC 只验证入口明确拒绝，不作为支持平台验收。
+所有验证必须通过 `ssh host-vps-scripts` 在专用真实环境执行，不得在当前系统或 WSL 运行项目代码。至少覆盖：普通用户/root 权限、用户和密码失败后的部分完成、公钥去重与权限、dry-run 零写入、登录策略直接应用及失败恢复、策略备份恢复、复杂配置写前拒绝、双端口监听、新非 root 会话证明、证明过期/复用/错误端口拒绝、commit 后旧端口收敛、abort、历史 restore、防火墙自动与手工模式，以及断开原会话后仍可从候选会话恢复。OpenRC 只验证入口明确拒绝，不作为支持平台验收。
 
 仓库提供不纳入默认测试套件的显式真实验收脚本 `tests/integration/test-security-access-real.sh`。它只应在专用主机以 `VPSCTL_REAL_ACCESS_TEST=1` 启用，并要求调用方提供可登录管理员、私钥路径、该用户可读的项目副本和空闲候选端口；脚本在同一持续 root 会话内完成双端口 prepare、无 TTY 的 publickey 第二会话证明、root-only 证明权限检查、abort 与配置哈希复原检查。`VPSCTL_REAL_ACCESS_USER=root` 验证纯端口修改；非 root 管理员则验证禁用密码后的公钥登录，并需免密 sudo。
 
 `tests/integration/test-security-access-pubkey-real.sh` 使用相同开关，要求受管 drop-in 路径空闲且没有活动事务。它创建临时用户和密钥，将磁盘配置置为禁用公钥认证（此时不 reload），验证添加公钥后自动启用、真实 SSH 登录成功、其他有效配置保持不变及重复添加幂等；退出时移除测试配置和用户、reload 并核对配置恢复。
+
+`tests/integration/test-security-access-policy-real.sh` 通过 `VPSCTL_REAL_ACCESS_POLICY_TEST=1` 显式启用。它使用临时账户和密钥验证直接应用、真实登录允许/拒绝及备份恢复，再回归端口事务的验证、提交、中止与定时回滚。root 密钥登录使用真实 root，root 密码策略使用临时 UID 0 别名验证，不修改现有 root 密码。脚本先检查原定时器和期限均为 15 分钟，再仅对测试事务添加 3 秒运行时覆盖，验证 systemd 自动回滚；退出时恢复 SSH 配置，核对监听、防火墙和定时器，并移除临时账户。
+
+### 2026-09-06 登录策略直接应用验收
+
+全部检查通过 `ssh host-vps-scripts` 执行：SSH 访问单元测试、`test-vpsctl.sh` 入口集成测试，以及上述策略真实验收脚本。单元测试覆盖参数、一次确认菜单、取消、非交互、dry-run、复杂配置拒绝、配置校验与 reload 失败恢复、活动事务冲突和策略备份恢复。
+
+真实验收完成 24 次登录检查，覆盖 root/普通用户的密钥与密码允许或拒绝、组合策略及恢复；策略操作未改变端口或防火墙，也未创建事务或定时器。原端口事务的第二会话证明、提交、恢复、中止及 systemd 定时回滚均通过。结束时核对原 SSH 文件内容与权限、有效配置、监听、防火墙、root 密码摘要和定时器均恢复，临时账户已移除。

@@ -155,7 +155,7 @@ access_sshd_validate_standard() {
     fi
     sshd="$(access_sshd_binary)" || return $?
     "$sshd" -t -f "$ACCESS_MAIN_CONFIG" || {
-        vps_cmd_error "当前 sshd_config 未通过 sshd -t；拒绝开始事务"
+        vps_cmd_error "当前 sshd_config 未通过 sshd -t；拒绝修改"
         return 10
     }
 }
@@ -583,11 +583,13 @@ access_sshd_print_recovery() {
     done
     printf -v command '%q -t -f %q && systemctl reload %q' "$(access_sshd_binary 2>/dev/null || printf sshd)" "$ACCESS_MAIN_CONFIG" "$ACCESS_SSH_SERVICE"
     vps_cmd_error "$command"
-    vps_cmd_error "防火墙只可按 vpsctl 标记恢复；不要按端口删除未知来源规则。"
+    if [[ "$(access_kv_get "$manifest" kind 2>/dev/null || true)" != ssh-policy ]]; then
+        vps_cmd_error "防火墙只可按 vpsctl 标记恢复；不要按端口删除未知来源规则。"
+    fi
 }
 
 access_sshd_make_backup() {
-    local backup_id="$1" backup_dir="$2" tx_id="$3" old_port="$4" new_port="$5"
+    local backup_id="$1" backup_dir="$2" tx_id="$3" old_port="$4" new_port="$5" kind="${6:-ssh}"
     local present=0 config_sha='' tmp file line keyword count=0 logical normalized_tmp
     local -a port_files=() port_modes=() port_uids=() port_gids=() port_hashes=() port_managed_hashes=()
 
@@ -599,11 +601,12 @@ access_sshd_make_backup() {
         present=1
         config_sha="$(access_sha256_file "$ACCESS_CONFIG")" || return $?
     fi
-    if [[ -f "$ACCESS_FW_STATE" ]]; then
+    if [[ "$kind" == ssh && -f "$ACCESS_FW_STATE" ]]; then
         cp -p -- "$ACCESS_FW_STATE" "$backup_dir/firewall.state" || return 20
         chmod 0600 -- "$backup_dir/firewall.state" || return 20
     fi
     for file in "$ACCESS_MAIN_CONFIG" "$ACCESS_SSH_CONFIG_DIR"/*.conf; do
+        [[ "$kind" == ssh ]] || break
         [[ -f "$file" && ! -L "$file" && "$file" != "$ACCESS_CONFIG" ]] || continue
         while IFS= read -r line; do
             keyword="${line%%[[:space:]]*}"
@@ -639,7 +642,7 @@ access_sshd_make_backup() {
     tmp="$(mktemp "${backup_dir}/.manifest.XXXXXX")" || return 20
     {
         access_kv_put schema_version 1
-        access_kv_put kind ssh
+        access_kv_put kind "$kind"
         access_kv_put backup_id "$backup_id"
         access_kv_put transaction_id "$tx_id"
         access_kv_put created_epoch "$(date +%s)"
@@ -839,6 +842,115 @@ access_ssh_prepare_rollback() {
         access_sshd_print_recovery "$backup_dir"
         return 1
     fi
+}
+
+access_ssh_apply() {
+    local requested_root="$1" requested_password="$2" port root_value password_value kbd_value pubkey_value expose_value
+    local candidate backup_id backup_dir applied_sha status=0 rollback_failed=0 prompt=''
+
+    vps_cmd_require_root || return $?
+    [[ -n "$requested_root" || -n "$requested_password" ]] || return 2
+    case "$requested_root" in '' | allow | deny) ;; *) return 2 ;; esac
+    case "$requested_password" in '' | allow | deny) ;; *) return 2 ;; esac
+    vps_cmd_ensure_tools security-access sshd ss systemctl || return $?
+    if [[ "${VPSCTL_DRY_RUN:-0}" == 1 && "${VPS_CMD_DEPENDENCIES_PLANNED:-0}" == 1 ]]; then
+        vps_cmd_warning "演练已列出 SSH 依赖；安装后需重新运行才能校验配置"
+        return 3
+    fi
+    case "$requested_root" in
+        allow) prompt+='允许 root SSH 登录。' ;;
+        deny) prompt+='禁用 root SSH 登录后，新连接需使用非 root 账户。' ;;
+    esac
+    case "$requested_password" in
+        allow) prompt+='允许 SSH 密码登录。' ;;
+        deny) prompt+='禁用密码登录后，新连接需使用 SSH 密钥。' ;;
+    esac
+    vps_cmd_confirm "${prompt}立即应用？" || return $?
+    vps_cmd_lock security-access || return $?
+    if [[ -n "$(access_active_transaction 2>/dev/null || true)" ]]; then
+        vps_cmd_unlock
+        vps_cmd_error "已有未完成访问事务；请先 commit 或 abort"
+        return 3
+    fi
+    # Read and validate under the same lock used to install the policy.
+    access_sshd_validate_standard || status=$?
+    if ((status == 0)); then
+        port="$(access_sshd_current_port)" &&
+            root_value="$(access_sshd_effective_value permitrootlogin)" &&
+            password_value="$(access_sshd_effective_value passwordauthentication)" &&
+            kbd_value="$(access_sshd_effective_value kbdinteractiveauthentication)" &&
+            pubkey_value="$(access_sshd_effective_value pubkeyauthentication)" &&
+            expose_value="$(access_sshd_effective_value exposeauthinfo)" || status=$?
+    fi
+    if ((status != 0)); then
+        vps_cmd_unlock
+        return "$status"
+    fi
+    [[ "$requested_root" != allow ]] || root_value=yes
+    [[ "$requested_root" != deny ]] || root_value=no
+    if [[ "$requested_password" == deny ]]; then
+        if [[ "$pubkey_value" != yes ]]; then
+            vps_cmd_unlock
+            vps_cmd_error "不能在 PubkeyAuthentication 未启用时禁用密码登录"
+            return 3
+        fi
+        password_value=no
+        kbd_value=no
+    elif [[ "$requested_password" == allow ]]; then
+        password_value=yes
+    fi
+    candidate="$(mktemp)" || {
+        vps_cmd_unlock
+        return 20
+    }
+    # Keep Port directives at their original sources; policy changes do not own them.
+    access_sshd_render "$port" "$port" "$root_value" "$password_value" "$kbd_value" "$pubkey_value" "$expose_value" 0 |
+        sed '/^Port /d' >"$candidate" || status=20
+    if [[ -f "$ACCESS_CONFIG" ]]; then
+        access_sshd_active_lines "$ACCESS_CONFIG" | awk 'tolower($1) == "port" {print}' >>"$candidate" || status=20
+    fi
+    ((status != 0)) || access_sshd_validate_candidate "$candidate" || status=$?
+    if ((status != 0)) || [[ "${VPSCTL_DRY_RUN:-0}" == 1 ]]; then
+        rm -f -- "$candidate"
+        vps_cmd_unlock
+        ((status == 0)) || return "$status"
+        vps_cmd_info "演练完成：将备份并直接应用 root=$root_value、密码=$password_value、交互认证=$kbd_value；端口保持 $port，本次未写入配置或备份"
+        return 0
+    fi
+    access_prepare_layout &&
+        backup_id="$(access_new_id bak)" &&
+        backup_dir="$(access_backup_path "$backup_id")" &&
+        access_sshd_make_backup "$backup_id" "$backup_dir" '' "$port" "$port" ssh-policy || status=$?
+    if ((status != 0)); then
+        rm -f -- "$candidate"
+        vps_cmd_unlock
+        return "$status"
+    fi
+    access_sshd_install_candidate "$candidate" || status=$?
+    ((status != 0)) || access_sshd_validate_standard || status=$?
+    ((status != 0)) || access_sshd_assert_effective "$port" "$port" "$root_value" "$password_value" "$kbd_value" "$pubkey_value" "$expose_value" 0 || status=$?
+    ((status != 0)) || access_sshd_reload || status=$?
+    ((status != 0)) || access_sshd_verify_ports "$port" "$port" 0 || status=$?
+    if ((status == 0)); then
+        applied_sha="$(access_sha256_file "$ACCESS_CONFIG")" &&
+            access_sshd_backup_mark "$backup_dir" committed "$applied_sha" || status=$?
+    fi
+    rm -f -- "$candidate"
+    if ((status != 0)); then
+        access_sshd_restore_backup_config "$backup_dir" || rollback_failed=1
+        access_sshd_reload || rollback_failed=1
+        vps_cmd_unlock
+        if ((rollback_failed)); then
+            access_sshd_print_recovery "$backup_dir"
+            return 30
+        fi
+        vps_cmd_error "SSH 登录策略应用失败，已恢复原配置"
+        return "$status"
+    fi
+    vps_cmd_unlock
+    vps_cmd_success "SSH 登录策略已生效：root=$root_value，密码=$password_value，交互认证=$kbd_value；端口 $port"
+    vps_cmd_info "恢复备份：vpsctl security access restore --backup $backup_id"
+    printf '%s\n' "$backup_id"
 }
 
 access_ssh_prepare() {
@@ -1062,8 +1174,12 @@ access_ssh_prepare() {
         return 30
     fi
     vps_cmd_unlock
-    vps_cmd_success "SSH 访问事务已准备；旧端口 $old_port 与新端口 $new_port 将并行监听 15 分钟"
-    vps_cmd_warning "请用目标策略允许的账户${fallback_user:+（$fallback_user）}建立第二个 SSH 会话连接新端口并运行：vpsctl security access session verify --transaction $tx_id"
+    if [[ "$old_port" == "$new_port" ]]; then
+        vps_cmd_success "SSH 访问事务已准备；端口保持 $new_port，请在 15 分钟内验证并提交"
+    else
+        vps_cmd_success "SSH 访问事务已准备；旧端口 $old_port 与新端口 $new_port 将并行监听 15 分钟"
+    fi
+    vps_cmd_warning "请用目标策略允许的账户${fallback_user:+（$fallback_user）}建立第二个 SSH 会话连接候选端口 $new_port 并运行：vpsctl security access session verify --transaction $tx_id"
     printf '%s\n' "$tx_id"
 }
 
@@ -1541,7 +1657,7 @@ access_ssh_abort() {
 }
 
 access_ssh_restore() {
-    local backup_id="$1" backup_dir manifest lifecycle applied current current_copy failed=0
+    local backup_id="$1" backup_dir manifest lifecycle applied current current_copy kind prompt failed=0
     local previous_backend='' previous_port='' previous_mode='' current_backend='' current_port='' current_mode=''
 
     vps_cmd_require_root || return $?
@@ -1556,8 +1672,9 @@ access_ssh_restore() {
         return 3
     }
     lifecycle="$(access_kv_get "$manifest" lifecycle)" || return 30
+    kind="$(access_kv_get "$manifest" kind)" || return 30
     [[ "$lifecycle" == committed ]] || {
-        vps_cmd_error "只允许恢复已提交事务的备份（当前：$lifecycle）"
+        vps_cmd_error "只允许恢复已生效配置的备份（当前：$lifecycle）"
         return 3
     }
     applied="$(access_kv_get "$manifest" applied_sha256)" || return 30
@@ -1571,10 +1688,12 @@ access_ssh_restore() {
         return 30
     }
     if [[ "${VPSCTL_DRY_RUN:-0}" == 1 ]]; then
-        vps_cmd_info "演练：已通过漂移检查，将恢复 SSH 备份 $backup_id 并仅调整 vpsctl 自有防火墙规则"
+        vps_cmd_info "演练：已通过漂移检查，将恢复 SSH 备份 $backup_id"
         return 0
     fi
-    vps_cmd_confirm_token "恢复会替换当前 SSH 访问配置并调整防火墙" "$backup_id" || {
+    prompt='恢复会替换当前 SSH 访问配置并调整防火墙'
+    [[ "$kind" != ssh-policy ]] || prompt='恢复会替换当前 SSH 登录策略'
+    vps_cmd_confirm_token "$prompt" "$backup_id" || {
         vps_cmd_error "restore 必须在 TTY 中输入备份 ID 强确认；--yes 不会绕过"
         return 3
     }
@@ -1619,6 +1738,13 @@ access_ssh_restore() {
         return 30
     fi
     rm -f -- "$current_copy"
+    if [[ "$kind" == ssh-policy ]]; then
+        access_sshd_backup_mark "$backup_dir" restored "$applied" || failed=1
+        vps_cmd_unlock
+        ((failed == 0)) || return 30
+        vps_cmd_success "已恢复 SSH 登录策略备份 $backup_id"
+        return 0
+    fi
     access_firewall_load_managed
     current_backend="$ACCESS_FW_PREVIOUS_BACKEND"
     current_port="$ACCESS_FW_PREVIOUS_PORT"

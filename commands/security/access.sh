@@ -34,6 +34,8 @@ access_usage() {
   access.sh [global-options] password set --user USER
   access.sh [global-options] key add --user USER (--stdin|--public-key-file FILE)
   access.sh [global-options] key generate --user USER
+  access.sh [global-options] ssh apply [--root-login allow|deny]
+      [--password-login allow|deny]
   access.sh [global-options] ssh prepare [--port PORT] [--root-login allow|deny]
       [--password-login allow|deny] [--fallback-user USER]
       [--firewall auto|manual]
@@ -57,9 +59,14 @@ access_usage() {
   添加或生成密钥后自动启用 PubkeyAuthentication，并验证配置和 reload 结果。
   保留端口、密码认证和 root 登录策略；启用失败时恢复配置并撤销本次新增公钥。
 
-安全事务：
+登录策略：
+  apply 至少指定一个登录策略；确认后备份、校验、直接应用并 reload。
+  不修改端口或防火墙，不要求回退用户或第二会话证明；失败自动恢复。
+  非交互应用需要 --yes；请保留当前会话与可用的控制台入口。
+
+端口变更与兼容事务：
   prepare 先验证标准 sshd_config，创建受管 drop-in，并在端口变更时让旧、新
-  端口并行监听。必须在 15 分钟内从新端口建立第二个 SSH 会话，运行
+  端口并行监听。必须在 15 分钟内从候选端口建立第二个 SSH 会话，运行
   session verify，再以事务 ID 显式 commit；否则 systemd 定时任务自动 abort。
   密码登录将被禁用时，证明会话必须使用 publickey。复杂 Include、Match、
   多端口或条件访问配置会被拒绝，不会猜测合并。
@@ -373,12 +380,51 @@ access_dispatch_key() {
 
 access_dispatch_ssh() {
     local action="${1:-}" port='' root_login='' password_login='' fallback='' firewall='' firewall_set=0 specified=0 tx_id='' confirm=''
-    case "$action" in prepare | commit | abort) ;; *)
-        vps_cmd_error "ssh 需要 prepare|commit|abort"
+    case "$action" in apply | prepare | commit | abort) ;; *)
+        vps_cmd_error "ssh 需要 apply|prepare|commit|abort"
         return 2
         ;;
     esac
     shift
+    if [[ "$action" == apply ]]; then
+        while (($# > 0)); do
+            case "$1" in
+                --root-login | --password-login)
+                    access_parse_required_value "$@" || return $?
+                    [[ "$2" == allow || "$2" == deny ]] || {
+                        vps_cmd_error "$1 仅接受 allow|deny"
+                        return 2
+                    }
+                    if [[ "$1" == --root-login ]]; then
+                        [[ -z "$root_login" ]] || {
+                            vps_cmd_error "重复指定 --root-login"
+                            return 2
+                        }
+                        root_login="$2"
+                    else
+                        [[ -z "$password_login" ]] || {
+                            vps_cmd_error "重复指定 --password-login"
+                            return 2
+                        }
+                        password_login="$2"
+                    fi
+                    specified=$((specified + 1))
+                    shift
+                    ;;
+                *)
+                    vps_cmd_error "未知 ssh apply 选项：$1"
+                    return 2
+                    ;;
+            esac
+            shift
+        done
+        ((specified > 0)) || {
+            vps_cmd_error "ssh apply 至少需要一个登录策略选项"
+            return 2
+        }
+        access_ssh_apply "$root_login" "$password_login"
+        return
+    fi
     if [[ "$action" == prepare ]]; then
         while (($# > 0)); do
             case "$1" in
@@ -587,7 +633,7 @@ access_restore() {
     }
     kind="$(access_kv_get "$manifest" kind 2>/dev/null || true)"
     case "$kind" in
-        ssh) access_ssh_restore "$backup_id" ;;
+        ssh | ssh-policy) access_ssh_restore "$backup_id" ;;
         authorized_keys) access_key_restore "$backup_id" ;;
         *)
             vps_cmd_error "未知或损坏的备份类型：${kind:-缺失}"
@@ -601,8 +647,8 @@ access_menu() {
     while true; do
         choice="$(vps_cmd_prompt_select "SSH 访问安全" status \
             status "查看状态" user "创建管理员用户" password "设置用户密码" \
-            key "添加或生成 SSH 密钥" ssh "准备 SSH 访问变更" \
-            transaction "提交或中止活动事务" restore "恢复已提交备份" quit "退出")" || {
+            key "添加或生成 SSH 密钥" ssh "修改 SSH 设置" \
+            transaction "提交或中止活动事务" restore "恢复历史备份" quit "退出")" || {
             rc=$?
             [[ "$rc" == 130 ]] && return "$status"
             return "$rc"
@@ -663,6 +709,10 @@ access_menu() {
                     root) root_mode="$(vps_cmd_prompt_select "root SSH 登录" deny deny "禁用" allow "允许")" || continue ;;
                     password) password_mode="$(vps_cmd_prompt_select "SSH 密码登录" deny deny "禁用" allow "允许")" || continue ;;
                 esac
+                if [[ "$action" != port ]]; then
+                    access_ssh_apply "$root_mode" "$password_mode" || status=$?
+                    continue
+                fi
                 user="$(vps_cmd_prompt_value "fallback 管理员用户（可留空）" '')" || continue
                 [[ -z "$user" ]] || access_validate_user_name "$user" || {
                     vps_cmd_error "无效 fallback 用户"
@@ -678,7 +728,7 @@ access_menu() {
                 }
                 action="$(vps_cmd_prompt_select "事务 $tx" abort abort "中止并回滚" commit "提交（需已有会话证明）")" || continue
                 if [[ "$action" == commit ]]; then
-                    vps_cmd_confirm_token "提交会关闭旧 SSH 端口" "$tx" || continue
+                    vps_cmd_confirm_token "提交将应用最终 SSH 访问配置" "$tx" || continue
                     access_ssh_commit "$tx" "$tx" || status=$?
                 else
                     access_ssh_abort "$tx" || status=$?

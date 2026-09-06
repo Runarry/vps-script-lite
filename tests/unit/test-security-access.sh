@@ -113,6 +113,11 @@ printf "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGenerated vpsctl-generated\n" >"${k
 
 make_mock sshd '
 printf "%s\n" "$*" >>"${VPSCTL_SYSTEM_ROOT}/run/sshd.log"
+if [[ " $* " == *" -t "* && -e "${VPSCTL_SYSTEM_ROOT}/run/fail-policy-validation-once" ]] &&
+    grep -Eq "^PermitRootLogin[[:space:]]+no$" "${VPSCTL_SYSTEM_ROOT}/etc/ssh/sshd_config.d/00-vpsctl-access.conf" 2>/dev/null; then
+    rm -f -- "${VPSCTL_SYSTEM_ROOT}/run/fail-policy-validation-once"
+    exit 1
+fi
 if [[ " $* " == *" -t "* && -e "${VPSCTL_SYSTEM_ROOT}/run/fail-validation-once" ]] &&
     grep -Eq "^PubkeyAuthentication[[:space:]]+yes$" "${VPSCTL_SYSTEM_ROOT}/etc/ssh/sshd_config.d/00-vpsctl-access.conf" 2>/dev/null; then
     rm -f -- "${VPSCTL_SYSTEM_ROOT}/run/fail-validation-once"
@@ -963,7 +968,141 @@ test_proof_and_configuration_integrity() {
     assert_status 0 "abort after configuration drift" run_access ssh abort --transaction "$tx"
 }
 
+test_direct_ssh_policy_apply() {
+    local managed baseline backup manifest command output marker expected tx state_sha confirmations
+    local status=0
+    managed="$TEST_SYSTEM_ROOT/etc/ssh/sshd_config.d/00-vpsctl-access.conf"
+
+    reset_system
+    assert_status 2 "direct apply requires a policy" run_access ssh apply
+    assert_status 2 "direct apply rejects invalid root policy" run_access ssh apply --root-login maybe
+    assert_status 2 "direct apply rejects invalid password policy" run_access ssh apply --password-login maybe
+    assert_status 2 "direct apply rejects duplicate root policy" run_access ssh apply --root-login allow --root-login deny
+    assert_status 2 "direct apply rejects duplicate password policy" run_access ssh apply --password-login allow --password-login deny
+    assert_status 2 "direct apply rejects empty root policy" run_access ssh apply --root-login ''
+    assert_status 2 "direct apply rejects empty password policy" run_access ssh apply --password-login ''
+    assert_status 2 "direct apply rejects missing root value" run_access ssh apply --root-login
+    assert_status 2 "direct apply rejects missing password value" run_access ssh apply --password-login
+    assert_status 2 "direct apply rejects port changes" run_access ssh apply --root-login deny --port 2222
+    assert_status 2 "direct apply rejects firewall changes" run_access ssh apply --root-login deny --firewall manual
+    assert_status 2 "direct apply rejects fallback user" run_access ssh apply --root-login deny --fallback-user alice
+    assert_status 2 "direct apply rejects transaction ID" run_access ssh apply --root-login deny --transaction tx-20000101T000000Z-0000000000000000
+    assert_status 3 "direct apply requires noninteractive confirmation" env VPSCTL_ASSUME_YES=0 \
+        bash "$TEST_ROOT/commands/security/access.sh" --no-color --non-interactive ssh apply --root-login deny
+    [[ ! -e "$managed" && ! -e "$TEST_SYSTEM_ROOT/var/lib/vpsctl/backups" ]] || fail "unconfirmed policy wrote config or backups"
+
+    assert_status 0 "direct apply dry-run needs no confirmation or fallback" env VPSCTL_ASSUME_YES=0 \
+        bash "$TEST_ROOT/commands/security/access.sh" --no-color --non-interactive --dry-run \
+        ssh apply --root-login deny --password-login deny
+    [[ ! -e "$managed" && ! -e "$TEST_SYSTEM_ROOT/var/lib/vpsctl" ]] || fail "policy dry-run wrote config or persistent state"
+    [[ ! -e "$TEST_SYSTEM_ROOT/run/systemctl.log" && ! -e "$TEST_SYSTEM_ROOT/run/systemd-run.log" ]] || fail "policy dry-run reloaded SSH or scheduled rollback"
+
+    reset_system
+    command -v script >/dev/null 2>&1 || fail "policy cancellation tests require util-linux script"
+    baseline="$(sha256sum "$TEST_SYSTEM_ROOT/etc/ssh/sshd_config")"
+    printf -v command 'env VPSCTL_ASSUME_YES=0 VPSCTL_NON_INTERACTIVE=0 bash %q --no-color ssh apply --root-login deny' "$TEST_ROOT/commands/security/access.sh"
+    output="$(printf 'n\n' | script -q -e -c "$command" /dev/null 2>&1)" || status=$?
+    [[ "$status" == 1 ]] || fail "cancel direct policy apply expected status 1, got $status: $output"
+    status=0
+    assert_equal "$baseline" "$(sha256sum "$TEST_SYSTEM_ROOT/etc/ssh/sshd_config")" "cancelled policy preserves main config"
+    [[ ! -e "$managed" && ! -e "$TEST_SYSTEM_ROOT/var/lib/vpsctl" && ! -e "$TEST_SYSTEM_ROOT/run/systemctl.log" ]] || fail "cancelled policy wrote config, backup state or reloaded SSH"
+
+    reset_system
+    printf -v command 'env VPSCTL_NON_INTERACTIVE=0 VPSCTL_ASSUME_YES=0 VPSCTL_QUIET=0 bash %q --no-color' "$TEST_ROOT/commands/security/access.sh"
+    output="$(printf '5\n3\n1\ny\n8\n' | script -q -e -c "$command" /dev/null 2>&1)" || status=$?
+    [[ "$status" == 0 ]] || fail "menu password deny failed with $status: $output"
+    assert_file_contains "$managed" 'PasswordAuthentication no' "menu immediately disables password login"
+    assert_file_contains "$managed" 'KbdInteractiveAuthentication no' "menu password deny disables keyboard-interactive login"
+    assert_file_contains "$TEST_SYSTEM_ROOT/run/systemctl.log" 'reload ssh.service' "menu applies policy with SSH reload"
+    confirmations="$(grep -Fo '输入 y 确认' <<<"$output" | grep -c . || true)"
+    assert_equal 1 "$confirmations" "menu policy change asks for exactly one confirmation"
+    if grep -Eq 'fallback|session verify|事务 ID|会话证明' <<<"$output"; then
+        fail "menu policy change requested fallback or transaction verification: $output"
+    fi
+    [[ ! -e "$TEST_SYSTEM_ROOT/var/lib/vpsctl/security/access/active" && ! -e "$TEST_SYSTEM_ROOT/run/systemd-run.log" ]] || fail "menu policy change created a pending transaction or rollback timer"
+
+    reset_system
+    # Even multiple active firewalls do not affect a policy-only operation.
+    : >"$TEST_SYSTEM_ROOT/run/ufw-active"
+    : >"$TEST_SYSTEM_ROOT/run/firewalld-active"
+    printf '2022\n' >"$TEST_SYSTEM_ROOT/run/ufw-user-port"
+    printf '2022\n' >"$TEST_SYSTEM_ROOT/run/firewalld-user-runtime"
+    baseline="$(sshd -T | grep -Ev '^(permitrootlogin|passwordauthentication|kbdinteractiveauthentication) ' | sort)"
+    assert_status 0 "direct deny applies without fallback user or session proof" run_access --yes ssh apply --root-login deny --password-login deny
+    assert_file_contains "$managed" 'PermitRootLogin no' "direct root login deny"
+    assert_file_contains "$managed" 'PasswordAuthentication no' "direct password login deny"
+    assert_file_contains "$managed" 'KbdInteractiveAuthentication no' "password deny disables keyboard-interactive login"
+    assert_equal "$baseline" "$(sshd -T | grep -Ev '^(permitrootlogin|passwordauthentication|kbdinteractiveauthentication) ' | sort)" "direct deny preserves unrelated SSH settings"
+    assert_file_contains "$TEST_SYSTEM_ROOT/run/systemctl.log" 'reload ssh.service' "direct apply reloads SSH"
+    [[ ! -e "$TEST_SYSTEM_ROOT/var/lib/vpsctl/security/access/active" && ! -e "$TEST_SYSTEM_ROOT/run/systemd-run.log" ]] || fail "direct apply created a pending transaction or rollback timer"
+    [[ ! -e "$TEST_SYSTEM_ROOT/run/ufw-vpsctl-port" && ! -e "$TEST_SYSTEM_ROOT/run/firewalld.log" && ! -e "$TEST_SYSTEM_ROOT/run/ufw-delete.log" ]] || fail "direct apply modified firewall rules"
+    assert_file_contains "$TEST_SYSTEM_ROOT/run/ufw-user-port" '2022' "direct apply preserves UFW rule"
+    assert_file_contains "$TEST_SYSTEM_ROOT/run/firewalld-user-runtime" '2022' "direct apply preserves firewalld rule"
+    backup="$(extract_id bak "$ACCESS_TEST_OUTPUT")"
+    [[ -n "$backup" ]] || fail "direct apply output omitted backup ID"
+    manifest="$TEST_SYSTEM_ROOT/var/lib/vpsctl/backups/security/access/$backup/manifest"
+    assert_file_contains "$manifest" $'kind\tssh-policy' "direct apply backup kind"
+    assert_file_contains "$manifest" $'lifecycle\tcommitted' "direct apply committed backup"
+    baseline="$(sha256sum "$managed" "$manifest")"
+    assert_status 0 "direct policy backup restore dry-run" run_access --dry-run restore --backup "$backup"
+    assert_equal "$baseline" "$(sha256sum "$managed" "$manifest")" "policy restore dry-run preserves config and manifest"
+    command -v script >/dev/null 2>&1 || fail "policy restore tests require util-linux script"
+    printf -v command 'env VPSCTL_NON_INTERACTIVE=0 bash %q --no-color restore --backup %q' "$TEST_ROOT/commands/security/access.sh" "$backup"
+    output="$(printf '%s\n' "$backup" | script -q -e -c "$command" /dev/null 2>&1)" || status=$?
+    [[ "$status" == 0 ]] || fail "restore direct policy backup failed with $status: $output"
+    [[ ! -e "$managed" ]] || fail "policy restore did not reinstate absent managed config"
+    assert_file_contains "$manifest" $'lifecycle\trestored' "restored direct policy backup"
+
+    reset_system
+    printf 'port 22\npermitrootlogin prohibit-password\npasswordauthentication no\nkbdinteractiveauthentication no\npubkeyauthentication yes\nexposeauthinfo no\n' \
+        >"$TEST_SYSTEM_ROOT/run/sshd-effective"
+    baseline="$(sshd -T | grep -v '^passwordauthentication ' | sort)"
+    assert_status 0 "direct password allow preserves root and keyboard-interactive policies" run_access --yes ssh apply --password-login allow
+    assert_file_contains "$managed" 'PasswordAuthentication yes' "direct password allow"
+    assert_equal "$baseline" "$(sshd -T | grep -v '^passwordauthentication ' | sort)" "password allow preserves unrequested settings and port"
+    baseline="$(sshd -T | grep -v '^permitrootlogin ' | sort)"
+    assert_status 0 "direct root allow preserves password policy" run_access --yes ssh apply --root-login allow
+    assert_file_contains "$managed" 'PermitRootLogin yes' "direct root allow"
+    assert_equal "$baseline" "$(sshd -T | grep -v '^permitrootlogin ' | sort)" "root allow preserves unrequested settings"
+
+    reset_system
+    printf 'port 2222\n' >>"$TEST_SYSTEM_ROOT/run/sshd-effective"
+    baseline="$(sha256sum "$TEST_SYSTEM_ROOT/etc/ssh/sshd_config")"
+    assert_status 10 "direct apply rejects multiple effective SSH ports" run_access --yes ssh apply --root-login deny
+    assert_equal "$baseline" "$(sha256sum "$TEST_SYSTEM_ROOT/etc/ssh/sshd_config")" "multiport rejection preserves main config"
+    [[ ! -e "$managed" && ! -e "$TEST_SYSTEM_ROOT/var/lib/vpsctl/backups" && ! -e "$TEST_SYSTEM_ROOT/run/systemctl.log" ]] || fail "multiport rejection wrote config, backups or reloaded SSH"
+
+    reset_system
+    sed -i 's/pubkeyauthentication yes/pubkeyauthentication no/' "$TEST_SYSTEM_ROOT/run/sshd-effective"
+    assert_status 3 "direct password deny refuses disabled public-key authentication" run_access --yes ssh apply --password-login deny
+    [[ ! -e "$managed" && ! -e "$TEST_SYSTEM_ROOT/run/systemctl.log" ]] || fail "disabled-publickey refusal changed SSH"
+
+    for marker in fail-policy-validation-once fail-reload-once; do
+        reset_system
+        printf '# Managed by vpsctl security access.\n# restore exact contents\nPort 2200\nPermitRootLogin yes\nPasswordAuthentication yes\n' >"$managed"
+        baseline="$(sha256sum "$managed")"
+        : >"$TEST_SYSTEM_ROOT/run/$marker"
+        expected=20
+        [[ "$marker" != fail-policy-validation-once ]] || expected=10
+        assert_status "$expected" "direct apply propagates $marker" run_access --yes ssh apply --root-login deny
+        [[ ! -e "$TEST_SYSTEM_ROOT/run/$marker" ]] || fail "direct apply did not exercise $marker"
+        assert_equal "$baseline" "$(sha256sum "$managed")" "direct apply $marker restores prior config exactly"
+        [[ ! -e "$TEST_SYSTEM_ROOT/var/lib/vpsctl/security/access/active" ]] || fail "failed direct apply left an active transaction"
+    done
+
+    reset_system
+    prepare_transaction 2255
+    tx="$ACCESS_TEST_TX"
+    baseline="$(sha256sum "$managed")"
+    state_sha="$(sha256sum "$TEST_SYSTEM_ROOT/var/lib/vpsctl/security/access/transactions/$tx/state")"
+    assert_status 3 "active transaction blocks direct policy apply" run_access --yes ssh apply --root-login deny
+    assert_equal "$baseline" "$(sha256sum "$managed")" "blocked direct apply preserves managed config"
+    assert_equal "$state_sha" "$(sha256sum "$TEST_SYSTEM_ROOT/var/lib/vpsctl/security/access/transactions/$tx/state")" "blocked direct apply preserves transaction"
+    assert_status 0 "abort after blocked direct apply" run_access ssh abort --transaction "$tx"
+}
+
 test_cli_validation_and_status
+test_direct_ssh_policy_apply
 test_target_login_policy
 test_user_password_and_keys
 test_key_pubkey_enable

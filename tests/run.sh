@@ -54,6 +54,7 @@ for syntax_file in \
     "${TEST_ROOT}/tests/integration/test-service-proxy-relay-real.sh" \
     "${TEST_ROOT}/tests/integration/test-security-fail2ban-real.sh" \
     "${TEST_ROOT}/tests/integration/test-security-access-pubkey-real.sh" \
+    "${TEST_ROOT}/tests/integration/test-security-access-policy-real.sh" \
     "${TEST_ROOT}/tests/integration/test-security-tls-real.sh" \
     "${TEST_ROOT}/tests/integration/test-vpsctl.sh"; do
     bash -n "$syntax_file"
