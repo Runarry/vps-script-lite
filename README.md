@@ -82,6 +82,8 @@ bash "$tmp_dir/vpsctl.sh" --verified-manifest "$tmp_dir/vpsctl-manifest.tsv"
 - 当前版本指针：`/usr/local/lib/vpsctl/current`
 - 安装器、自更新和分发缓存元数据：`/var/lib/vpsctl/self/`
 
+`self update` 跨版本更新完整提交成功后，会删除所有可验证归属的受管历史 release，仅保留当前版本，不保留自动回退版本；需要回退时重新安装指定 Release。新版本提交完成前发生失败时仍保留原版本；若提交后历史版本清理失败，新版本保持激活，命令报错并返回 `30`，下次成功跨版本更新会再次尝试清理。同版本更新不执行清理，临时目录、不受管或异常条目以及功能状态与备份均不在此次清理范围内。
+
 `core` 常驻安装；`network`、`system`、`security`、`service` 与 `test` 按领域拆分。首次调用某领域时，只从当前分发版本对应的同一个 GitHub Release 下载该领域资产，按 `vpsctl-manifest.tsv` 的 SHA-256 校验后缓存；不同版本的 core 与领域资产不得混用。
 
 如果旧版升级后启动报 `current/bin/vpsctl: Permission denied`，可能是 core 入口缺少执行位。可在 root shell 中恢复并检查：

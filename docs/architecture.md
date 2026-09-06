@@ -137,7 +137,9 @@ bundle<TAB>service<TAB>vpsctl-service-0.8.5.tar.gz<TAB>SHA256
 bundle<TAB>test<TAB>vpsctl-test-0.8.5.tar.gz<TAB>SHA256
 ```
 
-manifest 的 `version`、tag、文件名、安装目标版本和应用展示版本必须一致。`current` 只在 manifest、core 及必要安装文件完成校验并落盘后切换；更新失败时保留原 current。
+manifest 的 `version`、tag、文件名、安装目标版本和应用展示版本必须一致。`current` 只在 manifest、core 及必要安装文件完成校验并落盘后切换；更新提交完成前失败时保留原 release，并按现有事务流程恢复原 current、入口和 self 元数据。
+
+`self update` 仅在跨版本更新的 current、快捷入口及 self 元数据全部提交成功后清理历史 release，不保留自动回退版本。清理只处理 `releases/` 下名称为 `X.Y.Z` 的非符号链接目录，且普通文件 `.vpsctl-managed-release` 的单条记录必须为 `Runarry/vps-script-lite<TAB>X.Y.Z`、与目录名称匹配；当前 release、临时目录及不受管或异常条目跳过。历史清理失败时不回滚已激活的新版本，返回 `30` 并报告未完成路径；部分删除若已移除归属标识，则在原安全目录仍存在时恢复该标识，供下次成功跨版本更新重试。同版本无操作更新和提交失败路径不清理历史版本。初始安装、卸载及业务功能的状态与备份不受此策略影响。
 
 ### 3.5 配置与运行数据
 

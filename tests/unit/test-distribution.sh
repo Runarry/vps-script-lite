@@ -79,6 +79,17 @@ make_network_asset() {
     tar -C "$build" -czf "${TEST_ASSETS}/vpsctl-network-${version}.tar.gz" commands
 }
 
+prepare_update_assets() {
+    local version="$1" launcher_sha core_sha network_sha
+    make_core_asset "$version"
+    make_network_asset "$version"
+    printf '#!/usr/bin/env bash\n# release %s\nexit 0\n' "$version" >"$TEST_ASSETS/vpsctl.sh"
+    launcher_sha="$(sha_file "$TEST_ASSETS/vpsctl.sh")"
+    core_sha="$(sha_file "$TEST_ASSETS/vpsctl-core-${version}.tar.gz")"
+    network_sha="$(sha_file "$TEST_ASSETS/vpsctl-network-${version}.tar.gz")"
+    write_manifest "$TEST_ASSETS/vpsctl-manifest.tsv" "$version" "$launcher_sha" "$network_sha" "$core_sha"
+}
+
 test_source_mode_is_offline_and_mutations_refuse() (
     local calls=0 status=0
     VPSCTL_DISTRIBUTED=0
@@ -138,20 +149,28 @@ test_status_is_offline() (
 
 test_manual_update_is_atomic_and_versioned() (
     local old_release="${TEST_INSTALL_ROOT}/releases/0.1.0" new_release="${TEST_INSTALL_ROOT}/releases/0.2.0"
-    local launcher_sha core_sha network_sha status=0 current_before
+    local history="${TEST_INSTALL_ROOT}/releases/0.0.9" launcher_sha network_sha status=0 current_before
+    local failed_destination move_failed next_version output
     rm -rf -- "$TEST_INSTALL_ROOT" "$TEST_SELF_ROOT" "$TEST_ASSETS"
     mkdir -p "$TEST_ASSETS" "$TEST_INSTALL_ROOT/releases" "$TEST_SELF_ROOT" "${TEST_ENTRY%/*}"
     prepare_managed_install "$old_release" 0.1.0
-    make_core_asset 0.2.0
-    make_network_asset 0.2.0
-    printf '#!/usr/bin/env bash\nexit 0\n' >"$TEST_ASSETS/vpsctl.sh"
-    launcher_sha="$(sha_file "$TEST_ASSETS/vpsctl.sh")"
-    core_sha="$(sha_file "$TEST_ASSETS/vpsctl-core-0.2.0.tar.gz")"
-    network_sha="$(sha_file "$TEST_ASSETS/vpsctl-network-0.2.0.tar.gz")"
-    write_manifest "$TEST_ASSETS/vpsctl-manifest.tsv" 0.2.0 "$launcher_sha" "$network_sha" "$core_sha"
+    mkdir -p "$history"
+    printf 'Runarry/vps-script-lite\t0.0.9\n' >"$history/.vpsctl-managed-release"
     VPSCTL_DISTRIBUTED=1
     VPSCTL_PROJECT_ROOT="$old_release"
     vps_distribution_download() { cp -- "${TEST_ASSETS}/${1##*/}" "$2"; }
+    cp -- "$old_release/.release/manifest.tsv" "$TEST_ASSETS/vpsctl-manifest.tsv"
+    vps_distribution_self_update 0.1.0 >/dev/null || fail 'same-version update failed'
+    [[ -d "$old_release" && -f "$history/.vpsctl-managed-release" ]] || fail 'same-version update removed release history'
+
+    prepare_update_assets 0.2.0
+    launcher_sha="$(sha_file "$TEST_ASSETS/vpsctl.sh")"
+    vps_distribution_download() { return 20; }
+    vps_distribution_self_update 0.2.0 >/dev/null 2>&1 || status=$?
+    assert_equal 20 "$status" 'manifest download failure'
+    [[ -d "$old_release" && -f "$history/.vpsctl-managed-release" ]] || fail 'download failure removed release history'
+    vps_distribution_download() { cp -- "${TEST_ASSETS}/${1##*/}" "$2"; }
+    status=0
     chmod() {
         if [[ "${*: -1}" == */bin/vpsctl ]]; then return 1; fi
         command chmod "$@"
@@ -159,28 +178,151 @@ test_manual_update_is_atomic_and_versioned() (
     vps_distribution_self_update 0.2.0 >/dev/null 2>&1 || status=$?
     assert_equal 20 "$status" 'entry permission failure rejected before activation'
     [[ "$(readlink "$TEST_INSTALL_ROOT/current")" == "$old_release" ]] || fail 'permission failure changed current release'
+    [[ -d "$old_release" && -f "$history/.vpsctl-managed-release" ]] || fail 'permission failure removed release history'
     [[ ! -e "$new_release" && ! -e "$TEST_INSTALL_ROOT/.self-update.lock" ]] || fail 'permission failure left release or lock'
     unset -f chmod
+
+    for failed_destination in "$TEST_INSTALL_ROOT/current" "$TEST_ENTRY" \
+        "$TEST_SELF_ROOT/manifest.tsv" "$TEST_SELF_ROOT/vpsctl.sh" "$TEST_SELF_ROOT/entry.sha256"; do
+        status=0
+        move_failed=0
+        mv() {
+            if [[ "${*: -1}" == "$failed_destination" && "$move_failed" == 0 ]]; then
+                move_failed=1
+                return 1
+            fi
+            command mv "$@"
+        }
+        vps_distribution_self_update 0.2.0 >/dev/null 2>&1 || status=$?
+        unset -f mv
+        assert_equal 20 "$status" "activation failure at $failed_destination"
+        [[ "$(readlink "$TEST_INSTALL_ROOT/current")" == "$old_release" ]] || fail 'activation failure changed current release'
+        [[ -d "$old_release" && -f "$history/.vpsctl-managed-release" ]] || fail 'activation failure removed release history'
+        [[ ! -e "$new_release" && ! -e "$TEST_INSTALL_ROOT/.self-update.lock" ]] || fail 'activation failure left release or lock'
+        vps_distribution_validate_managed_install || fail 'activation failure did not restore managed metadata'
+    done
+
     status=0
     umask 077
-    vps_distribution_self_update 0.2.0 >/dev/null || fail 'manual update failed'
+    output="$(vps_distribution_self_update 0.2.0)" || fail 'manual update failed'
+    assert_contains "$output" '受管历史 release 已清理' 'successful update cleanup message'
     [[ "$(readlink "$TEST_INSTALL_ROOT/current")" == "$new_release" ]] || fail 'current did not switch to requested release'
     "$TEST_INSTALL_ROOT/current/bin/vpsctl" || fail 'updated entry point cannot execute directly'
     assert_equal 755 "$(stat -c %a "$new_release")" 'updated release directory permissions'
     assert_equal 644 "$(stat -c %a "$new_release/.release/manifest.tsv")" 'updated manifest permissions'
-    [[ -d "$old_release" && -f "$new_release/commands/network/bbr.sh" ]] || fail 'update did not retain old release and prefetch cached domain'
+    [[ ! -e "$old_release" && ! -e "$history" ]] || fail 'update retained a managed historical release'
+    [[ -f "$new_release/commands/network/bbr.sh" ]] || fail 'update did not prefetch cached domain'
+    assert_equal 0.2.0 "$(find "$TEST_INSTALL_ROOT/releases" -mindepth 1 -maxdepth 1 -printf '%f\n')" 'only current release remains'
     [[ "$(sha_file "$TEST_ENTRY")" == "$launcher_sha" ]] || fail 'managed launcher was not updated'
 
     VPSCTL_PROJECT_ROOT="$new_release"
-    make_core_asset 0.3.0
-    make_network_asset 0.3.0
+    vps_distribution_validate_managed_install || fail 'successful update left inconsistent metadata'
+    mkdir -p "$history"
+    printf 'Runarry/vps-script-lite\t0.0.9\n' >"$history/.vpsctl-managed-release"
+    prepare_update_assets 0.3.0
+    launcher_sha="$(sha_file "$TEST_ASSETS/vpsctl.sh")"
     network_sha="$(sha_file "$TEST_ASSETS/vpsctl-network-0.3.0.tar.gz")"
     write_manifest "$TEST_ASSETS/vpsctl-manifest.tsv" 0.3.0 "$launcher_sha" "$network_sha"
     current_before="$(readlink "$TEST_INSTALL_ROOT/current")"
     vps_distribution_self_update 0.3.0 >/dev/null 2>&1 || status=$?
     assert_equal 10 "$status" 'bad target bundle rejection'
     [[ "$(readlink "$TEST_INSTALL_ROOT/current")" == "$current_before" ]] || fail 'failed update changed current release'
+    [[ -d "$new_release" && -f "$history/.vpsctl-managed-release" ]] || fail 'bundle verification failure removed release history'
     [[ ! -e "$TEST_INSTALL_ROOT/releases/0.3.0" && ! -e "$TEST_INSTALL_ROOT/.self-update.lock" ]] || fail 'failed update left active release or lock'
+
+    for next_version in 0.3.0 0.4.0; do
+        prepare_update_assets "$next_version"
+        vps_distribution_self_update "$next_version" >/dev/null || fail 'consecutive update failed'
+        VPSCTL_PROJECT_ROOT="$TEST_INSTALL_ROOT/releases/$next_version"
+        assert_equal "$next_version" "$(find "$TEST_INSTALL_ROOT/releases" -mindepth 1 -maxdepth 1 -printf '%f\n')" 'consecutive updates accumulated release history'
+        vps_distribution_validate_managed_install || fail 'consecutive update left inconsistent metadata'
+        "$TEST_INSTALL_ROOT/current/bin/vpsctl" || fail 'consecutively updated entry point cannot execute'
+    done
+)
+
+test_update_cleanup_skips_unmanaged_entries() (
+    local old_release="${TEST_INSTALL_ROOT}/releases/0.1.0" release version
+    local outside="${TEST_TEMP}/outside-release" linked_marker="${TEST_TEMP}/linked-release-marker"
+    local -a preserved=(0.0.1 0.0.2 0.0.3 0.0.4 0.0.5 0.0.6 0.0.7 0.0.8 0.0.9 .staging-0.2.0.fixture 0.0.8.backup not-a-version)
+    rm -rf -- "$TEST_INSTALL_ROOT" "$TEST_SELF_ROOT" "$TEST_ASSETS"
+    mkdir -p "$TEST_ASSETS" "$TEST_INSTALL_ROOT/releases" "$TEST_SELF_ROOT" "${TEST_ENTRY%/*}" "$outside"
+    prepare_managed_install "$old_release" 0.1.0
+    for version in "${preserved[@]}"; do
+        mkdir -p "$TEST_INSTALL_ROOT/releases/$version"
+    done
+    printf 'keep\n' >"$outside/keep"
+    printf 'Runarry/vps-script-lite\t0.0.4\n' >"$outside/.vpsctl-managed-release"
+    printf 'Runarry/vps-script-lite\t9.9.9\n' >"$TEST_INSTALL_ROOT/releases/0.0.2/.vpsctl-managed-release"
+    printf 'Runarry/vps-script-lite\t0.0.3\n' >"$linked_marker"
+    ln -s "$linked_marker" "$TEST_INSTALL_ROOT/releases/0.0.3/.vpsctl-managed-release"
+    rmdir "$TEST_INSTALL_ROOT/releases/0.0.4"
+    ln -s "$outside" "$TEST_INSTALL_ROOT/releases/0.0.4"
+    printf 'Runarry/vps-script-lite\t0.0.5\n\n' >"$TEST_INSTALL_ROOT/releases/0.0.5/.vpsctl-managed-release"
+    printf 'Runarry/vps-script-lite\t0.0.6\000\n' >"$TEST_INSTALL_ROOT/releases/0.0.6/.vpsctl-managed-release"
+    mkdir "$TEST_INSTALL_ROOT/releases/0.0.7/.vpsctl-managed-release"
+    printf 'Other/repository\t0.0.8\n' >"$TEST_INSTALL_ROOT/releases/0.0.8/.vpsctl-managed-release"
+    rmdir "$TEST_INSTALL_ROOT/releases/0.0.9"
+    printf 'keep\n' >"$TEST_INSTALL_ROOT/releases/0.0.9"
+    for version in .staging-0.2.0.fixture 0.0.8.backup not-a-version; do
+        printf 'Runarry/vps-script-lite\t%s\n' "$version" >"$TEST_INSTALL_ROOT/releases/$version/.vpsctl-managed-release"
+    done
+    release="$TEST_INSTALL_ROOT/releases/0.0.0"
+    mkdir "$release"
+    printf 'Runarry/vps-script-lite\t0.0.0\n' >"$release/.vpsctl-managed-release"
+    ln -s "$outside" "$release/linked-data"
+
+    prepare_update_assets 0.2.0
+    VPSCTL_DISTRIBUTED=1
+    VPSCTL_PROJECT_ROOT="$old_release"
+    vps_distribution_download() { cp -- "${TEST_ASSETS}/${1##*/}" "$2"; }
+    vps_distribution_self_update 0.2.0 >/dev/null || fail 'update with unmanaged entries failed'
+    [[ ! -e "$old_release" && ! -e "$release" ]] || fail 'update retained a safely owned historical release'
+    for version in "${preserved[@]}"; do
+        [[ -e "$TEST_INSTALL_ROOT/releases/$version" || -L "$TEST_INSTALL_ROOT/releases/$version" ]] || fail "cleanup removed protected entry $version"
+    done
+    [[ -f "$outside/keep" && -f "$outside/.vpsctl-managed-release" && -f "$linked_marker" ]] || fail 'cleanup followed a release or marker symlink'
+    VPSCTL_PROJECT_ROOT="$TEST_INSTALL_ROOT/releases/0.2.0"
+    vps_distribution_validate_managed_install || fail 'cleanup damaged the active release'
+)
+
+test_update_cleanup_failure_keeps_new_release_and_retries() (
+    local old_release="${TEST_INSTALL_ROOT}/releases/0.1.0" new_release="${TEST_INSTALL_ROOT}/releases/0.2.0"
+    local output status=0 launcher_sha
+    rm -rf -- "$TEST_INSTALL_ROOT" "$TEST_SELF_ROOT" "$TEST_ASSETS"
+    mkdir -p "$TEST_ASSETS" "$TEST_INSTALL_ROOT/releases" "$TEST_SELF_ROOT" "${TEST_ENTRY%/*}"
+    prepare_managed_install "$old_release" 0.1.0
+    prepare_update_assets 0.2.0
+    launcher_sha="$(sha_file "$TEST_ASSETS/vpsctl.sh")"
+    VPSCTL_DISTRIBUTED=1
+    VPSCTL_PROJECT_ROOT="$old_release"
+    vps_distribution_download() { cp -- "${TEST_ASSETS}/${1##*/}" "$2"; }
+    rm() {
+        if [[ "${*: -1}" == "$old_release" ]]; then
+            command rm -f -- "$old_release/.vpsctl-managed-release"
+            return 1
+        fi
+        command rm "$@"
+    }
+    output="$(vps_distribution_self_update 0.2.0 2>&1)" || status=$?
+    unset -f rm
+    assert_equal 30 "$status" 'cleanup failure reports partially completed update'
+    assert_contains "$output" "$old_release" 'cleanup failure identifies the remaining release'
+    assert_contains "$output" '分发版本 0.2.0 已激活' 'cleanup failure explains active version'
+    [[ "$(readlink "$TEST_INSTALL_ROOT/current")" == "$new_release" ]] || fail 'cleanup failure rolled back current'
+    [[ -d "$old_release" && ! -e "$TEST_INSTALL_ROOT/.self-update.lock" ]] || fail 'cleanup failure lost history or left the update lock'
+    assert_equal $'Runarry/vps-script-lite\t0.1.0' "$(<"$old_release/.vpsctl-managed-release")" 'partial cleanup restored the verified ownership marker'
+    assert_equal "$launcher_sha" "$(sha_file "$TEST_ENTRY")" 'cleanup failure retained the new launcher'
+    VPSCTL_PROJECT_ROOT="$new_release"
+    vps_distribution_validate_managed_install || fail 'cleanup failure corrupted the committed update'
+    "$TEST_INSTALL_ROOT/current/bin/vpsctl" || fail 'cleanup failure made the new entry point unusable'
+
+    vps_distribution_self_update 0.2.0 >/dev/null || fail 'same-version update after cleanup failure failed'
+    [[ -d "$old_release" ]] || fail 'same-version update retried historical cleanup'
+    prepare_update_assets 0.3.0
+    vps_distribution_self_update 0.3.0 >/dev/null || fail 'next-version cleanup retry failed'
+    assert_equal 0.3.0 "$(find "$TEST_INSTALL_ROOT/releases" -mindepth 1 -maxdepth 1 -printf '%f\n')" 'next-version update did not clean all historical releases'
+    VPSCTL_PROJECT_ROOT="$TEST_INSTALL_ROOT/releases/0.3.0"
+    vps_distribution_validate_managed_install || fail 'cleanup retry damaged the active release'
 )
 
 test_stale_lock_is_recovered() (
@@ -292,6 +434,8 @@ test_manifest_is_strict
 test_lazy_domain_install_and_cache
 test_status_is_offline
 test_manual_update_is_atomic_and_versioned
+test_update_cleanup_skips_unmanaged_entries
+test_update_cleanup_failure_keeps_new_release_and_retries
 test_stale_lock_is_recovered
 test_testing_root_cannot_target_production
 test_uninstall_preserves_feature_state

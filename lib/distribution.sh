@@ -553,13 +553,53 @@ vps_distribution_self_status() {
     printf '项目路径：%s\n安装根：%s\nself 状态：%s\n' "$VPSCTL_PROJECT_ROOT" "$VPSCTL_INSTALL_ROOT" "$VPSCTL_SELF_STATE_ROOT"
 }
 
+vps_distribution_cleanup_old_releases() {
+    local active_release="$1" releases_root="${VPSCTL_INSTALL_ROOT}/releases"
+    local release version marker record status=0
+    version="${active_release##*/}"
+    if ! vps_distribution_require_no_symlink_components "$releases_root" ||
+        [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ || "$active_release" != "$releases_root/$version" ||
+            ! -d "$active_release" || -L "$active_release" || ! -L "$VPSCTL_INSTALL_ROOT/current" ]] ||
+        [[ "$(readlink "$VPSCTL_INSTALL_ROOT/current")" != "$active_release" ]]; then
+        vps_distribution_error '历史 release 清理失败：当前版本或 releases 路径异常'
+        return 3
+    fi
+    for release in "$releases_root"/*; do
+        version="${release##*/}"
+        [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "$release" != "$active_release" && -d "$release" && ! -L "$release" ]] || continue
+        marker="$release/.vpsctl-managed-release"
+        [[ -f "$marker" && -r "$marker" && ! -L "$marker" ]] || continue
+        # Read through EOF: extra lines and NUL bytes must not be hidden by
+        # command substitution's removal of trailing newlines.
+        record=''
+        if IFS= read -r -d '' record <"$marker"; then continue; fi
+        [[ "${record%$'\n'}" == $'Runarry/vps-script-lite\t'"$version" ]] || continue
+        if ! rm -rf -- "$release"; then
+            status=20
+            vps_distribution_error "历史 release 清理失败：$release"
+            # A partial removal may have deleted the ownership marker first.
+            # Restore only that verified marker so a later update can retry.
+            if [[ -d "$release" && ! -L "$release" && ! -e "$marker" && ! -L "$marker" ]] &&
+                vps_distribution_require_no_symlink_components "$release"; then
+                if ! (
+                    set -o noclobber
+                    printf 'Runarry/vps-script-lite\t%s\n' "$version" >"$marker"
+                ); then
+                    vps_distribution_error "无法恢复历史 release 标识，请人工检查：$release"
+                fi
+            fi
+        fi
+    done
+    return "$status"
+}
+
 vps_distribution_self_update_locked() {
     local requested="${1:-}" work_root manifest launcher version release_target staging base_url domain status=0 current_tmp old_current
     local entry_tmp state_launcher_tmp state_manifest_tmp state_sha_tmp rollback_ok=0
     local old_state_launcher old_state_manifest old_state_sha
     local -a domains=()
     vps_distribution_validate_managed_install || return $?
-    vps_distribution_confirm '确认下载并切换 vpsctl release？' || return $?
+    vps_distribution_confirm '确认下载并切换 vpsctl release，成功后删除受管历史版本？' || return $?
     work_root="$(mktemp -d "${VPSCTL_INSTALL_ROOT}/.update.XXXXXX")" || return 20
     old_state_launcher="${work_root}/old-vpsctl.sh"
     old_state_manifest="${work_root}/old-manifest.tsv"
@@ -716,7 +756,11 @@ vps_distribution_self_update_locked() {
         return 30
     fi
     rm -rf -- "$work_root"
-    printf 'vpsctl 已切换到分发版本 %s；上一 release 已保留。\n' "$version"
+    if ! vps_distribution_cleanup_old_releases "$release_target"; then
+        vps_distribution_error "分发版本 ${version} 已激活，但历史 release 清理未完成；请检查上述路径，下次成功跨版本更新将重试清理"
+        return 30
+    fi
+    printf 'vpsctl 已切换到分发版本 %s；受管历史 release 已清理。\n' "$version"
 }
 
 vps_distribution_self_update() {

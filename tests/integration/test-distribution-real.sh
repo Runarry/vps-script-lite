@@ -146,7 +146,9 @@ sed -i "s/^bundle\tcore\t.*/bundle\tcore\tvpsctl-core-0.8.6.tar.gz\t${core_sha}/
 export VPSCTL_TEST_ASSET_DIR="$NEXT_ASSETS"
 PATH="$MOCK_BIN:$PATH" "$ENTRY" --yes --non-interactive self update --version v0.8.6 >/dev/null
 [[ "$(readlink -f "$INSTALL_ROOT/current")" == "$INSTALL_ROOT/releases/0.8.6" ]] || fail 'versioned update did not switch current'
-[[ -d "$release_root" ]] || fail 'versioned update removed the previous release'
+[[ ! -e "$release_root" && ! -L "$release_root" ]] || fail 'versioned update retained the previous release'
+[[ "$(find "$INSTALL_ROOT/releases" -mindepth 1 -maxdepth 1 -type d -printf '%f\n')" == 0.8.6 ]] ||
+    fail 'versioned update did not leave only the current release'
 VPSCTL_TEST_CURL_FAIL=1 PATH="$MOCK_BIN:$PATH" "$ENTRY" --version | grep -Fx 'vpsctl 0.8.6' >/dev/null ||
     fail 'updated shortcut could not run offline as root'
 su nobody -s /bin/bash -c "$ENTRY --version" | grep -Fx 'vpsctl 0.8.6' >/dev/null ||
