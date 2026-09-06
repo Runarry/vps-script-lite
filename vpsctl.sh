@@ -325,7 +325,6 @@ vpsctl_install_core() {
     staging="$(mktemp -d "${VPSCTL_RELEASES_DIR}/.${VPSCTL_DISTRIBUTION_VERSION}.XXXXXXXX")"
     tar --no-same-owner --no-same-permissions -xzf "$archive" -C "$staging"
     vpsctl_validate_release_tree "$staging"
-    chmod 0755 "$staging/bin/vpsctl"
     printf '%s\t%s\n' "$VPSCTL_RELEASE_REPOSITORY" "$VPSCTL_DISTRIBUTION_VERSION" >"${staging}/.vpsctl-managed-release"
     vpsctl_write_release_metadata "$staging" "$manifest"
 
@@ -347,6 +346,13 @@ vpsctl_install_core() {
     else
         mv -- "$staging" "$release_dir"
     fi
+
+    # Also repair a verified, reused release left without execute permissions
+    # by older updaters. mktemp creates the fresh release root with mode 0700.
+    find "$release_dir" -type d -exec chmod 0755 -- {} +
+    find "$release_dir" -type f -exec chmod 0644 -- {} +
+    chmod 0755 -- "$release_dir/bin/vpsctl"
+    [[ -x "$release_dir/bin/vpsctl" ]] || vpsctl_bootstrap_die 'installed entry point is not executable'
 
     vpsctl_atomic_symlink "$release_dir" "$VPSCTL_CURRENT_LINK"
     vpsctl_install_launcher_entry "$launcher"

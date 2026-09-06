@@ -2,6 +2,7 @@
 
 set -euo pipefail
 IFS=$'\n\t'
+umask 022
 
 readonly RELEASE_REPOSITORY='Runarry/vps-script-lite'
 readonly RELEASE_SCHEMA_VERSION='1'
@@ -55,7 +56,11 @@ release_create_bundle() {
     shift
     local filename="vpsctl-${name}-${RELEASE_VERSION}.tar.gz"
     local tar_path="${BUILD_TEMP}/${filename%.gz}"
+    local staging_dir="${BUILD_TEMP}/${name}"
     local relative_path=''
+    local entry=''
+    local staged_path=''
+    local -a archive_roots=()
 
     for relative_path in "$@"; do
         if [[ -d "${PROJECT_ROOT}/${relative_path}" ]]; then
@@ -65,20 +70,40 @@ release_create_bundle() {
         fi
     done
 
+    mkdir -p -- "$staging_dir"
+    for relative_path in "$@"; do
+        while IFS= read -r -d '' entry; do
+            staged_path="${staging_dir}/${entry#"${PROJECT_ROOT}/"}"
+            if [[ -d "$entry" ]]; then
+                mkdir -p -- "$staged_path"
+            else
+                install -D -m 0644 -- "$entry" "$staged_path"
+            fi
+        done < <(find "${PROJECT_ROOT}/${relative_path}" -print0)
+    done
+    # Archive explicit parent directories and fixed modes, independent of the
+    # checkout's executable bits and the builder's umask.
+    find "$staging_dir" -type d -exec chmod 0755 -- {} +
+    if [[ "$name" == core ]]; then
+        chmod 0755 -- "${staging_dir}/bin/vpsctl"
+    fi
+    mapfile -d '' -t archive_roots < <(find "$staging_dir" -mindepth 1 -maxdepth 1 -printf '%f\0' | sort -z)
     tar --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner \
-        -C "$PROJECT_ROOT" -cf "$tar_path" -- "$@"
+        -C "$staging_dir" -cf "$tar_path" -- "${archive_roots[@]}"
     gzip -n "$tar_path"
     mv -- "${tar_path}.gz" "${OUTPUT_DIR}/${filename}"
 }
 
 release_require_tool awk
 release_require_tool bash
+release_require_tool chmod
 release_require_tool find
 release_require_tool gzip
 release_require_tool grep
 release_require_tool install
 release_require_tool mktemp
 release_require_tool sha256sum
+release_require_tool sort
 release_require_tool tar
 
 [[ $# -le 1 ]] || release_die 'usage: scripts/build-release.sh [output-directory]'

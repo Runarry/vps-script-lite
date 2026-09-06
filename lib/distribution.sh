@@ -621,6 +621,16 @@ vps_distribution_self_update_locked() {
         rm -rf -- "$staging" "$work_root"
         return 20
     }
+    # Archive modes and the caller's umask must not make the next release
+    # unreadable or its entry point unexecutable. Finish this before switching.
+    if ! find "$staging" -type d -exec chmod 0755 -- {} + ||
+        ! find "$staging" -type f -exec chmod 0644 -- {} + ||
+        ! chmod 0755 -- "$staging/bin/vpsctl" ||
+        [[ ! -x "$staging/bin/vpsctl" ]]; then
+        vps_distribution_error '无法设置新 release 的读取和执行权限'
+        rm -rf -- "$staging" "$work_root"
+        return 20
+    fi
     launcher="${work_root}/${VPS_DISTRIBUTION_LAUNCHER_FILE}"
     vps_distribution_download "${base_url}/${VPS_DISTRIBUTION_LAUNCHER_FILE}" "$launcher" || {
         status=$?

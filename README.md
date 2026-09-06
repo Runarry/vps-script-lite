@@ -84,6 +84,15 @@ bash "$tmp_dir/vpsctl.sh" --verified-manifest "$tmp_dir/vpsctl-manifest.tsv"
 
 `core` 常驻安装；`network`、`system`、`security`、`service` 与 `test` 按领域拆分。首次调用某领域时，只从当前分发版本对应的同一个 GitHub Release 下载该领域资产，按 `vpsctl-manifest.tsv` 的 SHA-256 校验后缓存；不同版本的 core 与领域资产不得混用。
 
+如果旧版升级后启动报 `current/bin/vpsctl: Permission denied`，可能是 core 入口缺少执行位。可在 root shell 中恢复并检查：
+
+```bash
+chmod 0755 /usr/local/lib/vpsctl/current/bin/vpsctl
+vpsctl --version
+```
+
+修复后的构建统一发布权限，升级在切换 `current` 前设置目录 `0755`、普通文件 `0644` 和入口 `0755`，设置失败则保留旧版本；安装器也会修复经校验后复用的版本目录。对应测试与恢复范围见[分发权限验收记录](docs/distribution-validation.md)。
+
 卸载命令为：
 
 ```text

@@ -110,4 +110,38 @@ for archive in "${RELEASE_DIR}"/*.tar.gz; do
     done < <(tar -tzf "$archive")
 done
 
+fixture="${TEST_TEMP}/source"
+mkdir -p -- "$fixture"
+cp -R -- "${TEST_ROOT}/scripts" "${TEST_ROOT}/bin" "${TEST_ROOT}/lib" "${TEST_ROOT}/commands" "$fixture/"
+cp -- "${TEST_ROOT}/VERSION" "${TEST_ROOT}/vpsctl.sh" "$fixture/"
+find "$fixture" -type d -exec chmod 0700 -- {} +
+find "$fixture" -type f -exec chmod 0600 -- {} +
+# Unexpected checkout permissions must not leak into published files.
+chmod 6777 -- "${fixture}/lib/environment.sh"
+(
+    umask 077
+    bash "${fixture}/scripts/build-release.sh" "${TEST_TEMP}/restricted-release"
+)
+for asset in "${expected_assets[@]}"; do
+    cmp -s -- "${RELEASE_DIR}/${asset}" "${TEST_TEMP}/restricted-release/${asset}" ||
+        fail "release changed with source permissions or umask: ${asset}"
+done
+
+extracted="${TEST_TEMP}/extracted"
+mkdir -p -- "$extracted"
+for archive in "${TEST_TEMP}/restricted-release"/*.tar.gz; do
+    # Restore archived modes even when the test itself inherits a strict umask.
+    tar --same-permissions -xzf "$archive" -C "$extracted"
+done
+while IFS= read -r -d '' entry; do
+    expected_mode=644
+    if [[ -d "$entry" || "$entry" == "${extracted}/bin/vpsctl" ]]; then
+        expected_mode=755
+    fi
+    [[ "$(stat -c '%a' -- "$entry")" == "$expected_mode" ]] ||
+        fail "unexpected release permissions: ${entry#"${extracted}/"}"
+done < <(find "$extracted" -mindepth 1 -print0)
+"${extracted}/bin/vpsctl" --help >"${TEST_TEMP}/help.txt" || fail 'archived core entry point cannot run directly'
+grep -F 'VPS Script Lite' "${TEST_TEMP}/help.txt" >/dev/null || fail 'archived core entry point did not show help'
+
 printf 'release build tests passed\n'

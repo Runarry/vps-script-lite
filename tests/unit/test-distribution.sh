@@ -152,8 +152,22 @@ test_manual_update_is_atomic_and_versioned() (
     VPSCTL_DISTRIBUTED=1
     VPSCTL_PROJECT_ROOT="$old_release"
     vps_distribution_download() { cp -- "${TEST_ASSETS}/${1##*/}" "$2"; }
+    chmod() {
+        if [[ "${*: -1}" == */bin/vpsctl ]]; then return 1; fi
+        command chmod "$@"
+    }
+    vps_distribution_self_update 0.2.0 >/dev/null 2>&1 || status=$?
+    assert_equal 20 "$status" 'entry permission failure rejected before activation'
+    [[ "$(readlink "$TEST_INSTALL_ROOT/current")" == "$old_release" ]] || fail 'permission failure changed current release'
+    [[ ! -e "$new_release" && ! -e "$TEST_INSTALL_ROOT/.self-update.lock" ]] || fail 'permission failure left release or lock'
+    unset -f chmod
+    status=0
+    umask 077
     vps_distribution_self_update 0.2.0 >/dev/null || fail 'manual update failed'
     [[ "$(readlink "$TEST_INSTALL_ROOT/current")" == "$new_release" ]] || fail 'current did not switch to requested release'
+    "$TEST_INSTALL_ROOT/current/bin/vpsctl" || fail 'updated entry point cannot execute directly'
+    assert_equal 755 "$(stat -c %a "$new_release")" 'updated release directory permissions'
+    assert_equal 644 "$(stat -c %a "$new_release/.release/manifest.tsv")" 'updated manifest permissions'
     [[ -d "$old_release" && -f "$new_release/commands/network/bbr.sh" ]] || fail 'update did not retain old release and prefetch cached domain'
     [[ "$(sha_file "$TEST_ENTRY")" == "$launcher_sha" ]] || fail 'managed launcher was not updated'
 
