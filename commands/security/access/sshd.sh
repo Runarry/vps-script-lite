@@ -3,6 +3,8 @@
 ACCESS_SSH_SERVICE=''
 ACCESS_SSH_CONFIG_DIR=''
 ACCESS_ENTRY_SCRIPT=''
+ACCESS_SSH_PUBKEY_ENABLED=0
+ACCESS_SSH_PUBKEY_BACKUP_ID=''
 
 access_sshd_init() {
     local os_id="${VPSCTL_ENV_OS_ID:-}"
@@ -180,6 +182,170 @@ access_sshd_current_port() {
     }
     access_validate_port "$output" || return 10
     printf '%s\n' "$output"
+}
+
+access_sshd_pubkey_preflight() {
+    local user="$1" active_file="${ACCESS_STATE_DIR}/active" active file line keyword effective
+
+    access_sshd_validate_standard || return $?
+    if [[ -e "$active_file" || -L "$active_file" ]]; then
+        active="$(access_active_transaction 2>/dev/null || true)"
+        vps_cmd_error "存在活动访问事务或无效活动记录：${active:-$active_file}；请先处理事务后再添加密钥"
+        return 3
+    fi
+    # Existing managed files may have been edited by an administrator. Do not
+    # infer a global public-key policy from a single sampled Match context.
+    for file in "$ACCESS_MAIN_CONFIG" "$ACCESS_SSH_CONFIG_DIR"/*.conf; do
+        [[ -f "$file" ]] || continue
+        while IFS= read -r line; do
+            keyword="${line%%[[:space:]=]*}"
+            case "${keyword,,}" in
+                match)
+                    vps_cmd_error "检测到 Match 条件块；拒绝自动启用公钥认证"
+                    return 10
+                    ;;
+                include)
+                    if [[ "$file" == "$ACCESS_CONFIG" || "$line" == "$keyword"=* ]]; then
+                        vps_cmd_error "SSH 配置含未经批准的 Include；拒绝自动启用公钥认证"
+                        return 10
+                    fi
+                    ;;
+                listenaddress | authenticationmethods | allowusers | denyusers | allowgroups | denygroups)
+                    if [[ "$file" == "$ACCESS_CONFIG" ]]; then
+                        vps_cmd_error "受管 SSH 配置含复杂指令 $keyword；拒绝自动启用公钥认证"
+                        return 10
+                    fi
+                    ;;
+            esac
+        done < <(access_sshd_active_lines "$file")
+    done
+    effective="$(access_sshd_effective_value pubkeyauthentication)" || return $?
+    case "$effective" in yes | no) ;; *) return 10 ;; esac
+    access_sshd_pubkey_snapshot "$user" "$effective" >/dev/null || return $?
+    if [[ "$effective" == no ]]; then
+        command -v ss >/dev/null 2>&1 || {
+            vps_cmd_error "缺少 ss，无法验证启用公钥认证后的 SSH 监听端口"
+            return 3
+        }
+        systemctl is-active --quiet "$ACCESS_SSH_SERVICE" || {
+            vps_cmd_error "$ACCESS_SSH_SERVICE 当前未运行，无法自动启用公钥认证"
+            return 3
+        }
+    fi
+}
+
+access_sshd_pubkey_snapshot() {
+    local user="$1" expected="$2" sshd context output actual
+    local -a contexts=('' root)
+
+    [[ "$user" == root ]] || contexts+=("$user")
+    sshd="$(access_sshd_binary)" || return $?
+    for context in "${contexts[@]}"; do
+        if [[ -z "$context" ]]; then
+            output="$("$sshd" -T -f "$ACCESS_MAIN_CONFIG" 2>/dev/null)" || return 10
+        else
+            output="$("$sshd" -T -f "$ACCESS_MAIN_CONFIG" -C "user=$context,host=localhost,addr=127.0.0.1" 2>/dev/null)" || return 10
+        fi
+        actual="$(awk '$1 == "pubkeyauthentication" {print $2; exit}' <<<"$output")"
+        [[ "$actual" == "$expected" ]] || {
+            vps_cmd_error "SSH 公钥认证未按预期生效（${context:-global}）：期望 $expected，实际 ${actual:-缺失}"
+            return 10
+        }
+        printf '# context %s\n' "${context:-global}"
+        awk '$1 != "pubkeyauthentication"' <<<"$output"
+    done
+}
+
+access_sshd_render_pubkey_enabled() {
+    printf '%s\nPubkeyAuthentication yes\n' "$ACCESS_MANAGED_MARKER" || return 20
+    [[ -f "$ACCESS_CONFIG" ]] || return 0
+    awk -v marker="$ACCESS_MANAGED_MARKER" '
+        $0 == marker { next }
+        {
+            probe=$0
+            sub(/^[[:space:]]*/, "", probe)
+            split(probe, fields, /[[:space:]=]+/)
+            if (tolower(fields[1]) != "pubkeyauthentication") print
+        }
+    ' "$ACCESS_CONFIG"
+}
+
+access_sshd_assert_pubkey_enabled() {
+    local user="$1" baseline="$2" current
+
+    current="$(access_sshd_pubkey_snapshot "$user" yes)" || return $?
+    [[ "$current" == "$baseline" ]] || {
+        vps_cmd_error "启用公钥认证改变了其他有效 SSH 设置，拒绝继续"
+        return 10
+    }
+}
+
+access_sshd_enable_pubkey_locked() {
+    local user="$1" candidate="$2" baseline="$3" backup_id backup_dir port ports applied_sha restored
+    local status=0 rollback_failed=0 reload_attempted=0
+
+    ports="$(awk '$1 == "port" {print $2}' <<<"$baseline" | sort -n -u)"
+    [[ -n "$ports" ]] || return 10
+    while IFS= read -r port; do
+        access_validate_port "$port" || return 10
+    done <<<"$ports"
+    port="${ports%%$'\n'*}"
+    backup_id="$(access_new_id bak)" || return $?
+    backup_dir="$(access_backup_path "$backup_id")" || return $?
+    # Public-key enablement does not normalize Port sources or alter firewall
+    # rules; retain the usual backup format for the existing restore command.
+    access_sshd_make_backup "$backup_id" "$backup_dir" '' "$port" "$port" || return $?
+    access_sshd_install_candidate "$candidate" || status=$?
+    ((status != 0)) || access_sshd_validate_standard || status=$?
+    ((status != 0)) || access_sshd_assert_pubkey_enabled "$user" "$baseline" || status=$?
+    if ((status == 0)); then
+        reload_attempted=1
+        access_sshd_reload || status=$?
+    fi
+    ((status != 0)) || access_sshd_assert_pubkey_enabled "$user" "$baseline" || status=$?
+    if ((status == 0)); then
+        while IFS= read -r port; do
+            access_sshd_verify_ports "$port" "$port" 0 || {
+                status=$?
+                break
+            }
+        done <<<"$ports"
+    fi
+    if ((status == 0)); then
+        applied_sha="$(access_sha256_file "$ACCESS_CONFIG")" || status=$?
+        ((status != 0)) || access_sshd_backup_mark "$backup_dir" committed "$applied_sha" || status=30
+    fi
+    if ((status != 0)); then
+        access_sshd_restore_backup_config "$backup_dir" || rollback_failed=1
+        access_sshd_validate_standard || rollback_failed=1
+        if ((rollback_failed == 0 && reload_attempted)); then
+            access_sshd_reload || rollback_failed=1
+        fi
+        restored="$(access_sshd_pubkey_snapshot "$user" no)" || rollback_failed=1
+        [[ "$restored" == "$baseline" ]] || rollback_failed=1
+        if ((rollback_failed == 0 && reload_attempted)); then
+            while IFS= read -r port; do
+                access_sshd_verify_ports "$port" "$port" 0 || rollback_failed=1
+            done <<<"$ports"
+        fi
+        if ((rollback_failed == 0)); then
+            access_sshd_backup_mark "$backup_dir" aborted '' || rollback_failed=1
+        fi
+        if ((rollback_failed)); then
+            vps_cmd_error "自动启用公钥认证失败，且 SSH 配置恢复不完整；备份 ID：$backup_id"
+            access_sshd_print_recovery "$backup_dir"
+            return 30
+        fi
+        vps_cmd_error "自动启用公钥认证失败，已恢复原 SSH 配置；备份 ID：$backup_id"
+        return "$status"
+    fi
+    # Consumed by key generation in keys.sh after the user saves or cancels.
+    # shellcheck disable=SC2034
+    ACCESS_SSH_PUBKEY_ENABLED=1
+    # shellcheck disable=SC2034
+    ACCESS_SSH_PUBKEY_BACKUP_ID="$backup_id"
+    vps_cmd_success "已自动启用 SSH 公钥认证（PubkeyAuthentication yes）"
+    vps_cmd_info "SSH 配置备份 ID：$backup_id"
 }
 
 access_sshd_map_root() {

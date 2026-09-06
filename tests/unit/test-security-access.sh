@@ -113,19 +113,27 @@ printf "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGenerated vpsctl-generated\n" >"${k
 
 make_mock sshd '
 printf "%s\n" "$*" >>"${VPSCTL_SYSTEM_ROOT}/run/sshd.log"
+if [[ " $* " == *" -t "* && -e "${VPSCTL_SYSTEM_ROOT}/run/fail-validation-once" ]] &&
+    grep -Eq "^PubkeyAuthentication[[:space:]]+yes$" "${VPSCTL_SYSTEM_ROOT}/etc/ssh/sshd_config.d/00-vpsctl-access.conf" 2>/dev/null; then
+    rm -f -- "${VPSCTL_SYSTEM_ROOT}/run/fail-validation-once"
+    exit 1
+fi
 if [[ " $* " == *" -T "* ]]; then
     managed="${VPSCTL_SYSTEM_ROOT}/etc/ssh/sshd_config.d/00-vpsctl-access.conf"
     if [[ -f "$managed" ]]; then
         awk '\''
-            $1 == "Port" {print "port " $2}
-            $1 == "PermitRootLogin" {print "permitrootlogin " $2}
-            $1 == "PasswordAuthentication" {print "passwordauthentication " $2}
-            $1 == "KbdInteractiveAuthentication" {print "kbdinteractiveauthentication " $2}
-            $1 == "PubkeyAuthentication" {print "pubkeyauthentication " $2}
-            $1 == "ExposeAuthInfo" {print "exposeauthinfo " $2}
-        '\'' "$managed"
+            FILENAME == ARGV[1] {
+                name = tolower($1)
+                if (name ~ /^(port|permitrootlogin|passwordauthentication|kbdinteractiveauthentication|pubkeyauthentication|exposeauthinfo)$/) {
+                    print name " " $2
+                    overridden[name] = 1
+                }
+                next
+            }
+            !overridden[$1] {print}
+        '\'' "$managed" "${VPSCTL_SYSTEM_ROOT}/run/sshd-effective" | LC_ALL=C sort
     else
-        cat -- "${VPSCTL_SYSTEM_ROOT}/run/sshd-effective"
+        LC_ALL=C sort -- "${VPSCTL_SYSTEM_ROOT}/run/sshd-effective"
     fi
 fi
 exit 0'
@@ -134,9 +142,9 @@ make_mock ss '
 [[ "$*" =~ :([0-9]+) ]] || exit 2
 port="${BASH_REMATCH[1]}"
 managed="${VPSCTL_SYSTEM_ROOT}/etc/ssh/sshd_config.d/00-vpsctl-access.conf"
-if [[ -f "$managed" ]]; then
+if [[ -f "$managed" ]] && grep -Eq "^Port[[:space:]]" "$managed"; then
     grep -Eq "^Port[[:space:]]+${port}$" "$managed" || exit 0
-elif [[ "$port" != 22 ]]; then
+elif ! grep -Eq "^port[[:space:]]+${port}$" "${VPSCTL_SYSTEM_ROOT}/run/sshd-effective"; then
     exit 0
 fi
 printf "LISTEN 0 128 0.0.0.0:%s 0.0.0.0:* users:((\\\"sshd\\\",pid=1,fd=3))\n" "$port"'
@@ -455,6 +463,118 @@ test_user_password_and_keys() {
     fi
 }
 
+test_key_pubkey_enable() {
+    local key_file="$TEST_TEMP/enable.pub" managed authorized baseline before marker expected tx state_sha command reply output status
+    managed="$TEST_SYSTEM_ROOT/etc/ssh/sshd_config.d/00-vpsctl-access.conf"
+    authorized="$TEST_SYSTEM_ROOT/home/alice/.ssh/authorized_keys"
+    printf 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest enable-test\n' >"$key_file"
+
+    reset_system
+    printf 'port 22\nport 2222\npermitrootlogin prohibit-password\npasswordauthentication no\nkbdinteractiveauthentication yes\npubkeyauthentication no\nexposeauthinfo no\nauthenticationmethods any\n' \
+        >"$TEST_SYSTEM_ROOT/run/sshd-effective"
+    baseline="$(sshd -T | grep -v '^pubkeyauthentication ' | sort)"
+    assert_status 0 "key add enables disabled pubkey authentication" run_access key add --user alice --public-key-file "$key_file"
+    assert_file_contains "$authorized" 'AAAAC3NzaC1lZDI1NTE5AAAAITest' "added public key"
+    assert_file_contains "$managed" 'PubkeyAuthentication yes' "pubkey authentication enabled"
+    assert_equal "$baseline" "$(sshd -T | grep -v '^pubkeyauthentication ' | sort)" "key add preserves all unrelated effective SSH settings"
+    assert_file_contains "$TEST_SYSTEM_ROOT/run/systemctl.log" 'reload ssh.service' "pubkey enable reloads sshd"
+
+    reset_system
+    seed_alice_key
+    printf '# Managed by vpsctl security access.\n# administrator settings\nPort 2200\nPasswordAuthentication no\nPubkeyAuthentication no\n' >"$managed"
+    before="$(sha256sum "$authorized")"
+    baseline="$(sshd -T | grep -v '^pubkeyauthentication ' | sort)"
+    assert_status 0 "duplicate key still enables pubkey authentication" run_access key add --user alice --public-key-file "$key_file"
+    assert_equal "$before" "$(sha256sum "$authorized")" "duplicate leaves authorized_keys unchanged"
+    assert_file_contains "$managed" '# administrator settings' "managed comments survive enable"
+    assert_file_contains "$managed" 'PubkeyAuthentication yes' "duplicate enables authentication"
+    assert_equal "$baseline" "$(sshd -T | grep -v '^pubkeyauthentication ' | sort)" "duplicate preserves other SSH settings"
+
+    reset_system
+    sed -i 's/pubkeyauthentication yes/pubkeyauthentication no/' "$TEST_SYSTEM_ROOT/run/sshd-effective"
+    assert_status 0 "disabled pubkey key-add dry-run" run_access --dry-run key add --user alice --public-key-file "$key_file"
+    assert_status 0 "disabled pubkey generation dry-run" run_access --dry-run key generate --user alice
+    [[ ! -e "$authorized" && ! -e "$managed" && ! -e "$TEST_SYSTEM_ROOT/var/lib/vpsctl" ]] || fail "key dry-run wrote key, config or backup state"
+    [[ ! -e "$TEST_SYSTEM_ROOT/run/systemctl.log" ]] || fail "key dry-run reloaded SSH"
+
+    reset_system
+    sed -i 's/pubkeyauthentication yes/pubkeyauthentication no/' "$TEST_SYSTEM_ROOT/run/sshd-effective"
+    printf 'invalid-public-key\n' >"$TEST_TEMP/invalid.pub"
+    assert_status 10 "invalid key cannot enable disabled pubkey authentication" run_access key add --user alice --public-key-file "$TEST_TEMP/invalid.pub"
+    [[ ! -e "$authorized" && ! -e "$managed" ]] || fail "invalid key wrote key or SSH configuration"
+    [[ ! -e "$TEST_SYSTEM_ROOT/run/systemctl.log" ]] || fail "invalid key reloaded SSH"
+
+    reset_system
+    sed -i 's/pubkeyauthentication yes/pubkeyauthentication no/' "$TEST_SYSTEM_ROOT/run/sshd-effective"
+    printf 'Include /etc/ssh/sshd_config.d/*.conf\nMatch User alice\n    PasswordAuthentication no\n' >"$TEST_SYSTEM_ROOT/etc/ssh/sshd_config"
+    before="$(sha256sum "$TEST_SYSTEM_ROOT/etc/ssh/sshd_config")"
+    assert_status 10 "complex SSH configuration blocks automatic pubkey enable" run_access key add --user alice --public-key-file "$key_file"
+    assert_contains "$ACCESS_TEST_OUTPUT" 'Match' "key add complex configuration diagnostic"
+    [[ ! -e "$authorized" && ! -e "$managed" ]] || fail "complex configuration refusal wrote key or managed config"
+    assert_equal "$before" "$(sha256sum "$TEST_SYSTEM_ROOT/etc/ssh/sshd_config")" "complex configuration refusal preserves main config"
+    [[ ! -e "$TEST_SYSTEM_ROOT/run/systemctl.log" ]] || fail "complex configuration refusal reloaded SSH"
+
+    # The validation fault fires only after installation into the live managed
+    # path; it verifies live validation rollback, not temporary candidate syntax.
+    for marker in fail-validation-once fail-reload-once; do
+        reset_system
+        seed_alice_key
+        printf '# Managed by vpsctl security access.\n# preserve exactly\nPort 2200\nPubkeyAuthentication no\n' >"$managed"
+        baseline="$(sha256sum "$managed")"
+        before="$(sha256sum "$authorized")"
+        printf 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINew rollback-test\n' >"$key_file"
+        : >"$TEST_SYSTEM_ROOT/run/$marker"
+        expected=20
+        [[ "$marker" != fail-validation-once ]] || expected=10
+        assert_status "$expected" "key add propagates $marker" run_access key add --user alice --public-key-file "$key_file"
+        [[ ! -e "$TEST_SYSTEM_ROOT/run/$marker" ]] || fail "$marker was not exercised"
+        assert_equal "$baseline" "$(sha256sum "$managed")" "$marker restores prior SSH configuration"
+        assert_equal "$before" "$(sha256sum "$authorized")" "$marker restores existing authorized_keys"
+    done
+
+    reset_system
+    prepare_transaction 2250
+    tx="$ACCESS_TEST_TX"
+    baseline="$(sha256sum "$managed")"
+    state_sha="$(sha256sum "$TEST_SYSTEM_ROOT/var/lib/vpsctl/security/access/transactions/$tx/state")"
+    assert_status 3 "active transaction blocks key add" run_access key add --user alice --public-key-file "$key_file"
+    [[ ! -e "$authorized" ]] || fail "active transaction refusal wrote authorized_keys"
+    assert_equal "$baseline" "$(sha256sum "$managed")" "active transaction refusal preserves SSH config"
+    assert_equal "$state_sha" "$(sha256sum "$TEST_SYSTEM_ROOT/var/lib/vpsctl/security/access/transactions/$tx/state")" "key add preserves active transaction"
+    assert_status 0 "abort after refused key add" run_access ssh abort --transaction "$tx"
+
+    command -v script >/dev/null 2>&1 || fail "key generation tests require util-linux script"
+    printf -v command 'bash %q --no-color --non-interactive key generate --user alice' "$TEST_ROOT/commands/security/access.sh"
+    for reply in SAVED CANCEL ERROR; do
+        reset_system
+        seed_alice_key
+        before="$(sha256sum "$authorized")"
+        sed -i 's/pubkeyauthentication yes/pubkeyauthentication no/' "$TEST_SYSTEM_ROOT/run/sshd-effective"
+        [[ "$reply" != ERROR ]] || : >"$TEST_SYSTEM_ROOT/run/fail-reload-once"
+        status=0
+        output="$(printf '%s\n' "$reply" | script -q -e -c "$command" /dev/null 2>&1)" || status=$?
+        case "$reply" in
+            SAVED)
+                assert_equal 0 "$status" "SAVED generation status"
+                assert_file_contains "$authorized" 'AAAAIGenerated' "SAVED retains generated public key"
+                assert_file_contains "$managed" 'PubkeyAuthentication yes' "SAVED enables pubkey authentication"
+                assert_contains "$output" 'MOCK-PRIVATE-KEY' "SAVED displays private key"
+                ;;
+            CANCEL)
+                assert_equal 130 "$status" "cancel generation status"
+                assert_equal "$before" "$(sha256sum "$authorized")" "cancel removes only generated public key"
+                assert_file_contains "$managed" 'PubkeyAuthentication yes' "cancel keeps additive pubkey enable"
+                ;;
+            ERROR)
+                assert_equal 20 "$status" "generation preserves key-add failure status"
+                assert_equal "$before" "$(sha256sum "$authorized")" "failed generation restores authorized_keys"
+                [[ ! -e "$managed" ]] || fail "failed generation retained SSH config"
+                [[ "$output" != *MOCK-PRIVATE-KEY* ]] || fail "failed key add displayed private key"
+                ;;
+        esac
+    done
+}
+
 test_sshd_shape_and_firewall_rejections() {
     local tx managed state family port
 
@@ -771,6 +891,7 @@ test_proof_and_configuration_integrity() {
 
 test_cli_validation_and_status
 test_user_password_and_keys
+test_key_pubkey_enable
 test_sshd_shape_and_firewall_rejections
 test_abort_expiry_and_reload_rollback
 test_verify_commit_replay_and_restore

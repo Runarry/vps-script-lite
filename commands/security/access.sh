@@ -53,6 +53,10 @@ access_usage() {
   --                    停止解析全局选项
   -h, --help           显示帮助
 
+公钥认证：
+  添加或生成密钥后自动启用 PubkeyAuthentication，并验证配置和 reload 结果。
+  保留端口、密码认证和 root 登录策略；启用失败时恢复配置并撤销本次新增公钥。
+
 安全事务：
   prepare 先验证标准 sshd_config，创建受管 drop-in，并在端口变更时让旧、新
   端口并行监听。必须在 15 分钟内从新端口建立第二个非 root SSH 会话，运行

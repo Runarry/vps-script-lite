@@ -28,7 +28,7 @@ jobs:
         shell: bash
         run: bash scripts/build-release.sh dist/release
 
-      - name: Publish GitHub release
+      - name: Create draft GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -37,5 +37,6 @@ jobs:
           gh release create "${GITHUB_REF_NAME}" \
             --repo Runarry/vps-script-lite \
             --title "vpsctl ${GITHUB_REF_NAME}" \
+            --draft \
             --generate-notes \
             dist/release/*

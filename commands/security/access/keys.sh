@@ -81,17 +81,6 @@ access_key_validate_line() {
     rm -f -- "$tmp"
 }
 
-access_key_require_pubkey_enabled() {
-    local effective
-
-    access_sshd_validate_standard || return $?
-    effective="$(access_sshd_effective_value pubkeyauthentication)" || return $?
-    [[ "$effective" == yes ]] || {
-        vps_cmd_error "当前 sshd 的 PubkeyAuthentication 未启用；请先通过 ssh prepare 安全启用"
-        return 3
-    }
-}
-
 access_user_has_authorized_key() {
     local user="$1" authorized line tmp valid=1
 
@@ -118,6 +107,7 @@ ACCESS_KEY_ADDED=0
 ACCESS_KEY_ADDED_PATH=''
 ACCESS_KEY_ADDED_TYPE=''
 ACCESS_KEY_ADDED_BLOB=''
+ACCESS_KEY_APPLIED_SHA=''
 ACCESS_KEY_BACKUP_ID=''
 ACCESS_KEY_BACKUP_DIR=''
 
@@ -200,12 +190,15 @@ access_key_mark_backup() {
 access_key_add_line_locked() {
     local user="$1" line="$2" authorized="$3" ssh_dir="$4" uid="$5" gid="$6" tmp
 
+    vps_cmd_require_no_symlink_components "$ssh_dir" || return $?
+    vps_cmd_require_no_symlink_components "$authorized" || return $?
+    [[ ! -e "$ssh_dir" || -d "$ssh_dir" ]] && [[ ! -e "$authorized" || -f "$authorized" ]] || return 3
     if [[ -f "$authorized" ]] && awk -v wanted_type="${line%%[[:space:]]*}" -v wanted_blob="$(vps_cmd_trim "${line#"${line%%[[:space:]]*}"}")" '
         BEGIN { split(wanted_blob, p, /[[:space:]]+/); wanted_blob=p[1] }
         $1 == wanted_type && $2 == wanted_blob { found=1 }
         END { exit(found ? 0 : 1) }
     ' "$authorized"; then
-        vps_cmd_info "该公钥已由并发操作添加到 $user 的 authorized_keys"
+        vps_cmd_info "该公钥已存在于 $user 的 authorized_keys"
         return 0
     fi
     access_key_create_backup "$user" "$authorized" || return $?
@@ -243,9 +236,51 @@ access_key_add_line_locked() {
     ACCESS_KEY_ADDED_TYPE="${line%%[[:space:]]*}"
     ACCESS_KEY_ADDED_BLOB="$(vps_cmd_trim "${line#"${line%%[[:space:]]*}"}")"
     ACCESS_KEY_ADDED_BLOB="${ACCESS_KEY_ADDED_BLOB%%[[:space:]]*}"
-    access_key_mark_backup committed "$(access_sha256_file "$authorized")" || return 30
-    vps_cmd_success "已添加 $user 的 SSH 公钥"
-    vps_cmd_info "authorized_keys 备份 ID：$ACCESS_KEY_BACKUP_ID"
+    ACCESS_KEY_APPLIED_SHA="$(access_sha256_file "$authorized")" || return 30
+    access_key_mark_backup committed "$ACCESS_KEY_APPLIED_SHA" || return 30
+}
+
+access_key_add_with_pubkey_locked() {
+    local user="$1" line="$2" authorized="$3" ssh_dir="$4" uid="$5" gid="$6"
+    local effective candidate='' baseline='' status=0
+
+    access_sshd_pubkey_preflight "$user" || return $?
+    effective="$(access_sshd_effective_value pubkeyauthentication)" || return $?
+    if [[ "$effective" == no ]]; then
+        baseline="$(access_sshd_pubkey_snapshot "$user" no)" || return $?
+        candidate="$(mktemp)" || return 20
+        access_sshd_render_pubkey_enabled >"$candidate" || status=20
+        ((status != 0)) || access_sshd_validate_candidate "$candidate" || status=$?
+        if ((status != 0)); then
+            rm -f -- "$candidate"
+            return "$status"
+        fi
+    fi
+    if [[ "${VPSCTL_DRY_RUN:-0}" == 1 ]]; then
+        vps_cmd_info "演练：将公钥去重后写入 $user 的 authorized_keys"
+        if [[ -n "$candidate" ]]; then
+            vps_cmd_info "演练：密钥安装后将自动启用 PubkeyAuthentication yes，备份 SSH 配置并校验、reload 与验证现有端口"
+            rm -f -- "$candidate"
+        fi
+        return 0
+    fi
+    access_key_add_line_locked "$user" "$line" "$authorized" "$ssh_dir" "$uid" "$gid" || status=$?
+    if ((status == 0)) && [[ -n "$candidate" ]]; then
+        access_sshd_enable_pubkey_locked "$user" "$candidate" "$baseline" || status=$?
+    fi
+    [[ -z "$candidate" ]] || rm -f -- "$candidate"
+    if ((status != 0)); then
+        if ! access_key_rollback_last_add_locked; then
+            vps_cmd_error "密钥安装失败，且无法撤销本次新增公钥；authorized_keys 备份 ID：$ACCESS_KEY_BACKUP_ID"
+            return 30
+        fi
+        return "$status"
+    fi
+    if [[ "$ACCESS_KEY_ADDED" == 1 ]]; then
+        vps_cmd_success "已添加 $user 的 SSH 公钥"
+        vps_cmd_info "authorized_keys 备份 ID：$ACCESS_KEY_BACKUP_ID"
+    fi
+    return 0
 }
 
 access_key_add_line() {
@@ -255,9 +290,13 @@ access_key_add_line() {
     ACCESS_KEY_ADDED_PATH=''
     ACCESS_KEY_ADDED_TYPE=''
     ACCESS_KEY_ADDED_BLOB=''
+    ACCESS_KEY_APPLIED_SHA=''
+    ACCESS_KEY_BACKUP_ID=''
+    ACCESS_KEY_BACKUP_DIR=''
+    ACCESS_SSH_PUBKEY_ENABLED=0
+    ACCESS_SSH_PUBKEY_BACKUP_ID=''
     vps_cmd_require_root || return $?
     access_require_login_user "$user" || return $?
-    access_key_require_pubkey_enabled || return $?
     access_key_validate_line "$line" || return $?
     authorized="$(access_key_authorized_path "$user")" || return $?
     ssh_dir="${authorized%/*}"
@@ -273,29 +312,45 @@ access_key_add_line() {
         vps_cmd_error "$authorized 不是普通文件"
         return 3
     }
-    if [[ -f "$authorized" ]] && awk -v wanted_type="${line%%[[:space:]]*}" -v wanted_blob="$(vps_cmd_trim "${line#"${line%%[[:space:]]*}"}")" '
-        BEGIN { split(wanted_blob, p, /[[:space:]]+/); wanted_blob=p[1] }
-        $1 == wanted_type && $2 == wanted_blob { found=1 }
-        END { exit(found ? 0 : 1) }
-    ' "$authorized"; then
-        vps_cmd_info "该公钥已存在于 $user 的 authorized_keys"
-        return 0
-    fi
     if [[ "${VPSCTL_DRY_RUN:-0}" == 1 ]]; then
-        vps_cmd_info "演练：将公钥去重后写入 $user 的 authorized_keys"
-        return 0
+        access_key_add_with_pubkey_locked "$user" "$line" "$authorized" "$ssh_dir" "$uid" "$gid"
+        return $?
     fi
     access_prepare_layout || return $?
     vps_cmd_lock security-access || return $?
-    access_key_add_line_locked "$user" "$line" "$authorized" "$ssh_dir" "$uid" "$gid" || status=$?
+    access_key_add_with_pubkey_locked "$user" "$line" "$authorized" "$ssh_dir" "$uid" "$gid" || status=$?
     vps_cmd_unlock
     return "$status"
 }
 
 access_key_rollback_last_add_locked() {
-    local authorized="${ACCESS_KEY_ADDED_PATH:-}" tmp
+    local authorized="${ACCESS_KEY_ADDED_PATH:-}" tmp manifest present original_sha mode uid gid
 
-    [[ "${ACCESS_KEY_ADDED:-0}" == 1 && -f "$authorized" && ! -L "$authorized" ]] || return 0
+    [[ "${ACCESS_KEY_ADDED:-0}" == 1 ]] || return 0
+    vps_cmd_require_no_symlink_components "$authorized" || return $?
+    [[ -f "$authorized" && ! -L "$authorized" ]] || return 30
+    manifest="$ACCESS_KEY_BACKUP_DIR/manifest"
+    present="$(access_kv_get "$manifest" original_present)" || return 30
+    if [[ -n "$ACCESS_KEY_APPLIED_SHA" && "$(access_sha256_file "$authorized")" == "$ACCESS_KEY_APPLIED_SHA" ]]; then
+        if [[ "$present" == 1 ]]; then
+            original_sha="$(access_kv_get "$manifest" original_sha256)" || return 30
+            tmp="$ACCESS_KEY_BACKUP_DIR/authorized_keys"
+            [[ -f "$tmp" && ! -L "$tmp" && "$(access_sha256_file "$tmp")" == "$original_sha" ]] || return 30
+            mode="$(access_kv_get "$manifest" original_mode)" || return 30
+            uid="$(access_kv_get "$manifest" original_uid)" || return 30
+            gid="$(access_kv_get "$manifest" original_gid)" || return 30
+            access_atomic_from_file "$tmp" "$authorized" "$mode" || return $?
+            chown "$uid:$gid" -- "$authorized" || return 30
+        elif [[ "$present" == 0 ]]; then
+            rm -f -- "$authorized" || return 20
+            original_sha=''
+        else
+            return 30
+        fi
+        access_key_mark_backup rolled_back "$original_sha" || return 30
+        ACCESS_KEY_ADDED=0
+        return 0
+    fi
     tmp="$(mktemp "${authorized%/*}/.authorized_keys.rollback.XXXXXX")" || return 20
     awk -v wanted_type="$ACCESS_KEY_ADDED_TYPE" -v wanted_blob="$ACCESS_KEY_ADDED_BLOB" '
         BEGIN { removed=0 }
@@ -320,7 +375,7 @@ access_key_rollback_last_add_locked() {
         rm -f -- "$tmp"
         return 20
     }
-    if [[ -n "$ACCESS_KEY_BACKUP_DIR" && "$(access_kv_get "$ACCESS_KEY_BACKUP_DIR/manifest" original_present 2>/dev/null || true)" == 0 ]]; then
+    if [[ "$present" == 0 && ! -s "$authorized" ]]; then
         rm -f -- "$authorized" || return 20
         access_key_mark_backup rolled_back '' || return 30
     elif [[ -n "$ACCESS_KEY_BACKUP_DIR" ]]; then
@@ -447,13 +502,17 @@ access_key_add() {
 }
 
 access_key_generate() {
-    local user="$1" key_file key_type=ed25519 saved=''
+    local user="$1" key_file key_type=ed25519 saved='' status
 
     vps_cmd_require_root || return $?
     access_require_login_user "$user" || return $?
     access_key_ensure_ssh_keygen || return $?
     if [[ "${VPSCTL_DRY_RUN:-0}" == 1 ]]; then
+        access_sshd_pubkey_preflight "$user" || return $?
         vps_cmd_info "演练：将生成一次性 Ed25519（失败时 RSA-4096）密钥并添加公钥"
+        if [[ "$(access_sshd_effective_value pubkeyauthentication)" == no ]]; then
+            vps_cmd_info "演练：密钥安装后将自动启用 PubkeyAuthentication yes，备份 SSH 配置并校验、reload 与验证现有端口"
+        fi
         return 0
     fi
     [[ -t 1 ]] || {
@@ -478,8 +537,9 @@ access_key_generate() {
         }
     fi
     access_key_add_line "$user" "$(<"$key_file.pub")" || {
+        status=$?
         access_cleanup_secret
-        return $?
+        return "$status"
     }
     printf '\n一次性私钥（%s，仅此次显示；请立即保存到安全位置）：\n\n' "$key_type" >/dev/tty
     cat -- "$key_file" >/dev/tty
@@ -493,6 +553,9 @@ access_key_generate() {
         fi
         access_cleanup_secret
         vps_cmd_warning "未确认 SAVED；一次性私钥已删除，本次新增公钥已撤销"
+        if [[ "$ACCESS_SSH_PUBKEY_ENABLED" == 1 ]]; then
+            vps_cmd_warning "公钥认证保持启用；如需恢复原 SSH 配置，可使用备份 ID：$ACCESS_SSH_PUBKEY_BACKUP_ID"
+        fi
         return 130
     fi
     access_cleanup_secret

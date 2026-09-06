@@ -63,7 +63,11 @@ bash bin/vpsctl --dry-run security access ssh prepare --port 2222 --firewall man
 
 `key add` 接受一条 OpenSSH 公钥记录：自动化可通过 `--stdin` 管道传入，或用 `--public-key-file FILE` 指定文件。入口验证公钥记录后写入目标用户的 `~/.ssh/authorized_keys`，并保持目录、文件所有者和权限适合 OpenSSH 使用；重复添加同一公钥不得产生重复行。私钥不会被该动作读取或复制。
 
+添加或生成密钥时，若 `PubkeyAuthentication` 尚未启用，会在公钥安装成功后自动启用。重复添加已有公钥也会检查并启用认证。修改前备份受管 SSH 配置，通过配置校验后 reload，并检查全局、root 和目标用户的有效配置；端口、密码认证和 root 登录策略保持原值。启用或验证失败时恢复 SSH 配置并撤销本次新增公钥。存在活动 SSH 事务或不支持的复杂配置时拒绝自动修改；`--dry-run` 只展示计划。
+
 `key generate --user USER` 为目标用户生成新的密钥对，允许由 `ssh-keygen` 在 TTY 中交互设置可选口令。私钥只在当前终端显示一次，不写入普通 stdout、日志、状态 JSON 或备份；操作者输入明确的保存确认后，服务器端临时私钥立即删除。未确认或中断时同时撤销本次新增公钥。密钥生成不自动删除旧密钥，也不自动关闭密码登录。
+
+未确认保存而撤销新公钥时，已成功启用的公钥认证保留，避免影响其他已有密钥。启用公钥认证不会绕过 `PermitRootLogin` 等现有登录限制。
 
 ## 4. SSH 变更事务
 
@@ -163,3 +167,5 @@ prepare 先放行候选端口；commit 在新会话证明通过后才移除本�
 所有验证必须通过 `ssh host-vps-scripts` 在专用真实环境执行，不得在当前系统或 WSL 运行项目代码。至少覆盖：普通用户/root 权限、用户和密码失败后的部分完成、公钥去重与权限、dry-run 零写入、复杂配置写前拒绝、双端口监听、新非 root 会话证明、证明过期/复用/错误端口拒绝、commit 后旧端口收敛、abort、历史 restore、防火墙自动与手工模式，以及断开原会话后仍可从候选会话恢复。OpenRC 只验证入口明确拒绝，不作为支持平台验收。
 
 仓库提供不纳入默认测试套件的显式真实验收脚本 `tests/integration/test-security-access-real.sh`。它只应在专用主机以 `VPSCTL_REAL_ACCESS_TEST=1` 启用，并要求调用方提供已准备好的一次性非 root 管理员、私钥路径、普通用户可读的项目副本和空闲候选端口；脚本在同一持续 root 会话内完成双端口 prepare、publickey 第二会话证明、root-only 证明权限检查、abort 与配置哈希复原检查。
+
+`tests/integration/test-security-access-pubkey-real.sh` 使用相同开关，要求受管 drop-in 路径空闲且没有活动事务。它创建临时用户和密钥，将磁盘配置置为禁用公钥认证（此时不 reload），验证添加公钥后自动启用、真实 SSH 登录成功、其他有效配置保持不变及重复添加幂等；退出时移除测试配置和用户、reload 并核对配置恢复。
