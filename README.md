@@ -4,9 +4,9 @@
 
 项目采用“一个管理入口、多个独立命令”的结构：管理入口只负责参数解析、固定命令登记、公共上下文和分发；每项实际功能原则上由一个公开入口脚本实现，复杂入口可拆为不单独分发的私有子模块。这样既能通过统一入口使用，也能单独运行、测试和排错。
 
-> 当前版本为 0.8.4，提供网络、系统内核、访问、TLS 证书、代理与服务器测试入口。系统变更命令应先使用 `--dry-run` 并阅读对应恢复说明；内核变更需提前确认带外控制台或救援入口可用，服务器测试会下载并运行第三方代码、产生明显 CPU/磁盘/网络负载且不支持演练。
+> 当前版本为 0.8.5，提供网络、系统内核、访问、TLS 证书、代理与服务器测试入口。系统变更命令应先使用 `--dry-run` 并阅读对应恢复说明；内核变更需提前确认带外控制台或救援入口可用，服务器测试会下载并运行第三方代码、产生明显 CPU/磁盘/网络负载且不支持演练。
 
-应用、功能与 GitHub Release 分发统一使用 `0.8.4`。仓库根 `VERSION` 是规范版本源，tag 为 `v0.8.4`；发布资产、安装目录、`vpsctl self` 与命令行版本展示均使用同一版本号。
+应用、功能与 GitHub Release 分发统一使用 `0.8.5`。仓库根 `VERSION` 是规范版本源，tag 为 `v0.8.5`；发布资产、安装目录、`vpsctl self` 与命令行版本展示均使用同一版本号。
 
 ## 文档
 
@@ -58,14 +58,14 @@ curl -fsSL https://github.com/Runarry/vps-script-lite/releases/latest/download/v
 ```text
 vpsctl self status
 vpsctl self update
-vpsctl self update --version v0.8.4
+vpsctl self update --version v0.8.5
 ```
 
 `curl | bash` 的初始执行信任边界包括 HTTPS、GitHub、仓库及 Release 发布权限，以及当前 `latest` 指向的 `vpsctl.sh`；同一 Release 中的校验清单只能在安装器已经开始执行后保护后续资产，不能倒过来证明安装器自身可信。更稳妥的方式是先下载安装器和清单，检查来源、版本、SHA-256 与脚本内容，再执行本地文件：
 
 ```bash
 tmp_dir="$(mktemp -d)"
-base_url="https://github.com/Runarry/vps-script-lite/releases/download/v0.8.4"
+base_url="https://github.com/Runarry/vps-script-lite/releases/download/v0.8.5"
 curl -fL "$base_url/vpsctl.sh" -o "$tmp_dir/vpsctl.sh"
 curl -fL "$base_url/vpsctl-manifest.tsv" -o "$tmp_dir/vpsctl-manifest.tsv"
 awk -F '\t' '$1 == "asset" && $2 == "launcher" { print $4 "  vpsctl.sh" }' \
@@ -178,7 +178,7 @@ bash bin/vpsctl service proxy update --core xray --version vX.Y.Z
 
 - 规范：已建立。
 - 目录骨架：已建立。
-- 当前版本：0.8.4。
+- 当前版本：0.8.5。
 - 管理入口：提供环境检测、终端 UI、固定注册表和安全分发。
 - 功能命令：提供 `network bbr`、`network dns`、`network ip-policy`、`network rfw`、`system kernel`、`security access`、`security fail2ban`、`security tls`、`service proxy`、`test nodequality` 和 `test tcpquality`；均处于 `experimental` 生命周期。
 - 公共函数库：提供环境检测、命令注册、终端 UI 及网络和服务命令所需公共能力。

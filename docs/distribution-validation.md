@@ -36,6 +36,12 @@ bash tests/integration/test-vpsctl.sh
 
 2026-09-06 将项目版本提升至 `0.8.1` 后，再次通过专用环境验证版本展示、`test-release-build.sh`、`test-vpsctl.sh` 和 `test-distribution-real.sh`。跨版本目标夹具同步调整为 `0.8.2`。本次改动脚本的 `bash -n` 与 ShellCheck 均通过；内核入口使用 `shellcheck -x` 跟随其模块定义。测试退出后已确认原 `0.1.0` 安装恢复。版本提交对应本地 tag `v0.8.1`，未推送或发布 GitHub Release。
 
+## v0.8.5 发布验证（2026-09-06）
+
+SSH 登录策略直接应用随 `v0.8.5` 发布，版本展示和分发清单统一为 `0.8.5`；跨版本测试夹具使用 `0.8.6`。在专用主机通过变更脚本的语法与 ShellCheck 检查，以及 `test-distribution.sh`、`test-release-build.sh`、`test-vpsctl.sh`、`test-distribution-real.sh`。覆盖清单与摘要校验、规范归档、全新和重复安装、按需领域下载、离线缓存、显式更新、升级权限修复、卸载及 purge。
+
+测试结束恢复测试前的 `vpsctl 0.5.0` 安装。发布资产先作为 draft 上传，重新下载后与专用主机的已测构建逐字节比较，并再次验证安装流程；正式发布后复核 latest 安装器、全新安装及从 `v0.8.4` 显式升级到 `v0.8.5`。后续发布检查结果记录在 GitHub Release 说明中；`v0.8.4` 为本次发布回退版本。
+
 ## 恢复信息
 
 真实安装测试开始前备份 `/usr/local/bin/vpsctl`、`/usr/local/lib/vpsctl` 和 `/var/lib/vpsctl/self`，退出时恢复，清理测试标记。已确认测试机 `current` 恢复到原 `0.1.0` 版本。
