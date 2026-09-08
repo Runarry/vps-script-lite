@@ -54,7 +54,9 @@ apk add --no-cache bash curl ca-certificates
 curl -fsSL https://github.com/Runarry/vps-script-lite/releases/latest/download/vpsctl.sh | bash
 ```
 
-安装后使用快捷命令 `vpsctl`。启动 `vpsctl` 只读取本地已安装内容，不联网检查更新；需要查看或更新分发版本时显式运行：
+**从 v0.8.6 及更早版本首次升级到 v0.8.7，需要普通卸载管理器代码后重新安装。** 旧更新器的 core 白名单不包含新增的 `lib/ufw.sh`，会拒绝直接 `self update`；直接重跑安装器也只会启动已有管理器。请先按下方固定 tag 流程下载并校验安装器和 manifest，再运行 `vpsctl --non-interactive self uninstall --confirm-uninstall`（不加 `--purge`），然后执行已下载的安装器。普通卸载保留功能配置、服务和备份。完整步骤见 [v0.8.7 发布说明](https://github.com/Runarry/vps-script-lite/releases/tag/v0.8.7)。
+
+安装后使用快捷命令 `vpsctl`。启动 `vpsctl` 只读取本地已安装内容，不联网检查更新；完成上述首次迁移后，需要查看或执行同格式分发更新时显式运行：
 
 ```text
 vpsctl self status
