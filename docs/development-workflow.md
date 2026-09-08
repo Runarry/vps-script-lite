@@ -65,19 +65,19 @@
 
 ## 4. Release 资产与发布流程
 
-仓库根 `VERSION` 是项目版本的规范来源；首个采用当前分发格式的版本为 `0.1.0`，对应历史 tag `v0.1.0`，当前版本为 `0.8.5`。应用、功能、tag、发布资产、安装目录和命令行展示必须使用同一版本号。
+仓库根 `VERSION` 是项目版本的规范来源；首个采用当前分发格式的版本为 `0.1.0`，对应历史 tag `v0.1.0`，当前版本为 `0.8.6`。应用、功能、tag、发布资产、安装目录和命令行展示必须使用同一版本号。
 
-每个 Release 必须一次性提供安装器、严格 TSV 清单、core bundle 和五个领域 bundle。当前 `0.8.5` 的规范资产集为：
+每个 Release 必须一次性提供安装器、严格 TSV 清单、core bundle 和五个领域 bundle。当前 `0.8.6` 的规范资产集为：
 
 ```text
 vpsctl.sh
 vpsctl-manifest.tsv
-vpsctl-core-0.8.5.tar.gz
-vpsctl-network-0.8.5.tar.gz
-vpsctl-system-0.8.5.tar.gz
-vpsctl-security-0.8.5.tar.gz
-vpsctl-service-0.8.5.tar.gz
-vpsctl-test-0.8.5.tar.gz
+vpsctl-core-0.8.6.tar.gz
+vpsctl-network-0.8.6.tar.gz
+vpsctl-system-0.8.6.tar.gz
+vpsctl-security-0.8.6.tar.gz
+vpsctl-service-0.8.6.tar.gz
+vpsctl-test-0.8.6.tar.gz
 ```
 
 每个 tar 包内使用项目根相对路径，不包含额外顶级包目录。`vpsctl-manifest.tsv` 依次包含 `schema_version<TAB>1`、`version<TAB>VERSION`、`repository<TAB>Runarry/vps-script-lite`、安装器的 `asset<TAB>launcher<TAB>FILENAME<TAB>SHA256` 行，以及 core 和五个领域各自的 `bundle<TAB>NAME<TAB>FILENAME<TAB>SHA256` 行；不允许缺行、重复名称、未登记资产或非 64 位小写十六进制摘要。
