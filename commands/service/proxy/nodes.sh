@@ -212,7 +212,76 @@ proxy_prepare_manifest_state() (
 proxy_port_conflicts_manifest() {
     local port="$1" ignore_id="${2:-}"
     [[ -f "$PROXY_MANIFEST" ]] || return 1
-    jq -e --arg port "$port" --arg ignore "$ignore_id" '.nodes[] | select(.port == ($port | tonumber) and .id != $ignore)' "$PROXY_MANIFEST" >/dev/null 2>&1
+    jq -e --argjson port "$((10#$port))" --arg ignore "$ignore_id" '
+        .nodes[] | select((.port == $port and .id != $ignore) or
+            (.tls.reality_guard.enabled == true and .tls.reality_guard.listen_port == $port))
+    ' "$PROXY_MANIFEST" >/dev/null 2>&1
+}
+
+proxy_reality_guard_label() {
+    case "${1:-off}" in on | true) printf '开启（精确 SNI 白名单）' ;; *) printf '关闭' ;; esac
+}
+
+proxy_prompt_reality_guard() {
+    proxy_prompt_select "REALITY 防偷" "${1:-on}" \
+        on "开启（精确 SNI 白名单）" off "关闭"
+}
+
+# Called under the proxy transaction lock. Allocation is persisted in the node,
+# never repeated by the renderers or by read-only operations.
+proxy_reality_guard_allocate_port() {
+    local public_port="$1" sockets port start end network hint effective forward
+    local -A used=()
+    used["$public_port"]=1
+    if [[ -f "$PROXY_MANIFEST" ]]; then
+        while IFS= read -r port; do
+            [[ -z "$port" ]] || used["$port"]=1
+        done < <(jq -r '.nodes[] | .port, (select(.tls.reality_guard.enabled == true) | .tls.reality_guard.listen_port)' "$PROXY_MANIFEST")
+    fi
+    sockets="$(ss -H -lntu 2>/dev/null)" || { vps_cmd_error "读取系统监听端口失败"; return 20; }
+    while IFS= read -r port; do
+        [[ -z "$port" ]] || used["$port"]=1
+    done < <(awk '{address=$5; sub(/^.*:/, "", address); if (address ~ /^[0-9]+$/) print address}' <<<"$sockets")
+    if [[ -n "${PROXY_RELAY_FILE:-}" && -f "$PROXY_RELAY_FILE" ]]; then
+        proxy_relay_validate_file "$PROXY_RELAY_FILE" "$PROXY_MANIFEST" || return $?
+        while IFS= read -r forward; do
+            network="$(jq -r '.network' <<<"$forward")"
+            hint="$(_proxy_relay_forward_exit_hint "$PROXY_RELAY_FILE" "$(jq -r '.exit_id' <<<"$forward")")" || return $?
+            effective="$(proxy_relay_forward_effective_network "$network" "$hint")" || return $?
+            [[ "$effective" == udp ]] && continue
+            start="$(jq -r '.listen_port_start' <<<"$forward")"
+            end="$(jq -r '.listen_port_end' <<<"$forward")"
+            ((start >= 10000)) || start=10000
+            ((end <= 29999)) || end=29999
+            for ((port = start; port <= end; port++)); do used["$port"]=1; done
+        done < <(jq -c '.forwards[]' "$PROXY_RELAY_FILE")
+    fi
+    for ((port = 10000; port <= 29999; port++)); do
+        if [[ -z "${used[$port]:-}" ]]; then printf '%s' "$port"; return 0; fi
+    done
+    vps_cmd_error "REALITY 防偷没有可用内部端口（10000–29999）"
+    return 3
+}
+
+proxy_reality_guard_apply() {
+    local node="$1" mode="$2" port
+    proxy_profile_uses_reality "$(jq -r '.profile' <<<"$node")" || {
+        vps_cmd_error "--reality-anti-relay 仅适用于 REALITY 节点"; return 2;
+    }
+    case "$mode" in
+        off) jq '.tls.reality_guard={enabled:false,listen_port:null}' <<<"$node" ;;
+        on)
+            proxy_reality_sni_valid "$(jq -r '.tls.server_name' <<<"$node")" || {
+                vps_cmd_error "REALITY 防偷需要有效 DNS 域名作为 SNI，不能使用 IP、通配符、URL 或端口"; return 2;
+            }
+            port="$(jq -r 'if .tls.reality_guard.enabled == true then .tls.reality_guard.listen_port else empty end' <<<"$node")"
+            if [[ -z "$port" ]]; then
+                port="$(proxy_reality_guard_allocate_port "$(jq -r '.port' <<<"$node")")" || return $?
+            fi
+            jq --argjson port "$port" '.tls.reality_guard={enabled:true,listen_port:$port}' <<<"$node"
+            ;;
+        *) vps_cmd_error "--reality-anti-relay 仅支持 on|off"; return 2 ;;
+    esac
 }
 
 proxy_port_is_listening() {
@@ -606,6 +675,7 @@ proxy_prepare_node_json() {
 
 proxy_node_add() (
     local profile="" requested_core="" name="" listen="::" port="" address="" sni="www.amd.com"
+    local reality_anti_relay=""
     local path="" service_name="" cert_mode="self-signed" import_cert="" import_key="" managed_cert_id=""
     local obfs_type="none" up_mbps=10000 down_mbps=10000 congestion_control="bbr" ip_strategy="auto" arg core id node
     local candidate_manifest candidate_config status=0 mode detected_address address_choice transport
@@ -620,6 +690,12 @@ proxy_node_add() (
             --port) (($# >= 2)) || return 2; port="$2"; shift 2 ;;
             --address) (($# >= 2)) || return 2; address="$2"; shift 2 ;;
             --sni) (($# >= 2)) || return 2; sni="$2"; shift 2 ;;
+            --reality-anti-relay)
+                (($# >= 2)) || return 2
+                [[ -z "$reality_anti_relay" ]] || { vps_cmd_error "--reality-anti-relay 不能重复"; return 2; }
+                case "$2" in on | off) reality_anti_relay="$2" ;; *) vps_cmd_error "--reality-anti-relay 仅支持 on|off"; return 2 ;; esac
+                shift 2
+                ;;
             --path) (($# >= 2)) || return 2; path="$2"; shift 2 ;;
             --service-name) (($# >= 2)) || return 2; service_name="$2"; shift 2 ;;
             --cert-mode) (($# >= 2)) || return 2; cert_mode="$2"; shift 2 ;;
@@ -640,6 +716,16 @@ proxy_node_add() (
     fi
     [[ -n "$profile" ]] || { vps_cmd_error "node add 需要 --profile"; return 2; }
     proxy_profile_cores "$profile" >/dev/null || { vps_cmd_error "未知节点配置：$profile"; return 2; }
+    if proxy_profile_uses_reality "$profile"; then
+        reality_anti_relay="${reality_anti_relay:-on}"
+    elif [[ -n "$reality_anti_relay" ]]; then
+        vps_cmd_error "--reality-anti-relay 仅适用于 REALITY 节点"
+        return 2
+    fi
+    if [[ "$reality_anti_relay" == on ]] && ! proxy_reality_sni_valid "$sni"; then
+        vps_cmd_error "REALITY 防偷需要有效 DNS 域名作为 SNI，不能使用 IP、通配符、URL 或端口"
+        return 2
+    fi
     if [[ -n "$requested_core" ]]; then
         proxy_core_valid "$requested_core" || { vps_cmd_error "无效内核：$requested_core"; return 2; }
         proxy_profile_cores "$profile" | grep -Fx "$requested_core" >/dev/null || {
@@ -731,6 +817,9 @@ proxy_node_add() (
             if proxy_profile_uses_reality "$profile" || proxy_profile_requires_tls_certificate "$profile" || [[ "$profile" == "shadowsocks-2022-shadowtls" ]]; then
                 sni="$(proxy_prompt_value "SNI/伪装域名" "$sni")" || return $?
             fi
+            if proxy_profile_uses_reality "$profile"; then
+                reality_anti_relay="$(proxy_prompt_reality_guard "$reality_anti_relay")" || return $?
+            fi
             case "$(proxy_profile_default_transport "$profile")" in
                 ws | xhttp) path="$(proxy_prompt_value "传输路径" "${path:-/$(proxy_random_hex 6)}")" || return $? ;;
                 grpc) service_name="$(proxy_prompt_value "gRPC serviceName" "${service_name:-grpc-$(proxy_random_hex 4)}")" || return $? ;;
@@ -801,8 +890,14 @@ proxy_node_add() (
     up_mbps=$((10#$up_mbps))
     down_mbps=$((10#$down_mbps))
 
+    if [[ "$reality_anti_relay" == on ]] && ! proxy_reality_sni_valid "$sni"; then
+        vps_cmd_error "REALITY 防偷需要有效 DNS 域名作为 SNI，不能使用 IP、通配符、URL 或端口"
+        return 2
+    fi
+
     if [[ "${VPSCTL_DRY_RUN:-0}" == "1" ]]; then
         vps_cmd_info "演练：向 $(proxy_core_label "$core") 添加 ${profile} 节点 ${name}（${listen}:${port}，客户端地址 ${address}，IP 策略 ${ip_strategy}）；不生成凭据、证书或配置"
+        [[ -z "$reality_anti_relay" ]] || vps_cmd_info "演练：REALITY 防偷：$(proxy_reality_guard_label "$reality_anti_relay")；内部端口仅在实际保存时分配"
         return 0
     fi
 
@@ -818,6 +913,9 @@ proxy_node_add() (
         proxy_cleanup_orphan_certs "$core" >/dev/null 2>&1 || true
         return "$status"
     }
+    if [[ -n "$reality_anti_relay" ]]; then
+        node="$(proxy_reality_guard_apply "$node" "$reality_anti_relay")" || return $?
+    fi
     candidate_manifest="$(mktemp "${PROXY_STATE_DIR}/.nodes.add.XXXXXX")" || {
         proxy_cleanup_orphan_certs "$core" >/dev/null 2>&1 || true
         return 20
@@ -882,6 +980,7 @@ proxy_node_list() {
                 (any($bindings[]; .node_id == $node.id)) as $relay_bound |
                 ($node.ip_strategy // "auto") as $strategy |
                 {id,core,profile,name,listen,port,address,ip_strategy:$strategy,
+                 reality_anti_relay:(.tls.reality_guard.enabled // false),
                  relay_bound:$relay_bound,
                  ip_strategy_effective:(($relay_bound and $strategy != "auto") | not),
                  ip_strategy_status:(if $relay_bound and $strategy != "auto" then "relay_bound" else "active" end),
@@ -910,6 +1009,9 @@ proxy_node_list() {
         strategy_suffix=""
         [[ "$relay_bound" != 1 ]] || strategy_suffix='（已绑定中转，暂不生效）'
         printf '    IP 策略：%s%s\n' "$(proxy_ip_strategy_label "$ip_strategy")" "$strategy_suffix"
+        if proxy_profile_uses_reality "$profile"; then
+            printf '    REALITY 防偷：%s\n' "$(proxy_reality_guard_label "$(jq -r '.tls.reality_guard.enabled // false' <<<"$node")")"
+        fi
     done < <(jq -c --arg core "$core" '.nodes[] | select($core == "all" or .core == $core)' "$PROXY_MANIFEST")
     total="$(proxy_manifest_count all)"
     printf '当前筛选：%d 个；节点总数：%s 个\n' "$count" "$total"
@@ -1275,6 +1377,9 @@ proxy_node_details_print() {
     if proxy_profile_uses_reality "$profile" || proxy_profile_requires_tls_certificate "$profile" || [[ "$profile" == "shadowsocks-2022-shadowtls" ]]; then
         printf '  SNI：%s\n' "$(jq -r '.tls.server_name' <<<"$node")"
     fi
+    if proxy_profile_uses_reality "$profile"; then
+        printf '  REALITY 防偷：%s\n' "$(proxy_reality_guard_label "$(jq -r '.tls.reality_guard.enabled // false' <<<"$node")")"
+    fi
     case "$transport" in
         ws | xhttp) printf '  传输路径：%s\n' "$(jq -r '.transport.path' <<<"$node")" ;;
         grpc) printf '  gRPC serviceName：%s\n' "$(jq -r '.transport.service_name' <<<"$node")" ;;
@@ -1359,6 +1464,7 @@ proxy_node_show() {
         fi
         jq --arg strategy "$ip_strategy" --argjson relay_bound "$relay_bound" '
             {id,core,profile,name,listen,port,address,ip_strategy:$strategy,
+             reality_anti_relay:(.tls.reality_guard.enabled // false),
              relay_bound:$relay_bound,
              ip_strategy_effective:(($relay_bound and $strategy != "auto") | not),
              ip_strategy_status:(if $relay_bound and $strategy != "auto" then "relay_bound" else "active" end),
@@ -1668,6 +1774,7 @@ proxy_node_menu_run() {
 
 proxy_node_edit() (
     local id="" name="" listen="" port="" address="" sni="" path="" service_name=""
+    local reality_anti_relay="" effective_reality_guard=""
     local requested_cert_mode="" import_cert="" import_key="" managed_cert_id="" obfs_type="" up_mbps="" down_mbps="" congestion_control="" ip_strategy="" arg
     local node current_node core profile old_port old_cert_mode cert_mode candidate_node candidate_manifest candidate_config status=0
     local field transport current confirm_status=0 certificate_tools_needed=0
@@ -1682,6 +1789,12 @@ proxy_node_edit() (
             --port) (($# >= 2)) || return 2; port="$2"; shift 2 ;;
             --address) (($# >= 2)) || return 2; address="$2"; shift 2 ;;
             --sni) (($# >= 2)) || return 2; sni="$2"; shift 2 ;;
+            --reality-anti-relay)
+                (($# >= 2)) || return 2
+                [[ -z "$reality_anti_relay" ]] || { vps_cmd_error "--reality-anti-relay 不能重复"; return 2; }
+                case "$2" in on | off) reality_anti_relay="$2" ;; *) vps_cmd_error "--reality-anti-relay 仅支持 on|off"; return 2 ;; esac
+                shift 2
+                ;;
             --path) (($# >= 2)) || return 2; path="$2"; shift 2 ;;
             --service-name) (($# >= 2)) || return 2; service_name="$2"; shift 2 ;;
             --cert-mode) (($# >= 2)) || return 2; requested_cert_mode="$2"; shift 2 ;;
@@ -1697,7 +1810,7 @@ proxy_node_edit() (
         esac
     done
     local had_explicit_change=0
-    [[ -z "$name$listen$port$address$sni$path$service_name$requested_cert_mode$import_cert$import_key$managed_cert_id$obfs_type$up_mbps$down_mbps$congestion_control$ip_strategy" ]] || had_explicit_change=1
+    [[ -z "$name$listen$port$address$sni$path$service_name$requested_cert_mode$import_cert$import_key$managed_cert_id$obfs_type$up_mbps$down_mbps$congestion_control$ip_strategy$reality_anti_relay" ]] || had_explicit_change=1
     if [[ -n "$id" && ! "$id" =~ ^node-[a-f0-9]{16}$ ]]; then
         vps_cmd_error "node edit 需要有效 --id"
         return 2
@@ -1737,6 +1850,10 @@ proxy_node_edit() (
     core="$(jq -r '.core' <<<"$node")"
     profile="$(jq -r '.profile' <<<"$node")"
     old_port="$(jq -r '.port' <<<"$node")"
+    if [[ -n "$reality_anti_relay" ]] && ! proxy_profile_uses_reality "$profile"; then
+        vps_cmd_error "--reality-anti-relay 仅适用于 REALITY 节点"
+        return 2
+    fi
     if ((had_explicit_change == 0)); then
         proxy_is_interactive || {
             vps_cmd_error "node edit 至少需要一个变更字段"
@@ -1746,6 +1863,9 @@ proxy_node_edit() (
         edit_fields=(name "节点名称" listen "监听模式" port "监听端口" address "客户端连接地址")
         if proxy_profile_uses_reality "$profile" || proxy_profile_requires_tls_certificate "$profile" || [[ "$profile" == "shadowsocks-2022-shadowtls" ]]; then
             edit_fields+=(sni "SNI/伪装域名")
+        fi
+        if proxy_profile_uses_reality "$profile"; then
+            edit_fields+=(reality_guard "REALITY 防偷")
         fi
         case "$transport" in
             ws | xhttp) edit_fields+=(path "传输路径") ;;
@@ -1843,6 +1963,11 @@ proxy_node_edit() (
                     ip_strategy="$(proxy_prompt_ip_strategy "$current")" || return $?
                     had_explicit_change=1
                     ;;
+                reality_guard)
+                    current="${reality_anti_relay:-$(jq -r 'if .tls.reality_guard.enabled == true then "on" else "off" end' <<<"$node")}"
+                    reality_anti_relay="$(proxy_prompt_reality_guard "$current")" || return $?
+                    had_explicit_change=1
+                    ;;
                 cancel)
                     vps_cmd_info "已取消编辑"
                     return 0
@@ -1875,6 +2000,10 @@ proxy_node_edit() (
                         "${up_mbps:-$(jq -r '.options.up_mbps' <<<"$node")}" "${down_mbps:-$(jq -r '.options.down_mbps' <<<"$node")}"
                     [[ -z "$congestion_control" ]] || printf '  拥塞控制：%s\n' "$congestion_control"
                     [[ -z "$ip_strategy" ]] || printf '  IP 策略：%s\n' "$(proxy_ip_strategy_label "$ip_strategy")"
+                    if proxy_profile_uses_reality "$profile"; then
+                        current="${reality_anti_relay:-$(jq -r 'if .tls.reality_guard.enabled == true then "on" else "off" end' <<<"$node")}"
+                        printf '  REALITY 防偷：%s\n' "$(proxy_reality_guard_label "$current")"
+                    fi
                     confirm_status=0
                     proxy_confirm "确认保存这些修改？" || confirm_status=$?
                     if ((confirm_status == 0)); then
@@ -1900,6 +2029,16 @@ proxy_node_edit() (
     down_mbps="${down_mbps:-$(jq -r '.options.down_mbps' <<<"$node")}"
     congestion_control="${congestion_control:-$(jq -r '.options.congestion_control' <<<"$node")}"
     ip_strategy="${ip_strategy:-$(jq -r '.ip_strategy // "auto"' <<<"$node")}"
+    if proxy_profile_uses_reality "$profile"; then
+        effective_reality_guard="${reality_anti_relay:-$(jq -r 'if .tls.reality_guard.enabled == true then "on" else "off" end' <<<"$node")}"
+        if [[ "$effective_reality_guard" == on ]] && ! proxy_reality_sni_valid "$sni"; then
+            vps_cmd_error "REALITY 防偷需要有效 DNS 域名作为 SNI，不能使用 IP、通配符、URL 或端口"
+            return 2
+        fi
+        if [[ "$effective_reality_guard" == on && "$(jq -r '.tls.reality_guard.enabled // false' <<<"$node")" != true ]]; then
+            required_tools+=(ss)
+        fi
+    fi
     proxy_valid_host "$address" || { vps_cmd_error "连接地址无效"; return 2; }
     [[ "$listen" == "::" || "$listen" == "0.0.0.0" || "$listen" =~ ^[A-Fa-f0-9:.]+$ ]] || return 2
     if [[ -n "$path" ]] && ! proxy_valid_path "$path"; then vps_cmd_error "传输路径无效"; return 2; fi
@@ -1932,6 +2071,12 @@ proxy_node_edit() (
     up_mbps=$((10#$up_mbps))
     down_mbps=$((10#$down_mbps))
 
+    if [[ "${VPSCTL_DRY_RUN:-0}" == 1 && -n "$effective_reality_guard" ]]; then
+        vps_cmd_info "演练：更新节点 ${name}（${id}，${listen}:${port}，客户端地址 ${address}，SNI ${sni}，IP 策略 ${ip_strategy}）"
+        vps_cmd_info "演练：REALITY 防偷：$(proxy_reality_guard_label "$effective_reality_guard")；保留凭据，不分配内部端口、不写配置或启停服务"
+        return 0
+    fi
+
     vps_cmd_lock proxy || return $?
     trap 'vps_cmd_unlock' EXIT
     proxy_recover_transaction || return $?
@@ -1954,6 +2099,10 @@ proxy_node_edit() (
          .transport.path=$path | .transport.service_name=$service_name | .options.obfs_type=$obfs_type |
          .options.up_mbps=$up_mbps | .options.down_mbps=$down_mbps | .options.congestion_control=$congestion_control |
          .ip_strategy=$ip_strategy | .updated_at=$updated_at' <<<"$node")" || return 10
+
+    if [[ -n "$reality_anti_relay" ]]; then
+        candidate_node="$(proxy_reality_guard_apply "$candidate_node" "$reality_anti_relay")" || return $?
+    fi
 
     if proxy_profile_requires_tls_certificate "$profile"; then
         old_cert_mode="$(jq -r '.tls.mode' <<<"$node")"

@@ -118,6 +118,7 @@ proxy_xray_validate_node() {
         printf 'Xray 节点字段校验失败（profile=%s）。\n' "$profile" >&2
         return 10
     fi
+    proxy_reality_guard_validate_node "$node_json"
 }
 
 proxy_xray_render_node() {
@@ -128,14 +129,15 @@ proxy_xray_render_node() {
         def reality_stream($network; $extra): {
             network: $network,
             security: "reality",
-            realitySettings: {
+            realitySettings: ({
                 show: false,
-                dest: ($node.tls.server_name + ":443"),
                 xver: 0,
                 serverNames: [$node.tls.server_name],
                 privateKey: $node.credentials.private_key,
                 shortIds: [$node.credentials.short_id]
-            }
+            } + (if $node.tls.reality_guard.enabled == true then
+                {target:("127.0.0.1:" + ($node.tls.reality_guard.listen_port | tostring))}
+                else {dest:($node.tls.server_name + ":443")} end))
         } + $extra;
         def tls_settings: {
             certificates: [{
@@ -163,7 +165,7 @@ proxy_xray_render_node() {
             settings: {clients: [{password: $node.credentials.password}]},
             streamSettings: $stream
         }];
-        if $node.profile == "vless-reality-vision" then
+        (if $node.profile == "vless-reality-vision" then
             vless(reality_stream("tcp"; {}); $node.transport.flow)
         elif $node.profile == "vless-grpc-reality" then
             vless(reality_stream("grpc"; {
@@ -213,7 +215,13 @@ proxy_xray_render_node() {
                 network: "tcp,udp"
             }
         }]
-        end
+        end) + (if $node.tls.reality_guard.enabled == true then [{
+            tag:("reality-guard-" + $node.id),listen:"127.0.0.1",
+            port:$node.tls.reality_guard.listen_port,protocol:"dokodemo-door",
+            # An IP placeholder ensures only sniffed domains can satisfy the allow rule.
+            settings:{address:"127.0.0.1",port:1,network:"tcp"},
+            sniffing:{enabled:true,destOverride:["tls"],routeOnly:true}
+        }] else [] end)
     ' || return 10
 }
 

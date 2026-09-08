@@ -239,7 +239,7 @@ _proxy_relay_forward_address_family() {
 proxy_relay_forward_validate_conflicts() {
     local manifest="${1:-}" nodes="${2:-${PROXY_MANIFEST:-}}"
     local count index other start end other_start other_end network hint effective mask other_network other_hint other_effective other_mask
-    local id other_id node port node_hint node_mask
+    local id other_id node port node_hint node_mask guard_port
 
     [[ -f "$manifest" && ! -L "$manifest" ]] || return 3
     count="$(jq -r '.forwards | length' "$manifest")" || return 10
@@ -274,6 +274,11 @@ proxy_relay_forward_validate_conflicts() {
                 node_mask="$(_proxy_relay_forward_network_mask "$node_hint")" || return 10
                 if ((port >= start && port <= end && (mask & node_mask) != 0)); then
                     vps_cmd_error "转发 ${id} 与受管节点 $(jq -r '.id' <<<"$node") 的端口及网络相交（${port}/${node_hint}）"
+                    return 10
+                fi
+                guard_port="$(jq -r 'if .tls.reality_guard.enabled == true then .tls.reality_guard.listen_port else empty end' <<<"$node")"
+                if [[ -n "$guard_port" ]] && ((guard_port >= start && guard_port <= end && (mask & 1) != 0)); then
+                    vps_cmd_error "转发 ${id} 与受管节点 $(jq -r '.id' <<<"$node") 的 REALITY 防偷辅助端口及网络相交（${guard_port}/tcp）"
                     return 10
                 fi
             done < <(jq -c '.nodes[]?' "$nodes")
@@ -368,7 +373,19 @@ proxy_relay_forward_manifest_validate() {
             vps_cmd_error "节点清单不是安全的普通文件：$nodes"
             return 3
         }
-        jq -e '((.nodes | type) == "array") and all(.nodes[]; (.port | type) == "number" and (.port | floor) == .port and .port >= 1 and .port <= 65535)' "$nodes" >/dev/null 2>&1 || {
+        jq -e '
+            ((.nodes | type) == "array") and all(.nodes[];
+                (.port | type) == "number" and (.port | floor) == .port and .port >= 1 and .port <= 65535 and
+                ((.tls | has("reality_guard") | not) or
+                    (.tls.reality_guard | type) == "object" and
+                    (.tls.reality_guard | has("enabled") and has("listen_port")) and
+                    (.tls.reality_guard.enabled | type) == "boolean" and
+                    (.tls.reality_guard.listen_port as $port |
+                        if .tls.reality_guard.enabled then
+                            ($port | type) == "number" and ($port | floor) == $port and $port >= 10000 and $port <= 29999
+                        else $port == null
+                        end)))
+        ' "$nodes" >/dev/null 2>&1 || {
             vps_cmd_error "节点清单端口格式无效：$nodes"
             return 10
         }

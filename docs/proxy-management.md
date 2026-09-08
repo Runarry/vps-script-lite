@@ -129,6 +129,7 @@ vpsctl service proxy node list [--core CORE|all] [--json]
 vpsctl service proxy node show --id NODE_ID [--uri]
 vpsctl service proxy node add --profile PROFILE [--core CORE] [--name NAME] [--port PORT]
     [--listen ADDRESS] [--address CLIENT_ADDRESS] [--sni HOST]
+    [--reality-anti-relay on|off]
     [--path PATH] [--service-name NAME]
     [--cert-mode self-signed|imported|managed --cert-file FILE --key-file FILE --cert-id ID]
     [--obfs none|salamander] [--up-mbps N] [--down-mbps N]
@@ -173,6 +174,20 @@ vpsctl service proxy subscription [--core CORE|all]
 `node ip-policy set` 只接受单一内核，可重复 `--id` 去重选择节点，也可按一个 profile 或该内核全部节点设置。命令先构造统一候选 manifest、渲染配置并调用真实内核校验，再通过现有事务一次提交；任一节点或配置校验失败时整批不写入。运行中的内核在提交成功后自动重启应用；若存在待应用的二进制更新则仍只记录待重启。交互界面提供多选节点、按 profile 和当前内核全部节点三种范围。
 
 端口在整个代理节点清单中必须唯一，且会检查本机当前监听占用以及同网络端口转发冲突。新增或编辑会先生成候选清单并与当前中转状态共同渲染候选内核配置，再调用对应内核校验；校验失败不会提交候选配置。已经作为中转入口的节点默认拒绝删除；`--cascade-relay --confirm-delete` 可在同一事务中删除节点关联。非交互删除节点必须传入 `--confirm-delete`。
+
+### REALITY 防偷
+
+所有现有 REALITY profile 新建节点时默认启用防偷，默认 SNI 为 `www.amd.com`；可通过 `node add --reality-anti-relay off` 关闭。`node edit --id NODE_ID --reality-anti-relay on|off` 可修改开关，省略时保留原状态。该参数仅适用于 REALITY profile，其他 profile 会拒绝。快速向导采用默认开启，自定义向导和编辑菜单提供开关。旧节点缺失防偷状态时视为关闭，升级或编辑其他字段不会自动开启。
+
+启用时，SNI 必须是合法的 DNS 主机名，按精确域名建立白名单，不接受通配符、IP 地址或 URL。节点列表 JSON 增加布尔字段 `reality_anti_relay`，节点详情、菜单预览和 `--dry-run` 展示有效状态。开关只改变服务端 handshake/fallback 路径，不改变节点分享链接、凭据、正常代理流量的中转绑定或 IP 地址族策略。
+
+状态保存在节点的 `tls.reality_guard` 对象中，包含 `enabled` 和 `listen_port`；关闭时 `listen_port` 为 `null`。启用节点由命令按升序分配并持久保存 `10000..29999` 中的独占 TCP 辅助端口，仅监听 `127.0.0.1`。辅助端口避开所有节点主端口、其他启用节点的辅助端口、本机 TCP/UDP 监听以及 effective network 含 TCP 的端口转发；UDP-only 转发不与该 TCP 端口冲突。编辑、重启和切核保留内部端口，关闭或删除节点释放端口。辅助端口不出现在分享链接或订阅中，不需要客户端配置。
+
+Xray 使用内置 `dokodemo-door` 入站嗅探 TLS SNI，以 `full:` 精确域名规则进入固定 `freedom.redirect` 伪装站出口，其他流量进入阻断出口。sing-box 使用内置 `direct` 入站、1 秒 `sniff`、精确域名路由及固定目标覆盖，未匹配流量 `reject`，伪装站使用专用 local resolver。两者都不需要 Nginx，也不新增 profile 或限速服务。实现依据：[REALITY 配置](https://xtls.github.io/config/transports/reality.html)、[Xray 防偷示例](https://github.com/XTLS/Xray-examples/tree/main/VLESS-TCP-REALITY%20%28without%20being%20stolen%29)和 [sing-box 路由动作](https://sing-box.sagernet.org/configuration/route/rule_action/)。
+
+防偷限制的是未通过 REALITY 认证后可到达的伪装目标：白名单伪装站仍允许访问。它不能防止有效代理凭据被滥用，不能检查加密后的 HTTP Host，也不能检查 ECH 内层 SNI。
+
+真实配置、连通性、负向过滤和恢复结果见 [REALITY 防偷验收记录](proxy-reality-guard-validation.md)。真实链路脚本支持 `CONNECTIVITY_PROFILE=reality` 仅检查 REALITY 组合，并用 `CONNECTIVITY_REALITY_GUARD=on|off` 对照防护开关；默认开启。
 
 ### TLS 证书
 

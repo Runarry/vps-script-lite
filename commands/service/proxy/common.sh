@@ -377,7 +377,7 @@ proxy_manifest_default() {
 }
 
 proxy_manifest_validate_file() {
-    local file="$1"
+    local file="$1" node
     command -v jq >/dev/null 2>&1 || {
         vps_cmd_error "节点管理需要 jq"
         return 3
@@ -387,12 +387,15 @@ proxy_manifest_validate_file() {
         return 3
     }
     jq -e --argjson schema "$PROXY_SCHEMA_VERSION" '
+        def assigned_ports:
+            [.nodes[] | .port,
+             (select(.tls.reality_guard.enabled == true) | .tls.reality_guard.listen_port)];
         type == "object" and
         .schema_version == $schema and
         ((.nodes | type) == "array") and
         (([.nodes[].id] | length) == ([.nodes[].id] | unique | length)) and
         (([.nodes[].name] | length) == ([.nodes[].name] | unique | length)) and
-        (([.nodes[].port] | length) == ([.nodes[].port] | unique | length)) and
+        ((assigned_ports | length) == (assigned_ports | unique | length)) and
         all(.nodes[];
             ((.id | type) == "string" and (.id | test("^node-[a-f0-9]{16}$"))) and
             (.core == "sing-box" or .core == "xray") and
@@ -414,6 +417,9 @@ proxy_manifest_validate_file() {
         vps_cmd_error "节点清单格式或唯一性校验失败：$file"
         return 10
     }
+    while IFS= read -r node; do
+        proxy_reality_guard_validate_node "$node" || return $?
+    done < <(jq -c '.nodes[] | select(.tls | has("reality_guard"))' "$file")
 }
 
 proxy_manifest_ensure() {
@@ -523,6 +529,64 @@ proxy_valid_port() {
 proxy_valid_host() {
     local value="${1:-}"
     [[ -n "$value" && ${#value} -le 253 && "$value" != *[[:space:]/]* && "$value" != *$'\n'* && "$value" != *$'\r'* ]]
+}
+
+proxy_reality_guard_profile_valid() {
+    case "${1:-}" in
+        vless-reality-vision | vless-grpc-reality | trojan-xhttp-reality | trojan-grpc-reality | anytls-reality)
+            return 0
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+proxy_reality_sni_valid() {
+    local value="${1:-}" label LC_ALL=C
+    local -a labels=()
+    [[ -n "$value" && ${#value} -le 253 && "$value" == *.* &&
+        "$value" != .* && "$value" != *. && "$value" != *[!A-Za-z0-9.-]* ]] || return 1
+    [[ ! "$value" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+    IFS=. read -r -a labels <<<"$value"
+    for label in "${labels[@]}"; do
+        [[ "$label" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$ ]] || return 1
+    done
+}
+
+proxy_reality_guard_validate_node() {
+    local node="${1:-}" profile enabled sni
+    jq -e '
+        type == "object" and ((.tls | type) == "object") and
+        (if (.tls | has("reality_guard")) then
+            ((.profile | type) == "string" and (.profile | length) > 0) and
+            .tls.enabled == true and .tls.mode == "reality" and
+            (.tls.reality_guard |
+             type == "object" and (keys == ["enabled", "listen_port"]) and
+             ((.enabled | type) == "boolean") and
+             (if .enabled then
+                 ((.listen_port | type) == "number") and
+                 (.listen_port | floor) == .listen_port and
+                 .listen_port >= 10000 and .listen_port <= 29999
+              else .listen_port == null end))
+         else true end)
+    ' <<<"$node" >/dev/null 2>&1 || {
+        vps_cmd_error "REALITY 防偷字段无效：必须为 enabled 布尔值和 listen_port；启用端口限 10000–29999，关闭时端口必须为 null"
+        return 10
+    }
+    profile="$(jq -r 'if (.tls | has("reality_guard")) then .profile else "" end' <<<"$node")" || return 10
+    [[ -n "$profile" ]] || return 0
+    proxy_reality_guard_profile_valid "$profile" || {
+        vps_cmd_error "REALITY 防偷仅支持 REALITY 节点：$profile"
+        return 10
+    }
+    enabled="$(jq -r '.tls.reality_guard.enabled' <<<"$node")" || return 10
+    [[ "$enabled" == true ]] || return 0
+    # Check characters before shell extraction can discard NULs or trailing newlines.
+    if ! sni="$(jq -er '.tls.server_name | select(type == "string" and
+        (test("[^A-Za-z0-9.-]") | not))' <<<"$node" 2>/dev/null)" ||
+       ! proxy_reality_sni_valid "$sni"; then
+        vps_cmd_error "REALITY 防偷要求有效的 ASCII DNS SNI：至少两段域名，不能为 IP、URL、通配符或带端口的地址"
+        return 10
+    fi
 }
 
 proxy_valid_path() {
@@ -677,7 +741,7 @@ proxy_render_config() {
     local core="$1" manifest="$2" relay_manifest="${3:-${PROXY_RELAY_FILE:-}}"
     local node rendered inbounds='[]' relay_state='{"schema_version":1,"exits":[],"bindings":[],"forwards":[]}'
     local exit exit_id outbound_bundle target_tag node_id used_exit_ids
-    local relay_outbounds='[]' relay_rules='[]' policy_nodes='[]' policy_outbounds='[]' policy_rules='[]'
+    local relay_outbounds='[]' relay_rules='[]' policy_nodes='[]' policy_outbounds='[]' policy_rules='[]' guard_nodes='[]'
     proxy_core_valid "$core" || return 2
     proxy_manifest_validate_file "$manifest" || return $?
     if [[ -n "$relay_manifest" && -f "$relay_manifest" ]]; then
@@ -753,7 +817,11 @@ proxy_render_config() {
          select((any($relay.bindings[]; .node_id == $node.id)) | not) |
          {id:$node.id,ip_strategy:($node.ip_strategy // "auto")}]
     ')" || return 10
+    guard_nodes="$(jq -c --arg core "$core" '
+        [.nodes[] | select(.core == $core and .tls.reality_guard.enabled == true)]
+    ' "$manifest")" || return 10
 
+    # Guard rules terminate auxiliary traffic before node relay or IP policy rules.
     case "$core" in
         sing-box)
             policy_outbounds="$(jq -cn --argjson nodes "$policy_nodes" '
@@ -766,14 +834,23 @@ proxy_render_config() {
             ')" || return 10
             jq -n --argjson inbounds "$inbounds" --argjson relay_outbounds "$relay_outbounds" \
                 --argjson relay_rules "$relay_rules" --argjson policy_outbounds "$policy_outbounds" \
-                --argjson policy_rules "$policy_rules" '
+                --argjson policy_rules "$policy_rules" --argjson guard_nodes "$guard_nodes" '
+                ($guard_nodes | map({type:"direct",tag:("reality-target-" + .id),
+                                    domain_resolver:{server:"local"}})) as $guard_outbounds |
+                ($guard_nodes | map([
+                    {inbound:[("reality-guard-" + .id)],action:"sniff",sniffer:["tls"],timeout:"1s"},
+                    {inbound:[("reality-guard-" + .id)],protocol:["tls"],domain:[(.tls.server_name | ascii_downcase)],
+                     action:"route",outbound:("reality-target-" + .id),
+                     override_address:.tls.server_name,override_port:443},
+                    {inbound:[("reality-guard-" + .id)],action:"reject"}
+                ]) | add // []) as $guard_rules |
                 {
                     log: {level: "warn", timestamp: true},
                     inbounds: $inbounds,
-                    outbounds: ([{type: "direct", tag: "direct"}] + $policy_outbounds + $relay_outbounds),
-                    route: (if (($relay_rules + $policy_rules) | length) == 0 then {final:"direct"}
-                            else {rules:($relay_rules + $policy_rules),final:"direct"} end)
-                } + (if ($policy_outbounds | length) == 0 then {}
+                    outbounds: ([{type: "direct", tag: "direct"}] + $guard_outbounds + $policy_outbounds + $relay_outbounds),
+                    route: (if (($guard_rules + $relay_rules + $policy_rules) | length) == 0 then {final:"direct"}
+                            else {rules:($guard_rules + $relay_rules + $policy_rules),final:"direct"} end)
+                } + (if (($guard_outbounds + $policy_outbounds) | length) == 0 then {}
                      else {dns:{servers:[{type:"local",tag:"local"}]}} end)
             '
             ;;
@@ -794,14 +871,22 @@ proxy_render_config() {
             ')" || return 10
             jq -n --argjson inbounds "$inbounds" --argjson relay_outbounds "$relay_outbounds" \
                 --argjson relay_rules "$relay_rules" --argjson policy_outbounds "$policy_outbounds" \
-                --argjson policy_rules "$policy_rules" '{
+                --argjson policy_rules "$policy_rules" --argjson guard_nodes "$guard_nodes" '
+                ($guard_nodes | map({protocol:"freedom",tag:("reality-target-" + .id),
+                                    settings:{redirect:(.tls.server_name + ":443")}})) as $guard_outbounds |
+                ($guard_nodes | map([
+                    {type:"field",inboundTag:[("reality-guard-" + .id)],protocol:["tls"],
+                     domain:[("full:" + (.tls.server_name | ascii_downcase))],outboundTag:("reality-target-" + .id)},
+                    {type:"field",inboundTag:[("reality-guard-" + .id)],outboundTag:"block"}
+                ]) | add // []) as $guard_rules |
+                {
                     log: {loglevel: "warning"},
                     inbounds: $inbounds,
                     outbounds: ([
                         {protocol: "freedom", tag: "direct"},
                         {protocol: "blackhole", tag: "block"}
-                    ] + $policy_outbounds + $relay_outbounds),
-                    routing: {rules: ($relay_rules + $policy_rules)}
+                    ] + $guard_outbounds + $policy_outbounds + $relay_outbounds),
+                    routing: {rules: ($guard_rules + $relay_rules + $policy_rules)}
                 }'
             ;;
     esac
@@ -822,7 +907,9 @@ proxy_validate_config_with_binary() {
         sing-box)
             validation_output="$("$binary" check -c "$config" 2>&1)" || {
                 vps_cmd_error "sing-box 拒绝生成的配置"
-                if jq -e 'any(.outbounds[]?; has("domain_resolver"))' "$config" >/dev/null 2>&1; then
+                if jq -e 'any(.inbounds[]?; (.tag // "") | startswith("reality-guard-"))' "$config" >/dev/null 2>&1; then
+                    vps_cmd_error "REALITY 防偷需要支持 TLS sniff、精确域名路由、目标覆盖和 domain_resolver 的 sing-box；请更新内核并检查配置后重试"
+                elif jq -e 'any(.outbounds[]?; has("domain_resolver"))' "$config" >/dev/null 2>&1; then
                     vps_cmd_error "该节点策略需要支持现代 domain_resolver 的 sing-box；请先更新内核后重试"
                 fi
                 validation_detail="$(awk 'NF { detail=$0 } END { print detail }' <<<"$validation_output")"
@@ -842,6 +929,9 @@ proxy_validate_config_with_binary() {
                     validation_detail="${validation_detail:0:509}..."
                 fi
                 vps_cmd_error "Xray 拒绝生成的配置"
+                if jq -e 'any(.inbounds[]?; (.tag // "") | startswith("reality-guard-"))' "$config" >/dev/null 2>&1; then
+                    vps_cmd_error "REALITY 防偷需要支持 TLS routeOnly 嗅探、精确域名路由和 freedom redirect 的 Xray；请更新内核并检查配置后重试"
+                fi
                 [[ -z "$validation_detail" ]] || vps_cmd_error "Xray 校验详情：$validation_detail"
                 return 10
             }

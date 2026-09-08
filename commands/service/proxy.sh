@@ -88,6 +88,7 @@ proxy_usage() {
   node show --id NODE_ID [--uri]
   node add --profile PROFILE [--core CORE] [--name NAME] [--port PORT]
            [--listen ADDRESS] [--address CLIENT_ADDRESS] [--sni HOST]
+           [--reality-anti-relay on|off]
            [--path PATH] [--service-name NAME]
            [--cert-mode self-signed|imported|managed --cert-file FILE --key-file FILE --cert-id ID]
            [--obfs none|salamander] [--up-mbps N] [--down-mbps N]
@@ -99,6 +100,10 @@ proxy_usage() {
   STRATEGY: auto | prefer_ipv4 | prefer_ipv6 | ipv4_only | ipv6_only
   node delete --id NODE_ID [--cascade-relay] [--confirm-delete]
   subscription [--core CORE|all]
+
+REALITY 防偷：仅适用于 REALITY 配置，新增默认 on；已有节点保持原状，
+编辑时可开启或关闭，省略选项保留当前状态。使用精确 SNI 白名单过滤回落，
+仍允许访问伪装站；内部监听端口自动分配，分享链接和凭据保持不变。
 
 中转：
   relay status [--json]

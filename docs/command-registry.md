@@ -80,6 +80,8 @@ vpsctl self uninstall [--purge] [--confirm-uninstall] [--confirm-purge]
 
 `security tls` 登记为 `linux`，导入和查看不要求 systemd；续期 timer 由功能脚本在 systemd 上安装。帮助、状态、列表、详情和路径查询可由普通用户运行；导入、申请、续期、删除和卸载需要 root。ACME 使用钉死版本的 lego，live 证书是无符号链接的普通文件。完整接口见[TLS 证书管理](tls-management.md)。
 
+`service proxy node add/edit` 的 `--reality-anti-relay on|off` 仅接受 REALITY profile。所有现有 REALITY 模板新建默认开启，编辑省略时保留状态，旧节点缺失状态按关闭处理；默认 SNI 为 `www.amd.com`，开启后采用严格 DNS SNI 精确白名单。自定义添加向导和编辑菜单提供开关，列表 JSON 的 `reality_anti_relay` 为布尔值，详情、预览和 dry-run 展示状态。内核内置防护使用自动持久分配的本地辅助端口，只约束 handshake/fallback，不改变分享链接、凭据、正常节点中转或 IP 地址族策略；安全边界及实现依据见[REALITY 防偷](proxy-management.md#reality-防偷)。
+
 ## 4. 单命令说明模板
 
 每个已登记命令还应在适当的命令文档中使用以下结构：

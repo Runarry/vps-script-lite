@@ -122,6 +122,7 @@ proxy_sb_validate_node() {
         printf 'sing-box 节点 %s（%s）的字段校验失败。\n' "$(jq -r '.id // "<未知>"' <<<"$node" 2>/dev/null || printf '<未知>')" "$profile" >&2
         return 10
     }
+    proxy_reality_guard_validate_node "$node"
 }
 
 proxy_sb_render_node() {
@@ -131,16 +132,22 @@ proxy_sb_render_node() {
 
     case "$profile" in
         vless-reality-vision)
+            # The auxiliary inbound has no target domain until TLS SNI authorizes a route.
             jq -n --argjson n "$node" '[{
                 type:"vless", tag:$n.id, listen:($n.listen // "::"), listen_port:$n.port,
                 users:[{uuid:$n.credentials.uuid, flow:$n.transport.flow}],
                 tls:{enabled:true, server_name:$n.tls.server_name, reality:{
                     enabled:true,
-                    handshake:{server:$n.tls.server_name, server_port:443},
+                    handshake:(if $n.tls.reality_guard.enabled == true then
+                        {server:"127.0.0.1",server_port:$n.tls.reality_guard.listen_port}
+                        else {server:$n.tls.server_name,server_port:443} end),
                     private_key:$n.credentials.private_key,
                     short_id:[$n.credentials.short_id]
                 }}
-            }]'
+            }] + (if $n.tls.reality_guard.enabled == true then [{
+                type:"direct",tag:("reality-guard-" + $n.id),listen:"127.0.0.1",
+                listen_port:$n.tls.reality_guard.listen_port,network:"tcp"
+            }] else [] end)'
             ;;
         vless-ws-tls)
             jq -n --argjson n "$node" '[{
@@ -184,11 +191,16 @@ proxy_sb_render_node() {
                 users:[{name:"default", password:$n.credentials.password}], padding_scheme:[],
                 tls:{enabled:true, server_name:$n.tls.server_name, reality:{
                     enabled:true,
-                    handshake:{server:$n.tls.server_name, server_port:443},
+                    handshake:(if $n.tls.reality_guard.enabled == true then
+                        {server:"127.0.0.1",server_port:$n.tls.reality_guard.listen_port}
+                        else {server:$n.tls.server_name,server_port:443} end),
                     private_key:$n.credentials.private_key,
                     short_id:[$n.credentials.short_id]
                 }}
-            }]'
+            }] + (if $n.tls.reality_guard.enabled == true then [{
+                type:"direct",tag:("reality-guard-" + $n.id),listen:"127.0.0.1",
+                listen_port:$n.tls.reality_guard.listen_port,network:"tcp"
+            }] else [] end)'
             ;;
         hysteria2)
             jq -n --argjson n "$node" '[{

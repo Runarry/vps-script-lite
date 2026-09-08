@@ -46,6 +46,7 @@ XRAY_BINARY="${XRAY_BINARY:-$(command -v xray 2>/dev/null || true)}"
 CONNECTIVITY_CORE="${CONNECTIVITY_CORE:-all}"
 CONNECTIVITY_PROFILE="${CONNECTIVITY_PROFILE:-all}"
 CONNECTIVITY_SWITCH_SMOKE_ONLY="${CONNECTIVITY_SWITCH_SMOKE_ONLY:-0}"
+CONNECTIVITY_REALITY_GUARD="${CONNECTIVITY_REALITY_GUARD:-on}"
 # Xray's official gRPC REALITY example uses Yahoo; unlike some otherwise valid
 # TLS sites it consistently supports the complete REALITY+HTTP/2 handshake.
 CONNECTIVITY_SNI="${CONNECTIVITY_SNI:-www.yahoo.com}"
@@ -56,6 +57,9 @@ ALLOW_XRAY_TROJAN_GRPC_REALITY_XFAIL="${ALLOW_XRAY_TROJAN_GRPC_REALITY_XFAIL:-0}
     exit 3
 }
 case "$CONNECTIVITY_CORE" in all | sing-box | xray) ;; *) printf 'FAIL: invalid CONNECTIVITY_CORE\n' >&2; exit 2 ;; esac
+case "$CONNECTIVITY_REALITY_GUARD" in on | off) ;; *)
+    printf 'FAIL: CONNECTIVITY_REALITY_GUARD must be on or off\n' >&2; exit 2 ;;
+esac
 case "$CONNECTIVITY_SWITCH_SMOKE_ONLY" in 0 | 1) ;; *)
     printf 'FAIL: CONNECTIVITY_SWITCH_SMOKE_ONLY must be 0 or 1\n' >&2
     exit 2
@@ -369,7 +373,11 @@ pass_count=0
 xfail_count=0
 while IFS=$'\t' read -r profile _label; do
     [[ -n "$profile" ]] || continue
-    [[ "$CONNECTIVITY_PROFILE" == all || "$CONNECTIVITY_PROFILE" == "$profile" ]] || continue
+    if [[ "$CONNECTIVITY_PROFILE" == reality ]]; then
+        proxy_profile_uses_reality "$profile" || continue
+    else
+        [[ "$CONNECTIVITY_PROFILE" == all || "$CONNECTIVITY_PROFILE" == "$profile" ]] || continue
+    fi
     while IFS= read -r core; do
         [[ -n "$core" ]] || continue
         [[ "$CONNECTIVITY_CORE" == all || "$CONNECTIVITY_CORE" == "$core" ]] || continue
@@ -396,6 +404,9 @@ while IFS=$'\t' read -r profile _label; do
             printf 'FAIL: landing fixture %s/%s\n' "$profile" "$core" >&2; exit 1;
         }
         landing="$(materialize_certificate_paths "$landing")" || exit 1
+        if proxy_profile_uses_reality "$profile"; then
+            landing="$(proxy_reality_guard_apply "$landing" "$CONNECTIVITY_REALITY_GUARD")" || exit 1
+        fi
         entry="$(proxy_prepare_node_json "$core" shadowsocks-aes-256-gcm "$entry_id" "entry-${profile}" \
             127.0.0.1 "$entry_port" 127.0.0.1 "$CONNECTIVITY_SNI" /unused unused self-signed '' '' none 100 200 bbr)" || {
             printf 'FAIL: entry fixture %s/%s\n' "$profile" "$core" >&2; exit 1;
@@ -499,7 +510,7 @@ while IFS=$'\t' read -r profile _label; do
             printf 'XPASS: connectivity %s/%s; remove the upstream-failure allowance\n' "$profile" "$core" >&2
             exit 1
         fi
-        printf 'PASS: connectivity %s/%s\n' "$profile" "$core"
+        printf 'PASS: connectivity %s/%s (REALITY guard=%s)\n' "$profile" "$core" "$CONNECTIVITY_REALITY_GUARD"
         pass_count=$((pass_count + 1))
         stop_case
     done < <(proxy_profile_cores "$profile")

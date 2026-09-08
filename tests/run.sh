@@ -50,6 +50,7 @@ for syntax_file in \
     "${TEST_ROOT}/tests/unit/test-server-test.sh" \
     "${TEST_ROOT}/tests/unit/test-service-proxy.sh" \
     "${TEST_ROOT}/tests/integration/test-service-proxy-relay-connectivity-real.sh" \
+    "${TEST_ROOT}/tests/integration/test-service-proxy-reality-anti-relay-real.sh" \
     "${TEST_ROOT}/tests/integration/test-distribution-real.sh" \
     "${TEST_ROOT}/tests/integration/test-service-proxy-relay-cores-real.sh" \
     "${TEST_ROOT}/tests/integration/test-service-proxy-relay-real.sh" \

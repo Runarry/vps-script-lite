@@ -2174,6 +2174,256 @@ test_node_core_switch() {
     done
 }
 
+test_reality_anti_relay_guard() {
+    local direct_id protocol_id xray_id sb_id off_id legacy_id replacement_id guard_port sb_guard_port
+    local before_manifest before_config before_uri after_uri before_credentials before_keys
+    local xray_config sb_config manifest_hash relay_hash xray_hash sb_hash list_json invalid relay_uri
+
+    reset_root
+    install_external sing-box
+    install_external xray
+
+    # Allocation must avoid a real listener, ordinary node ports, forward ranges,
+    # the candidate's public port, and guard ports already assigned to either core.
+    printf '10000\n' >"${TEST_SYSTEM_ROOT}/run/listening-port"
+    run_proxy node add --profile shadowsocks-aes-256-gcm --core xray \
+        --name guard-port-owner --port 10001 --address proxy.example
+    assert_equal 0 "$RUN_STATUS" "guard allocation ordinary-node fixture"
+    run_proxy relay exit add --name guard-port-direct --target 198.51.100.30 --target-port 443
+    assert_equal 0 "$RUN_STATUS" "guard allocation direct-exit fixture"
+    direct_id="$(jq -r '.exits[] | select(.name == "guard-port-direct") | .id' "$(relay_path)")"
+    run_proxy relay forward add --name guard-port-forward --exit-id "$direct_id" \
+        --listen-ports 10002-10003 --network tcp --address relay.example
+    assert_equal 0 "$RUN_STATUS" "guard allocation forward fixture"
+
+    run_proxy node add --profile vless-reality-vision --core xray --name guarded-xray \
+        --port 10004 --address proxy.example --sni reality.example
+    assert_equal 0 "$RUN_STATUS" "REALITY add defaults anti-relay on"
+    xray_id="$(node_id_by_name guarded-xray)"
+    guard_port="$(jq -r --arg id "$xray_id" '.nodes[] | select(.id == $id) | .tls.reality_guard.listen_port' "$(manifest_path)")"
+    assert_equal 10005 "$guard_port" "guard allocation skips system, node, forward and public ports"
+    jq -e --arg id "$xray_id" '.nodes[] | select(.id == $id) |
+        .tls.reality_guard == {enabled:true,listen_port:10005}' "$(manifest_path)" >/dev/null ||
+        fail "default REALITY guard state"
+
+    run_proxy node add --profile vless-reality-vision --core sing-box --name guarded-sing-box \
+        --port 19101 --address proxy.example --sni reality.example --ip-strategy prefer_ipv4
+    assert_equal 0 "$RUN_STATUS" "second-core guarded REALITY add"
+    sb_id="$(node_id_by_name guarded-sing-box)"
+    sb_guard_port="$(jq -r --arg id "$sb_id" '.nodes[] | select(.id == $id) | .tls.reality_guard.listen_port' "$(manifest_path)")"
+    assert_equal 10006 "$sb_guard_port" "guard allocation is shared across cores"
+
+    run_proxy node add --profile anytls-reality --core sing-box --name unguarded-reality \
+        --port 19102 --address proxy.example --sni reality.example --reality-anti-relay off
+    assert_equal 0 "$RUN_STATUS" "explicit REALITY anti-relay off"
+    off_id="$(node_id_by_name unguarded-reality)"
+    jq -e --arg id "$off_id" '.nodes[] | select(.id == $id) |
+        .tls.reality_guard == {enabled:false,listen_port:null}' "$(manifest_path)" >/dev/null ||
+        fail "explicit disabled REALITY guard state"
+
+    run_proxy node list --json
+    assert_equal 0 "$RUN_STATUS" "guard node JSON list"
+    list_json="$RUN_OUTPUT"
+    jq -e --arg on "$xray_id" --arg off "$off_id" '
+        (.nodes[] | select(.id == $on) | .reality_anti_relay) == true and
+        (.nodes[] | select(.id == $off) | .reality_anti_relay) == false
+    ' <<<"$list_json" >/dev/null || fail "node JSON list guard booleans"
+
+    # The option has a deliberately narrow contract: only REALITY nodes and only
+    # on/off.  Enabled guards additionally require an exact DNS hostname SNI.
+    for invalid in yes true 1 ''; do
+        if [[ -n "$invalid" ]]; then
+            run_proxy node add --profile vless-reality-vision --core xray --name "invalid-mode-$invalid" \
+                --port 19200 --address proxy.example --sni reality.example --reality-anti-relay "$invalid"
+        else
+            run_proxy node add --profile vless-reality-vision --core xray --name invalid-mode-missing \
+                --port 19200 --address proxy.example --sni reality.example --reality-anti-relay
+        fi
+        assert_equal 2 "$RUN_STATUS" "invalid anti-relay mode ${invalid:-missing}"
+    done
+    run_proxy node add --profile shadowsocks-aes-256-gcm --core xray --name invalid-nonreality-on \
+        --port 19201 --address proxy.example --reality-anti-relay on
+    assert_equal 2 "$RUN_STATUS" "non-REALITY rejects anti-relay on"
+    run_proxy node add --profile shadowsocks-aes-256-gcm --core xray --name invalid-nonreality-off \
+        --port 19201 --address proxy.example --reality-anti-relay off
+    assert_equal 2 "$RUN_STATUS" "non-REALITY rejects anti-relay off"
+    for invalid in 198.51.100.10 2001:db8::1 'https://reality.example' 'reality.example/path' 'reality.example:443' '*.reality.example'; do
+        run_proxy node add --profile vless-reality-vision --core xray --name invalid-sni \
+            --port 19202 --address proxy.example --sni "$invalid" --reality-anti-relay on
+        assert_equal 2 "$RUN_STATUS" "guard rejects non-DNS SNI $invalid"
+    done
+
+    # Editing unrelated fields preserves both the assigned inner port and all
+    # credentials. Toggling the guard changes neither credentials nor URI.
+    before_credentials="$(jq -Sc --arg id "$xray_id" '.nodes[] | select(.id == $id) | .credentials' "$(manifest_path)")"
+    before_keys="$(jq -r --arg id "$xray_id" '.nodes[] | select(.id == $id) |
+        .credentials.private_key + ":" + .credentials.public_key + ":" + .credentials.short_id' "$(manifest_path)")"
+    run_proxy node show --id "$xray_id" --uri
+    assert_equal 0 "$RUN_STATUS" "guarded URI before edits"
+    before_uri="$RUN_OUTPUT"
+    run_proxy node edit --id "$xray_id" --address edited-proxy.example
+    assert_equal 0 "$RUN_STATUS" "unrelated guarded-node edit"
+    assert_equal "$guard_port" "$(jq -r --arg id "$xray_id" '.nodes[] | select(.id == $id) | .tls.reality_guard.listen_port' "$(manifest_path)")" \
+        "unrelated edit preserves guard port"
+    assert_equal "$before_credentials" "$(jq -Sc --arg id "$xray_id" '.nodes[] | select(.id == $id) | .credentials' "$(manifest_path)")" \
+        "unrelated edit preserves credentials"
+    run_proxy node edit --id "$xray_id" --address proxy.example
+    assert_equal 0 "$RUN_STATUS" "restore guarded public address"
+    run_proxy node edit --id "$xray_id" --reality-anti-relay off
+    assert_equal 0 "$RUN_STATUS" "disable guard by edit"
+    jq -e --arg id "$xray_id" '.nodes[] | select(.id == $id) |
+        .tls.reality_guard == {enabled:false,listen_port:null}' "$(manifest_path)" >/dev/null ||
+        fail "disabled guard edit state"
+    run_proxy node show --id "$xray_id" --uri
+    after_uri="$RUN_OUTPUT"
+    assert_equal "$before_uri" "$after_uri" "guard disable leaves URI unchanged"
+    assert_equal "$before_keys" "$(jq -r --arg id "$xray_id" '.nodes[] | select(.id == $id) |
+        .credentials.private_key + ":" + .credentials.public_key + ":" + .credentials.short_id' "$(manifest_path)")" \
+        "guard disable leaves REALITY keys unchanged"
+    run_proxy node edit --id "$xray_id" --reality-anti-relay on
+    assert_equal 0 "$RUN_STATUS" "re-enable guard by edit"
+    assert_equal 10005 "$(jq -r --arg id "$xray_id" '.nodes[] | select(.id == $id) | .tls.reality_guard.listen_port' "$(manifest_path)")" \
+        "guard re-enable reuses first free port"
+    run_proxy node show --id "$xray_id" --uri
+    assert_equal "$before_uri" "$RUN_OUTPUT" "guard re-enable leaves URI unchanged"
+
+    run_proxy node edit --id "$xray_id" --sni ReAlItY.ExAmPlE
+    assert_equal 0 "$RUN_STATUS" "mixed-case DNS SNI is accepted"
+    jq -e --arg id "$xray_id" '
+        any(.routing.rules[]; (.inboundTag | index("reality-guard-" + $id)) != null and
+            (.domain | index("full:reality.example")) != null)
+    ' "${TEST_SYSTEM_ROOT}/etc/vpsctl/proxy/xray/config.json" >/dev/null ||
+        fail "mixed-case SNI exact rule is normalized"
+    run_proxy node edit --id "$xray_id" --sni reality.example
+    assert_equal 0 "$RUN_STATUS" "restore lowercase guarded SNI"
+
+    cp -p -- "$(manifest_path)" "${TEST_SYSTEM_ROOT}/run/nodes-before-nul.json"
+    jq --arg id "$xray_id" '(.nodes[] | select(.id == $id) | .tls.server_name) = "reality\u0000.example"' \
+        "$(manifest_path)" >"${TEST_SYSTEM_ROOT}/run/nodes-with-nul.json"
+    mv -- "${TEST_SYSTEM_ROOT}/run/nodes-with-nul.json" "$(manifest_path)"
+    run_proxy node list --json
+    assert_equal 10 "$RUN_STATUS" "manifest guard rejects escaped NUL SNI"
+    mv -- "${TEST_SYSTEM_ROOT}/run/nodes-before-nul.json" "$(manifest_path)"
+
+    # Dry-run reports the transition while preserving manifest and rendered config.
+    before_manifest="$(sha256sum "$(manifest_path)" | awk '{print $1}')"
+    before_config="$(sha256sum "${TEST_SYSTEM_ROOT}/etc/vpsctl/proxy/xray/config.json" | awk '{print $1}')"
+    run_proxy --dry-run node edit --id "$xray_id" --reality-anti-relay off
+    assert_equal 0 "$RUN_STATUS" "guard edit dry-run"
+    assert_contains "$RUN_OUTPUT" "演练" "guard edit dry-run output"
+    assert_equal "$before_manifest" "$(sha256sum "$(manifest_path)" | awk '{print $1}')" "guard dry-run manifest"
+    assert_equal "$before_config" "$(sha256sum "${TEST_SYSTEM_ROOT}/etc/vpsctl/proxy/xray/config.json" | awk '{print $1}')" "guard dry-run config"
+
+    # Old manifests without reality_guard remain disabled through ordinary edits
+    # and are exposed as false by the stable JSON list interface.
+    run_proxy node add --profile vless-grpc-reality --core xray --name legacy-reality \
+        --port 19103 --address proxy.example --sni reality.example --service-name legacy --reality-anti-relay off
+    assert_equal 0 "$RUN_STATUS" "legacy fixture add"
+    legacy_id="$(node_id_by_name legacy-reality)"
+    jq --arg id "$legacy_id" '(.nodes[] | select(.id == $id) | .tls) |= del(.reality_guard)' \
+        "$(manifest_path)" >"${TEST_SYSTEM_ROOT}/run/legacy-nodes.json"
+    mv -- "${TEST_SYSTEM_ROOT}/run/legacy-nodes.json" "$(manifest_path)"
+    run_proxy node edit --id "$legacy_id" --name legacy-reality-edited
+    assert_equal 0 "$RUN_STATUS" "legacy node ordinary edit"
+    jq -e --arg id "$legacy_id" '.nodes[] | select(.id == $id) | .tls | has("reality_guard") | not' \
+        "$(manifest_path)" >/dev/null || fail "legacy edit unexpectedly enabled or normalized guard"
+    run_proxy node list --json
+    jq -e --arg id "$legacy_id" '(.nodes[] | select(.id == $id) | .reality_anti_relay) == false' \
+        <<<"$RUN_OUTPUT" >/dev/null || fail "legacy node list guard compatibility"
+    run_proxy node edit --id "$legacy_id" --reality-anti-relay on
+    assert_equal 0 "$RUN_STATUS" "legacy node explicit guard enable"
+
+    # Renderer structure must isolate the auxiliary guard listener on loopback.
+    # Guard rules are scoped to reality-guard-ID; relay and IP-policy rules remain
+    # scoped to the public node ID.
+    run_proxy node show --id "$(node_id_by_name guard-port-owner)" --uri
+    assert_equal 0 "$RUN_STATUS" "shared relay fixture URI"
+    relay_uri="$RUN_OUTPUT"
+    run_proxy relay exit add --name guard-protocol-exit --uri "$relay_uri" \
+        --profile shadowsocks-aes-256-gcm --core xray
+    assert_equal 0 "$RUN_STATUS" "guarded Xray protocol-exit fixture"
+    protocol_id="$(jq -r '.exits[] | select(.name == "guard-protocol-exit") | .id' "$(relay_path)")"
+    run_proxy relay bind add --node-id "$xray_id" --exit-id "$protocol_id"
+    assert_equal 0 "$RUN_STATUS" "guarded Xray relay binding"
+    xray_config="${TEST_SYSTEM_ROOT}/etc/vpsctl/proxy/xray/config.json"
+    sb_config="${TEST_SYSTEM_ROOT}/etc/vpsctl/proxy/sing-box/config.json"
+    jq -e --arg id "$xray_id" --arg sni reality.example --argjson public 10004 --argjson inner 10005 '
+        . as $root |
+        any(.inbounds[]; .tag == $id and .port == $public and
+            .streamSettings.realitySettings.target == ("127.0.0.1:" + ($inner | tostring))) and
+        any(.inbounds[]; .tag == ("reality-guard-" + $id) and .protocol == "dokodemo-door" and
+            .listen == "127.0.0.1" and .port == $inner and .settings.address == "127.0.0.1" and
+            .settings.port == 1 and .settings.network == "tcp" and .sniffing.enabled == true and
+            .sniffing.routeOnly == true and (.sniffing.destOverride | index("tls") != null)) and
+        any(.routing.rules[]; (.inboundTag | index("reality-guard-" + $id)) != null and
+            (.protocol | index("tls")) != null and (.domain | index("full:" + $sni)) != null and
+            .outboundTag == ("reality-target-" + $id)) and
+        any(.outbounds[]; .tag == ("reality-target-" + $id) and .protocol == "freedom" and
+            .settings.redirect == ($sni + ":443")) and
+        any(.routing.rules[]; (.inboundTag | index("reality-guard-" + $id)) != null and
+            .outboundTag as $tag | any($root.outbounds[]; .tag == $tag and .protocol == "blackhole")) and
+        any(.routing.rules[]; (.inboundTag | index($id)) != null and
+            .outboundTag as $tag | any($root.outbounds[]; .tag == $tag and .protocol != "blackhole"))
+    ' "$xray_config" >/dev/null || fail "Xray guard, target, exact-SNI, block and relay rendering"
+    jq -e --arg id "$sb_id" --arg sni reality.example --argjson public 19101 --argjson inner 10006 '
+        . as $root |
+        any(.inbounds[]; .tag == $id and .listen_port == $public and
+            .tls.reality.handshake == {server:"127.0.0.1",server_port:$inner}) and
+        any(.inbounds[]; .tag == ("reality-guard-" + $id) and .type == "direct" and
+            .listen == "127.0.0.1" and .listen_port == $inner and
+            (has("override_address") | not) and (has("override_port") | not)) and
+        any(.route.rules[]; (.inbound | index("reality-guard-" + $id)) != null and .action == "sniff" and .timeout == "1s") and
+        any(.route.rules[]; (.inbound | index("reality-guard-" + $id)) != null and
+            (.protocol | index("tls")) != null and (.domain | index($sni)) != null and
+            .outbound == ("reality-target-" + $id) and .override_address == $sni and .override_port == 443) and
+        any(.outbounds[]; .tag == ("reality-target-" + $id) and .type == "direct" and
+            .domain_resolver.server == "local") and
+        any(.route.rules[]; (.inbound | index("reality-guard-" + $id)) != null and .action == "reject") and
+        any(.route.rules[]; (.inbound | index($id)) != null and
+            .outbound == ("direct-" + $id))
+    ' "$sb_config" >/dev/null || fail "sing-box guard, target, exact-SNI, reject and IP-policy rendering"
+
+    # Deleting a guarded node releases its inner port for deterministic reuse.
+    run_proxy node delete --id "$legacy_id" --confirm-delete
+    assert_equal 0 "$RUN_STATUS" "guarded legacy node delete"
+    run_proxy node delete --id "$xray_id" --cascade-relay --confirm-delete
+    assert_equal 0 "$RUN_STATUS" "guarded Xray node delete with binding"
+    run_proxy node add --profile shadowsocks-aes-256-gcm --core xray --name released-public-owner \
+        --port 10004 --address proxy.example
+    assert_equal 0 "$RUN_STATUS" "occupy deleted node public port before guard reuse"
+    run_proxy node add --profile vless-reality-vision --core xray --name replacement-reality \
+        --port 19104 --address proxy.example --sni reality.example
+    assert_equal 0 "$RUN_STATUS" "replacement guarded node add"
+    replacement_id="$(node_id_by_name replacement-reality)"
+    assert_equal 10005 "$(jq -r --arg id "$replacement_id" '.nodes[] | select(.id == $id) | .tls.reality_guard.listen_port' "$(manifest_path)")" \
+        "deleted guard port becomes reusable"
+
+    # Guard metadata and render state participate in core-switch rollback.
+    manifest_hash="$(sha256sum "$(manifest_path)" | awk '{print $1}')"
+    relay_hash="$(sha256sum "$(relay_path)" | awk '{print $1}')"
+    xray_hash="$(sha256sum "$xray_config" | awk '{print $1}')"
+    sb_hash="$(sha256sum "$sb_config" | awk '{print $1}')"
+    touch "${TEST_SYSTEM_ROOT}/run/mock-systemd/active-vpsctl-proxy-xray.service"
+    touch "${TEST_SYSTEM_ROOT}/run/mock-systemd/active-vpsctl-proxy-sing-box.service"
+    touch "${TEST_SYSTEM_ROOT}/run/fail-service-restart-once"
+    run_proxy node core set --id "$replacement_id" --core sing-box --confirm-disruptive
+    assert_equal 20 "$RUN_STATUS" "guarded core-switch restart failure"
+    assert_equal "$manifest_hash" "$(sha256sum "$(manifest_path)" | awk '{print $1}')" "guarded switch rollback manifest"
+    assert_equal "$relay_hash" "$(sha256sum "$(relay_path)" | awk '{print $1}')" "guarded switch rollback relay"
+    assert_equal "$xray_hash" "$(sha256sum "$xray_config" | awk '{print $1}')" "guarded switch rollback Xray config"
+    assert_equal "$sb_hash" "$(sha256sum "$sb_config" | awk '{print $1}')" "guarded switch rollback sing-box config"
+
+    run_proxy node core set --id "$replacement_id" --core sing-box --confirm-disruptive
+    assert_equal 0 "$RUN_STATUS" "guarded core switch"
+    jq -e --arg id "$replacement_id" '.nodes[] | select(.id == $id) |
+        .core == "sing-box" and .tls.reality_guard == {enabled:true,listen_port:10005}' \
+        "$(manifest_path)" >/dev/null || fail "guarded core switch state"
+    jq -e --arg id "$replacement_id" '
+        any(.inbounds[]; .tag == ("reality-guard-" + $id)) and
+        any(.outbounds[]; .tag == ("reality-target-" + $id))
+    ' "$sb_config" >/dev/null || fail "guarded core switch target rendering"
+}
+
 case "${VPSCTL_TEST_ONLY:-}" in
     core-release) test_core_release_channels; printf 'PASS: proxy core release tests\n'; exit 0 ;;
     node-ip-policy) test_node_ip_strategy_and_batch; printf 'PASS: node IP policy tests\n'; exit 0 ;;
@@ -2184,6 +2434,7 @@ case "${VPSCTL_TEST_ONLY:-}" in
     relay-service) test_relay_forward_service_lifecycle; printf 'PASS: relay service tests\n'; exit 0 ;;
     node-core) test_node_core_switch; printf 'PASS: node core switch tests\n'; exit 0 ;;
     profile-membership) test_profile_membership_pipe_consumption; printf 'PASS: profile membership tests\n'; exit 0 ;;
+    reality-anti-relay) test_reality_anti_relay_guard; printf 'PASS: REALITY anti-relay tests\n'; exit 0 ;;
 esac
 
 printf 'TEST: proxy arguments, dry-run and time\n'
@@ -2222,4 +2473,6 @@ printf 'TEST: proxy relay service lifecycle and failures\n'
 test_relay_forward_service_lifecycle
 printf 'TEST: proxy node core switching\n'
 test_node_core_switch
+printf 'TEST: proxy REALITY anti-relay guard\n'
+test_reality_anti_relay_guard
 printf 'PASS: service proxy tests\n'
