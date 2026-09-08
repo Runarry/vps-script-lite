@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# shellcheck disable=SC1091,SC2016,SC2034,SC2317
+# Subshell tests deliberately isolate overrides of sourced production functions.
+# shellcheck disable=SC1091,SC2016,SC2030,SC2031,SC2034,SC2317
 
 set -Eeuo pipefail
 IFS=$'\n\t'
@@ -224,6 +225,97 @@ test_efi_bootcurrent_probe() {
     _kernel_grub_probe_efi_bootcurrent || test_fail 'active shim BootCurrent was rejected'
 }
 
+test_bios_backend_package_gate() (
+    # Restore the real probe within this subshell. Other parser fixtures use a
+    # stub because they deliberately do not represent a running BIOS machine.
+    source "$TEST_ROOT/commands/system/kernel/grub.sh"
+    reset_fixture
+    local fixture_pc_status='ii ' fixture_include_pc=1
+    mkdir -p "$TEST_SYSTEM_ROOT/boot/grub/i386-pc"
+    printf 'fixture normal module\n' >"$TEST_SYSTEM_ROOT/boot/grub/i386-pc/normal.mod"
+    update-grub() { return 0; }
+    grub-editenv() { return 0; }
+    dpkg-query() {
+        printf '%s\n' $'ii \tgrub-common' $'ii \tgrub-pc-bin'
+        [[ "$fixture_include_pc" == 0 ]] || printf '%s\tgrub-pc\n' "$fixture_pc_status"
+    }
+    assert_status 0 'complete grub-pc and BIOS modules are supported' kernel_grub_probe_active
+
+    fixture_include_pc=0
+    assert_status 1 'grub-pc-bin alone cannot authorize kernel switching' kernel_grub_probe_active
+    assert_contains "$KERNEL_GRUB_REASON" '完整 grub-pc' 'missing grub-pc diagnosis'
+    kernel_grub_load
+    assert_equal 0 "$KERNEL_GRUB_NEXT_READ_KNOWN" 'failed BIOS probe does not claim to have read grubenv'
+    assert_equal 0 "$KERNEL_GRUB_SUPPORTED" 'missing BIOS package keeps mutation gate closed'
+
+    fixture_include_pc=1
+    fixture_pc_status='iF '
+    assert_status 1 'half-configured grub-pc rejected' kernel_grub_probe_active
+    fixture_pc_status='hi '
+    assert_status 0 'configured held grub-pc accepted' kernel_grub_probe_active
+    rm -- "$TEST_SYSTEM_ROOT/boot/grub/i386-pc/normal.mod"
+    assert_status 1 'missing deployed BIOS modules rejected' kernel_grub_probe_active
+    assert_contains "$KERNEL_GRUB_REASON" 'i386-pc' 'module layout diagnostic'
+)
+
+test_config_loading_without_active_bootloader() (
+    local probe_log="$TEST_TEMP/config-probe.log" status=0
+    reset_fixture
+    kernel_grub_probe_active() {
+        printf 'called\n' >>"$probe_log"
+        KERNEL_GRUB_REASON='fixture missing grub-pc'
+        return 1
+    }
+    write_defaults '1>0'
+    write_grub_cfg '1>0'
+    write_env 'next_entry=1>2'
+    kernel_grub_load_config || test_fail 'standalone configuration inspection requires no installed backend'
+    assert_equal 1 "$KERNEL_GRUB_CONFIG_SUPPORTED" 'configuration parser reports its independent success'
+    assert_equal 0 "$KERNEL_GRUB_SUPPORTED" 'configuration parsing cannot authorize a bootloader mutation'
+    assert_equal 6.12.12-amd64 "$KERNEL_GRUB_DEFAULT_RELEASE" 'standalone parser preserves numeric default semantics'
+    assert_equal 6.12.9-amd64 "$KERNEL_GRUB_NEXT_RELEASE" 'standalone parser resolves next override'
+    assert_equal 1 "$KERNEL_GRUB_NEXT_READ_KNOWN" 'standalone parser records successful environment inspection'
+    [[ ! -e "$probe_log" ]] || test_fail 'configuration-only inspection called the active bootloader probe'
+
+    write_env 'next_entry=missing-entry'
+    status=0
+    kernel_grub_load_config || status=$?
+    assert_equal 1 "$status" 'unresolved next override returns config inspection failure'
+    assert_equal 0 "$KERNEL_GRUB_CONFIG_SUPPORTED" 'partially parsed configuration does not report complete success'
+    assert_equal 6.12.12-amd64 "$KERNEL_GRUB_DEFAULT_RELEASE" 'valid default survives failed next override resolution'
+    assert_equal 1 "$KERNEL_GRUB_NEXT_READ_KNOWN" 'unresolved next selector is distinguished from unread environment'
+    assert_equal missing-entry "$KERNEL_GRUB_NEXT_SELECTOR" 'unresolved next selector is exposed for repair planning'
+    assert_equal '' "$KERNEL_GRUB_NEXT_RELEASE" 'unresolved next selector clears a prior resolved next release'
+
+    rm -- "$KERNEL_GRUB_ENV"
+    kernel_grub_load_config || test_fail 'absent environment block should represent no next override'
+    assert_equal 1 "$KERNEL_GRUB_NEXT_READ_KNOWN" 'absent environment is confirmed known'
+    assert_equal '' "$KERNEL_GRUB_NEXT_SELECTOR" 'absent environment clears stale next selector'
+
+    write_env 'next_entry=1>0' 'next_entry=1>2'
+    status=0
+    kernel_grub_load_config || status=$?
+    assert_equal 1 "$status" 'duplicate next selectors are rejected instead of silently taking the last'
+    assert_equal 0 "$KERNEL_GRUB_NEXT_READ_KNOWN" 'ambiguous environment does not report known absence'
+    printf 'next_entry=1>0\n' >"$KERNEL_GRUB_ENV"
+    status=0
+    kernel_grub_load_config || status=$?
+    assert_equal 1 "$status" 'nonstandard environment block is rejected'
+    assert_equal 0 "$KERNEL_GRUB_NEXT_READ_KNOWN" 'unsafe environment remains unknown'
+
+    rm -- "$KERNEL_GRUB_ENV"
+    ln -s "$KERNEL_GRUB_DEFAULT_FILE" "$KERNEL_GRUB_ENV"
+    status=0
+    kernel_grub_load_config || status=$?
+    assert_equal 1 "$status" 'environment symlink is rejected'
+    assert_equal 0 "$KERNEL_GRUB_NEXT_READ_KNOWN" 'symlink environment is unread'
+
+    kernel_grub_load
+    assert_equal 0 "$KERNEL_GRUB_NEXT_READ_KNOWN" 'active probe failure resets prior successful environment knowledge'
+    assert_equal 0 "$KERNEL_GRUB_SUPPORTED" 'active probe still guards the public load operation'
+    assert_equal 'fixture missing grub-pc' "$KERNEL_GRUB_REASON" 'active probe diagnosis remains visible'
+)
+
 test_fail_closed_parsing() {
     local marker="$TEST_TEMP/injected" foreign
     reset_fixture
@@ -385,6 +477,10 @@ printf 'TEST: GRUB single-level menu and section counting\n'
 test_single_level_and_other_section_counting
 printf 'TEST: GRUB UEFI BootCurrent proof\n'
 test_efi_bootcurrent_probe
+printf 'TEST: GRUB BIOS backend package proof\n'
+test_bios_backend_package_gate
+printf 'TEST: GRUB configuration inspection without an active backend\n'
+test_config_loading_without_active_bootloader
 printf 'TEST: GRUB parser fail-closed behavior\n'
 test_fail_closed_parsing
 printf 'TEST: GRUB dry-run and mutation gates\n'

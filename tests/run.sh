@@ -43,6 +43,7 @@ for syntax_file in \
     "${TEST_ROOT}/tests/unit/test-system-kernel-providers.sh" \
     "${TEST_ROOT}/tests/unit/test-system-kernel-inventory.sh" \
     "${TEST_ROOT}/tests/unit/test-system-kernel-grub.sh" \
+    "${TEST_ROOT}/tests/unit/test-system-kernel-grub-install.sh" \
     "${TEST_ROOT}/tests/unit/test-security-access.sh" \
     "${TEST_ROOT}/tests/unit/test-security-fail2ban.sh" \
     "${TEST_ROOT}/tests/unit/test-security-tls.sh" \
@@ -56,6 +57,8 @@ for syntax_file in \
     "${TEST_ROOT}/tests/integration/test-security-access-pubkey-real.sh" \
     "${TEST_ROOT}/tests/integration/test-security-access-policy-real.sh" \
     "${TEST_ROOT}/tests/integration/test-security-tls-real.sh" \
+    "${TEST_ROOT}/tests/integration/test-system-kernel-grub-install-real.sh" \
+    "${TEST_ROOT}/tests/integration/test-system-kernel-grub-install-rescue-real.sh" \
     "${TEST_ROOT}/tests/integration/test-vpsctl.sh"; do
     bash -n "$syntax_file"
 done
@@ -72,6 +75,7 @@ bash "${TEST_ROOT}/tests/unit/test-system-kernel.sh"
 bash "${TEST_ROOT}/tests/unit/test-system-kernel-providers.sh"
 bash "${TEST_ROOT}/tests/unit/test-system-kernel-inventory.sh"
 bash "${TEST_ROOT}/tests/unit/test-system-kernel-grub.sh"
+bash "${TEST_ROOT}/tests/unit/test-system-kernel-grub-install.sh"
 bash "${TEST_ROOT}/tests/unit/test-security-access.sh"
 bash "${TEST_ROOT}/tests/unit/test-security-fail2ban.sh"
 bash "${TEST_ROOT}/tests/unit/test-security-tls.sh"

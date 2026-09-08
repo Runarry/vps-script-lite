@@ -415,11 +415,11 @@ test_system_bundle_requires_kernel_modules() (
     status=0
     vps_distribution_validate_domain_tree "$tree" system >/dev/null 2>&1 || status=$?
     assert_equal 10 "$status" 'incomplete system kernel bundle rejected'
-    for module in providers inventory grub; do
+    for module in providers inventory grub grub-install; do
         printf '#!/usr/bin/env bash\n' >"$tree/commands/system/kernel/$module.sh"
     done
     vps_distribution_validate_domain_tree "$tree" system || fail 'complete system kernel bundle rejected'
-    for module in providers inventory grub; do
+    for module in providers inventory grub grub-install; do
         mv "$tree/commands/system/kernel/$module.sh" "$tree/$module.sh"
         status=0
         vps_distribution_validate_domain_tree "$tree" system >/dev/null 2>&1 || status=$?

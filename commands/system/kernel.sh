@@ -23,6 +23,7 @@ readonly KERNEL_KEY_LOGICAL='/etc/apt/keyrings/vpsctl-xanmod-archive-keyring.gpg
 readonly KERNEL_STATE_LOGICAL='/var/lib/vpsctl/system/kernel-bbrv3/state'
 readonly KERNEL_OFFICIAL_STATE_LOGICAL='/var/lib/vpsctl/system/kernel/install-state'
 readonly KERNEL_INSTALL_TOKEN='INSTALL-KERNEL'
+readonly KERNEL_INSTALL_GRUB_TOKEN='INSTALL-BIOS-GRUB'
 readonly KERNEL_SWITCH_TOKEN='SWITCH-KERNEL'
 readonly KERNEL_UNINSTALL_TOKEN='REMOVE-KERNEL'
 readonly KERNEL_LEGACY_INSTALL_TOKEN='INSTALL-XANMOD-BBRV3'
@@ -39,14 +40,18 @@ KERNEL_TYPE='xanmod'
 KERNEL_TRACK='auto'
 KERNEL_CPU_LEVEL='auto'
 KERNEL_RELEASE=''
+KERNEL_GRUB_DISK=''
 KERNEL_CONFIRM_INSTALL=''
+KERNEL_CONFIRM_INSTALL_GRUB=''
 KERNEL_CONFIRM_SWITCH=''
 KERNEL_CONFIRM_UNINSTALL=''
 KERNEL_TYPE_SET=0
 KERNEL_TRACK_SET=0
 KERNEL_CPU_LEVEL_SET=0
 KERNEL_RELEASE_SET=0
+KERNEL_GRUB_DISK_SET=0
 KERNEL_INSTALL_CONFIRM_SET=0
+KERNEL_INSTALL_GRUB_CONFIRM_SET=0
 KERNEL_SWITCH_CONFIRM_SET=0
 KERNEL_UNINSTALL_CONFIRM_SET=0
 KERNEL_LOCKED=0
@@ -77,6 +82,9 @@ source "${KERNEL_PROJECT_ROOT}/commands/system/kernel/inventory.sh"
 # shellcheck source=kernel/grub.sh
 # shellcheck disable=SC1091
 source "${KERNEL_PROJECT_ROOT}/commands/system/kernel/grub.sh"
+# shellcheck source=kernel/grub-install.sh
+# shellcheck disable=SC1091
+source "${KERNEL_PROJECT_ROOT}/commands/system/kernel/grub-install.sh"
 
 kernel_parse_globals() {
     KERNEL_ARGS=()
@@ -258,6 +266,8 @@ kernel_usage() {
       [--confirm-switch SWITCH-KERNEL]
   kernel.sh [global-options] uninstall --release RELEASE
       [--confirm-uninstall REMOVE-KERNEL]
+  kernel.sh [global-options] install-grub [--disk DISK]
+      [--confirm-install-grub INSTALL-BIOS-GRUB]
 
 选项与范围：
   official    Debian linux-image-amd64 / Ubuntu linux-generic（菜单默认推荐）
@@ -266,10 +276,14 @@ kernel_usage() {
   xanmod      XanMod BBRv3；CLI 省略 --type 时保持此默认
   --track / --cpu-level  仅用于 XanMod，auto 优先 main，缺包时回退 LTS
   --release   完整内核版本（与 uname -r 的格式相同），不接受包名或通配符
+  --disk      BIOS GRUB 安装目标整盘，接受 /dev/disk/by-id/ 整盘路径
 
 仅支持 Debian/Ubuntu amd64、APT/dpkg；容器和 WSL 不能管理宿主机内核。
 官方内核使用发行版已配置的受信源；XanMod 验证完整密钥指纹并拒绝
 Secure Boot 启用或状态未知的环境。切换及安全卸载需要可识别的标准 GRUB 2。
+install-grub 为 experimental：仅支持 BIOS、同一普通磁盘上的 ext2/ext3/ext4
+根分区和 /boot，不创建分区。非交互必须指定 --disk；真实安装还须提供
+--confirm-install-grub INSTALL-BIOS-GRUB。演练只检查并显示安装计划。
 
 永久切换固定具体版本，由用户自行重启。安装不会卸载旧版本；先切换并
 重启，再卸载旧版本。当前运行、默认启动、已有下一次启动目标均不可卸载。
@@ -299,19 +313,23 @@ kernel_parse_args() {
     KERNEL_TRACK=auto
     KERNEL_CPU_LEVEL=auto
     KERNEL_RELEASE=''
+    KERNEL_GRUB_DISK=''
     KERNEL_CONFIRM_INSTALL=''
+    KERNEL_CONFIRM_INSTALL_GRUB=''
     KERNEL_CONFIRM_SWITCH=''
     KERNEL_CONFIRM_UNINSTALL=''
     KERNEL_TYPE_SET=0
     KERNEL_TRACK_SET=0
     KERNEL_CPU_LEVEL_SET=0
     KERNEL_RELEASE_SET=0
+    KERNEL_GRUB_DISK_SET=0
     KERNEL_INSTALL_CONFIRM_SET=0
+    KERNEL_INSTALL_GRUB_CONFIRM_SET=0
     KERNEL_SWITCH_CONFIRM_SET=0
     KERNEL_UNINSTALL_CONFIRM_SET=0
     while (($# > 0)); do
         case "$1" in
-            --type | --track | --cpu-level | --release | --confirm-install | --confirm-switch | --confirm-uninstall)
+            --type | --track | --cpu-level | --release | --disk | --confirm-install | --confirm-install-grub | --confirm-switch | --confirm-uninstall)
                 option="$1"
                 (($# >= 2)) || {
                     kernel_die_usage "$option 缺少参数值"
@@ -339,9 +357,17 @@ kernel_parse_args() {
                         KERNEL_RELEASE="$value"
                         KERNEL_RELEASE_SET=1
                         ;;
+                    --disk)
+                        KERNEL_GRUB_DISK="$value"
+                        KERNEL_GRUB_DISK_SET=1
+                        ;;
                     --confirm-install)
                         KERNEL_CONFIRM_INSTALL="$value"
                         KERNEL_INSTALL_CONFIRM_SET=1
+                        ;;
+                    --confirm-install-grub)
+                        KERNEL_CONFIRM_INSTALL_GRUB="$value"
+                        KERNEL_INSTALL_GRUB_CONFIRM_SET=1
                         ;;
                     --confirm-switch)
                         KERNEL_CONFIRM_SWITCH="$value"
@@ -397,6 +423,12 @@ kernel_parse_args() {
         kernel_die_usage '无效 --release：必须提供完整内核版本，不接受路径、包名或通配符'
         return $?
     fi
+    if ((KERNEL_GRUB_DISK_SET)); then
+        [[ "$KERNEL_GRUB_DISK" =~ ^/dev/([A-Za-z0-9_+:.=-]+/)*[A-Za-z0-9_+:.=-]+$ && "/$KERNEL_GRUB_DISK/" != *'/../'* && "/$KERNEL_GRUB_DISK/" != *'/./'* ]] || {
+            kernel_die_usage '无效 --disk：必须提供 /dev 下的整盘设备路径，不接受通配符或相对路径'
+            return $?
+        }
+    fi
     if ((KERNEL_INSTALL_CONFIRM_SET)) && [[ "$KERNEL_CONFIRM_INSTALL" != "$KERNEL_INSTALL_TOKEN" ]]; then
         [[ "$KERNEL_TYPE" == xanmod && "$KERNEL_CONFIRM_INSTALL" == "$KERNEL_LEGACY_INSTALL_TOKEN" ]] || {
             kernel_die_usage '--confirm-install 的确认短语不正确'
@@ -407,6 +439,10 @@ kernel_parse_args() {
         kernel_die_usage '--confirm-switch 的确认短语不正确'
         return $?
     fi
+    if ((KERNEL_INSTALL_GRUB_CONFIRM_SET)) && [[ "$KERNEL_CONFIRM_INSTALL_GRUB" != "$KERNEL_INSTALL_GRUB_TOKEN" ]]; then
+        kernel_die_usage '--confirm-install-grub 的确认短语不正确；请使用 INSTALL-BIOS-GRUB'
+        return $?
+    fi
     if ((KERNEL_UNINSTALL_CONFIRM_SET)) && [[ "$KERNEL_CONFIRM_UNINSTALL" != "$KERNEL_UNINSTALL_TOKEN" ]]; then
         kernel_die_usage '--confirm-uninstall 请使用 REMOVE-KERNEL，并明确选择 --release'
         return $?
@@ -415,16 +451,17 @@ kernel_parse_args() {
 
 kernel_validate_action_options() {
     local install_options=$((KERNEL_TYPE_SET + KERNEL_TRACK_SET + KERNEL_CPU_LEVEL_SET + KERNEL_INSTALL_CONFIRM_SET))
+    local grub_install_options=$((KERNEL_GRUB_DISK_SET + KERNEL_INSTALL_GRUB_CONFIRM_SET))
     case "$KERNEL_ACTION" in
         '' | status | help)
-            ((install_options + KERNEL_RELEASE_SET + KERNEL_SWITCH_CONFIRM_SET + KERNEL_UNINSTALL_CONFIRM_SET == 0)) || {
+            ((install_options + grub_install_options + KERNEL_RELEASE_SET + KERNEL_SWITCH_CONFIRM_SET + KERNEL_UNINSTALL_CONFIRM_SET == 0)) || {
                 kernel_die_usage "${KERNEL_ACTION:-无动作} 不接受动作选项"
                 return $?
             }
             ;;
         install)
-            ((KERNEL_RELEASE_SET + KERNEL_SWITCH_CONFIRM_SET + KERNEL_UNINSTALL_CONFIRM_SET == 0)) || {
-                kernel_die_usage 'install 不接受 --release 或其他动作的确认选项'
+            ((grub_install_options + KERNEL_RELEASE_SET + KERNEL_SWITCH_CONFIRM_SET + KERNEL_UNINSTALL_CONFIRM_SET == 0)) || {
+                kernel_die_usage 'install 不接受 --disk、--release 或其他动作的确认选项'
                 return $?
             }
             if [[ "$KERNEL_TYPE" != xanmod ]] && ((KERNEL_TRACK_SET + KERNEL_CPU_LEVEL_SET > 0)); then
@@ -432,8 +469,24 @@ kernel_validate_action_options() {
                 return $?
             fi
             ;;
+        install-grub)
+            ((install_options + KERNEL_RELEASE_SET + KERNEL_SWITCH_CONFIRM_SET + KERNEL_UNINSTALL_CONFIRM_SET == 0)) || {
+                kernel_die_usage 'install-grub 仅接受 --disk 和 --confirm-install-grub'
+                return $?
+            }
+            if ! vps_cmd_is_interactive; then
+                [[ -n "$KERNEL_GRUB_DISK" ]] || {
+                    kernel_die_usage '非交互 install-grub 必须用 --disk 指定目标整盘'
+                    return $?
+                }
+                [[ "${VPSCTL_DRY_RUN:-0}" == 1 || "$KERNEL_CONFIRM_INSTALL_GRUB" == "$KERNEL_INSTALL_GRUB_TOKEN" ]] || {
+                    kernel_die_usage '非交互 install-grub 必须提供 --confirm-install-grub INSTALL-BIOS-GRUB；--yes 不能绕过'
+                    return $?
+                }
+            fi
+            ;;
         switch | uninstall)
-            ((install_options == 0)) || {
+            ((install_options + grub_install_options == 0)) || {
                 kernel_die_usage "$KERNEL_ACTION 不接受安装选项"
                 return $?
             }
@@ -577,7 +630,7 @@ kernel_release_actionable() {
 }
 
 kernel_status() {
-    local release flags source package package_text meta_text proc_path bbr=未知 qdisc=未知
+    local release flags source package package_text meta_text proc_path next=未知 bbr=未知 qdisc=未知
     vps_cmd_status '当前内核' "$KERNEL_RUNNING_RELEASE" normal
     case "$KERNEL_OS_ID" in debian | ubuntu) ;; *)
         vps_cmd_status '内核包管理' '不适用（仅 Debian/Ubuntu）' muted
@@ -587,7 +640,14 @@ kernel_status() {
     esac
     kernel_refresh_inventory || return $?
     vps_cmd_status '默认启动内核' "${KERNEL_GRUB_DEFAULT_RELEASE:-未知}" normal
-    vps_cmd_status '下一次启动覆盖' "${KERNEL_GRUB_NEXT_RELEASE:-${KERNEL_GRUB_NEXT_ID:-无}}" muted
+    if [[ "${KERNEL_GRUB_NEXT_READ_KNOWN:-0}" == 1 ]]; then
+        if [[ -n "${KERNEL_GRUB_NEXT_RELEASE:-}" ]]; then
+            next="$KERNEL_GRUB_NEXT_RELEASE"
+        elif [[ -z "${KERNEL_GRUB_NEXT_SELECTOR:-}" ]]; then
+            next=无
+        fi
+    fi
+    vps_cmd_status '下一次启动覆盖' "$next" muted
     [[ "${KERNEL_GRUB_SUPPORTED:-0}" == 1 ]] || vps_cmd_status '启动器' "${KERNEL_GRUB_REASON:-无法识别}" warning
     for release in "${KERNEL_RELEASES[@]}"; do
         flags=''
@@ -739,6 +799,7 @@ kernel_install() (
     vps_cmd_success "已安装/更新 $package ($version)"
     vps_cmd_status '当前运行' "$KERNEL_RUNNING_RELEASE" normal
     vps_cmd_status '默认启动' "${KERNEL_GRUB_DEFAULT_RELEASE:-未知，请人工检查启动器}" normal
+    [[ "${KERNEL_GRUB_SUPPORTED:-0}" == 1 ]] || kernel_grub_install_hint
     vps_cmd_info '如需固定使用某个版本，请执行 switch；自行重启后再卸载旧版本'
 )
 
@@ -961,13 +1022,15 @@ kernel_interactive_menu() {
     local choice action_status status=0
     while true; do
         printf ' %s\n' "$(kernel_menu_snapshot)" >&2
-        choice="$(vps_cmd_prompt_select '系统内核管理' status status '查看已安装内核与启动状态' install '安装/更新内核' switch '永久切换默认启动内核' uninstall '卸载指定旧版本' quit '退出')" || {
+        choice="$(vps_cmd_prompt_select '系统内核管理' status status '查看已安装内核与启动状态' install '安装/更新内核' switch '永久切换默认启动内核' uninstall '卸载指定旧版本' quit '退出' install-grub '安装/修复 BIOS GRUB（experimental）')" || {
             action_status=$?
             ((action_status == 130)) && return "$status"
             return "$action_status"
         }
         KERNEL_RELEASE=''
+        KERNEL_GRUB_DISK=''
         KERNEL_CONFIRM_INSTALL=''
+        KERNEL_CONFIRM_INSTALL_GRUB=''
         KERNEL_CONFIRM_SWITCH=''
         KERNEL_CONFIRM_UNINSTALL=''
         KERNEL_ACTION="$choice"
@@ -975,6 +1038,7 @@ kernel_interactive_menu() {
         case "$choice" in
             status) kernel_status || action_status=$? ;;
             install) kernel_menu_install || action_status=$? ;;
+            install-grub) kernel_install_grub || action_status=$? ;;
             switch) kernel_switch || action_status=$? ;;
             uninstall) kernel_uninstall || action_status=$? ;;
             quit) return "$status" ;;
@@ -1005,6 +1069,7 @@ kernel_main() {
     case "$KERNEL_ACTION" in
         status) kernel_status ;;
         install) kernel_install ;;
+        install-grub) kernel_install_grub ;;
         switch) kernel_switch ;;
         uninstall) kernel_uninstall ;;
     esac

@@ -274,7 +274,7 @@ vps_distribution_validate_domain_tree() {
         network)
             required_files=(commands/network/bbr.sh commands/network/dns.sh commands/network/ip-policy.sh commands/network/rfw.sh)
             ;;
-        system) required_files=(commands/system/kernel.sh commands/system/kernel/providers.sh commands/system/kernel/inventory.sh commands/system/kernel/grub.sh) ;;
+        system) required_files=(commands/system/kernel.sh commands/system/kernel/providers.sh commands/system/kernel/inventory.sh commands/system/kernel/grub.sh commands/system/kernel/grub-install.sh) ;;
         security) required_files=(commands/security/access.sh commands/security/fail2ban.sh commands/security/tls.sh) ;;
         service) required_files=(commands/service/proxy.sh) ;;
         test) required_files=(commands/test/nodequality.sh commands/test/tcpquality.sh lib/server-test.sh) ;;

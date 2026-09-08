@@ -185,7 +185,7 @@ vps_registry_init() {
         "system" \
         "kernel" \
         "内核管理" \
-        "查看、安装、固定切换或按版本安全卸载系统内核" \
+        "查看、安装、切换或卸载内核，安装与修复 BIOS GRUB" \
         "commands/system/kernel.sh" \
         "disruptive" \
         "optional-root" \

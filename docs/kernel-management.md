@@ -1,6 +1,6 @@
 # 系统内核管理
 
-`system kernel` 在 Debian/Ubuntu amd64 上清点已安装内核，安装发行版官方内核或 XanMod BBRv3 内核，将指定版本固定为 GRUB 2 默认启动项，并按版本安全卸载不再使用的内核。BBR/qdisc 的运行时与持久化设置仍由 `network bbr` 管理。
+`system kernel` 在 Debian/Ubuntu amd64 上清点已安装内核，安装发行版官方内核或 XanMod BBRv3 内核，将指定版本固定为 GRUB 2 默认启动项，并按版本安全卸载不再使用的内核；另提供独立的 BIOS GRUB 安装与修复入口。BBR/qdisc 的运行时与持久化设置仍由 `network bbr` 管理。
 
 本功能处于 `experimental` 生命周期。内核和启动器变更可能导致重启后无法启动，首次使用前必须确认云厂商串行控制台、VNC、救援系统或其他带外恢复入口可用。
 
@@ -15,6 +15,8 @@ vpsctl system kernel switch --release RELEASE
     [--confirm-switch SWITCH-KERNEL]
 vpsctl system kernel uninstall --release RELEASE
     [--confirm-uninstall REMOVE-KERNEL]
+vpsctl system kernel install-grub [--disk DISK]
+    [--confirm-install-grub INSTALL-BIOS-GRUB]
 ```
 
 无参数且连接终端时进入“系统内核管理”菜单；非交互环境无参数时只显示状态。交互菜单按编号提供查看状态、安装/更新、切换默认内核和卸载指定版本，安装类型默认推荐官方标准内核。直接 CLI 省略 `--type` 时仍默认为 `xanmod`，兼容原有安装调用；`--track` 和 `--cpu-level` 只适用于 XanMod。
@@ -151,7 +153,30 @@ bash bin/vpsctl system kernel uninstall --release RELEASE \
 
 需要恢复某系列的自动更新时，重新执行对应的 `install --type ...`；XanMod 还应选择所需 `--track`。重新安装元包不会解除已经固定的默认版本，使用新版本仍需显式 `switch`。
 
-## 9. 恢复与验收要求
+## 9. 安装与修复 BIOS GRUB
+
+云镜像只有 `grub-pc-bin`、缺少完整 `grub-pc` 时，已有内核安装可能成功，但自动切换会被启动器检查拒绝。菜单中的“安装/修复 BIOS GRUB”提供独立处理入口，不在安装或切换内核时自动写入引导设备。
+
+```bash
+vpsctl system kernel install-grub
+vpsctl --dry-run system kernel install-grub --disk /dev/vda
+vpsctl --non-interactive system kernel install-grub \
+  --disk /dev/vda --confirm-install-grub INSTALL-BIOS-GRUB
+```
+
+交互模式从 `/` 和 `/boot` 的挂载关系推荐整盘，确认页展示设备、容量、分区表、包变更及默认内核策略。非交互必须明确提供 `--disk` 和强确认短语，`--yes` 不能代替强确认。允许整盘路径和指向该整盘的 `/dev/disk/by-id/` 路径，不接受分区路径或无关数据盘。完成后仍需自行执行 `switch` 选择其他内核并重启验证。
+
+首版只接受 Debian/Ubuntu amd64 的真实 BIOS 环境、同盘普通分区上的 ext2/ext3/ext4 根文件系统及 `/boot`，支持同盘独立 `/boot`。UEFI、容器、WSL、LVM、RAID、加密、多路径、MBR 扩展/逻辑分区及跨盘启动布局均拒绝。MBR 的首分区前至少有 1 MiB 空间；GPT 必须已有至少 1 MiB、未挂载且无文件系统的 BIOS Boot 分区。脚本不创建或格式化分区，不使用强制或 blocklist 安装。
+
+检查工具缺失、dpkg 未完成、启动文件不完整、配置冲突及目标设备变化均在写入前停止。演练不刷新 APT 索引，不写 debconf、备份或启动文件。真实安装只接受发行版可信源，先模拟完整安装计划，拒绝删除、降级或内核包变动；已满足要求的软件包不自动升级。
+
+默认内核可解析且完整时保留其语义并使用稳定菜单 ID；菜单缺失或默认选择器无法关联到完整内核时，在确认页明确说明将固定当前运行内核。有效单次覆盖保留；默认回退或单次覆盖无法解析时清除覆盖。未完成读取的单次覆盖显示“未知”，只有已确认不存在才显示“无”。损坏的环境块、动态默认变量、`readonly` 赋值或后加载的覆盖配置须先人工整理，不通过回退策略强行覆盖。
+
+确认后，脚本先保存配置、GRUB 模块、包状态、debconf、设备身份、分区表及实际引导写入区域。Debian 的包维护脚本会使用 `--force`，因此本流程暂时清空其安装设备并允许跳过隐式引导安装，同时关闭 Ubuntu 云镜像可能启用的 `grub-pc/cloud_style_installation` 自动选盘开关；随后显式执行不带 `--force` 的 BIOS `grub-install`，成功后才持久化已确认的目标设备，并生成、回读启动配置。确认页说明关闭自动选盘，原开关值保存在备份中；成功后继续使用已确认的目标盘，不恢复自动选盘。包配置阶段仍按可能产生系统变更处理。成功表示“安装与配置校验通过，待重启验证”，不表示已经验证 BIOS 的实际磁盘启动顺序。
+
+从包安装或引导写入开始，失败和中断均按部分完成处理（退出码 `30`）。备份、阶段记录和恢复说明保留，不自动卸载 GRUB 或回写原始扇区。配置备份不能将包安装或磁盘引导整体回滚；恢复原始区域须在救援环境核对磁盘身份、偏移、长度和校验值后进行。先确认控制台或救援入口可用，出现部分完成时不要直接重启。各发行版的安装、重启及救援演练结果见 [BIOS GRUB 验收记录](kernel-grub-install-validation.md)。
+
+## 10. 恢复与验收要求
 
 启动失败时，通过带外控制台选择另一个完整内核或进入救援系统。切换或卸载返回部分完成/失败时不要直接重启，先检查 dpkg、启动文件、受管 GRUB 片段、备份和实际菜单：
 

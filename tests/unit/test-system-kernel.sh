@@ -123,6 +123,7 @@ reset_inventory_fixture() {
     KERNEL_GRUB_NEXT_ID=''
     KERNEL_GRUB_DEFAULT_SELECTOR=''
     KERNEL_GRUB_NEXT_SELECTOR=''
+    KERNEL_GRUB_NEXT_READ_KNOWN=0
 }
 
 write_cpu_flags() {
@@ -177,6 +178,99 @@ test_arguments_and_compatibility() {
     parse_and_validate switch --release 6.8.0-1-amd64 --confirm-switch SWITCH-KERNEL
     test_assert_equal '6.8.0-1-amd64' "$KERNEL_RELEASE" 'complete release accepted'
 }
+
+test_grub_install_arguments_and_confirmation() (
+    local status option action
+    VPSCTL_DRY_RUN=0
+    VPSCTL_NON_INTERACTIVE=1
+    VPSCTL_ASSUME_YES=1
+
+    parse_and_validate install-grub --disk /dev/vda --confirm-install-grub INSTALL-BIOS-GRUB
+    test_assert_equal install-grub "$KERNEL_ACTION" 'BIOS GRUB action'
+    test_assert_equal /dev/vda "$KERNEL_GRUB_DISK" 'explicit BIOS GRUB disk'
+    test_assert_equal INSTALL-BIOS-GRUB "$KERNEL_CONFIRM_INSTALL_GRUB" 'separate BIOS GRUB token'
+    parse_and_validate install-grub --disk /dev/disk/by-id/virtio-root --confirm-install-grub INSTALL-BIOS-GRUB
+    test_assert_equal /dev/disk/by-id/virtio-root "$KERNEL_GRUB_DISK" 'by-id disk reaches physical validation'
+
+    for option in --disk --confirm-install-grub; do
+        status=0
+        parse_and_validate install-grub "$option" >/dev/null 2>&1 || status=$?
+        test_assert_equal 2 "$status" "$option requires a value"
+    done
+    status=0
+    parse_and_validate install-grub --confirm-install-grub INSTALL-BIOS-GRUB >/dev/null 2>&1 || status=$?
+    test_assert_equal 2 "$status" 'non-interactive GRUB installation requires an explicit disk'
+    status=0
+    parse_and_validate install-grub --disk /dev/vda >/dev/null 2>&1 || status=$?
+    test_assert_equal 2 "$status" '--yes cannot supply the missing GRUB token'
+    status=0
+    parse_and_validate install-grub --disk /dev/vda --confirm-install-grub INSTALL-KERNEL >/dev/null 2>&1 || status=$?
+    test_assert_equal 2 "$status" 'kernel install token cannot authorize disk bootloader writes'
+
+    for action in status install switch uninstall; do
+        status=0
+        parse_and_validate "$action" --disk /dev/vda --confirm-install-grub INSTALL-BIOS-GRUB >/dev/null 2>&1 || status=$?
+        test_assert_equal 2 "$status" "$action rejects BIOS GRUB-only options"
+    done
+    for option in --type --track --cpu-level --release --confirm-install --confirm-switch --confirm-uninstall; do
+        case "$option" in
+            --type) action=official ;;
+            --track) action=main ;;
+            --cpu-level) action=v3 ;;
+            --release) action=6.12.12-amd64 ;;
+            --confirm-install) action=INSTALL-KERNEL ;;
+            --confirm-switch) action=SWITCH-KERNEL ;;
+            --confirm-uninstall) action=REMOVE-KERNEL ;;
+        esac
+        status=0
+        parse_and_validate install-grub --disk /dev/vda --confirm-install-grub INSTALL-BIOS-GRUB "$option" "$action" >/dev/null 2>&1 || status=$?
+        test_assert_equal 2 "$status" "install-grub rejects $option"
+    done
+
+    VPSCTL_DRY_RUN=1
+    parse_and_validate install-grub --disk /dev/vda
+    status=0
+    parse_and_validate install-grub >/dev/null 2>&1 || status=$?
+    test_assert_equal 2 "$status" 'dry-run still requires non-interactive disk selection'
+    parse_and_validate status
+    test_assert_equal '' "$KERNEL_GRUB_DISK" 'parsing another action clears previous disk'
+    test_assert_equal '' "$KERNEL_CONFIRM_INSTALL_GRUB" 'parsing another action clears previous GRUB token'
+
+    VPSCTL_DRY_RUN=0
+    status=0
+    kernel_confirm_action install-grub '' "$KERNEL_INSTALL_GRUB_TOKEN" 'install BIOS GRUB' >/dev/null 2>&1 || status=$?
+    test_assert_equal 3 "$status" '--yes does not bypass BIOS GRUB strong confirmation'
+    kernel_confirm_action install-grub INSTALL-BIOS-GRUB "$KERNEL_INSTALL_GRUB_TOKEN" 'install BIOS GRUB'
+    vps_cmd_is_interactive() { return 0; }
+    status=0
+    kernel_confirm_action install-grub '' "$KERNEL_INSTALL_GRUB_TOKEN" 'install BIOS GRUB' </dev/null >/dev/null 2>&1 || status=$?
+    test_assert_equal 130 "$status" 'cancelled BIOS GRUB token prompt returns cancellation'
+)
+
+test_grub_install_menu_entry() (
+    local log="$TEST_TEMP/grub-install-menu.log" output
+    : >"$log"
+    KERNEL_GRUB_DISK=/dev/previous
+    KERNEL_CONFIRM_INSTALL_GRUB=INSTALL-BIOS-GRUB
+    kernel_menu_snapshot() { printf 'fixture current kernel'; }
+    vps_cmd_prompt_select() {
+        printf '%s\n' "$(kernel_join_values "$@")" >>"$log"
+        if [[ "$(wc -l <"$log")" == 1 ]]; then
+            printf 'install-grub\n'
+        else
+            printf 'quit\n'
+        fi
+    }
+    kernel_install_grub() {
+        test_assert_equal '' "$KERNEL_GRUB_DISK" 'menu does not reuse a prior disk selection'
+        test_assert_equal '' "$KERNEL_CONFIRM_INSTALL_GRUB" 'menu does not reuse a prior strong confirmation'
+        printf 'fixture GRUB installer reached\n'
+    }
+    output="$(kernel_interactive_menu 2>&1)"
+    test_assert_contains "$(<"$log")" 'quit, 退出, install-grub' 'existing five menu choices keep their positions'
+    test_assert_contains "$(<"$log")" 'BIOS GRUB' 'menu exposes BIOS GRUB installation'
+    test_assert_contains "$output" 'fixture GRUB installer reached' 'menu dispatches to separate BIOS GRUB installer'
+)
 
 test_provider_candidates_and_cpu() {
     local output
@@ -607,6 +701,41 @@ test_status_version_rows() (
     test_assert_contains "$output" '可卸载' 'status actionable old release'
 )
 
+test_status_next_override_knowledge() (
+    local output next_line fixture_known=0 fixture_selector='' fixture_release=''
+    reset_inventory_fixture
+    kernel_refresh_inventory() {
+        KERNEL_GRUB_SUPPORTED=0
+        KERNEL_GRUB_REASON='BIOS 模式下未确认完整 grub-pc 软件包已安装'
+        KERNEL_GRUB_NEXT_READ_KNOWN="$fixture_known"
+        KERNEL_GRUB_NEXT_SELECTOR="$fixture_selector"
+        KERNEL_GRUB_NEXT_RELEASE="$fixture_release"
+    }
+    output="$(kernel_status)"
+    next_line="${output#*下一次启动覆盖}"
+    next_line="${next_line%%$'\n'*}"
+    test_assert_contains "$next_line" '未知' 'failed bootloader probe does not claim no next override'
+    test_assert_not_contains "$next_line" '无' 'unread environment is distinct from no override'
+
+    fixture_known=1
+    output="$(kernel_status)"
+    next_line="${output#*下一次启动覆盖}"
+    next_line="${next_line%%$'\n'*}"
+    test_assert_contains "$next_line" '无' 'confirmed absent next override is displayed as none'
+
+    fixture_selector='missing-entry'
+    output="$(kernel_status)"
+    next_line="${output#*下一次启动覆盖}"
+    next_line="${next_line%%$'\n'*}"
+    test_assert_contains "$next_line" '未知' 'unresolved existing next override is unknown'
+
+    fixture_release=6.12.12-amd64
+    output="$(kernel_status)"
+    next_line="${output#*下一次启动覆盖}"
+    next_line="${next_line%%$'\n'*}"
+    test_assert_contains "$next_line" '6.12.12-amd64' 'resolved next override names the release'
+)
+
 test_release_selection_protection() (
     local status=0 reason target=6.5.0-amd64
     reset_inventory_fixture
@@ -866,6 +995,8 @@ test_owned_cleanup_and_drift() (
 
 test_init
 test_arguments_and_compatibility
+test_grub_install_arguments_and_confirmation
+test_grub_install_menu_entry
 test_provider_candidates_and_cpu
 test_menu_install_availability_and_xanmod_inputs
 test_secure_boot_is_provider_specific
@@ -876,6 +1007,7 @@ test_dry_run_zero_write
 test_install_meta_release_verification
 test_switch_signature_gate
 test_status_version_rows
+test_status_next_override_knowledge
 test_release_selection_protection
 test_purge_simulation_guards
 test_uninstall_target_change_guard

@@ -5,6 +5,7 @@
 # shellcheck disable=SC2004,SC2016,SC2034
 
 KERNEL_GRUB_SUPPORTED=0
+KERNEL_GRUB_CONFIG_SUPPORTED=0
 KERNEL_GRUB_REASON='尚未检测'
 KERNEL_GRUB_DEFAULT_RELEASE=''
 KERNEL_GRUB_NEXT_RELEASE=''
@@ -12,6 +13,7 @@ KERNEL_GRUB_DEFAULT_ID=''
 KERNEL_GRUB_NEXT_ID=''
 KERNEL_GRUB_DEFAULT_SELECTOR=''
 KERNEL_GRUB_NEXT_SELECTOR=''
+KERNEL_GRUB_NEXT_READ_KNOWN=0
 KERNEL_GRUB_CFG=''
 KERNEL_GRUB_ENV=''
 KERNEL_GRUB_DEFAULT_FILE=''
@@ -37,10 +39,11 @@ kernel_grub_init_paths() {
     KERNEL_GRUB_BACKUP_ROOT="$(vps_cmd_system_path /var/lib/vpsctl/system/kernel/backups)" || return $?
 }
 
-kernel_grub_probe_active() {
-    local output package
-    local grub_common=0 grub_pc=0 grub_efi=0
-
+_kernel_grub_require_config_file() {
+    if _vps_cmd_path_has_symlink_component "$KERNEL_GRUB_CFG"; then
+        KERNEL_GRUB_REASON='标准 /boot/grub/grub.cfg 路径包含符号链接'
+        return 1
+    fi
     [[ -f "$KERNEL_GRUB_CFG" && ! -L "$KERNEL_GRUB_CFG" && -r "$KERNEL_GRUB_CFG" ]] || {
         KERNEL_GRUB_REASON='未找到可读的标准 /boot/grub/grub.cfg'
         return 1
@@ -49,6 +52,13 @@ kernel_grub_probe_active() {
         KERNEL_GRUB_REASON='grub.cfg 不具有发行版 grub-mkconfig 生成标记'
         return 1
     }
+}
+
+kernel_grub_probe_active() {
+    local output status package
+    local grub_common=0 grub_pc=0 grub_efi=0
+
+    _kernel_grub_require_config_file || return 1
     if ! command -v update-grub >/dev/null 2>&1 || ! command -v grub-editenv >/dev/null 2>&1; then
         KERNEL_GRUB_REASON='缺少 update-grub 或 grub-editenv，无法安全维护 GRUB2'
         return 1
@@ -344,6 +354,7 @@ _kernel_grub_read_default() {
     local -a files=()
     KERNEL_GRUB_RAW_DEFAULT='0'
     KERNEL_GRUB_RAW_SAVEDEFAULT='false'
+    if _vps_cmd_path_has_symlink_component "$KERNEL_GRUB_DEFAULT_FILE" || _vps_cmd_path_has_symlink_component "$KERNEL_GRUB_DEFAULT_DIR"; then return 1; fi
     [[ ! -e "$KERNEL_GRUB_DEFAULT_FILE" || (-f "$KERNEL_GRUB_DEFAULT_FILE" && ! -L "$KERNEL_GRUB_DEFAULT_FILE") ]] || return 1
     [[ ! -e "$KERNEL_GRUB_DEFAULT_FILE" ]] || files+=("$KERNEL_GRUB_DEFAULT_FILE")
     if [[ -d "$KERNEL_GRUB_DEFAULT_DIR" && ! -L "$KERNEL_GRUB_DEFAULT_DIR" ]]; then
@@ -404,15 +415,20 @@ _kernel_grub_cfg_default_matches() {
 }
 
 _kernel_grub_read_env_value() {
-    local wanted="$1" line key value found=''
-    [[ ! -e "$KERNEL_GRUB_ENV" ]] && return 1
+    local wanted="$1" line key value header found='' seen=0
+    _vps_cmd_path_has_symlink_component "$KERNEL_GRUB_ENV" && return 2
+    [[ ! -e "$KERNEL_GRUB_ENV" && ! -L "$KERNEL_GRUB_ENV" ]] && return 1
     [[ -f "$KERNEL_GRUB_ENV" && ! -L "$KERNEL_GRUB_ENV" && -r "$KERNEL_GRUB_ENV" ]] || return 2
+    IFS= read -r header <"$KERNEL_GRUB_ENV" || return 2
+    [[ "$header" == '# GRUB Environment Block' ]] || return 2
     while IFS= read -r line || [[ -n "$line" ]]; do
         [[ "$line" == '# GRUB Environment Block' || "$line" == '#'* ]] && continue
         [[ "$line" == *=* ]] || continue
         key="${line%%=*}"
         value="${line#*=}"
         [[ "$key" == "$wanted" ]] || continue
+        ((seen == 0)) || return 2
+        seen=1
         [[ "$value" != *[$'\001'-$'\037']* && ${#value} -le 4096 ]] || return 2
         found="$value"
     done <"$KERNEL_GRUB_ENV"
@@ -449,9 +465,9 @@ _kernel_grub_resolve_selector() {
     KERNEL_GRUB_RESOLVED_ID="$stable"
 }
 
-kernel_grub_load() {
-    local release saved='' next='' selector env_status=0
+_kernel_grub_reset_config() {
     KERNEL_GRUB_SUPPORTED=0
+    KERNEL_GRUB_CONFIG_SUPPORTED=0
     KERNEL_GRUB_REASON='GRUB2 状态未知'
     KERNEL_GRUB_DEFAULT_RELEASE=''
     KERNEL_GRUB_NEXT_RELEASE=''
@@ -459,6 +475,11 @@ kernel_grub_load() {
     KERNEL_GRUB_NEXT_ID=''
     KERNEL_GRUB_DEFAULT_SELECTOR=''
     KERNEL_GRUB_NEXT_SELECTOR=''
+    KERNEL_GRUB_NEXT_READ_KNOWN=0
+    KERNEL_GRUB_RAW_DEFAULT=''
+    KERNEL_GRUB_RAW_SAVEDEFAULT=''
+    KERNEL_GRUB_RESOLVED_RELEASE=''
+    KERNEL_GRUB_RESOLVED_ID=''
     KERNEL_GRUB_ENTRY=()
     _KERNEL_GRUB_RELEASE_BY_ID=()
     _KERNEL_GRUB_RELEASE_BY_NUMBER=()
@@ -467,11 +488,19 @@ kernel_grub_load() {
     _KERNEL_GRUB_ID_BY_NUMBER=()
     _KERNEL_GRUB_ID_BY_TITLE=()
     _KERNEL_GRUB_ACTIVE_ROOT=''
+}
 
-    kernel_grub_probe_active || return 0
+# Read configuration without claiming that this GRUB controls the active boot
+# path. Return 1 on unknown/unsafe configuration, retaining any already-resolved
+# default and menu entries for install-grub's explicit repair plan. A known env
+# read with a nonempty NEXT_SELECTOR but no NEXT_RELEASE is an unresolved override.
+kernel_grub_load_config() {
+    local release saved='' next='' selector env_status=0
+    _kernel_grub_reset_config
+    _kernel_grub_require_config_file || return 1
     _kernel_grub_parse_cfg || {
         KERNEL_GRUB_REASON='grub.cfg 菜单结构异常或缺少稳定 menuentry ID'
-        return 0
+        return 1
     }
     for release in "${KERNEL_RELEASES[@]:-}"; do
         [[ -v '_KERNEL_GRUB_EXACT_ENTRY[$release]' ]] || continue
@@ -480,25 +509,25 @@ kernel_grub_load() {
     done
     _kernel_grub_read_default || {
         KERNEL_GRUB_REASON='无法安全解析 GRUB_DEFAULT（只接受不含展开的字面量）'
-        return 0
+        return 1
     }
     _kernel_grub_cfg_default_matches "$KERNEL_GRUB_RAW_DEFAULT" || {
         KERNEL_GRUB_REASON='grub.cfg 中的有效 default 与安全读取的 GRUB_DEFAULT 不一致'
-        return 0
+        return 1
     }
     selector="$KERNEL_GRUB_RAW_DEFAULT"
     if [[ "$selector" == saved ]]; then
         saved="$(_kernel_grub_read_env_value saved_entry)" || env_status=$?
         if ((env_status != 0)); then
             KERNEL_GRUB_REASON='GRUB_DEFAULT=saved，但 grubenv 中没有可解析的 saved_entry'
-            return 0
+            return 1
         fi
         selector="$saved"
     fi
     KERNEL_GRUB_DEFAULT_SELECTOR="$selector"
     if ! _kernel_grub_resolve_selector "$selector"; then
         KERNEL_GRUB_REASON="GRUB 默认项无法唯一关联到已知完整内核：$selector"
-        return 0
+        return 1
     fi
     KERNEL_GRUB_DEFAULT_RELEASE="$KERNEL_GRUB_RESOLVED_RELEASE"
     KERNEL_GRUB_DEFAULT_ID="$KERNEL_GRUB_RESOLVED_ID"
@@ -506,27 +535,48 @@ kernel_grub_load() {
     next="$(_kernel_grub_read_env_value next_entry)" || env_status=$?
     case "$env_status" in
         0)
+            KERNEL_GRUB_NEXT_READ_KNOWN=1
             KERNEL_GRUB_NEXT_SELECTOR="$next"
             if ! _kernel_grub_resolve_selector "$next"; then
                 KERNEL_GRUB_REASON="grubenv next_entry 无法唯一关联到已知完整内核：$next"
-                return 0
+                return 1
             fi
             KERNEL_GRUB_NEXT_RELEASE="$KERNEL_GRUB_RESOLVED_RELEASE"
             KERNEL_GRUB_NEXT_ID="$KERNEL_GRUB_RESOLVED_ID"
             ;;
-        1) ;;
+        1) KERNEL_GRUB_NEXT_READ_KNOWN=1 ;;
         *)
             KERNEL_GRUB_REASON='grubenv 不是可安全读取的普通环境块'
-            return 0
+            return 1
             ;;
     esac
+    KERNEL_GRUB_CONFIG_SUPPORTED=1
+    KERNEL_GRUB_REASON='已安全解析 GRUB 配置、默认项及下一次启动覆盖；尚未确认活动启动路径'
+    return 0
+}
+
+kernel_grub_load() {
+    _kernel_grub_reset_config
+    kernel_grub_probe_active || return 0
+    kernel_grub_load_config || return 0
     KERNEL_GRUB_SUPPORTED=1
     KERNEL_GRUB_REASON='已确认发行版 GRUB2、活动启动路径和可解析默认项'
+}
+
+kernel_grub_install_hint() {
+    [[ ! -d "$(vps_cmd_system_path /sys/firmware/efi)" ]] || return 0
+    case "${KERNEL_GRUB_REASON:-}" in
+        'BIOS 模式下未确认完整 grub-pc 软件包已安装' | 'BIOS 模式下未确认实际 i386-pc GRUB 模块布局' | '未确认 grub-common 已安装' | '缺少 update-grub 或 grub-editenv，无法安全维护 GRUB2' | '未找到可读的标准 /boot/grub/grub.cfg')
+            vps_cmd_info '可运行 vpsctl system kernel install-grub，检查启动盘并安装/修复 BIOS GRUB'
+            ;;
+    esac
+    return 0
 }
 
 kernel_grub_require() {
     [[ "$KERNEL_GRUB_SUPPORTED" == 1 ]] || {
         vps_cmd_error "GRUB2 内核切换不可用：${KERNEL_GRUB_REASON:-未知原因}"
+        kernel_grub_install_hint
         return 3
     }
     [[ -n "$KERNEL_GRUB_DEFAULT_RELEASE" ]] || {
