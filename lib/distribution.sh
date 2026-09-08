@@ -202,7 +202,7 @@ vps_distribution_archive_path_allowed() {
     case "$domain" in
         core)
             case "$entry" in
-                VERSION | bin | bin/vpsctl | lib | lib/environment.sh | lib/registry.sh | lib/ui.sh | lib/command.sh | lib/distribution.sh | commands | commands/self | commands/self/*) return 0 ;;
+                VERSION | bin | bin/vpsctl | lib | lib/environment.sh | lib/registry.sh | lib/ui.sh | lib/command.sh | lib/ufw.sh | lib/distribution.sh | commands | commands/self | commands/self/*) return 0 ;;
             esac
             ;;
         network | system | security | service)
@@ -286,6 +286,22 @@ vps_distribution_validate_domain_tree() {
             return 10
         }
     done
+    # Older releases predate the shared UFW library. Require it only when the
+    # same core registers the new command, so explicit historical installs work.
+    if [[ "$domain" == core ]] && grep -Fq '"commands/network/ufw.sh"' "$tree/lib/registry.sh"; then
+        [[ -f "$tree/lib/ufw.sh" && ! -L "$tree/lib/ufw.sh" ]] || {
+            vps_distribution_error 'core 领域包缺少 UFW 共享库：lib/ufw.sh'
+            return 10
+        }
+    fi
+    if [[ "$domain" == network && -f "$tree/commands/network/ufw.sh" ]]; then
+        for required in common inventory rules actions menu; do
+            [[ -f "$tree/commands/network/ufw/$required.sh" && ! -L "$tree/commands/network/ufw/$required.sh" ]] || {
+                vps_distribution_error "network 领域包缺少 UFW 模块：$required.sh"
+                return 10
+            }
+        done
+    fi
 }
 
 vps_distribution_atomic_marker() {

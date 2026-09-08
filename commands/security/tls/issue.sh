@@ -347,10 +347,10 @@ tls_issue() {
     lego_args+=(run)
     if [[ "${VPSCTL_DRY_RUN:-0}" == 1 ]]; then
         vps_cmd_info "演练：为 ${domains[*]} 申请 $ca 证书（$challenge）"
-        tls_run_lego "$cred" "${lego_args[@]}"
+        tls_run_challenge "$challenge" "$cred" "${lego_args[@]}"
         return 0
     fi
-    tls_run_lego "$cred" "${lego_args[@]}" || {
+    tls_run_challenge "$challenge" "$cred" "${lego_args[@]}" || {
         vps_cmd_error "lego 申请证书失败"
         [[ -n "$cred" ]] && rm -f -- "$cred"
         return 20
@@ -422,10 +422,10 @@ tls_renew_one() {
     lego_args+=(renew --days "$renew_days")
     if [[ "${VPSCTL_DRY_RUN:-0}" == 1 ]]; then
         vps_cmd_info "演练：续期 $id"
-        tls_run_lego "$cred" "${lego_args[@]}"
+        tls_run_challenge "$TLS_CERT_CHALLENGE" "$cred" "${lego_args[@]}"
         return 0
     fi
-    tls_run_lego "$cred" "${lego_args[@]}" || {
+    tls_run_challenge "$TLS_CERT_CHALLENGE" "$cred" "${lego_args[@]}" || {
         vps_cmd_error "lego 续期失败：$id"
         return 20
     }

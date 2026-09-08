@@ -1,6 +1,6 @@
 # 网络设置
 
-固定的 `network` 领域提供 BBR、DNS、IP 地址族偏好和 RFW 四个入口。本文记录公开命令接口、风险边界、落盘位置、失败语义和发布验收要求；它不声称这些操作已经在真实 VPS 或 VM 上完成验证。
+固定的 `network` 领域提供 BBR、DNS、IP 地址族偏好、UFW 和 RFW 五个入口。本文记录公开命令接口、风险边界、落盘位置、失败语义和发布验收要求；UFW 的完整管理及业务联动见 [UFW 管理](ufw-management.md)。实际验证结果以各功能验收记录为准。
 
 ## 1. 入口与公共约定
 
@@ -10,6 +10,7 @@
 | `network dns` | `show`、`test`、`set`、`refresh`、`verify`、`restore` | `disruptive` | `optional-root` | 支持 | `linux` | `experimental` |
 | `network ip-policy` | `status`、`set`、`restore` | `disruptive` | `optional-root` | 支持 | `linux` | `experimental` |
 | `network rfw` | `status`、`install`、`update`、`configure`、`start`、`stop`、`restart`、`stats`、`logs`、`uninstall` | `disruptive` | `optional-root` | 支持 | `linux`、`init:systemd` | `experimental` |
+| `network ufw` | 安装/卸载、启停、规则增删改查、联动同步及高级配置 | `disruptive` | `optional-root` | 支持 | `linux`；写操作按实际 UFW/包管理器/init 能力检查 | `experimental` |
 
 全局选项必须位于领域前，例如：
 
@@ -189,7 +190,7 @@ RFW 会在参数校验以及 Linux、systemd、架构和内核版本门禁通过
 
 ## 6. 退出码
 
-四个入口遵守统一退出码：
+五个入口遵守统一退出码：
 
 | 退出码 | 含义与网络命令示例 |
 | ---: | --- |

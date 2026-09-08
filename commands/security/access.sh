@@ -11,6 +11,8 @@ readonly ACCESS_PROJECT_ROOT
 
 # shellcheck source=../../lib/command.sh
 source "${ACCESS_PROJECT_ROOT}/lib/command.sh"
+# shellcheck source=../../lib/ufw.sh
+source "${ACCESS_PROJECT_ROOT}/lib/ufw.sh"
 # shellcheck source=access/common.sh
 source "${ACCESS_PROJECT_ROOT}/commands/security/access/common.sh"
 # shellcheck source=access/users.sh
@@ -73,6 +75,10 @@ access_usage() {
 
 防火墙：
   auto 适配单一活动 UFW、firewalld、nftables 或持久化 iptables。
+  UFW 与其他服务共享规则引用；prepare 保留旧、新端口，commit 验证 SSH 后
+  释放旧端口需求，abort/restore 恢复原需求与接管前规则。UFW 未启用时只记录
+  需求；已有等价手动规则可接管，复杂限制规则拒绝自动扩大访问范围。
+  已解除关联的 ssh 所有者不会被自动重新关联；manual 全程自行管理防火墙。
   nftables 只处理会限制入站的真实 INPUT 基链；缺少可靠持久化时可自动添加运行时规则，
   交互模式允许改选 manual。运行时规则在重启/ruleset reload 后失效。
 

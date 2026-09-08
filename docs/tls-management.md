@@ -70,9 +70,9 @@ ACME 客户端固定为 lego `v5.4.1`，从 GitHub Release 下载对应 `linux_a
 
 - `--ca` 默认 `letsencrypt`。`--staging` 只用于 Let's Encrypt staging，不得用于生产。
 - ZeroSSL 需要 `--email`。Let's Encrypt 也要求 email，用于账户注册。
-- HTTP-01：lego 临时监听 `:80`。若 80 已被占用则失败并提示改用 DNS-01，不抢占已有服务。
+- HTTP-01：lego 临时监听 `:80`。若 80 已被占用则失败并提示改用 DNS-01，不抢占已有服务。UFW 开启时临时申请 80/TCP 放行，成功、失败及可捕获中断后释放；已有人工规则和其他服务引用继续保留，详见 [UFW 管理](ufw-management.md)。
 - DNS-01：通配符 `*.example.com` 必须使用。提供商白名单为 Cloudflare、阿里云、腾讯云、DNSPod、华为云。凭证文件只允许对应提供商的环境变量名，未知键会被拒绝。
-- 本功能不把域名解析到本机；HTTP-01 只检查端口占用。
+- 本功能不把域名解析到本机；HTTP-01 检查端口占用并维护本机 UFW 临时需求，域名 DNS 与上游访问策略仍需预先配置。
 - 首次成功的 ACME 签发会幂等启用续期 timer。
 
 `renew --all` 只续期 `source=acme` 且 30 天内到期的证书；导入证书跳过。`--force` 忽略剩余有效期。部分成功返回 `30` 并列出失败 ID。timer 每天两次触发 `vpsctl security tls renew --all`，并带随机延迟。无 systemd 时可以导入和申请，但不能安装 timer。

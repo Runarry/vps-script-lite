@@ -39,6 +39,7 @@ apk add --no-cache bash curl ca-certificates
 | `network bbr` | 支持入口与依赖安装；实际变更仍要求内核暴露所选拥塞控制和 qdisc 能力 |
 | `network dns` | 支持静态 `/etc/resolv.conf` 与 openresolv；检测到 Alpine DHCP 可能回写 plain 后端时，会在零写入状态拒绝并要求 openresolv，或明确禁用 udhcpc/dhcpcd 的 DNS hook |
 | `network rfw` | 不支持 Alpine 默认的 OpenRC；仅支持 systemd、`x86_64`/`aarch64`、Linux 5.15+ 及所需 XDP/BPF 能力 |
+| `network ufw` | 适配 `apk` 和 OpenRC；要求已配置的软件源提供 UFW，实际验证范围见 [UFW 验收记录](docs/ufw-validation.md) |
 | `security access` | SSH 服务编排仅支持 systemd；不能把核心的 OpenRC 支持外推为访问管理支持 |
 | `security fail2ban` | 不支持 `apk`/OpenRC；仅支持文档列出的 systemd 发行版包管理器与 Fail2ban 0.11+ |
 | `security tls` | 导入与查看支持 Alpine；续期 timer 需要 systemd；ACME 的 lego 二进制仅 `x86_64`/`aarch64` |
@@ -133,6 +134,7 @@ bash bin/vpsctl network bbr status
 bash bin/vpsctl network dns show
 bash bin/vpsctl network ip-policy status
 bash bin/vpsctl network rfw status
+bash bin/vpsctl network ufw status
 bash bin/vpsctl system kernel status
 bash bin/vpsctl system kernel install --type official --confirm-install INSTALL-KERNEL
 bash bin/vpsctl system kernel switch --release RELEASE --confirm-switch SWITCH-KERNEL
@@ -182,6 +184,7 @@ bash bin/vpsctl service proxy update --core xray --version vX.Y.Z
 - 目录骨架：已建立。
 - 当前版本：0.8.6。
 - 管理入口：提供环境检测、终端 UI、固定注册表和安全分发。
-- 功能命令：提供 `network bbr`、`network dns`、`network ip-policy`、`network rfw`、`system kernel`、`security access`、`security fail2ban`、`security tls`、`service proxy`、`test nodequality` 和 `test tcpquality`；均处于 `experimental` 生命周期。
+- 功能命令：提供 `network bbr`、`network dns`、`network ip-policy`、`network ufw`、`network rfw`、`system kernel`、`security access`、`security fail2ban`、`security tls`、`service proxy`、`test nodequality` 和 `test tcpquality`；均处于 `experimental` 生命周期。
+- UFW：主菜单提供简洁端口管理，进阶功能放在“高级规则管理”。启用后自动维护 SSH、代理节点、中转转发及 HTTP-01 临时端口；支持等价已有规则接管、共享引用和按服务解除联动。安装默认不启用，服务停止但配置保留时规则继续保留。接口和恢复说明见 [UFW 管理](docs/ufw-management.md)。
 - 公共函数库：提供环境检测、命令注册、终端 UI 及网络和服务命令所需公共能力。
 - 验收说明：所有项目测试与验证统一通过 `ssh host-vps-scripts` 在专用真实环境中执行；不得在当前系统或 WSL 中测试。发布前仍须按对应功能文档完成真实环境验收。

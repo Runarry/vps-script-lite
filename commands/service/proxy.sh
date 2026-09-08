@@ -25,6 +25,8 @@ readonly PROXY_PROJECT_ROOT
 # shellcheck source=../../lib/command.sh
 source "${PROXY_PROJECT_ROOT}/lib/command.sh"
 vps_cmd_init "service proxy" "$PROXY_PROJECT_ROOT" || exit $?
+# shellcheck source=../../lib/ufw.sh
+source "${PROXY_PROJECT_ROOT}/lib/ufw.sh"
 
 readonly PROXY_MODULE_DIR="${PROXY_PROJECT_ROOT}/commands/service/proxy"
 
@@ -45,6 +47,7 @@ proxy_load_module() {
 }
 
 proxy_load_module common.sh || exit $?
+proxy_load_module ufw.sh || exit $?
 proxy_load_module protocols-sing-box.sh || exit $?
 proxy_load_module protocols-xray.sh || exit $?
 proxy_load_module nodes.sh || exit $?

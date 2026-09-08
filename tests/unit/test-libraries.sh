@@ -157,7 +157,7 @@ test_registry() {
     vps_registry_init
 
     test_assert_equal "6" "${#VPS_DOMAIN_IDS[@]}" "registered domain count"
-    test_assert_equal "14" "${#VPS_COMMAND_KEYS[@]}" "registered command count"
+    test_assert_equal "15" "${#VPS_COMMAND_KEYS[@]}" "registered command count"
     test_assert_equal "network" "${VPS_DOMAIN_IDS[0]}" "network domain id"
     test_assert_equal "system" "${VPS_DOMAIN_IDS[1]}" "system domain id"
     test_assert_equal "security" "${VPS_DOMAIN_IDS[2]}" "security domain id"
@@ -168,6 +168,7 @@ test_registry() {
     test_assert_equal "commands/network/dns.sh" "${VPS_COMMAND_PATH["network:dns"]}" "DNS command path"
     test_assert_equal "commands/network/ip-policy.sh" "${VPS_COMMAND_PATH["network:ip-policy"]}" "IP policy command path"
     test_assert_equal "commands/network/rfw.sh" "${VPS_COMMAND_PATH["network:rfw"]}" "RFW command path"
+    test_assert_equal "commands/network/ufw.sh" "${VPS_COMMAND_PATH["network:ufw"]}" "UFW command path"
     test_assert_equal "change" "${VPS_COMMAND_RISK["network:bbr"]}" "BBR risk"
     test_assert_equal "disruptive" "${VPS_COMMAND_RISK["network:dns"]}" "DNS risk"
     test_assert_equal "disruptive" "${VPS_COMMAND_RISK["network:ip-policy"]}" "IP policy risk"
@@ -252,7 +253,7 @@ test_ui_input() {
     vps_registry_init
     output="$(vps_ui_main_menu)"
     [[ "$output" == *"网络设置"* ]] || test_fail "registered network domain should be visible"
-    [[ "$output" == *"(4 个功能)"* ]] || test_fail "network domain command count should be visible"
+    [[ "$output" == *"(5 个功能)"* ]] || test_fail "network domain command count should be visible"
     [[ "$output" == *"系统管理"* ]] || test_fail "registered system domain should be visible"
     [[ "$output" == *"(1 个功能)"* ]] || test_fail "system domain command count should be visible"
     [[ "$output" == *"安全与访问"* ]] || test_fail "registered security domain should be visible"

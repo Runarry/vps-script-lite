@@ -195,37 +195,115 @@ if [[ " $* " == *" delete rule "*" handle "* ]]; then
 fi
 exit 0'
 
-make_mock ufw '
-if [[ "${1:-}" == status ]]; then
-    [[ -e "${VPSCTL_SYSTEM_ROOT}/run/ufw-active" ]] || { printf "Status: inactive\n"; exit 0; }
-    printf "Status: active\n"
-    number=0
-    if [[ -f "${VPSCTL_SYSTEM_ROOT}/run/ufw-vpsctl-port" ]]; then
-        port="$(<"${VPSCTL_SYSTEM_ROOT}/run/ufw-vpsctl-port")"
-        if [[ "${2:-}" == numbered ]]; then number=$((number + 1)); printf "[ %s] %s/tcp ALLOW IN Anywhere # vpsctl security access\n" "$number" "$port"
-        else printf "%s/tcp ALLOW IN Anywhere # vpsctl security access\n" "$port"; fi
+# Persist native UFW tuples so the shared engine exercises inventory, exact rule
+# ownership and snapshot restoration through the same files as real UFW.
+cat >"${MOCK_BIN}/ufw" <<'UFW'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+families=() tuples=()
+for family in ipv4 ipv6; do
+    file="${VPSCTL_SYSTEM_ROOT}/etc/ufw/user.rules"
+    [[ "$family" != ipv6 ]] || file="${VPSCTL_SYSTEM_ROOT}/etc/ufw/user6.rules"
+    while IFS= read -r line; do
+        [[ "$line" == '### tuple ### '* ]] || continue
+        families+=("$family")
+        tuples+=("$line")
+    done <"$file"
+done
+decode_tuple() {
+    local text="$1" hex index encoded=''
+    read -r _ _ _ action proto port destination sport source _ <<<"$text"
+    comment=''
+    if [[ "$text" == *' comment='* ]]; then
+        hex="${text##* comment=}"
+        for ((index=0; index<${#hex}; index+=2)); do encoded+="\x${hex:index:2}"; done
+        printf -v comment '%b' "$encoded"
     fi
-    if [[ -f "${VPSCTL_SYSTEM_ROOT}/run/ufw-user-port" ]]; then
-        port="$(<"${VPSCTL_SYSTEM_ROOT}/run/ufw-user-port")"
-        if [[ "${2:-}" == numbered ]]; then number=$((number + 1)); printf "[ %s] %s/tcp ALLOW IN Anywhere # administrator rule\n" "$number" "$port"
-        else printf "%s/tcp ALLOW IN Anywhere # administrator rule\n" "$port"; fi
-    fi
+}
+save_rules() {
+    local file family index chain
+    rm -f -- "${VPSCTL_SYSTEM_ROOT}/run/ufw-vpsctl-port"
+    for family in ipv4 ipv6; do
+        file="${VPSCTL_SYSTEM_ROOT}/etc/ufw/user.rules"
+        [[ "$family" != ipv6 ]] || file="${VPSCTL_SYSTEM_ROOT}/etc/ufw/user6.rules"
+        chain=ufw-user-input
+        [[ "$family" != ipv6 ]] || chain=ufw6-user-input
+        {
+            printf '*filter\n'
+            for index in "${!tuples[@]}"; do
+                [[ "${families[$index]}" == "$family" ]] || continue
+                decode_tuple "${tuples[$index]}"
+                printf '%s\n-A %s -p %s --dport %s -j ACCEPT\n\n' "${tuples[$index]}" "$chain" "$proto" "$port"
+                if [[ "$comment" == vpsctl* ]]; then
+                    printf '%s\n' "$port" >>"${VPSCTL_SYSTEM_ROOT}/run/ufw-vpsctl-port"
+                fi
+            done
+            printf '### END RULES ###\nCOMMIT\n'
+        } >"$file"
+    done
+}
+case "${1:-}" in
+    status)
+        [[ -e "${VPSCTL_SYSTEM_ROOT}/run/ufw-active" ]] || { printf 'Status: inactive\n'; exit 0; }
+        printf 'Status: active\n'
+        for index in "${!tuples[@]}"; do
+            decode_tuple "${tuples[$index]}"
+            [[ "${2:-}" != numbered ]] || printf '[ %s] ' "$((index + 1))"
+            printf '%s/tcp ' "$port"
+            [[ "${families[$index]}" != ipv6 ]] || printf '(v6) '
+            printf 'ALLOW IN Anywhere # %s\n' "$comment"
+        done
+        exit 0
+        ;;
+    reload) exit 0 ;;
+esac
+if [[ "${1:-} ${2:-}" == '--force delete' ]]; then
+    printf '%s\n' "$*" >>"${VPSCTL_SYSTEM_ROOT}/run/ufw-delete.log"
+    index=$((${3:-0} - 1))
+    [[ "$index" -ge 0 && -n "${tuples[$index]:-}" ]] || exit 1
+    decode_tuple "${tuples[$index]}"
+    [[ "$comment" != 'administrator rule' ]] || : >"${VPSCTL_SYSTEM_ROOT}/run/ufw-user-deleted"
+    unset 'tuples[index]' 'families[index]'
+    save_rules
     exit 0
 fi
-if [[ "${1:-}" == allow ]]; then
-    printf "%s\n" "${2%/tcp}" >"${VPSCTL_SYSTEM_ROOT}/run/ufw-vpsctl-port"
-    exit 0
-fi
-if [[ "${1:-} ${2:-}" == "--force delete" ]]; then
-    printf "%s\n" "$*" >>"${VPSCTL_SYSTEM_ROOT}/run/ufw-delete.log"
-    if [[ -f "${VPSCTL_SYSTEM_ROOT}/run/ufw-vpsctl-port" && "${3:-}" == 1 ]]; then
-        rm -f -- "${VPSCTL_SYSTEM_ROOT}/run/ufw-vpsctl-port"
+position=''
+if [[ "${1:-}" == insert ]]; then position="$2"; shift 2; fi
+[[ "${1:-}" == allow ]] || exit 1
+shift
+port='' proto=tcp source=any destination=any comment=''
+while (($# > 0)); do
+    case "$1" in
+        proto) proto="$2"; shift ;;
+        from) source="$2"; shift ;;
+        to) destination="$2"; shift ;;
+        port) port="$2"; shift ;;
+        comment) comment="$2"; shift ;;
+        */tcp) port="${1%/tcp}" ;;
+        *) exit 1 ;;
+    esac
+    shift
+done
+[[ "$port" =~ ^[0-9]+$ ]] || exit 1
+hex="$(printf '%s' "$comment" | od -An -tx1 | tr -d ' \n')"
+case "$source" in any) requested=(ipv4 ipv6) ;; *:*) requested=(ipv6) ;; *) requested=(ipv4) ;; esac
+for family in "${requested[@]}"; do
+    address=0.0.0.0/0
+    [[ "$family" != ipv6 ]] || address=::/0
+    tuple="### tuple ### allow $proto $port $address any $address in comment=$hex"
+    if [[ -n "$position" ]]; then
+        index=$((position - 1))
+        tuples=("${tuples[@]:0:index}" "$tuple" "${tuples[@]:index}")
+        families=("${families[@]:0:index}" "$family" "${families[@]:index}")
     else
-        : >"${VPSCTL_SYSTEM_ROOT}/run/ufw-user-deleted"
+        tuples+=("$tuple")
+        families+=("$family")
     fi
-    exit 0
-fi
-exit 1'
+done
+[[ "$comment" != 'administrator rule' ]] || printf '%s\n' "$port" >"${VPSCTL_SYSTEM_ROOT}/run/ufw-user-port"
+save_rules
+UFW
+chmod 0755 -- "${MOCK_BIN}/ufw"
 
 make_mock firewall-cmd '
 if [[ "${1:-}" == --state && -e "${VPSCTL_SYSTEM_ROOT}/run/firewalld-active" ]]; then exit 0; fi
@@ -319,7 +397,10 @@ run_access() {
 
 reset_system() {
     rm -rf -- "$TEST_SYSTEM_ROOT"
-    mkdir -p -- "$TEST_SYSTEM_ROOT/etc/ssh/sshd_config.d" "$TEST_SYSTEM_ROOT/home/alice" "$TEST_SYSTEM_ROOT/run"
+    mkdir -p -- "$TEST_SYSTEM_ROOT/etc/ssh/sshd_config.d" "$TEST_SYSTEM_ROOT/etc/ufw" "$TEST_SYSTEM_ROOT/etc/default" "$TEST_SYSTEM_ROOT/home/alice" "$TEST_SYSTEM_ROOT/run"
+    printf 'IPV6=yes\n' >"$TEST_SYSTEM_ROOT/etc/default/ufw"
+    printf '*filter\n### END RULES ###\nCOMMIT\n' >"$TEST_SYSTEM_ROOT/etc/ufw/user.rules"
+    cp -- "$TEST_SYSTEM_ROOT/etc/ufw/user.rules" "$TEST_SYSTEM_ROOT/etc/ufw/user6.rules"
     printf 'Include /etc/ssh/sshd_config.d/*.conf\n' >"$TEST_SYSTEM_ROOT/etc/ssh/sshd_config"
     printf 'port 22\npermitrootlogin yes\npasswordauthentication yes\nkbdinteractiveauthentication yes\npubkeyauthentication yes\nexposeauthinfo no\n' \
         >"$TEST_SYSTEM_ROOT/run/sshd-effective"
@@ -701,8 +782,9 @@ test_sshd_shape_and_firewall_rejections() {
     prepare_transaction 2223 --firewall auto
     tx="$ACCESS_TEST_TX"
     state="$TEST_SYSTEM_ROOT/var/lib/vpsctl/security/access/transactions/$tx/state"
-    assert_file_contains "$state" $'firewall_backend\tnone' "non-INPUT nftables rules are not an SSH firewall"
+    assert_file_contains "$state" $'firewall_backend\tufw' "non-INPUT nftables is ignored while inactive UFW records requirements"
     [[ ! -e "$TEST_SYSTEM_ROOT/run/nft-vpsctl-ports" ]] || fail "container-only nftables rules triggered an INPUT modification"
+    [[ ! -e "$TEST_SYSTEM_ROOT/run/ufw-vpsctl-port" ]] || fail "inactive UFW added runtime rules"
     assert_status 0 "container-only nftables transaction abort" run_access ssh abort --transaction "$tx"
 
     reset_system
@@ -710,8 +792,9 @@ test_sshd_shape_and_firewall_rejections() {
     prepare_transaction 2233 --firewall auto
     tx="$ACCESS_TEST_TX"
     state="$TEST_SYSTEM_ROOT/var/lib/vpsctl/security/access/transactions/$tx/state"
-    assert_file_contains "$state" $'firewall_backend\tnone' "empty accept INPUT chain needs no SSH allow rule"
+    assert_file_contains "$state" $'firewall_backend\tufw' "empty accept INPUT chain is ignored while inactive UFW records requirements"
     [[ ! -e "$TEST_SYSTEM_ROOT/run/nft-vpsctl-ports" ]] || fail "empty accept INPUT chain triggered an unnecessary nftables rule"
+    [[ ! -e "$TEST_SYSTEM_ROOT/run/ufw-vpsctl-port" ]] || fail "inactive UFW added runtime rules"
     assert_status 0 "empty accept INPUT transaction abort" run_access ssh abort --transaction "$tx"
 
     port=2224
@@ -841,12 +924,14 @@ test_firewall_owned_rule_cleanup() {
     : >"$TEST_SYSTEM_ROOT/run/ufw-active"
     prepare_transaction 2241 --firewall auto
     tx="$ACCESS_TEST_TX"
-    printf '2241\n' >"$TEST_SYSTEM_ROOT/run/ufw-user-port"
+    ufw allow 2241/tcp comment 'administrator rule'
     assert_status 0 "UFW abort removes only marked rule" run_access ssh abort --transaction "$tx"
     [[ -f "$TEST_SYSTEM_ROOT/run/ufw-user-port" ]] || fail "UFW abort removed the administrator rule"
     [[ ! -e "$TEST_SYSTEM_ROOT/run/ufw-user-deleted" ]] || fail "UFW abort targeted an unowned rule"
     [[ ! -e "$TEST_SYSTEM_ROOT/run/ufw-vpsctl-port" ]] || fail "UFW abort retained the vpsctl rule"
     assert_file_contains "$TEST_SYSTEM_ROOT/run/ufw-delete.log" '--force delete 1' "UFW numbered ownership deletion"
+    assert_file_contains "$TEST_SYSTEM_ROOT/etc/ufw/user.rules" '2241' "UFW abort retains administrator IPv4 tuple"
+    assert_file_contains "$TEST_SYSTEM_ROOT/etc/ufw/user6.rules" '2241' "UFW abort retains administrator IPv6 tuple"
 
     reset_system
     : >"$TEST_SYSTEM_ROOT/run/firewalld-active"
@@ -1025,7 +1110,7 @@ test_direct_ssh_policy_apply() {
     # Even multiple active firewalls do not affect a policy-only operation.
     : >"$TEST_SYSTEM_ROOT/run/ufw-active"
     : >"$TEST_SYSTEM_ROOT/run/firewalld-active"
-    printf '2022\n' >"$TEST_SYSTEM_ROOT/run/ufw-user-port"
+    ufw allow 2022/tcp comment 'administrator rule'
     printf '2022\n' >"$TEST_SYSTEM_ROOT/run/firewalld-user-runtime"
     baseline="$(sshd -T | grep -Ev '^(permitrootlogin|passwordauthentication|kbdinteractiveauthentication) ' | sort)"
     assert_status 0 "direct deny applies without fallback user or session proof" run_access --yes ssh apply --root-login deny --password-login deny

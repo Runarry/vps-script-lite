@@ -118,6 +118,7 @@ release_require_regular 'lib/environment.sh'
 release_require_regular 'lib/registry.sh'
 release_require_regular 'lib/ui.sh'
 release_require_regular 'lib/command.sh'
+release_require_regular 'lib/ufw.sh'
 release_require_regular 'lib/distribution.sh'
 release_require_tree 'commands/self'
 release_require_regular 'commands/self/status.sh'
@@ -143,6 +144,7 @@ release_create_bundle core \
     lib/registry.sh \
     lib/ui.sh \
     lib/command.sh \
+    lib/ufw.sh \
     lib/distribution.sh \
     commands/self
 release_create_bundle network commands/network

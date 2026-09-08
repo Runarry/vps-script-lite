@@ -134,6 +134,7 @@ fi
 exit 2'
 make_mock ss '[[ ! -f "${VPSCTL_SYSTEM_ROOT}/run/listening-port" ]] || printf "tcp LISTEN 0 128 0.0.0.0:%s 0.0.0.0:*\n" "$(<"${VPSCTL_SYSTEM_ROOT}/run/listening-port")"'
 make_mock flock 'exit 0'
+make_mock ufw '[[ "${1:-}" == status ]] || exit 99; printf "Status: inactive\n"'
 make_mock curl '
 printf "curl %s\n" "$*" >>"$MOCK_LOG"
 scenario_file="${VPSCTL_SYSTEM_ROOT}/run/release-fixture-scenario"

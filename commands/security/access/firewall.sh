@@ -13,6 +13,7 @@ ACCESS_FW_NFT_MODE='auto'
 
 access_firewall_init() {
     ACCESS_FW_STATE="$(vps_cmd_system_path "$ACCESS_FW_STATE_LOGICAL")" || return $?
+    vps_ufw_init
 }
 
 access_firewall_service_enabled() {
@@ -20,7 +21,7 @@ access_firewall_service_enabled() {
 }
 
 access_firewall_detect() {
-    local ufw_status iptables_version iptables_rules
+    local ufw_status='' iptables_version iptables_rules
     local -a detected=()
 
     if command -v ufw >/dev/null 2>&1; then
@@ -48,7 +49,13 @@ access_firewall_detect() {
         vps_cmd_error "检测到多个活动防火墙后端：${detected[*]}；拒绝 auto，请使用 --firewall manual 明确自行管理"
         return 3
     fi
-    ((${#detected[@]} == 1)) && printf '%s\n' "${detected[0]}" || printf 'none\n'
+    if ((${#detected[@]} == 1)); then
+        printf '%s\n' "${detected[0]}"
+    elif [[ "$ufw_status" == 'Status: inactive' ]]; then
+        printf 'ufw\n'
+    else
+        printf 'none\n'
+    fi
 }
 
 access_firewall_nft_persistent() {
@@ -206,6 +213,9 @@ access_firewall_load_managed() {
     else
         ACCESS_FW_PREVIOUS_MODE=''
     fi
+    if [[ "$ACCESS_FW_PREVIOUS_BACKEND" == ufw ]] && vps_ufw_owner_detached ssh; then
+        ACCESS_FW_PREVIOUS_OWNED=0
+    fi
     [[ "$ACCESS_FW_PREVIOUS_OWNED" == 1 ]] && access_validate_port "$ACCESS_FW_PREVIOUS_PORT" || {
         ACCESS_FW_PREVIOUS_BACKEND=''
         ACCESS_FW_PREVIOUS_PORT=''
@@ -233,7 +243,165 @@ access_firewall_ufw_owned_numbers() {
 }
 
 access_firewall_ufw_has_owned_port() {
-    [[ -n "$(access_firewall_ufw_owned_numbers "$1")" ]]
+    local port="$1" desired
+
+    vps_ufw_owner_detached ssh && return 1
+    if desired="$(vps_ufw_scope_desired ssh 2>/dev/null)" &&
+        jq -e --arg port "$port" 'any(.[]; .owner == "ssh" and .kind == "input" and .proto == "tcp" and .port == $port)' <<<"$desired" >/dev/null; then
+        return 0
+    fi
+    [[ -n "$(access_firewall_ufw_owned_numbers "$port")" ]]
+}
+
+access_firewall_ufw_desired_ports() {
+    local output="$1" port family separator='' ipv6=0
+    local -A seen=()
+    shift
+
+    if vps_ufw_ipv6_available; then
+        ipv6=1
+    else
+        vps_cmd_warning "UFW 未启用 IPv6；本次只登记 IPv4 SSH 端口需求"
+    fi
+    {
+        printf '['
+        for port in "$@"; do
+            [[ -n "$port" ]] || continue
+            access_validate_port "$port" || return 2
+            [[ -z "${seen[$port]:-}" ]] || continue
+            seen[$port]=1
+            for family in ipv4 ipv6; do
+                [[ "$family" != ipv6 || "$ipv6" == 1 ]] || continue
+                printf '%s{"owner":"ssh","kind":"input","family":"%s","proto":"tcp","port":"%s","destination":"any","source":"any","temporary":false}' "$separator" "$family" "$port"
+                separator=,
+            done
+        done
+        printf ']\n'
+    } >"$output"
+}
+
+access_firewall_ufw_apply_ports() {
+    local snapshot="${1:-}" desired status=0 locked=0
+    shift
+
+    vps_ufw_require_tools || return $?
+    desired="$(mktemp)" || return 20
+    access_firewall_ufw_desired_ports "$desired" "$@" || {
+        rm -f -- "$desired"
+        return 20
+    }
+    if [[ -n "$snapshot" && "${VPSCTL_DRY_RUN:-0}" != 1 ]]; then
+        vps_ufw_lock || {
+            rm -f -- "$desired"
+            return 20
+        }
+        locked=1
+        vps_ufw_scope_snapshot ssh "$snapshot" || status=$?
+    fi
+    if ((status == 0)); then
+        vps_ufw_begin ssh "$desired" || status=$?
+        if ((status == 0)); then
+            ACCESS_FW_ADDED=ufw-shared
+            vps_ufw_commit || status=$?
+        fi
+    fi
+    ((locked == 0)) || vps_ufw_unlock
+    rm -f -- "$desired"
+    return "$status"
+}
+
+access_firewall_ufw_import_legacy() {
+    local port="$1" directory status=0
+
+    vps_ufw_require_tools || return $?
+    vps_ufw_owner_detached ssh && return 0
+    directory="$(mktemp -d)" || return 20
+    vps_ufw_scope_desired ssh >"$directory/desired.json" || status=$?
+    ((status)) || vps_ufw_inventory >"$directory/inventory.json" || status=$?
+    if ((status == 0)); then
+        jq -s --arg port "$port" '
+            .[0] + [.[1][] | select(.simple and .kind == "input" and .action == "allow"
+                and .proto == "tcp" and .port == $port and .source == "any" and .destination == "any"
+                and .comment == "vpsctl security access") |
+                {owner:"ssh",kind:.kind,family:.family,proto:.proto,port:.port,
+                 source:.source,destination:.destination,temporary:false}]
+            | unique_by([.owner,.kind,.family,.proto,.port,.source,.destination])
+        ' "$directory/desired.json" "$directory/inventory.json" >"$directory/import.json" || status=30
+    fi
+    if ((status == 0)); then
+        vps_ufw_begin ssh "$directory/import.json" || status=$?
+        ((status)) || vps_ufw_commit || status=$?
+    fi
+    rm -f -- "$directory/desired.json" "$directory/inventory.json" "$directory/import.json"
+    rmdir -- "$directory" || true
+    return "$status"
+}
+
+access_firewall_ufw_release_port() {
+    local port="$1" desired status=0
+
+    vps_ufw_owner_detached ssh && return 0
+    vps_ufw_lock || return $?
+    access_firewall_ufw_import_legacy "$port" || status=$?
+    if ((status == 0)); then
+        desired="$(mktemp)" || status=20
+        if ((status == 0)); then
+            vps_ufw_scope_desired ssh | jq --arg port "$port" '
+                map(select(.owner != "ssh" or .kind != "input" or .proto != "tcp" or .port != $port))
+            ' >"$desired" || status=30
+            if ((status == 0)); then
+                vps_ufw_begin ssh "$desired" || status=$?
+                ((status)) || vps_ufw_commit || status=$?
+            fi
+            rm -f -- "$desired"
+        fi
+    fi
+    vps_ufw_unlock
+    return "$status"
+}
+
+access_firewall_backup_mode() {
+    local backup_dir="$1" mode tx_id state
+
+    if [[ -f "$backup_dir/firewall.mode" && ! -L "$backup_dir/firewall.mode" ]]; then
+        mode="$(cat -- "$backup_dir/firewall.mode")" || return 30
+    else
+        tx_id="$(access_kv_get "$backup_dir/manifest" transaction_id 2>/dev/null || true)"
+        if [[ -n "$tx_id" ]] && state="$(access_transaction_path "$tx_id" 2>/dev/null)"; then
+            mode="$(access_kv_get "$state/state" firewall_mode 2>/dev/null || true)"
+        fi
+        mode="${mode:-auto}"
+    fi
+    case "$mode" in auto | manual) printf '%s\n' "$mode" ;; *) return 30 ;; esac
+}
+
+access_firewall_backup_mode_write() {
+    local backup_dir="$1" mode="$2"
+
+    [[ "${VPSCTL_DRY_RUN:-0}" != 1 ]] || return 0
+    printf '%s\n' "$mode" >"$backup_dir/firewall.mode" || return 20
+    chmod 0600 -- "$backup_dir/firewall.mode" || return 20
+}
+
+access_firewall_ufw_restore_begin() {
+    local backup_dir="$1"
+
+    vps_ufw_require_tools || return $?
+    [[ -f "$backup_dir/ufw.scope.json" && ! -L "$backup_dir/ufw.scope.json" ]] || {
+        vps_cmd_error "缺少 SSH UFW 需求快照，拒绝推测回退规则"
+        return 30
+    }
+    vps_ufw_scope_restore_begin ssh "$backup_dir/ufw.scope.json"
+}
+
+access_firewall_ufw_restore_state() {
+    local backup_dir="$1"
+
+    if vps_ufw_owner_detached ssh || [[ ! -f "$backup_dir/firewall.state" ]]; then
+        access_firewall_write_state '' ''
+    else
+        access_atomic_from_file "$backup_dir/firewall.state" "$ACCESS_FW_STATE" 0644
+    fi
 }
 
 access_firewall_firewalld_rule() {
@@ -541,9 +709,14 @@ access_firewall_has_port() {
 }
 
 access_firewall_open() {
-    local backend="$1" port="$2" old_port="${3:-}" require_owned="${4:-0}" runtime_had=0 permanent_had=0 added_runtime=0 added_permanent=0 ipv6_added=0 rule zone
+    local backend="$1" port="$2" old_port="${3:-}" require_owned="${4:-0}" backup_dir="${5:-}" runtime_had=0 permanent_had=0 added_runtime=0 added_permanent=0 ipv6_added=0 rule zone snapshot=''
 
     ACCESS_FW_ADDED=0
+    if [[ "$backend" == ufw ]]; then
+        [[ -z "$backup_dir" ]] || snapshot="$backup_dir/ufw.scope.json"
+        access_firewall_ufw_apply_ports "$snapshot" "$old_port" "$port"
+        return $?
+    fi
     if [[ "$backend" != firewalld ]]; then
         if [[ "$require_owned" == 1 ]] && access_firewall_has_owned_port "$backend" "$port"; then
             vps_cmd_info "防火墙中已存在 vpsctl 自有的 TCP $port 规则"
@@ -557,13 +730,6 @@ access_firewall_open() {
         none)
             vps_cmd_warning "未检测到活动防火墙；未添加端口规则"
             return 0
-            ;;
-        ufw)
-            vps_cmd_run ufw allow "${port}/tcp" comment 'vpsctl security access' || return 20
-            [[ "${VPSCTL_DRY_RUN:-0}" == 1 ]] || access_firewall_ufw_has_owned_port "$port" || {
-                vps_cmd_error "UFW 未返回带 vpsctl 标记的规则，拒绝记录所有权"
-                return 30
-            }
             ;;
         firewalld)
             rule="$(access_firewall_firewalld_rule "$port")"
@@ -631,8 +797,7 @@ access_firewall_open() {
 }
 
 access_firewall_close() {
-    local backend="$1" port="$2" owned="${3:-0}" mode="${4:-auto}" rule number removed=0 zone zones
-    local -a numbers=()
+    local backend="$1" port="$2" owned="${3:-0}" mode="${4:-auto}" rule removed=0 zone zones
 
     case "$backend" in
         none | '') return 0 ;;
@@ -641,17 +806,8 @@ access_firewall_close() {
                 vps_cmd_error "拒绝删除没有 vpsctl 所有权记录的 UFW 规则"
                 return 30
             }
-            mapfile -t numbers < <(access_firewall_ufw_owned_numbers "$port")
-            if ((${#numbers[@]} == 0)); then
-                access_firewall_has_port ufw "$port" && {
-                    vps_cmd_error "UFW 所有权标记已漂移；不会删除同端口的其他规则"
-                    return 30
-                }
-                return 0
-            fi
-            for number in "${numbers[@]}"; do
-                vps_cmd_run ufw --force delete "$number" || return 20
-            done
+            access_firewall_ufw_release_port "$port"
+            return $?
             ;;
         firewalld)
             [[ "$owned" == 1 ]] || {
@@ -738,8 +894,21 @@ access_firewall_write_state() {
 }
 
 access_firewall_commit() {
-    local backend="$1" old_port="$2" new_port="$3" added="$4" previous_backend="$5" previous_port="$6" previous_mode="${7:-}" mode=''
+    local backend="$1" old_port="$2" new_port="$3" added="$4" previous_backend="$5" previous_port="$6" previous_mode="${7:-}" firewall_mode="${8:-auto}" mode=''
 
+    [[ "$firewall_mode" != manual ]] || return 0
+    if [[ "$backend" == ufw ]]; then
+        if [[ "$added" != ufw-shared && "$previous_backend" == ufw && -n "$previous_port" ]]; then
+            access_firewall_ufw_import_legacy "$previous_port" || return $?
+        fi
+        access_firewall_ufw_apply_ports '' "$new_port" || return $?
+        if vps_ufw_owner_detached ssh; then
+            access_firewall_write_state '' ''
+        else
+            access_firewall_write_state ufw "$new_port"
+        fi
+        return $?
+    fi
     if [[ "$backend" == nftables ]]; then
         case "$added" in
             nft-runtime) mode=runtime ;;
@@ -758,9 +927,15 @@ access_firewall_commit() {
 }
 
 access_firewall_abort() {
-    local backend="$1" new_port="$2" added="$3" previous_backend="${4:-}" previous_port="${5:-}" previous_mode="${6:-}" mode=auto
+    local backend="$1" new_port="$2" added="$3" previous_backend="${4:-}" previous_port="${5:-}" previous_mode="${6:-}" backup_dir="${7:-}" mode=auto
 
     [[ "$added" != 0 ]] || return 0
+    if [[ "$backend" == ufw && "$added" == ufw-shared ]]; then
+        access_firewall_ufw_restore_begin "$backup_dir" || return $?
+        vps_ufw_commit || return $?
+        access_firewall_ufw_restore_state "$backup_dir"
+        return $?
+    fi
     case "$added" in
         nft-runtime) mode=runtime ;;
         nft-persistent) mode=persistent ;;

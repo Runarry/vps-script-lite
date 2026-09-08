@@ -81,6 +81,10 @@ export VPSCTL_NO_COLOR=1
 
 # shellcheck source=../../lib/command.sh
 source "${TEST_ROOT}/lib/command.sh"
+# shellcheck source=../../lib/ufw.sh
+source "${TEST_ROOT}/lib/ufw.sh"
+# shellcheck source=../../commands/service/proxy/ufw.sh
+source "${TEST_ROOT}/commands/service/proxy/ufw.sh"
 vps_cmd_init "relay real connectivity test" "$TEST_ROOT"
 # shellcheck source=../../commands/service/proxy/common.sh
 source "${TEST_ROOT}/commands/service/proxy/common.sh"

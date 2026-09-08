@@ -787,8 +787,10 @@ proxy_relay_forward_install_runtime() {
     local -a files=(
         lib/command.sh
         lib/ui.sh
+        lib/ufw.sh
         commands/service/proxy.sh
         commands/service/proxy/common.sh
+        commands/service/proxy/ufw.sh
         commands/service/proxy/protocols-sing-box.sh
         commands/service/proxy/protocols-xray.sh
         commands/service/proxy/nodes.sh
@@ -923,7 +925,7 @@ _proxy_relay_forward_service_action() {
     esac
 }
 
-proxy_relay_forward_apply() (
+proxy_relay_forward_apply() {
     local tmp cache_candidate batch referenced_missing snapshot cache_backup
     local had_snapshot=0 cache_existed=0 rollback_failed=0 snapshot_status=0
     proxy_relay_forward_init || return $?
@@ -975,7 +977,20 @@ proxy_relay_forward_apply() (
     proxy_relay_forward_render_nft "$PROXY_RELAY_FORWARD_MANIFEST" "$cache_candidate" >"$batch" || { local rc=$?; rm -rf -- "$tmp"; return "$rc"; }
     chmod 0600 -- "$batch" || { rm -rf -- "$tmp"; return 20; }
     proxy_relay_forward_nft_check "$batch" || { local rc=$?; rm -rf -- "$tmp"; return "$rc"; }
-    proxy_relay_forward_nft_apply "$batch" || { local rc=$?; rm -rf -- "$tmp"; return "$rc"; }
+    # DNAT packets traverse FORWARD using the translated destination. Allow the
+    # new cache targets before switching nft, keeping old targets until commit.
+    proxy_ufw_forwards_begin "$PROXY_RELAY_FORWARD_MANIFEST" "$cache_candidate" || {
+        local rc=$?; rm -rf -- "$tmp"; return "$rc";
+    }
+    if proxy_relay_forward_nft_apply "$batch"; then
+        :
+    else
+        local rc=$?
+        vps_ufw_rollback || rollback_failed=1
+        rm -rf -- "$tmp"
+        ((rollback_failed == 0)) || return 30
+        return "$rc"
+    fi
     if ! proxy_atomic_write_from_file "$cache_candidate" "$PROXY_RELAY_FORWARD_CACHE_LOGICAL" 0600; then
         if ((had_snapshot)); then
             proxy_relay_forward_nft_restore "$snapshot" || rollback_failed=1
@@ -987,15 +1002,21 @@ proxy_relay_forward_apply() (
         else
             rm -f -- "$PROXY_RELAY_FORWARD_CACHE" || rollback_failed=1
         fi
+        vps_ufw_rollback || rollback_failed=1
         rm -rf -- "$tmp"
         ((rollback_failed == 0)) || return 30
         vps_cmd_error "写入 relay DNS 缓存失败，已恢复旧 nftables 规则与缓存"
         return 20
     fi
+    if ! vps_ufw_commit; then
+        rm -rf -- "$tmp"
+        vps_cmd_error "relay DNS 缓存和 nftables 已刷新，但旧 UFW 规则清理未完成；新目标放行已保留"
+        return 30
+    fi
     _proxy_relay_forward_warn_external_policy
     rm -rf -- "$tmp"
     vps_cmd_success "relay DNS 缓存与受管 nftables 表已刷新"
-)
+}
 
 proxy_relay_forward_clear() {
     proxy_relay_forward_init || return $?
@@ -1079,7 +1100,7 @@ proxy_relay_forward_runtime_status() {
         '{installed:$installed,active:$active,enabled:$enabled,degraded:$degraded}'
 }
 
-proxy_relay_forward_install_service() (
+proxy_relay_forward_install_service() {
     local tmp helper_candidate service_candidate sysctl_candidate count rc
     proxy_relay_forward_init || return $?
     proxy_require_platform || return $?
@@ -1122,7 +1143,7 @@ proxy_relay_forward_install_service() (
     fi
     rm -rf -- "$tmp"
     vps_cmd_success "relay forward 服务组件已安装"
-)
+}
 
 proxy_relay_forward_remove_service() {
     proxy_relay_forward_init || return $?
@@ -1159,6 +1180,29 @@ proxy_relay_forward_on_count_change() {
 }
 
 proxy_relay_forward_sync() {
+    local count status=0 cleanup_status=0
+    proxy_relay_forward_init || return $?
+    if [[ "${VPSCTL_DRY_RUN:-0}" == 1 || ! -f "$PROXY_RELAY_FORWARD_MANIFEST" ]]; then
+        _proxy_relay_forward_sync
+        return $?
+    fi
+    count="$(jq -r '.forwards | length' "$PROXY_RELAY_FORWARD_MANIFEST")" || return 10
+    if ((count > 0)); then
+        _proxy_relay_forward_sync
+        return $?
+    fi
+    # Explicit removal of the last forward releases its scope; stopping the
+    # helper only calls clear(), which intentionally retains its declarations.
+    proxy_ufw_forwards_begin "$PROXY_RELAY_FORWARD_MANIFEST" "" || return $?
+    _proxy_relay_forward_sync || status=$?
+    if ((status == 0)); then vps_ufw_commit || cleanup_status=$?
+    else vps_ufw_rollback || cleanup_status=$?
+    fi
+    ((cleanup_status == 0)) || return 30
+    return "$status"
+}
+
+_proxy_relay_forward_sync() {
     local count
     proxy_relay_forward_init || return $?
     vps_cmd_require_root || return $?

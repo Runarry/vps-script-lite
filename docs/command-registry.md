@@ -54,6 +54,7 @@ vpsctl self uninstall [--purge] [--confirm-uninstall] [--confirm-purge]
 | `network dns` | `commands/network/dns.sh` | 检测、测试、设置、刷新、验证或恢复 DNS | `disruptive` | `optional-root` | `supported` | `linux` | `experimental` |
 | `network ip-policy` | `commands/network/ip-policy.sh` | 查看、设置或恢复 glibc IPv4/IPv6 地址排序偏好 | `disruptive` | `optional-root` | `supported` | `linux,libc:glibc` | `experimental` |
 | `network rfw` | `commands/network/rfw.sh` | 安装、配置和管理 RFW systemd 服务 | `disruptive` | `optional-root` | `supported` | `linux,init:systemd` | `experimental` |
+| `network ufw` | `commands/network/ufw.sh` | 管理 UFW 并联动 SSH、节点、中转与证书端口 | `disruptive` | `optional-root` | `supported` | `linux` | `experimental` |
 | `system kernel` | `commands/system/kernel.sh` | 查看、安装、切换或卸载内核，安装与修复 BIOS GRUB | `disruptive` | `optional-root` | `supported` | `linux,os:debian-family` | `experimental` |
 | `security access` | `commands/security/access.sh` | 管理用户、密码、公钥与可验证恢复的 SSH 访问变更 | `disruptive` | `optional-root` | `supported` | `linux,init:systemd` | `experimental` |
 | `security fail2ban` | `commands/security/fail2ban.sh` | 安装、配置和管理 OpenSSH 的 Fail2ban 防护 | `disruptive` | `optional-root` | `supported` | `linux,init:systemd` | `experimental` |

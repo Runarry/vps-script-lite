@@ -50,6 +50,10 @@ done
 
 # shellcheck source=../../lib/command.sh
 source "${TEST_ROOT}/lib/command.sh"
+# shellcheck source=../../lib/ufw.sh
+source "${TEST_ROOT}/lib/ufw.sh"
+# shellcheck source=../../commands/service/proxy/ufw.sh
+source "${TEST_ROOT}/commands/service/proxy/ufw.sh"
 vps_cmd_init "relay real nft test" "$TEST_ROOT"
 # shellcheck source=../../commands/service/proxy/relay-forward.sh
 source "${TEST_ROOT}/commands/service/proxy/relay-forward.sh"

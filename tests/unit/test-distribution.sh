@@ -428,6 +428,21 @@ test_system_bundle_requires_kernel_modules() (
     done
 )
 
+test_core_ufw_library_compatibility() (
+    local tree="${TEST_TEMP}/ufw-core" required status=0
+    mkdir -p "$tree/bin" "$tree/lib" "$tree/commands/self"
+    for required in VERSION bin/vpsctl lib/environment.sh lib/registry.sh lib/ui.sh lib/command.sh lib/distribution.sh commands/self/status.sh commands/self/update.sh commands/self/uninstall.sh; do
+        printf '# fixture\n' >"$tree/$required"
+    done
+    vps_distribution_validate_domain_tree "$tree" core || fail 'historical core without UFW rejected'
+    printf '%s\n' '"commands/network/ufw.sh"' >>"$tree/lib/registry.sh"
+    vps_distribution_validate_domain_tree "$tree" core >/dev/null 2>&1 || status=$?
+    assert_equal 10 "$status" 'new core missing shared UFW rejected'
+    printf '# shared UFW fixture\n' >"$tree/lib/ufw.sh"
+    vps_distribution_validate_domain_tree "$tree" core || fail 'complete UFW core rejected'
+)
+
+test_core_ufw_library_compatibility
 test_system_bundle_requires_kernel_modules
 test_source_mode_is_offline_and_mutations_refuse
 test_manifest_is_strict

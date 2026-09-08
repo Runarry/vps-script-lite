@@ -106,7 +106,7 @@ vps_registry_init() {
     vps_registry_register_domain \
         "network" \
         "网络设置" \
-        "BBR、本机 DNS、IP 地址族偏好与 RFW 网络防护管理"
+        "BBR、本机 DNS、IP 地址族偏好、UFW 与 RFW 网络防护管理"
 
     vps_registry_register_domain \
         "system" \
@@ -167,6 +167,18 @@ vps_registry_init() {
         "optional-root" \
         "supported" \
         "linux,libc:glibc" \
+        "experimental"
+
+    vps_registry_register_command \
+        "network" \
+        "ufw" \
+        "UFW 防火墙" \
+        "安装、管理防火墙规则并联动 SSH、节点、中转与证书端口" \
+        "commands/network/ufw.sh" \
+        "disruptive" \
+        "optional-root" \
+        "supported" \
+        "linux" \
         "experimental"
 
     vps_registry_register_command \

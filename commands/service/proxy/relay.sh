@@ -269,6 +269,14 @@ proxy_relay_write_state_only() {
 }
 
 proxy_relay_commit_candidate() {
+    if [[ "${4:-0}" == 1 ]]; then
+        proxy_ufw_relay_transaction _proxy_relay_commit_candidate "$@"
+    else
+        _proxy_relay_commit_candidate "$@"
+    fi
+}
+
+_proxy_relay_commit_candidate() {
     local candidate="$1" reason="$2" core="${3:-}" sync_forward="${4:-0}"
     local candidate_config="" status=0 sync_status=0 rollback_failed=0 rollback_dir=""
     local relay_existed=0 manifest_existed=0 config_existed=0 pending_existed=0

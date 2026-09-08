@@ -112,6 +112,7 @@ for domain in network system security service test; do
 done
 
 PATH="$MOCK_BIN:$PATH" "$ENTRY" network bbr --help >/dev/null
+PATH="$MOCK_BIN:$PATH" "$ENTRY" network ufw --help >/dev/null
 PATH="$MOCK_BIN:$PATH" "$ENTRY" system kernel --help >/dev/null
 PATH="$MOCK_BIN:$PATH" "$ENTRY" security fail2ban --help >/dev/null
 PATH="$MOCK_BIN:$PATH" "$ENTRY" service proxy --help >/dev/null
@@ -121,6 +122,7 @@ for domain in network system security service test; do
 done
 
 VPSCTL_TEST_CURL_FAIL=1 PATH="$MOCK_BIN:$PATH" "$ENTRY" network bbr --help >/dev/null
+VPSCTL_TEST_CURL_FAIL=1 PATH="$MOCK_BIN:$PATH" "$ENTRY" network ufw --help >/dev/null
 VPSCTL_TEST_CURL_FAIL=1 PATH="$MOCK_BIN:$PATH" "$ENTRY" self status >/dev/null
 PATH="$MOCK_BIN:$PATH" "$ENTRY" --yes --non-interactive self update >/dev/null
 su nobody -s /bin/bash -c "$ENTRY --version" | grep -Fx 'vpsctl 0.8.6' >/dev/null ||

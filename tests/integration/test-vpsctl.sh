@@ -68,6 +68,7 @@ test_cli() {
     test_contains "$output" "network bbr" "BBR command listing"
     test_contains "$output" "network dns" "DNS command listing"
     test_contains "$output" "network ip-policy" "IP policy command listing"
+    test_contains "$output" "network ufw" "UFW command listing"
     test_contains "$output" "network rfw" "RFW command listing"
     test_contains "$output" "system kernel" "kernel command listing"
     test_contains "$output" "security access" "access command listing"

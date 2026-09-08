@@ -72,6 +72,7 @@ printf "\n" >>"${MOCK_LOG}"
 exit 1'
 
 make_mock flock 'exit 0'
+make_mock ufw '[[ "${1:-}" == status ]] || exit 99; printf "Status: inactive\n"'
 
 make_mock lego '
 path=""

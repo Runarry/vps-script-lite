@@ -837,7 +837,9 @@ access_ssh_prepare_rollback() {
 
     access_sshd_restore_backup_config "$backup_dir" || failed=1
     access_sshd_reload || failed=1
-    access_firewall_abort "$backend" "$new_port" "$added" "$previous_backend" "$previous_port" "$previous_mode" || failed=1
+    if ((failed == 0)) || [[ "$backend" != ufw || "$added" != ufw-shared ]]; then
+        access_firewall_abort "$backend" "$new_port" "$added" "$previous_backend" "$previous_port" "$previous_mode" "$backup_dir" || failed=1
+    fi
     if ((failed)); then
         access_sshd_print_recovery "$backup_dir"
         return 1
@@ -1081,6 +1083,10 @@ access_ssh_prepare() {
     else
         vps_cmd_warning "防火墙为 manual；请确认 TCP $new_port 已从管理端可达"
     fi
+    access_firewall_backup_mode_write "$backup_dir" "$firewall_mode" || {
+        vps_cmd_unlock
+        return 20
+    }
     if ! candidate="$(mktemp)"; then
         [[ "${VPSCTL_DRY_RUN:-0}" == 1 ]] || access_ssh_prepare_rollback "$backup_dir" "$backend" "$new_port" "$ACCESS_FW_ADDED" "$ACCESS_FW_PREVIOUS_BACKEND" "$ACCESS_FW_PREVIOUS_PORT" "$ACCESS_FW_PREVIOUS_MODE" || rollback_failed=1
         vps_cmd_unlock
@@ -1096,7 +1102,7 @@ access_ssh_prepare() {
         access_sshd_print_recovery "$backup_dir"
         return 30
     }
-    if [[ "$firewall_mode" == auto ]] && ! access_firewall_open "$backend" "$new_port" "$old_port"; then
+    if [[ "$firewall_mode" == auto ]] && ! access_firewall_open "$backend" "$new_port" "$old_port" 0 "$backup_dir"; then
         rm -f -- "$candidate"
         if [[ "${VPSCTL_DRY_RUN:-0}" != 1 ]] && ! access_ssh_prepare_rollback "$backup_dir" "$backend" "$new_port" "$ACCESS_FW_ADDED" "$ACCESS_FW_PREVIOUS_BACKEND" "$ACCESS_FW_PREVIOUS_PORT" "$ACCESS_FW_PREVIOUS_MODE"; then rollback_failed=1; fi
         vps_cmd_unlock
@@ -1110,13 +1116,11 @@ access_ssh_prepare() {
         return 0
     fi
     if ! access_sshd_normalize_ports "$backup_dir"; then
-        if ! access_sshd_restore_backup_config "$backup_dir"; then
-            vps_cmd_unlock
-            access_sshd_print_recovery "$backup_dir"
-            return 30
-        fi
+        rm -f -- "$candidate"
+        access_ssh_prepare_rollback "$backup_dir" "$backend" "$new_port" "$ACCESS_FW_ADDED" "$ACCESS_FW_PREVIOUS_BACKEND" "$ACCESS_FW_PREVIOUS_PORT" "$ACCESS_FW_PREVIOUS_MODE" || rollback_failed=1
         vps_cmd_unlock
-        return 20
+        ((rollback_failed == 0)) && return 20
+        return 30
     fi
     if ! access_sshd_install_candidate "$candidate"; then
         rm -f -- "$candidate"
@@ -1128,8 +1132,7 @@ access_ssh_prepare() {
     fi
     if ! access_sshd_assert_effective "$old_port" "$new_port" "$root_value" "$password_value" "$kbd_value" "$current_pubkey" yes 1 "$fallback_user"; then
         rm -f -- "$candidate"
-        access_sshd_restore_backup_config "$backup_dir" || rollback_failed=1
-        access_firewall_abort "$backend" "$new_port" "$ACCESS_FW_ADDED" "$ACCESS_FW_PREVIOUS_BACKEND" "$ACCESS_FW_PREVIOUS_PORT" "$ACCESS_FW_PREVIOUS_MODE" || rollback_failed=1
+        access_ssh_prepare_rollback "$backup_dir" "$backend" "$new_port" "$ACCESS_FW_ADDED" "$ACCESS_FW_PREVIOUS_BACKEND" "$ACCESS_FW_PREVIOUS_PORT" "$ACCESS_FW_PREVIOUS_MODE" || rollback_failed=1
         vps_cmd_unlock
         ((rollback_failed == 0)) && return 10
         return 30
@@ -1143,25 +1146,19 @@ access_ssh_prepare() {
     fi
     rm -f -- "$candidate"
     if ! access_sshd_reload || ! access_sshd_verify_ports "$old_port" "$new_port" 1; then
-        access_sshd_restore_backup_config "$backup_dir" || rollback_failed=1
-        access_sshd_reload || rollback_failed=1
-        access_firewall_abort "$backend" "$new_port" "$ACCESS_FW_ADDED" "$ACCESS_FW_PREVIOUS_BACKEND" "$ACCESS_FW_PREVIOUS_PORT" "$ACCESS_FW_PREVIOUS_MODE" || rollback_failed=1
+        access_ssh_prepare_rollback "$backup_dir" "$backend" "$new_port" "$ACCESS_FW_ADDED" "$ACCESS_FW_PREVIOUS_BACKEND" "$ACCESS_FW_PREVIOUS_PORT" "$ACCESS_FW_PREVIOUS_MODE" || rollback_failed=1
         vps_cmd_unlock
         ((rollback_failed == 0)) && return 20
         return 30
     fi
     access_sshd_write_transaction "$tx_dir" prepared "$tx_id" "$backup_id" "$created" "$expires" "$old_port" "$new_port" "$root_value" "$password_value" "$kbd_value" "$current_pubkey" "$current_expose" "$fallback_user" "$firewall_mode" "$backend" "$ACCESS_FW_ADDED" "$ACCESS_FW_PREVIOUS_BACKEND" "$ACCESS_FW_PREVIOUS_PORT" "$ACCESS_FW_PREVIOUS_MODE" "$pending_sha" || {
-        access_sshd_restore_backup_config "$backup_dir" || rollback_failed=1
-        access_sshd_reload || rollback_failed=1
-        access_firewall_abort "$backend" "$new_port" "$ACCESS_FW_ADDED" "$ACCESS_FW_PREVIOUS_BACKEND" "$ACCESS_FW_PREVIOUS_PORT" "$ACCESS_FW_PREVIOUS_MODE" || rollback_failed=1
+        access_ssh_prepare_rollback "$backup_dir" "$backend" "$new_port" "$ACCESS_FW_ADDED" "$ACCESS_FW_PREVIOUS_BACKEND" "$ACCESS_FW_PREVIOUS_PORT" "$ACCESS_FW_PREVIOUS_MODE" || rollback_failed=1
         vps_cmd_unlock
         ((rollback_failed == 0)) && return 20
         return 30
     }
     if ! access_write_active "$tx_id"; then
-        access_sshd_restore_backup_config "$backup_dir" || rollback_failed=1
-        access_sshd_reload || rollback_failed=1
-        access_firewall_abort "$backend" "$new_port" "$ACCESS_FW_ADDED" "$ACCESS_FW_PREVIOUS_BACKEND" "$ACCESS_FW_PREVIOUS_PORT" "$ACCESS_FW_PREVIOUS_MODE" || rollback_failed=1
+        access_ssh_prepare_rollback "$backup_dir" "$backend" "$new_port" "$ACCESS_FW_ADDED" "$ACCESS_FW_PREVIOUS_BACKEND" "$ACCESS_FW_PREVIOUS_PORT" "$ACCESS_FW_PREVIOUS_MODE" || rollback_failed=1
         access_sshd_transaction_mark "$tx_dir/state" aborted || rollback_failed=1
         vps_cmd_unlock
         ((rollback_failed == 0)) && return 20
@@ -1371,7 +1368,7 @@ access_sshd_find_proof() {
 
 access_ssh_commit() {
     local tx_id="$1" confirm_id="$2" tx_dir state status expires now proof proof_tx proof_port proof_auth proof_user
-    local backup_id backup_dir old_port new_port root_value password_value kbd_value pubkey_value expose_value fallback firewall_backend firewall_added previous_backend previous_port previous_mode candidate applied_sha pending_sha current_sha proof_verified created failed=0 rollback_failed=0
+    local backup_id backup_dir old_port new_port root_value password_value kbd_value pubkey_value expose_value fallback firewall_backend firewall_mode firewall_added previous_backend previous_port previous_mode candidate applied_sha pending_sha current_sha proof_verified created failed=0 rollback_failed=0
 
     vps_cmd_require_root || return $?
     [[ "$confirm_id" == "$tx_id" ]] || {
@@ -1496,6 +1493,15 @@ access_ssh_commit() {
         vps_cmd_unlock
         return 30
     }
+    firewall_mode="$(access_kv_get "$state" firewall_mode)" || {
+        vps_cmd_unlock
+        return 30
+    }
+    case "$firewall_mode" in auto | manual) ;; *)
+        vps_cmd_unlock
+        return 30
+        ;;
+    esac
     firewall_added="$(access_kv_get "$state" firewall_added)" || {
         vps_cmd_unlock
         return 30
@@ -1564,7 +1570,7 @@ access_ssh_commit() {
         vps_cmd_unlock
         return $?
     }
-    access_firewall_commit "$firewall_backend" "$old_port" "$new_port" "$firewall_added" "$previous_backend" "$previous_port" "$previous_mode" || failed=1
+    access_firewall_commit "$firewall_backend" "$old_port" "$new_port" "$firewall_added" "$previous_backend" "$previous_port" "$previous_mode" "$firewall_mode" || failed=1
     access_sshd_backup_mark "$backup_dir" committed "$applied_sha" || failed=1
     access_sshd_transaction_mark "$state" committed || failed=1
     rm -f -- "$proof" || failed=1
@@ -1582,7 +1588,7 @@ access_ssh_commit() {
 }
 
 access_ssh_abort() {
-    local tx_id="$1" tx_dir state status backup_id backup_dir backend added new_port previous_backend previous_port previous_mode failed=0
+    local tx_id="$1" tx_dir state status backup_id backup_dir backend added old_port new_port previous_backend previous_port previous_mode failed=0 ufw_restore=0
 
     vps_cmd_require_root || return $?
     access_prepare_layout || return $?
@@ -1640,9 +1646,36 @@ access_ssh_abort() {
         vps_cmd_info "演练：将从备份 $backup_id 恢复 prepare 前配置、reload SSH 并仅撤销本事务防火墙规则"
         return 0
     fi
+    if [[ "$backend" == ufw && "$added" == ufw-shared ]]; then
+        if ! old_port="$(access_kv_get "$state" old_port)" || ! access_validate_port "$old_port"; then
+            vps_cmd_unlock
+            return 30
+        fi
+        access_firewall_ufw_restore_begin "$backup_dir" || {
+            vps_cmd_unlock
+            return 30
+        }
+        ufw_restore=1
+    fi
     access_sshd_restore_backup_config "$backup_dir" || failed=1
     access_sshd_reload || failed=1
-    access_firewall_abort "$backend" "$new_port" "$added" "$previous_backend" "$previous_port" "$previous_mode" || failed=1
+    if ((ufw_restore)); then
+        ((failed)) || access_sshd_port_listening "$old_port" || failed=1
+        if ((failed)); then
+            vps_ufw_rollback || true
+        else
+            vps_ufw_commit || failed=1
+            ((failed)) || access_firewall_ufw_restore_state "$backup_dir" || failed=1
+        fi
+        if ((failed)); then
+            vps_cmd_unlock
+            vps_cmd_error "SSH/UFW 回滚未完成，已保留事务供重试；备份 ID：$backup_id"
+            access_sshd_print_recovery "$backup_dir"
+            return 30
+        fi
+    else
+        access_firewall_abort "$backend" "$new_port" "$added" "$previous_backend" "$previous_port" "$previous_mode" "$backup_dir" || failed=1
+    fi
     access_sshd_backup_mark "$backup_dir" aborted '' || failed=1
     access_sshd_transaction_mark "$state" aborted || failed=1
     access_clear_active "$tx_id" || failed=1
@@ -1659,6 +1692,7 @@ access_ssh_abort() {
 access_ssh_restore() {
     local backup_id="$1" backup_dir manifest lifecycle applied current current_copy kind prompt failed=0
     local previous_backend='' previous_port='' previous_mode='' current_backend='' current_port='' current_mode=''
+    local firewall_mode=manual ufw_restore=0 restored_port
 
     vps_cmd_require_root || return $?
     [[ -z "$(access_active_transaction 2>/dev/null || true)" ]] || {
@@ -1673,6 +1707,9 @@ access_ssh_restore() {
     }
     lifecycle="$(access_kv_get "$manifest" lifecycle)" || return 30
     kind="$(access_kv_get "$manifest" kind)" || return 30
+    if [[ "$kind" != ssh-policy ]]; then
+        firewall_mode="$(access_firewall_backup_mode "$backup_dir")" || return 30
+    fi
     [[ "$lifecycle" == committed ]] || {
         vps_cmd_error "只允许恢复已生效配置的备份（当前：$lifecycle）"
         return 3
@@ -1692,6 +1729,7 @@ access_ssh_restore() {
         return 0
     fi
     prompt='恢复会替换当前 SSH 访问配置并调整防火墙'
+    [[ "$firewall_mode" != manual ]] || prompt='恢复会替换当前 SSH 访问配置'
     [[ "$kind" != ssh-policy ]] || prompt='恢复会替换当前 SSH 登录策略'
     vps_cmd_confirm_token "$prompt" "$backup_id" || {
         vps_cmd_error "restore 必须在 TTY 中输入备份 ID 强确认；--yes 不会绕过"
@@ -1717,6 +1755,14 @@ access_ssh_restore() {
         vps_cmd_unlock
         return 20
     }
+    if [[ "$firewall_mode" == auto && -f "$backup_dir/ufw.scope.json" ]]; then
+        access_firewall_ufw_restore_begin "$backup_dir" || {
+            rm -f -- "$current_copy"
+            vps_cmd_unlock
+            return 30
+        }
+        ufw_restore=1
+    fi
     access_sshd_restore_backup_config "$backup_dir" || failed=1
     if ((failed == 0)); then
         if [[ -f "$ACCESS_CONFIG" ]]; then
@@ -1728,9 +1774,14 @@ access_ssh_restore() {
         fi
     fi
     ((failed)) || access_sshd_reload || failed=1
+    if ((failed == 0 && ufw_restore == 1)); then
+        restored_port="$(access_kv_get "$manifest" old_port)" || failed=1
+        ((failed)) || access_sshd_port_listening "$restored_port" || failed=1
+    fi
     if ((failed)); then
         access_sshd_install_candidate "$current_copy" || true
         access_sshd_reload || true
+        ((ufw_restore == 0)) || vps_ufw_rollback || true
         rm -f -- "$current_copy"
         vps_cmd_unlock
         vps_cmd_error "恢复后的 SSH 配置验证失败，已尝试回到恢复前状态"
@@ -1745,29 +1796,34 @@ access_ssh_restore() {
         vps_cmd_success "已恢复 SSH 登录策略备份 $backup_id"
         return 0
     fi
-    access_firewall_load_managed
-    current_backend="$ACCESS_FW_PREVIOUS_BACKEND"
-    current_port="$ACCESS_FW_PREVIOUS_PORT"
-    current_mode="$ACCESS_FW_PREVIOUS_MODE"
-    if [[ -f "$backup_dir/firewall.state" ]]; then
-        previous_backend="$(access_kv_get "$backup_dir/firewall.state" backend 2>/dev/null || true)"
-        previous_port="$(access_kv_get "$backup_dir/firewall.state" port 2>/dev/null || true)"
-        previous_mode="$(access_kv_get "$backup_dir/firewall.state" mode 2>/dev/null || true)"
-        if [[ "$previous_backend" == nftables && "$previous_mode" != persistent && "$previous_mode" != runtime ]]; then
-            previous_mode=persistent
+    if ((ufw_restore)); then
+        vps_ufw_commit || failed=1
+        ((failed)) || access_firewall_ufw_restore_state "$backup_dir" || failed=1
+    elif [[ "$firewall_mode" == auto ]]; then
+        access_firewall_load_managed
+        current_backend="$ACCESS_FW_PREVIOUS_BACKEND"
+        current_port="$ACCESS_FW_PREVIOUS_PORT"
+        current_mode="$ACCESS_FW_PREVIOUS_MODE"
+        if [[ -f "$backup_dir/firewall.state" ]]; then
+            previous_backend="$(access_kv_get "$backup_dir/firewall.state" backend 2>/dev/null || true)"
+            previous_port="$(access_kv_get "$backup_dir/firewall.state" port 2>/dev/null || true)"
+            previous_mode="$(access_kv_get "$backup_dir/firewall.state" mode 2>/dev/null || true)"
+            if [[ "$previous_backend" == nftables && "$previous_mode" != persistent && "$previous_mode" != runtime ]]; then
+                previous_mode=persistent
+            fi
         fi
-    fi
-    if [[ -n "$current_backend" && "$current_backend:$current_port" != "$previous_backend:$previous_port" ]]; then
-        access_firewall_close "$current_backend" "$current_port" 1 "$current_mode" || failed=1
-    fi
-    if [[ -n "$previous_backend" && "$current_backend:$current_port" != "$previous_backend:$previous_port" ]]; then
-        access_firewall_require_auto_backend "$previous_backend" "$previous_mode" || failed=1
-        if ((failed == 0)); then
-            access_firewall_open "$previous_backend" "$previous_port" '' 1 || failed=1
-            access_firewall_write_state "$previous_backend" "$previous_port" "$previous_mode" || failed=1
+        if [[ -n "$current_backend" && "$current_backend:$current_port" != "$previous_backend:$previous_port" ]]; then
+            access_firewall_close "$current_backend" "$current_port" 1 "$current_mode" || failed=1
         fi
-    elif [[ -z "$previous_backend" ]]; then
-        access_firewall_write_state '' '' || failed=1
+        if [[ -n "$previous_backend" && "$current_backend:$current_port" != "$previous_backend:$previous_port" ]]; then
+            access_firewall_require_auto_backend "$previous_backend" "$previous_mode" || failed=1
+            if ((failed == 0)); then
+                access_firewall_open "$previous_backend" "$previous_port" '' 1 || failed=1
+                access_firewall_write_state "$previous_backend" "$previous_port" "$previous_mode" || failed=1
+            fi
+        elif [[ -z "$previous_backend" ]]; then
+            access_firewall_write_state '' '' || failed=1
+        fi
     fi
     access_sshd_backup_mark "$backup_dir" restored "$applied" || failed=1
     vps_cmd_unlock

@@ -84,6 +84,7 @@ for member in \
     lib/registry.sh \
     lib/ui.sh \
     lib/command.sh \
+    lib/ufw.sh \
     lib/distribution.sh; do
     assert_archive_has "$core" "$member"
 done
@@ -92,6 +93,7 @@ for member in commands/self/status.sh commands/self/update.sh commands/self/unin
 done
 
 assert_archive_has "${RELEASE_DIR}/vpsctl-network-${RELEASE_VERSION}.tar.gz" commands/network/bbr.sh
+assert_archive_has "${RELEASE_DIR}/vpsctl-network-${RELEASE_VERSION}.tar.gz" commands/network/ufw.sh
 assert_archive_has "${RELEASE_DIR}/vpsctl-system-${RELEASE_VERSION}.tar.gz" commands/system/kernel.sh
 for member in providers inventory grub grub-install; do
     assert_archive_has "${RELEASE_DIR}/vpsctl-system-${RELEASE_VERSION}.tar.gz" "commands/system/kernel/${member}.sh"

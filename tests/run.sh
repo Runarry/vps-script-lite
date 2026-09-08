@@ -11,6 +11,7 @@ for syntax_file in \
     "${TEST_ROOT}/bin/vpsctl" \
     "${TEST_ROOT}/lib/environment.sh" \
     "${TEST_ROOT}/lib/command.sh" \
+    "${TEST_ROOT}/lib/ufw.sh" \
     "${TEST_ROOT}/lib/distribution.sh" \
     "${TEST_ROOT}/lib/registry.sh" \
     "${TEST_ROOT}/lib/server-test.sh" \
@@ -19,6 +20,8 @@ for syntax_file in \
     "${TEST_ROOT}/commands/network/dns.sh" \
     "${TEST_ROOT}/commands/network/ip-policy.sh" \
     "${TEST_ROOT}/commands/network/rfw.sh" \
+    "${TEST_ROOT}/commands/network/ufw.sh" \
+    "${TEST_ROOT}"/commands/network/ufw/*.sh \
     "${TEST_ROOT}/commands/system/kernel.sh" \
     "${TEST_ROOT}"/commands/system/kernel/*.sh \
     "${TEST_ROOT}/commands/security/access.sh" \
@@ -39,6 +42,11 @@ for syntax_file in \
     "${TEST_ROOT}/tests/unit/test-network-dns.sh" \
     "${TEST_ROOT}/tests/unit/test-network-ip-policy.sh" \
     "${TEST_ROOT}/tests/unit/test-network-rfw.sh" \
+    "${TEST_ROOT}/tests/unit/test-ufw-library.sh" \
+    "${TEST_ROOT}/tests/unit/test-network-ufw.sh" \
+    "${TEST_ROOT}/tests/unit/test-proxy-ufw.sh" \
+    "${TEST_ROOT}/tests/unit/test-access-ufw.sh" \
+    "${TEST_ROOT}/tests/unit/test-tls-ufw.sh" \
     "${TEST_ROOT}/tests/unit/test-system-kernel.sh" \
     "${TEST_ROOT}/tests/unit/test-system-kernel-providers.sh" \
     "${TEST_ROOT}/tests/unit/test-system-kernel-inventory.sh" \
@@ -54,6 +62,7 @@ for syntax_file in \
     "${TEST_ROOT}/tests/integration/test-distribution-real.sh" \
     "${TEST_ROOT}/tests/integration/test-service-proxy-relay-cores-real.sh" \
     "${TEST_ROOT}/tests/integration/test-service-proxy-relay-real.sh" \
+    "${TEST_ROOT}"/tests/integration/test-*ufw*-real.sh \
     "${TEST_ROOT}/tests/integration/test-security-fail2ban-real.sh" \
     "${TEST_ROOT}/tests/integration/test-security-access-pubkey-real.sh" \
     "${TEST_ROOT}/tests/integration/test-security-access-policy-real.sh" \
@@ -72,6 +81,11 @@ bash "${TEST_ROOT}/tests/unit/test-network-bbr.sh"
 bash "${TEST_ROOT}/tests/unit/test-network-dns.sh"
 bash "${TEST_ROOT}/tests/unit/test-network-ip-policy.sh"
 bash "${TEST_ROOT}/tests/unit/test-network-rfw.sh"
+bash "${TEST_ROOT}/tests/unit/test-ufw-library.sh"
+bash "${TEST_ROOT}/tests/unit/test-network-ufw.sh"
+bash "${TEST_ROOT}/tests/unit/test-proxy-ufw.sh"
+bash "${TEST_ROOT}/tests/unit/test-access-ufw.sh"
+bash "${TEST_ROOT}/tests/unit/test-tls-ufw.sh"
 bash "${TEST_ROOT}/tests/unit/test-system-kernel.sh"
 bash "${TEST_ROOT}/tests/unit/test-system-kernel-providers.sh"
 bash "${TEST_ROOT}/tests/unit/test-system-kernel-inventory.sh"

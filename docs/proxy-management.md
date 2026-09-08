@@ -243,7 +243,7 @@ vpsctl service proxy relay forward refresh [--id FORWARD_ID]
 
 每条转发独立保存 `family`；旧记录缺失时以及新增时默认 `dual`，列表 JSON 始终补出该默认值。`ipv4` 或 `ipv6` 只解析、缓存并渲染指定地址族，若出口是相反族字面量或域名没有所需记录，新增和编辑在提交前失败。`dual` 部署出口所有可用地址族，至少一个族可用即可提交；缺少另一族时在 `relay status` 中标记部分双栈 degraded。它不提供跨地址族优先、失败回退、NAT64 或用户态转发。
 
-nftables 规则只写入独立的 `ip vpsctl_proxy_forward4` 和 `ip6 vpsctl_proxy_forward6` 表，使用 `fib daddr type local` 限定本机 PREROUTING 流量，不创建 OUTPUT 规则，也不刷新全局 ruleset。规则包括受管 DNAT 连接的 FORWARD 放行和 masquerade；IPv4、IPv6 分别渲染，不做 NAT64。候选批次先通过 `nft -c`，再一次提交；状态、DNS 缓存、核心配置或运行规则任一提交失败都会尝试恢复旧版本。检测到其他 FORWARD 链拒绝策略时只告警，不修改 UFW、firewalld、云安全组或第三方表。
+nftables 规则只写入独立的 `ip vpsctl_proxy_forward4` 和 `ip6 vpsctl_proxy_forward6` 表，使用 `fib daddr type local` 限定本机 PREROUTING 流量，不创建 OUTPUT 规则，也不刷新全局 ruleset。规则包括受管 DNAT 连接的 FORWARD 放行和 masquerade；IPv4、IPv6 分别渲染，不做 NAT64。候选批次先通过 `nft -c`，再一次提交；状态、DNS 缓存、核心配置或运行规则任一提交失败都会尝试恢复旧版本。UFW 开启时，通过共享接口按 DNAT 后目标 IP、协议和目标端口维护 route allow，并与 DNS 缓存和 nftables 变更共同恢复；检测到其他 FORWARD 链拒绝策略仍只告警，不修改 firewalld、云安全组或第三方表。规则归属和解除联动见 [UFW 管理](ufw-management.md)。
 
 首条转发会按需安装 nftables，启用 IP forwarding，并安装、启用 `vpsctl-proxy-forward` 服务。该服务每 5 分钟重新解析正在使用的域名出口并恢复受管规则，本身不承载流量。多条转发共享出口时，缓存按所有引用记录计算所需地址族并集，成功提交后不再保留无人引用的旧族。每个地址族确定性选取排序后的首个有效地址；解析失败时保留最后可用地址并在 `relay status` 中标记 degraded，没有可用旧地址时拒绝替换规则并保留现有数据面。目标解析到本机时拒绝应用，以避免转发循环。最后一条转发删除后会停止并禁用服务、清除两个受管表和 DNS 运行缓存。
 
