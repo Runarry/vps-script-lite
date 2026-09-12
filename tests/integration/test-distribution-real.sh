@@ -62,6 +62,16 @@ rm -rf -- "$INSTALL_ROOT" "$SELF_ROOT"
 
 bash "$TEST_ROOT/scripts/build-release.sh" "$RELEASE_DIR"
 
+# Future shared libraries must be accepted by both bootstrap and update.
+EXTRA_CORE="$TEST_TEMP/extra-core"
+mkdir -p "$EXTRA_CORE"
+tar -xzf "$RELEASE_DIR/vpsctl-core-0.8.7.tar.gz" -C "$EXTRA_CORE"
+mkdir -p "$EXTRA_CORE/lib/nested"
+printf '# bootstrap shared helper\n' >"$EXTRA_CORE/lib/nested/bootstrap-helper.sh"
+tar -C "$EXTRA_CORE" -czf "$RELEASE_DIR/vpsctl-core-0.8.7.tar.gz" VERSION bin lib commands
+core_sha="$(sha256sum "$RELEASE_DIR/vpsctl-core-0.8.7.tar.gz" | awk '{print $1}')"
+sed -i "s/^bundle\tcore\t.*/bundle\tcore\tvpsctl-core-0.8.7.tar.gz\t${core_sha}/" "$RELEASE_DIR/vpsctl-manifest.tsv"
+
 cat >"$MOCK_BIN/curl" <<'MOCK_CURL'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -99,6 +109,7 @@ install_output="$(PATH="$MOCK_BIN:$PATH" bash "$RELEASE_DIR/vpsctl.sh" \
 [[ -x "$ENTRY" && -L "$INSTALL_ROOT/current" ]] || fail 'managed launcher/current were not installed'
 release_root="$(readlink -f -- "$INSTALL_ROOT/current")"
 [[ -f "$release_root/.bundles/core.sha256" ]] || fail 'core marker is missing'
+[[ -f "$release_root/lib/nested/bootstrap-helper.sh" ]] || fail 'bootstrap rejected new shared library'
 su nobody -s /bin/bash -c "$ENTRY --version" | grep -Fx 'vpsctl 0.8.7' >/dev/null ||
     fail 'ordinary user could not execute the freshly installed shortcut'
 # Reproduce an older updater leaving a valid, managed core without execute bits.
@@ -124,7 +135,11 @@ done
 VPSCTL_TEST_CURL_FAIL=1 PATH="$MOCK_BIN:$PATH" "$ENTRY" network bbr --help >/dev/null
 VPSCTL_TEST_CURL_FAIL=1 PATH="$MOCK_BIN:$PATH" "$ENTRY" network ufw --help >/dev/null
 VPSCTL_TEST_CURL_FAIL=1 PATH="$MOCK_BIN:$PATH" "$ENTRY" self status >/dev/null
+rm -- "$SELF_ROOT/vpsctl.sh"
+printf 'corrupt cache\n' >"$SELF_ROOT/manifest.tsv"
 PATH="$MOCK_BIN:$PATH" "$ENTRY" --yes --non-interactive self update >/dev/null
+cmp "$ENTRY" "$SELF_ROOT/vpsctl.sh" || fail 'same-version update did not repair cached launcher'
+cmp "$release_root/.release/manifest.tsv" "$SELF_ROOT/manifest.tsv" || fail 'same-version update did not repair cached manifest'
 su nobody -s /bin/bash -c "$ENTRY --version" | grep -Fx 'vpsctl 0.8.7' >/dev/null ||
     fail 'ordinary user could not execute the installed shortcut'
 
@@ -141,12 +156,17 @@ bash "$NEXT_SOURCE/scripts/build-release.sh" "$NEXT_ASSETS" >/dev/null
 LEGACY_CORE="$TEST_TEMP/legacy-core"
 mkdir -p "$LEGACY_CORE"
 tar -xzf "$NEXT_ASSETS/vpsctl-core-0.8.8.tar.gz" -C "$LEGACY_CORE"
+mkdir -p "$LEGACY_CORE/lib/nested"
+printf '# update shared helper\n' >"$LEGACY_CORE/lib/nested/update-helper.sh"
 chmod 0644 "$LEGACY_CORE/bin/vpsctl"
 tar -C "$LEGACY_CORE" -czf "$NEXT_ASSETS/vpsctl-core-0.8.8.tar.gz" VERSION bin lib commands
 core_sha="$(sha256sum "$NEXT_ASSETS/vpsctl-core-0.8.8.tar.gz" | awk '{print $1}')"
 sed -i "s/^bundle\tcore\t.*/bundle\tcore\tvpsctl-core-0.8.8.tar.gz\t${core_sha}/" "$NEXT_ASSETS/vpsctl-manifest.tsv"
 export VPSCTL_TEST_ASSET_DIR="$NEXT_ASSETS"
+rm -rf -- "$SELF_ROOT"
 PATH="$MOCK_BIN:$PATH" "$ENTRY" --yes --non-interactive self update --version v0.8.8 >/dev/null
+[[ -f "$INSTALL_ROOT/current/lib/nested/update-helper.sh" ]] || fail 'update rejected new shared library'
+cmp "$ENTRY" "$SELF_ROOT/vpsctl.sh" || fail 'versioned update did not restore cached launcher'
 [[ "$(readlink -f "$INSTALL_ROOT/current")" == "$INSTALL_ROOT/releases/0.8.8" ]] || fail 'versioned update did not switch current'
 [[ ! -e "$release_root" && ! -L "$release_root" ]] || fail 'versioned update retained the previous release'
 [[ "$(find "$INSTALL_ROOT/releases" -mindepth 1 -maxdepth 1 -type d -printf '%f\n')" == 0.8.8 ]] ||
@@ -163,10 +183,11 @@ export VPSCTL_TEST_ASSET_DIR="$RELEASE_DIR"
 
 mkdir -p -- "${ETC_MARKER%/*}" "${STATE_MARKER%/*}" "${LIBEXEC_MARKER%/*}"
 touch -- "$ETC_MARKER" "$STATE_MARKER" "$LIBEXEC_MARKER"
-"$ENTRY" --non-interactive self uninstall --confirm-uninstall >/dev/null
+rm -- "$SELF_ROOT/vpsctl.sh"
+"$ENTRY" --yes --non-interactive self uninstall >/dev/null
 [[ ! -e "$ENTRY" && ! -e "$INSTALL_ROOT/current" && ! -e "$INSTALL_ROOT/releases" ]] ||
     fail 'normal uninstall retained managed code'
-[[ -f "$SELF_ROOT/vpsctl.sh" ]] || fail 'normal uninstall removed self state'
+[[ -f "$SELF_ROOT/manifest.tsv" && ! -e "$SELF_ROOT/vpsctl.sh" ]] || fail 'normal uninstall changed self cache'
 [[ -f "$ETC_MARKER" && -f "$STATE_MARKER" && -f "$LIBEXEC_MARKER" ]] ||
     fail 'normal uninstall removed protected feature data'
 

@@ -89,11 +89,8 @@ proxy_prompt_ip_strategy() {
 }
 
 proxy_choose_core_for_profile() {
-    local profile="$1" requested="${2:-}" core selected confirm_status=0 installed_count=0
+    local profile="$1" requested="${2:-}" core selected confirm_status=0
     local -a candidates=() supported=() choices=()
-    while IFS= read -r core; do
-        [[ -n "$core" ]] && installed_count=$((installed_count + 1))
-    done < <(proxy_installed_cores)
     while IFS= read -r core; do
         supported+=("$core")
         proxy_core_registered "$core" && candidates+=("$core")
@@ -150,14 +147,7 @@ proxy_choose_core_for_profile() {
             printf '%s' "$selected"
             ;;
         1)
-            if ((installed_count > 1)) && proxy_is_interactive; then
-                proxy_confirm "${profile} 仅由 $(proxy_core_label "${candidates[0]}") 提供，确认使用该内核？" || confirm_status=$?
-                if ((confirm_status != 0)); then
-                    [[ "$confirm_status" == "130" ]] && return 130
-                    vps_cmd_info "已取消添加节点"
-                    return 130
-                fi
-            fi
+            vps_cmd_info "${profile} 自动使用唯一已安装且兼容的内核：$(proxy_core_label "${candidates[0]}")" >&2
             printf '%s' "${candidates[0]}"
             ;;
         *)

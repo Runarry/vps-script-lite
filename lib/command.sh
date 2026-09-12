@@ -651,11 +651,9 @@ vps_cmd_ensure_tools() {
         IFS=' '
         printf '%s' "${missing[*]}"
     )"
-    if [[ "${VPSCTL_INSTALL_DEPS:-0}" != "1" ]]; then
-        if [[ "${VPSCTL_DRY_RUN:-0}" == "1" ]] || ! vps_cmd_is_interactive; then
-            vps_cmd_error "缺少工具：${missing_join}；请添加 --install-deps 允许安装依赖"
-            return 3
-        fi
+    if [[ "${VPSCTL_DRY_RUN:-0}" != "1" && "${VPSCTL_INSTALL_DEPS:-0}" != "1" ]] && ! vps_cmd_is_interactive; then
+        vps_cmd_error "缺少工具：${missing_join}；请添加 --install-deps 允许安装依赖"
+        return 3
     fi
     manager="$(vps_cmd_detect_package_manager)" || return $?
     for tool in "${missing[@]}"; do
@@ -669,7 +667,7 @@ vps_cmd_ensure_tools() {
         IFS=' '
         printf '%s' "${packages[*]}"
     )"
-    if [[ "${VPSCTL_INSTALL_DEPS:-0}" != 1 ]]; then
+    if [[ "${VPSCTL_DRY_RUN:-0}" != 1 && "${VPSCTL_INSTALL_DEPS:-0}" != 1 ]]; then
         vps_cmd_warning "缺少工具：${missing_join}；需要安装软件包：${packages_join}"
         if _vps_cmd_confirm_dependency_install; then
             :

@@ -139,13 +139,17 @@ tls_uninstall() {
             *) vps_cmd_error "uninstall 未知选项：$1"; return 2 ;;
         esac
     done
-    ((confirm)) || {
-        vps_cmd_error "uninstall 需要 --confirm-uninstall $TLS_UNINSTALL_TOKEN"
-        return 2
-    }
-    if ((purge)) && ((confirm_purge == 0)); then
-        vps_cmd_error "purge 还需要 --confirm-purge"
-        return 2
+    if ((purge)); then
+        ((confirm)) || {
+            vps_cmd_error "purge 需要 --confirm-uninstall $TLS_UNINSTALL_TOKEN"
+            return 2
+        }
+        ((confirm_purge)) || {
+            vps_cmd_error "purge 还需要 --confirm-purge"
+            return 2
+        }
+    elif ((confirm == 0)); then
+        vps_cmd_confirm "确认卸载 TLS 续期 timer？证书、私钥与备份会保留。" || return $?
     fi
     vps_cmd_require_root || return $?
     tls_ensure_tools uninstall flock || return $?

@@ -74,7 +74,8 @@ printf 'PubkeyAuthentication no\n' >"$disabled"
 sshd -t
 sshd -T >"$work/disabled"
 grep -qx 'pubkeyauthentication no' "$work/disabled"
-bash "$TEST_ROOT/bin/vpsctl" --no-color security access key add --user "$user" --public-key-file "$work/key.pub"
+ln -s key.pub "$work/key-link.pub"
+bash "$TEST_ROOT/bin/vpsctl" --no-color security access key add --user "$user" --public-key-file "$work/key-link.pub"
 sshd -T >"$work/after"
 grep -qx 'pubkeyauthentication yes' "$work/after"
 diff -u <(sed '/^pubkeyauthentication /d' "$work/disabled") <(sed '/^pubkeyauthentication /d' "$work/after")
@@ -85,4 +86,4 @@ sha256sum "$managed" "/home/$user/.ssh/authorized_keys" >"$work/first"
 bash "$TEST_ROOT/bin/vpsctl" --no-color security access key add --user "$user" --public-key-file "$work/key.pub"
 sha256sum "$managed" "/home/$user/.ssh/authorized_keys" >"$work/second"
 diff -u "$work/first" "$work/second"
-printf 'PASS: real key installation enables pubkey authentication, preserves policy, permits login, and is idempotent\n'
+printf 'PASS: linked public key installation enables pubkey authentication, preserves policy, permits login, and is idempotent\n'

@@ -202,7 +202,7 @@ vps_distribution_archive_path_allowed() {
     case "$domain" in
         core)
             case "$entry" in
-                VERSION | bin | bin/vpsctl | lib | lib/environment.sh | lib/registry.sh | lib/ui.sh | lib/command.sh | lib/ufw.sh | lib/distribution.sh | commands | commands/self | commands/self/*) return 0 ;;
+                VERSION | bin | bin/vpsctl | lib | lib/* | commands | commands/self | commands/self/*) return 0 ;;
             esac
             ;;
         network | system | security | service)
@@ -457,8 +457,23 @@ vps_distribution_require_self_mutation() {
     }
 }
 
+vps_distribution_validate_self_state_paths() {
+    local path
+    vps_distribution_require_no_symlink_components "$VPSCTL_SELF_STATE_ROOT" || return 3
+    [[ ! -e "$VPSCTL_SELF_STATE_ROOT" || -d "$VPSCTL_SELF_STATE_ROOT" ]] || {
+        vps_distribution_error 'self 状态路径不是目录'
+        return 3
+    }
+    for path in "$VPSCTL_SELF_STATE_ROOT/vpsctl.sh" "$VPSCTL_SELF_STATE_ROOT/manifest.tsv" "$VPSCTL_SELF_STATE_ROOT/entry.sha256"; do
+        if [[ -L "$path" || (-e "$path" && ! -f "$path") ]]; then
+            vps_distribution_error "self 缓存路径不是普通文件：$path"
+            return 3
+        fi
+    done
+}
+
 vps_distribution_validate_managed_install() {
-    local current target resolved manifest launcher_sha release_name target_suffix state_launcher_sha
+    local current target resolved manifest launcher_sha release_name target_suffix
     vps_distribution_require_no_symlink_components "$VPSCTL_INSTALL_ROOT" || {
         vps_distribution_error '安装根路径包含符号链接或不安全组件'
         return 3
@@ -504,12 +519,8 @@ vps_distribution_validate_managed_install() {
         vps_distribution_error '受管入口与当前 release manifest 不匹配'
         return 3
     }
-    vps_distribution_require_no_symlink_components "$VPSCTL_SELF_STATE_ROOT" || return 3
-    [[ -f "$VPSCTL_SELF_STATE_ROOT/vpsctl.sh" && ! -L "$VPSCTL_SELF_STATE_ROOT/vpsctl.sh" ]] || return 3
-    state_launcher_sha="$(vps_distribution_sha256 "$VPSCTL_SELF_STATE_ROOT/vpsctl.sh")" || return $?
-    [[ "${state_launcher_sha,,}" == "$VPS_DISTRIBUTION_LAUNCHER_SHA256" ]] || return 3
-    [[ -f "$VPSCTL_SELF_STATE_ROOT/manifest.tsv" && ! -L "$VPSCTL_SELF_STATE_ROOT/manifest.tsv" ]] || return 3
-    [[ "$(vps_distribution_sha256 "$manifest")" == "$(vps_distribution_sha256 "$VPSCTL_SELF_STATE_ROOT/manifest.tsv")" ]] || return 3
+    # Self metadata is a recoverable cache, not proof of release ownership.
+    vps_distribution_validate_self_state_paths
 }
 
 vps_distribution_confirm() {
@@ -620,11 +631,11 @@ vps_distribution_self_update_locked() {
     old_state_launcher="${work_root}/old-vpsctl.sh"
     old_state_manifest="${work_root}/old-manifest.tsv"
     old_state_sha="${work_root}/old-entry.sha256"
-    cp -p -- "$VPSCTL_SELF_STATE_ROOT/vpsctl.sh" "$old_state_launcher" || {
+    cp -p -- "$VPSCTL_MANAGED_ENTRY" "$old_state_launcher" || {
         rm -rf -- "$work_root"
         return 20
     }
-    cp -p -- "$VPSCTL_SELF_STATE_ROOT/manifest.tsv" "$old_state_manifest" || {
+    cp -p -- "$(vps_distribution_current_manifest)" "$old_state_manifest" || {
         rm -rf -- "$work_root"
         return 20
     }
@@ -642,8 +653,16 @@ vps_distribution_self_update_locked() {
     release_target="${VPSCTL_INSTALL_ROOT}/releases/${version}"
     if [[ -e "$release_target" || -L "$release_target" ]]; then
         if [[ "$(cd -- "$release_target" 2>/dev/null && pwd -P)" == "$(cd -- "$VPSCTL_PROJECT_ROOT" && pwd -P)" ]]; then
+            if ! mkdir -p -- "$VPSCTL_SELF_STATE_ROOT" ||
+                ! vps_distribution_atomic_install "$old_state_launcher" "$VPSCTL_SELF_STATE_ROOT/vpsctl.sh" 0755 ||
+                ! vps_distribution_atomic_install "$old_state_manifest" "$VPSCTL_SELF_STATE_ROOT/manifest.tsv" 0644 ||
+                ! vps_distribution_atomic_install "$old_state_sha" "$VPSCTL_SELF_STATE_ROOT/entry.sha256" 0600; then
+                rm -rf -- "$work_root"
+                vps_distribution_error 'self 缓存修复未完成；当前入口和 release 未改变，可重试 self update'
+                return 20
+            fi
             rm -rf -- "$work_root"
-            printf '当前已是分发版本 %s。\n' "$version"
+            printf '当前已是分发版本 %s；self 缓存已同步。\n' "$version"
             return 0
         fi
         vps_distribution_error "目标 release 已存在，拒绝覆盖：${version}"

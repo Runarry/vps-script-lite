@@ -85,9 +85,9 @@ bash "$tmp_dir/vpsctl.sh" --verified-manifest "$tmp_dir/vpsctl-manifest.tsv"
 - 当前版本指针：`/usr/local/lib/vpsctl/current`
 - 安装器、自更新和分发缓存元数据：`/var/lib/vpsctl/self/`
 
-`self update` 跨版本更新完整提交成功后，会删除所有可验证归属的受管历史 release，仅保留当前版本，不保留自动回退版本；需要回退时重新安装指定 Release。新版本提交完成前发生失败时仍保留原版本；若提交后历史版本清理失败，新版本保持激活，命令报错并返回 `30`，下次成功跨版本更新会再次尝试清理。同版本更新不执行清理，临时目录、不受管或异常条目以及功能状态与备份均不在此次清理范围内。
+`self update` 跨版本更新完整提交成功后，会删除所有可验证归属的受管历史 release，仅保留当前版本，不保留自动回退版本；需要回退时重新安装指定 Release。新版本提交完成前发生失败时仍保留原版本；若提交后历史版本清理失败，新版本保持激活，命令报错并返回 `30`，下次成功跨版本更新会再次尝试清理。同版本更新不执行清理，只同步 self 缓存；临时目录、不受管或异常条目以及功能状态与备份均不在清理范围内。self 启动器、manifest 和入口校验值是可恢复缓存，缺失或普通文件内容损坏不阻断更新与普通卸载；更新从当前已校验入口及 release manifest 保存回滚材料并修复缓存。当前代码或入口损坏、归属不明，以及缓存路径为链接或异常文件类型仍会拒绝。
 
-`core` 常驻安装；`network`、`system`、`security`、`service` 与 `test` 按领域拆分。首次调用某领域时，只从当前分发版本对应的同一个 GitHub Release 下载该领域资产，按 `vpsctl-manifest.tsv` 的 SHA-256 校验后缓存；不同版本的 core 与领域资产不得混用。
+`core` 常驻安装；`network`、`system`、`security`、`service` 与 `test` 按领域拆分。首次调用某领域时，只从当前分发版本对应的同一个 GitHub Release 下载该领域资产，按 `vpsctl-manifest.tsv` 的 SHA-256 校验后缓存；不同版本的 core 与领域资产不得混用。core 允许 `lib/` 下新增公共库文件，构建仍显式选择发布文件，并保留入口完整性、哈希、路径边界和文件类型检查。
 
 如果旧版升级后启动报 `current/bin/vpsctl: Permission denied`，可能是 core 入口缺少执行位。可在 root shell 中恢复并检查：
 
@@ -101,11 +101,11 @@ vpsctl --version
 卸载命令为：
 
 ```text
-vpsctl self uninstall --confirm-uninstall
+vpsctl --yes self uninstall
 vpsctl self uninstall --purge --confirm-uninstall --confirm-purge
 ```
 
-普通卸载删除分发入口和已安装的分发文件，但不触碰 `/etc/vpsctl/`、功能状态与备份、各功能已经安装的组件或 `/usr/local/libexec/`。交互菜单会要求现场确认；非交互调用必须提供 `--confirm-uninstall`，purge 还必须提供 `--confirm-purge`，全局 `--yes` 不能替代这些非交互确认标志。`--purge` 具有相同的功能数据保护边界，只额外删除 `/var/lib/vpsctl/self/` 中的 self 元数据。
+普通卸载删除分发入口和已安装的分发文件，但不触碰 `/etc/vpsctl/`、功能状态与备份、各功能已经安装的组件或 `/usr/local/libexec/`。普通卸载在交互模式下确认一次，直接调用可用全局 `--yes` 或兼容的 `--confirm-uninstall` 授权。purge 的交互确认保持不变，非交互调用仍必须同时提供 `--confirm-uninstall --confirm-purge`，全局 `--yes` 不能替代这两个 purge 确认标志。`--purge` 具有相同的功能数据保护边界，只额外删除 `/var/lib/vpsctl/self/` 中的 self 元数据。
 
 ## 从源码树运行主管理脚本
 
@@ -178,7 +178,7 @@ bash bin/vpsctl service proxy update --core xray --version vX.Y.Z
 
 在主管理菜单中选择 BBR、DNS、IP 地址族偏好、RFW、内核管理、访问管理、Fail2ban、TLS 证书、代理管理或两项服务器测试后，会直接进入对应功能入口，不再经过“命令详情”或输入 `r` 才运行的中间页；菜单选项执行的是真实动作，不提供演练、依赖授权、自动同意、非交互、静默或详细日志等执行型全局参数开关。系统内核菜单以官方标准内核为推荐安装项，并通过编号选择具体切换或卸载版本；代理内核的安装和更新会用编号选择最新稳定版（推荐）、最新预发布版或精确 Release tag。`--dry-run`、`--install-deps`、`--yes`、`--non-interactive`、`--quiet`、`--verbose` 只用于直接功能 CLI，并写在领域之前；服务器测试明确拒绝 `--dry-run`，也不承诺非交互自动化。子动作及选项见[网络设置](docs/network-settings.md)、[系统内核管理](docs/kernel-management.md)、[访问管理](docs/access-management.md)、[Fail2ban 管理](docs/fail2ban-management.md)、[TLS 证书管理](docs/tls-management.md)、[代理管理](docs/proxy-management.md)和[服务器测试](docs/server-testing.md)。机器可读格式开关、`--force` 和 `--confirm-*` 确认标志同样只用于直接 CLI，菜单中的危险动作改用明确的交互提示和必要的强确认短语。
 
-依赖检查按用户当前选择的动作延迟执行：只有该动作实际缺少可安装工具时，真实执行的交互流程才询问是否安装，不会为其他菜单动作预装依赖；非交互调用和 `--dry-run` 依赖计划仍必须显式提供 `--install-deps`。该授权支持 `apt-get`、`dnf5`、`dnf`、`yum`、`apk`、`pacman` 和 `zypper`，实际安装需要 root，也不会绕过 Linux、init 系统、CPU 架构、内核版本、XDP/BPF 或功能本体等平台门禁。它与 `--dry-run` 组合时只展示固定的软件包安装命令，不实际安装，部分动作会在依赖计划后安全停止并提示安装后重跑。上例中的 `--core` 是直接命令和非交互调用保留的高级消歧参数：只有一个符合条件的内核时通常可自动解析，存在多个候选时应显式指定。
+依赖检查按用户当前选择的动作延迟执行：只有该动作实际缺少可安装工具时，真实执行的交互流程才询问是否安装，不会为其他菜单动作预装依赖；真实非交互安装仍必须显式提供 `--install-deps`；`--dry-run` 会直接展示缺失依赖和安装计划，无需该授权且不询问。该授权支持 `apt-get`、`dnf5`、`dnf`、`yum`、`apk`、`pacman` 和 `zypper`，实际安装需要 root，也不会绕过 Linux、init 系统、CPU 架构、内核版本、XDP/BPF 或功能本体等平台门禁。它与 `--dry-run` 组合时只展示固定的软件包安装命令，不实际安装，部分动作会在依赖计划后安全停止并提示安装后重跑。上例中的 `--core` 是直接命令和非交互调用保留的高级消歧参数：只有一个符合条件的内核时通常可自动解析，存在多个候选时应显式指定。
 
 ## 当前状态
 

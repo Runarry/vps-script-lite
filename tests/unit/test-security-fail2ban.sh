@@ -252,11 +252,42 @@ test_adoption_restore_and_uninstall() {
     assert_file_contains "$SYSTEM_ROOT/var/lib/vpsctl/backups/security/fail2ban/$backup/manifest" $'lifecycle\trestored' "restore lifecycle"
 
     run_fail2ban install --adopt-existing
-    assert_status 2 "uninstall confirmation token" run_fail2ban uninstall --confirm-uninstall WRONG
-    run_fail2ban uninstall --confirm-uninstall REMOVE-VPSCTL-FAIL2BAN
+    VPSCTL_ASSUME_YES=0 assert_status 3 "uninstall requires noninteractive authorization" run_fail2ban uninstall
+    assert_status 2 "yes rejects wrong uninstall token" run_fail2ban --yes uninstall --confirm-uninstall WRONG
+    assert_status 2 "yes rejects missing uninstall token" run_fail2ban --yes uninstall --confirm-uninstall
+    assert_status 2 "yes rejects empty uninstall token" run_fail2ban --yes uninstall --confirm-uninstall ''
+    [[ -f "$config" && -e "$SYSTEM_ROOT/run/fail2ban-active" ]] || fail "rejected uninstall changed config or service"
+    VPSCTL_ASSUME_YES=0 assert_status 0 "uninstall dry-run needs no confirmation" run_fail2ban --dry-run uninstall
+    [[ -f "$config" ]] || fail "uninstall dry-run removed config"
+    VPSCTL_ASSUME_YES=0 run_fail2ban uninstall --confirm-uninstall REMOVE-VPSCTL-FAIL2BAN
+    [[ ! -e "$config" ]] || fail "legacy uninstall retained managed config"
+    run_fail2ban install --adopt-existing
+    VPSCTL_ASSUME_YES=0 run_fail2ban --yes uninstall
     [[ ! -e "$config" ]] || fail "uninstall retained managed config"
     [[ -e "$SYSTEM_ROOT/run/fail2ban-active" ]] || fail "uninstall stopped service"
     [[ -d "$SYSTEM_ROOT/var/lib/vpsctl/backups/security/fail2ban" ]] || fail "uninstall removed backups"
+}
+
+test_uninstall_menu_confirmation() {
+    local config="$SYSTEM_ROOT/etc/fail2ban/jail.d/99-vpsctl-sshd.local" command output before confirmations status=0
+    command -v script >/dev/null 2>&1 || fail "uninstall menu tests require util-linux script"
+    reset_system
+    run_fail2ban install
+    before="$(sha256sum "$config" "$SYSTEM_ROOT/var/lib/vpsctl/security/fail2ban/config.sha256" "$SYSTEM_ROOT/var/lib/vpsctl/security/fail2ban/metadata")"
+    printf -v command 'env VPSCTL_ASSUME_YES=0 VPSCTL_NON_INTERACTIVE=0 bash %q --no-color' "$TEST_ROOT/commands/security/fail2ban.sh"
+    output="$(printf '11\nn\n12\n' | script -q -e -c "$command" /dev/null 2>&1)" || status=$?
+    [[ "$status" == 1 ]] || fail "cancel uninstall expected 1, got $status: $output"
+    [[ "$before" == "$(sha256sum "$config" "$SYSTEM_ROOT/var/lib/vpsctl/security/fail2ban/config.sha256" "$SYSTEM_ROOT/var/lib/vpsctl/security/fail2ban/metadata")" ]] || fail "cancelled uninstall changed config or state"
+    [[ -e "$SYSTEM_ROOT/run/fail2ban-active" ]] || fail "cancelled uninstall stopped service"
+    status=0
+    output="$(printf '11\ny\n12\n' | script -q -e -c "$command" /dev/null 2>&1)" || status=$?
+    [[ "$status" == 0 ]] || fail "menu uninstall failed with $status: $output"
+    confirmations="$(grep -Fo '输入 y 确认' <<<"$output" | grep -c . || true)"
+    [[ "$confirmations" == 1 ]] || fail "menu uninstall did not ask exactly once: $output"
+    [[ "$output" != *'请输入 REMOVE-VPSCTL-FAIL2BAN'* ]] || fail "menu uninstall requested a token"
+    [[ ! -e "$config" ]] || fail "menu uninstall retained managed config"
+    [[ -e "$SYSTEM_ROOT/run/fail2ban-active" ]] || fail "menu uninstall stopped service"
+    [[ -d "$SYSTEM_ROOT/var/lib/vpsctl/backups/security/fail2ban" ]] || fail "menu uninstall removed backups"
 }
 
 test_missing_backend_package_plan() {
@@ -288,6 +319,7 @@ test_cli_and_install
 test_config_ignore_sync_and_services
 test_drift_rollback_and_verify_cleanup
 test_adoption_restore_and_uninstall
+test_uninstall_menu_confirmation
 test_missing_backend_package_plan
 test_plain_version_output
 test_readonly_status_without_systemd

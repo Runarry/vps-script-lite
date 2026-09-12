@@ -75,8 +75,9 @@ tls_usage() {
   tls.sh [global-options] renew [--id ID | --all] [--force]
   tls.sh [global-options] credentials --id ID --dns-credential-file FILE
   tls.sh [global-options] timer status|enable|disable
+  tls.sh [global-options] uninstall [--confirm-uninstall REMOVE-VPSCTL-TLS]
   tls.sh [global-options] uninstall --confirm-uninstall REMOVE-VPSCTL-TLS
-      [--purge --confirm-purge]
+      --purge --confirm-purge
 
 全局选项：
   --dry-run --install-deps --yes --non-interactive --quiet --verbose --no-color
@@ -84,6 +85,9 @@ tls_usage() {
 
 导入、查看不依赖 systemd。续期 timer 仅支持 systemd。ACME 使用钉死版本的
 lego（x86_64/aarch64）。私钥不会写入 stdout、日志或 JSON。
+普通卸载只移除续期 timer，可交互确认或使用全局 --yes，也兼容原确认令牌。
+彻底清除库存仍须同时提供 --confirm-uninstall 令牌、--purge 和 --confirm-purge；
+--yes 不能替代这些参数，备份始终保留。
 EOF
 }
 
@@ -227,12 +231,11 @@ tls_menu() {
                 ;;
             uninstall)
                 action="$(vps_cmd_prompt_select "卸载范围" timer timer "仅移除 timer" purge "清除证书库存")" || continue
-                vps_cmd_confirm_token "卸载 TLS 管理" "$TLS_UNINSTALL_TOKEN" || continue
                 if [[ "$action" == purge ]]; then
-                    vps_cmd_confirm_token "彻底清除证书库存" "$TLS_UNINSTALL_TOKEN" || continue
+                    vps_cmd_confirm_token "卸载续期 timer 和 lego，清除证书、私钥、ACME 账户及 DNS 凭证（保留备份）" "$TLS_UNINSTALL_TOKEN" || continue
                     tls_uninstall --confirm-uninstall "$TLS_UNINSTALL_TOKEN" --purge --confirm-purge || status=$?
                 else
-                    tls_uninstall --confirm-uninstall "$TLS_UNINSTALL_TOKEN" || status=$?
+                    tls_uninstall || status=$?
                 fi
                 ;;
             quit) return "$status" ;;

@@ -134,7 +134,7 @@ ln -s "${TEST_FAKE_BIN}/sysctl" "${TEST_NO_MODPROBE_BIN}/sysctl"
 ln -s "$TEST_BASE64" "${TEST_NO_MODPROBE_BIN}/base64"
 cat >"${TEST_NO_MODPROBE_BIN}/apt-get" <<'EOF'
 #!/usr/bin/env bash
-exit 0
+printf '%s\n' "$*" >>"${VPSCTL_SYSTEM_ROOT}/apt-get.log"
 EOF
 chmod +x "${TEST_NO_MODPROBE_BIN}/apt-get"
 
@@ -301,9 +301,17 @@ test_dry_run() {
     test_assert_contains "$RUN_OUTPUT" "tc qdisc replace dev eth0 root fq_codel" "live qdisc plan"
 
     printf 'reno cubic\n' >"$available_path"
-    RUN_BBR_PATH="$TEST_NO_MODPROBE_BIN" run_bbr --dry-run --yes set --algorithm bbr --qdisc fq
-    test_assert_equal 3 "$RUN_STATUS" "missing modprobe dry-run exit code"
-    test_assert_contains "$RUN_OUTPUT" "--install-deps" "missing modprobe install hint"
+    RUN_BBR_PATH="$TEST_NO_MODPROBE_BIN" run_bbr --yes set --algorithm bbr --qdisc fq
+    test_assert_equal 3 "$RUN_STATUS" "missing dependency real execution requires install authorization"
+    test_assert_contains "$RUN_OUTPUT" "--install-deps" "missing dependency real execution install hint"
+    [[ ! -e "${TEST_SYSTEM_ROOT}/apt-get.log" ]] || test_fail "unauthorized dependency check executed package manager"
+
+    RUN_BBR_PATH="$TEST_NO_MODPROBE_BIN" run_bbr --dry-run set --algorithm bbr --qdisc fq
+    test_assert_equal 0 "$RUN_STATUS" "missing modprobe dry-run exit code"
+    test_assert_contains "$RUN_OUTPUT" "缺少工具：modprobe" "missing modprobe dependency summary"
+    test_assert_contains "$RUN_OUTPUT" "apt-get update" "missing modprobe dependency refresh plan"
+    test_assert_contains "$RUN_OUTPUT" "apt-get install -y --no-install-recommends kmod" "missing modprobe dependency install plan"
+    test_assert_contains "$RUN_OUTPUT" "重新运行以查看完整计划" "missing modprobe dependency stop message"
     test_assert_not_contains "$RUN_OUTPUT" "变更失败，正在恢复" "missing modprobe dry-run rollback warning"
     test_assert_not_contains "$RUN_OUTPUT" "net.ipv4.tcp_congestion_control=cubic" "missing modprobe dry-run rollback plan"
 
@@ -314,6 +322,10 @@ test_dry_run() {
     test_assert_contains "$RUN_OUTPUT" "重新运行以查看完整计划" "planned dependency stop message"
     test_assert_not_contains "$RUN_OUTPUT" "变更失败，正在恢复" "planned dependency rollback warning"
     test_assert_not_contains "$RUN_OUTPUT" "原子写入" "planned dependency managed write"
+    [[ ! -e "${TEST_SYSTEM_ROOT}/apt-get.log" ]] || test_fail "dependency plan executed package manager"
+    [[ ! -e "${TEST_SYSTEM_ROOT}/modprobe.log" ]] || test_fail "dependency plan loaded a module"
+    test_assert_equal cubic "$(<"${TEST_SYSTEM_ROOT}/proc/sys/net/ipv4/tcp_congestion_control")" "dependency plan algorithm"
+    test_assert_equal fq_codel "$(<"${TEST_SYSTEM_ROOT}/proc/sys/net/core/default_qdisc")" "dependency plan qdisc"
     [[ ! -e "${TEST_SYSTEM_ROOT}/etc/sysctl.d/90-vpsctl-bbr.conf" ]] || test_fail "planned dependency wrote sysctl config"
     [[ ! -e "${TEST_SYSTEM_ROOT}/etc/modules-load.d/90-vpsctl-bbr.conf" ]] || test_fail "planned dependency wrote modules config"
     [[ ! -e "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/network/bbr/original.conf" ]] || test_fail "planned dependency saved original state"

@@ -66,6 +66,8 @@ make_core_asset() {
     for required in status update uninstall; do
         printf '#!/usr/bin/env bash\nexit 0\n' >"$build/commands/self/${required}.sh"
     done
+    mkdir -p "$build/lib/nested"
+    printf '# new shared helper\n' >"$build/lib/nested/future-helper.sh"
     tar -C "$build" -czf "${TEST_ASSETS}/vpsctl-core-${version}.tar.gz" VERSION bin lib commands
 }
 
@@ -184,6 +186,8 @@ test_manual_update_is_atomic_and_versioned() (
 
     for failed_destination in "$TEST_INSTALL_ROOT/current" "$TEST_ENTRY" \
         "$TEST_SELF_ROOT/manifest.tsv" "$TEST_SELF_ROOT/vpsctl.sh" "$TEST_SELF_ROOT/entry.sha256"; do
+        rm -f -- "$TEST_SELF_ROOT/vpsctl.sh"
+        printf 'corrupt cache\n' >"$TEST_SELF_ROOT/manifest.tsv"
         status=0
         move_failed=0
         mv() {
@@ -200,10 +204,14 @@ test_manual_update_is_atomic_and_versioned() (
         [[ -d "$old_release" && -f "$history/.vpsctl-managed-release" ]] || fail 'activation failure removed release history'
         [[ ! -e "$new_release" && ! -e "$TEST_INSTALL_ROOT/.self-update.lock" ]] || fail 'activation failure left release or lock'
         vps_distribution_validate_managed_install || fail 'activation failure did not restore managed metadata'
+        if [[ "$failed_destination" != "$TEST_INSTALL_ROOT/current" ]]; then
+            assert_self_cache_matches
+        fi
     done
 
     status=0
     umask 077
+    rm -rf -- "$TEST_SELF_ROOT"
     output="$(vps_distribution_self_update 0.2.0)" || fail 'manual update failed'
     assert_contains "$output" '受管历史 release 已清理' 'successful update cleanup message'
     [[ "$(readlink "$TEST_INSTALL_ROOT/current")" == "$new_release" ]] || fail 'current did not switch to requested release'
@@ -212,11 +220,13 @@ test_manual_update_is_atomic_and_versioned() (
     assert_equal 644 "$(stat -c %a "$new_release/.release/manifest.tsv")" 'updated manifest permissions'
     [[ ! -e "$old_release" && ! -e "$history" ]] || fail 'update retained a managed historical release'
     [[ -f "$new_release/commands/network/bbr.sh" ]] || fail 'update did not prefetch cached domain'
+    [[ -f "$new_release/lib/nested/future-helper.sh" ]] || fail 'update rejected new shared helper'
     assert_equal 0.2.0 "$(find "$TEST_INSTALL_ROOT/releases" -mindepth 1 -maxdepth 1 -printf '%f\n')" 'only current release remains'
     [[ "$(sha_file "$TEST_ENTRY")" == "$launcher_sha" ]] || fail 'managed launcher was not updated'
 
     VPSCTL_PROJECT_ROOT="$new_release"
     vps_distribution_validate_managed_install || fail 'successful update left inconsistent metadata'
+    assert_self_cache_matches
     mkdir -p "$history"
     printf 'Runarry/vps-script-lite\t0.0.9\n' >"$history/.vpsctl-managed-release"
     prepare_update_assets 0.3.0
@@ -369,6 +379,70 @@ prepare_managed_install() {
     ln -s "$release" "$TEST_INSTALL_ROOT/current"
 }
 
+assert_self_cache_matches() {
+    assert_equal "$(sha_file "$TEST_ENTRY")" "$(sha_file "$TEST_SELF_ROOT/vpsctl.sh")" 'cached launcher'
+    assert_equal "$(sha_file "$VPSCTL_PROJECT_ROOT/.release/manifest.tsv")" "$(sha_file "$TEST_SELF_ROOT/manifest.tsv")" 'cached manifest'
+    assert_equal "$(sha_file "$TEST_ENTRY")" "$(<"$TEST_SELF_ROOT/entry.sha256")" 'cached entry digest'
+}
+
+test_self_cache_repair() (
+    local release="$TEST_INSTALL_ROOT/releases/0.1.0" history="$TEST_INSTALL_ROOT/releases/0.0.9"
+    local scenario path status entry_sha
+    rm -rf -- "$TEST_INSTALL_ROOT" "$TEST_SELF_ROOT"
+    mkdir -p "$TEST_INSTALL_ROOT/releases" "$TEST_SELF_ROOT"
+    prepare_managed_install "$release" 0.1.0
+    mkdir -p "$history"
+    printf 'Runarry/vps-script-lite\t0.0.9\n' >"$history/.vpsctl-managed-release"
+    VPSCTL_DISTRIBUTED=1
+    VPSCTL_PROJECT_ROOT="$release"
+    entry_sha="$(sha_file "$TEST_ENTRY")"
+    cp -- "$release/.release/manifest.tsv" "$TEST_ASSETS/vpsctl-manifest.tsv"
+    vps_distribution_download() { cp -- "${TEST_ASSETS}/${1##*/}" "$2"; }
+    for scenario in missing-root missing-launcher corrupt-manifest corrupt-digest; do
+        case "$scenario" in
+            missing-root) rm -rf -- "$TEST_SELF_ROOT" ;;
+            missing-launcher) rm -- "$TEST_SELF_ROOT/vpsctl.sh" ;;
+            corrupt-manifest) printf 'corrupt\n' >"$TEST_SELF_ROOT/manifest.tsv" ;;
+            corrupt-digest) printf 'corrupt\n' >"$TEST_SELF_ROOT/entry.sha256" ;;
+        esac
+        vps_distribution_self_update 0.1.0 >/dev/null || fail "same-version cache repair: $scenario"
+        assert_self_cache_matches
+        assert_equal "$release" "$(readlink "$TEST_INSTALL_ROOT/current")" 'cache repair current'
+        assert_equal "$entry_sha" "$(sha_file "$TEST_ENTRY")" 'cache repair entry'
+        [[ -f "$history/.vpsctl-managed-release" ]] || fail 'cache repair removed history'
+    done
+    for path in vpsctl.sh manifest.tsv entry.sha256; do
+        rm -- "$TEST_SELF_ROOT/$path"
+        status=0
+        mv() {
+            [[ "${*: -1}" != "$TEST_SELF_ROOT/$path" ]] || return 1
+            command mv "$@"
+        }
+        vps_distribution_self_update 0.1.0 >/dev/null 2>&1 || status=$?
+        unset -f mv
+        assert_equal 20 "$status" 'cache repair write failure'
+        assert_equal "$release" "$(readlink "$TEST_INSTALL_ROOT/current")" 'failed cache repair current'
+        assert_equal "$entry_sha" "$(sha_file "$TEST_ENTRY")" 'failed cache repair entry'
+        [[ ! -e "$TEST_INSTALL_ROOT/.self-update.lock" ]] || fail 'failed cache repair retained lock'
+        vps_distribution_self_update 0.1.0 >/dev/null || fail 'cache repair retry'
+        assert_self_cache_matches
+    done
+    for path in vpsctl.sh manifest.tsv entry.sha256; do
+        rm -- "$TEST_SELF_ROOT/$path"
+        ln -s "$TEST_ENTRY" "$TEST_SELF_ROOT/$path"
+        status=0
+        vps_distribution_self_update 0.1.0 >/dev/null 2>&1 || status=$?
+        assert_equal 3 "$status" 'cache symlink rejected'
+        rm -- "$TEST_SELF_ROOT/$path"
+        mkdir "$TEST_SELF_ROOT/$path"
+        status=0
+        vps_distribution_self_uninstall 0 >/dev/null 2>&1 || status=$?
+        assert_equal 3 "$status" 'cache directory rejected'
+        rmdir "$TEST_SELF_ROOT/$path"
+    done
+    [[ -f "$TEST_ENTRY" ]] || fail 'unsafe cache check removed entry'
+)
+
 test_uninstall_preserves_feature_state() (
     local release="${TEST_INSTALL_ROOT}/releases/0.2.0"
     rm -f -- "$TEST_INSTALL_ROOT/current"
@@ -377,21 +451,49 @@ test_uninstall_preserves_feature_state() (
     touch "$TEST_SYSTEM_ROOT/etc/vpsctl/keep" "$TEST_SYSTEM_ROOT/var/lib/vpsctl/network/keep" "$TEST_SYSTEM_ROOT/usr/local/libexec/keep"
     VPSCTL_DISTRIBUTED=1
     VPSCTL_PROJECT_ROOT="$release"
+    rm -f -- "$TEST_SELF_ROOT/vpsctl.sh"
+    printf 'corrupt cache\n' >"$TEST_SELF_ROOT/manifest.tsv"
     vps_distribution_self_uninstall 0 >/dev/null || fail 'normal uninstall failed'
     [[ ! -e "$TEST_ENTRY" && ! -e "$TEST_INSTALL_ROOT/current" && ! -e "$TEST_INSTALL_ROOT/releases" ]] || fail 'managed install remained'
-    [[ -e "$TEST_SELF_ROOT/vpsctl.sh" ]] || fail 'normal uninstall removed self state'
+    [[ ! -e "$TEST_SELF_ROOT/vpsctl.sh" ]] || fail 'normal uninstall repaired an unused cache'
+    assert_equal 'corrupt cache' "$(<"$TEST_SELF_ROOT/manifest.tsv")" 'normal uninstall preserves self state'
     [[ -e "$TEST_SYSTEM_ROOT/etc/vpsctl/keep" && -e "$TEST_SYSTEM_ROOT/var/lib/vpsctl/network/keep" && -e "$TEST_SYSTEM_ROOT/usr/local/libexec/keep" ]] || fail 'normal uninstall removed preserved data'
 )
 
 test_uninstall_confirmation_contract() (
-    local status=0
-    VPSCTL_DISTRIBUTED=0 VPSCTL_PROJECT_ROOT="$TEST_ROOT" VPSCTL_NON_INTERACTIVE=1 VPSCTL_ASSUME_YES=1 \
-        bash "$TEST_ROOT/commands/self/uninstall.sh" >/dev/null 2>&1 || status=$?
-    assert_equal 3 "$status" 'global yes cannot replace uninstall confirmation flag'
-    status=0
-    VPSCTL_DISTRIBUTED=0 VPSCTL_PROJECT_ROOT="$TEST_ROOT" VPSCTL_NON_INTERACTIVE=1 VPSCTL_ASSUME_YES=1 \
-        bash "$TEST_ROOT/commands/self/uninstall.sh" --purge --confirm-uninstall >/dev/null 2>&1 || status=$?
-    assert_equal 3 "$status" 'purge requires its own confirmation flag'
+    local status authorization args command output release="$TEST_INSTALL_ROOT/releases/0.2.0"
+    for authorization in yes legacy; do
+        mkdir -p "$TEST_INSTALL_ROOT/releases" "$TEST_SELF_ROOT"
+        rm -f -- "$TEST_INSTALL_ROOT/current"
+        prepare_managed_install "$release" 0.2.0
+        cp -- "$TEST_ROOT/lib/distribution.sh" "$release/lib/distribution.sh"
+        export VPSCTL_DISTRIBUTED=1 VPSCTL_PROJECT_ROOT="$release" VPSCTL_NON_INTERACTIVE=1
+        status=0
+        VPSCTL_ASSUME_YES=0 bash "$TEST_ROOT/commands/self/uninstall.sh" >/dev/null 2>&1 || status=$?
+        assert_equal 3 "$status" 'noninteractive uninstall requires authorization'
+        for args in '--purge' '--purge --confirm-uninstall' '--purge --confirm-purge'; do
+            local -a parsed=()
+            IFS=' ' read -r -a parsed <<<"$args"
+            status=0
+            VPSCTL_ASSUME_YES=1 bash "$TEST_ROOT/commands/self/uninstall.sh" "${parsed[@]}" >/dev/null 2>&1 || status=$?
+            assert_equal 3 "$status" 'global yes cannot replace purge confirmation flags'
+        done
+        [[ -f "$TEST_ENTRY" ]] || fail 'unconfirmed uninstall changed installation'
+        if [[ "$authorization" == yes ]]; then
+            printf -v command 'env VPSCTL_ASSUME_YES=0 VPSCTL_NON_INTERACTIVE=0 bash %q' "$TEST_ROOT/commands/self/uninstall.sh"
+            status=0
+            output="$(printf 'n\n' | script -q -e -c "$command" /dev/null 2>&1)" || status=$?
+            assert_equal 130 "$status" 'interactive uninstall cancellation'
+            assert_contains "$output" '确认卸载受管 vpsctl' 'interactive uninstall prompt'
+            [[ -f "$TEST_ENTRY" && -d "$release" ]] || fail 'cancelled uninstall changed installation'
+        fi
+        if [[ "$authorization" == yes ]]; then
+            VPSCTL_ASSUME_YES=1 bash "$TEST_ROOT/commands/self/uninstall.sh" >/dev/null || fail 'global yes uninstall'
+        else
+            VPSCTL_ASSUME_YES=0 bash "$TEST_ROOT/commands/self/uninstall.sh" --confirm-uninstall >/dev/null || fail 'legacy uninstall flag'
+        fi
+        [[ ! -e "$TEST_ENTRY" ]] || fail 'authorized uninstall kept entry'
+    done
 )
 
 test_purge_removes_only_self_state() (
@@ -442,6 +544,26 @@ test_core_ufw_library_compatibility() (
     vps_distribution_validate_domain_tree "$tree" core || fail 'complete UFW core rejected'
 )
 
+test_core_archive_boundaries() (
+    local tree="$TEST_TEMP/core-boundaries" archive="$TEST_TEMP/core-boundaries.tar.gz" path status
+    mkdir -p "$tree/lib/nested"
+    printf '# helper\n' >"$tree/lib/nested/helper.sh"
+    tar -C "$tree" -czf "$archive" lib
+    vps_distribution_validate_archive "$archive" core || fail 'nested shared helper rejected'
+    for path in /etc/passwd lib/../outside .release/manifest.tsv commands/network/bbr.sh bin/other; do
+        status=0
+        tar -C "$tree" --transform="s|lib/nested/helper.sh|$path|" -czf "$archive" lib/nested/helper.sh
+        vps_distribution_validate_archive "$archive" core >/dev/null 2>&1 || status=$?
+        assert_equal 10 "$status" "out-of-bounds core path rejected: $path"
+    done
+    ln -s helper.sh "$tree/lib/nested/link.sh"
+    tar -C "$tree" -czf "$archive" lib
+    status=0
+    vps_distribution_validate_archive "$archive" core >/dev/null 2>&1 || status=$?
+    assert_equal 10 "$status" 'core symlink rejected'
+)
+
+test_core_archive_boundaries
 test_core_ufw_library_compatibility
 test_system_bundle_requires_kernel_modules
 test_source_mode_is_offline_and_mutations_refuse
@@ -453,6 +575,7 @@ test_update_cleanup_skips_unmanaged_entries
 test_update_cleanup_failure_keeps_new_release_and_retries
 test_stale_lock_is_recovered
 test_testing_root_cannot_target_production
+test_self_cache_repair
 test_uninstall_preserves_feature_state
 test_uninstall_confirmation_contract
 test_purge_removes_only_self_state

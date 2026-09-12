@@ -296,18 +296,70 @@ test_dns_credentials_and_secrets() {
 }
 
 test_uninstall_keeps_backups() {
-    local output id
+    local output id timer="${SYSTEM_ROOT}/etc/systemd/system/vpsctl-tls-renew.timer"
     reset_system
     make_cert keep.example
     output="$(run_tls import --name keep --cert-file "${FIXTURES}/keep.example/cert.pem" \
         --key-file "${FIXTURES}/keep.example/key.pem")"
     id="$(imported_id "$output")"
-    assert_status 2 "uninstall token required" run_tls uninstall
-    run_tls uninstall --confirm-uninstall REMOVE-VPSCTL-TLS
+    run_tls timer enable
+    VPSCTL_ASSUME_YES=0 assert_status 3 "uninstall requires noninteractive authorization" run_tls uninstall
+    assert_status 2 "yes rejects wrong uninstall token" run_tls --yes uninstall --confirm-uninstall WRONG
+    assert_status 2 "yes rejects missing uninstall token" run_tls --yes uninstall --confirm-uninstall
+    assert_status 2 "yes rejects empty uninstall token" run_tls --yes uninstall --confirm-uninstall ''
+    assert_status 2 "yes cannot authorize purge" run_tls --yes uninstall --purge
+    assert_status 2 "purge confirmation still needs uninstall token" run_tls --yes uninstall --purge --confirm-purge
+    assert_status 2 "purge token still needs purge confirmation" run_tls --yes uninstall --purge --confirm-uninstall REMOVE-VPSCTL-TLS
+    assert_file "$timer" "rejected uninstall kept timer"
+    assert_file "${SYSTEM_ROOT}/run/tls-timer-active" "rejected uninstall kept timer running"
+    assert_file "${SYSTEM_ROOT}/var/lib/vpsctl/security/tls/live/${id}/fullchain.pem" "rejected purge kept cert"
+    VPSCTL_ASSUME_YES=0 assert_status 0 "plain uninstall dry-run needs no confirmation" run_tls --dry-run uninstall
+    assert_file "$timer" "dry-run kept timer"
+    VPSCTL_ASSUME_YES=0 run_tls --yes uninstall
+    [[ ! -e "$timer" ]] || fail "yes uninstall retained timer"
+    assert_file "${SYSTEM_ROOT}/var/lib/vpsctl/security/tls/live/${id}/fullchain.pem" "yes uninstall kept cert"
+    run_tls timer enable
+    VPSCTL_ASSUME_YES=0 run_tls uninstall --confirm-uninstall REMOVE-VPSCTL-TLS
+    [[ ! -e "$timer" ]] || fail "legacy uninstall retained timer"
     assert_file "${SYSTEM_ROOT}/var/lib/vpsctl/security/tls/live/${id}/fullchain.pem" "plain uninstall kept cert"
-    run_tls uninstall --purge --confirm-uninstall REMOVE-VPSCTL-TLS --confirm-purge
+    VPSCTL_ASSUME_YES=0 run_tls uninstall --purge --confirm-uninstall REMOVE-VPSCTL-TLS --confirm-purge
     [[ ! -e "${SYSTEM_ROOT}/var/lib/vpsctl/security/tls/live/${id}/fullchain.pem" ]] || fail "purge left live cert"
     [[ -d "${SYSTEM_ROOT}/var/lib/vpsctl/backups/security/tls" ]] || fail "purge removed backups"
+}
+
+test_uninstall_menu_confirmation() {
+    local command output id confirmations status=0 timer="${SYSTEM_ROOT}/etc/systemd/system/vpsctl-tls-renew.timer"
+    command -v script >/dev/null 2>&1 || fail "uninstall menu tests require util-linux script"
+    reset_system
+    output="$(run_tls import --name menu --cert-file "${FIXTURES}/keep.example/cert.pem" \
+        --key-file "${FIXTURES}/keep.example/key.pem")"
+    id="$(imported_id "$output")"
+    run_tls timer enable
+    printf -v command 'env VPSCTL_ASSUME_YES=0 VPSCTL_NON_INTERACTIVE=0 bash %q --no-color' "$TEST_ROOT/commands/security/tls.sh"
+    output="$(printf '12\n1\nn\n13\n' | script -q -e -c "$command" /dev/null 2>&1)" || status=$?
+    [[ "$status" == 1 ]] || fail "cancel timer uninstall expected 1, got $status: $output"
+    assert_file "$timer" "cancelled menu uninstall kept timer"
+    assert_file "${SYSTEM_ROOT}/run/tls-timer-active" "cancelled menu uninstall kept timer running"
+    status=0
+    output="$(printf '12\n1\ny\n13\n' | script -q -e -c "$command" /dev/null 2>&1)" || status=$?
+    [[ "$status" == 0 ]] || fail "menu timer uninstall failed with $status: $output"
+    confirmations="$(grep -Fo '输入 y 确认' <<<"$output" | grep -c . || true)"
+    [[ "$confirmations" == 1 ]] || fail "menu timer uninstall did not ask exactly once: $output"
+    assert_not_contains "$output" '请输入 REMOVE-VPSCTL-TLS' "ordinary uninstall no longer requests a token"
+    [[ ! -e "$timer" ]] || fail "menu uninstall retained timer"
+    assert_file "${SYSTEM_ROOT}/var/lib/vpsctl/security/tls/live/${id}/fullchain.pem" "menu timer uninstall kept cert"
+    run_tls timer enable
+    output="$(printf '12\n2\nn\n13\n' | script -q -e -c "$command" /dev/null 2>&1)" || status=$?
+    [[ "$status" == 0 ]] || fail "cancel purge menu failed with $status: $output"
+    assert_file "$timer" "cancelled purge kept timer"
+    assert_file "${SYSTEM_ROOT}/var/lib/vpsctl/security/tls/live/${id}/fullchain.pem" "cancelled purge kept cert"
+    output="$(printf '12\n2\nREMOVE-VPSCTL-TLS\n13\n' | script -q -e -c "$command" /dev/null 2>&1)" || status=$?
+    [[ "$status" == 0 ]] || fail "menu purge failed with $status: $output"
+    confirmations="$(grep -Fo '请输入 REMOVE-VPSCTL-TLS' <<<"$output" | grep -c . || true)"
+    [[ "$confirmations" == 1 ]] || fail "menu purge did not ask exactly once: $output"
+    assert_contains "$output" '卸载续期 timer 和 lego，清除证书、私钥、ACME 账户及 DNS 凭证（保留备份）' "purge confirmation covers removal scope"
+    [[ ! -e "$timer" && ! -e "${SYSTEM_ROOT}/var/lib/vpsctl/security/tls/live/${id}/fullchain.pem" ]] || fail "menu purge retained timer or cert"
+    [[ -d "${SYSTEM_ROOT}/var/lib/vpsctl/backups/security/tls" ]] || fail "menu purge removed backups"
 }
 
 test_help_and_status
@@ -318,4 +370,5 @@ test_drift_rejects_writes
 test_issue_renew_and_timer
 test_dns_credentials_and_secrets
 test_uninstall_keeps_backups
+test_uninstall_menu_confirmation
 printf 'PASS: security tls unit tests\n'

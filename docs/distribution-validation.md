@@ -65,6 +65,29 @@ GitHub Actions 生成的八个 draft 资产重新下载到专用主机后，清�
 
 证据位于专用主机 `/var/tmp/vpsctl-release-0.8.7/evidence/` 的 `pre-release.log`、`draft-assets.log` 和 `published-install.log`。验证退出码均为 0；每轮对受管安装路径的内容与归属快照进行恢复核对，最终原安装恢复通过。发布标签和八个资产保持不可变，迁移说明同步至 README 和 GitHub Release。
 
+## 自用限制简化验收（2026-09-12）
+
+基于 `123ee35` 的工作区修改，版本保持 `0.8.7`，未打 tag 或发布 Release。所有项目代码执行均通过 `ssh host-vps-scripts`，本机仅编辑和检查仓库差异。
+
+### 通过的验证
+
+- `tests/run.sh` 所列全部单元测试及 `test-vpsctl.sh` 入口集成按批执行通过。BBR 的旧演练断言已更新，确认缺少工具时无需安装授权即可展示计划，包管理器、模块加载和配置写入均未执行。
+- 分发单元测试覆盖新增嵌套公共库、越界/链接拒绝、缺失或损坏缓存的同版本修复、缓存修复写入失败与重试、无缓存的跨版本更新、更新提交失败恢复旧入口及一致缓存，以及普通卸载的 `--yes`、旧参数、未授权拒绝和交互取消。专用 purge 确认仍保留。
+- `test-distribution-real.sh` 在真实安装路径验证安装器及更新器接受新公共库、修复缓存、无缓存升级、普通卸载和 purge，并检查业务数据保留。下载使用本地构建资产，未发布测试版本。
+- 安全和代理测试验证普通确认、旧参数兼容、显式错误令牌拒绝、TLS 菜单单次清库确认、唯一兼容内核自动选择，以及 `--yes` 不绕过清库、外部内核覆盖和节点切核确认。
+- `test-security-access-pubkey-real.sh` 用链接公钥为临时账户安装授权，完成真实 SSH 登录及幂等检查；`test-security-tls-real.sh` 验证真实 timer 的普通卸载保留证书和私钥；`test-security-fail2ban-real.sh` 验证真实封禁/解封及 `--yes` 仅移除受管配置；实际 Xray 的 `--yes --non-interactive service proxy restart --core xray` 成功。
+- 基线 `0.8.7` 的分发校验器接受本次实际构建的全部六个 bundle 及哈希。构建文件集合、manifest 格式和安装布局未改变。
+
+### 静态检查边界
+
+修改脚本的 `bash -n` 通过。ShellCheck 使用 `-x -P SCRIPTDIR --extended-analysis=false` 对照基线，无新增诊断；完整数据流分析曾耗尽专用主机内存而被终止，因此不列为通过项。`shfmt -d -i 4 -ci` 在基线已有整文件风格差异，本次修改行没有新增差异，未进行无关的整文件格式化。不能将这两项表述为全仓库零告警或全格式通过。
+
+### 恢复与证据
+
+真实验收前对安装、SSH 受管配置、TLS、Fail2ban、代理配置及相关功能状态和备份保存快照。结束后文件快照比较、`sshd -T` 前后比较和恢复脚本均成功（`acceptance_exit=0`、`restoration_exit=0`）。原安装恢复为 `0.1.0`，SSH、Fail2ban、Xray 保持 active，TLS timer 保持 inactive；临时登录账户与 Fail2ban 网络命名空间已删除。系统日志和 Fail2ban 运行历史保留测试记录。
+
+原始证据与恢复快照保留在专用主机 `/root/vpsctl-simplify.zcQUv6fA/evidence/`，包括单元/集成日志、`real-status.txt`、`restoration-status.txt`、`static-comparison-final.log` 和 `compatibility.log`。该目录包含系统快照，不提交仓库。
+
 ## 恢复信息
 
 真实安装测试开始前备份 `/usr/local/bin/vpsctl`、`/usr/local/lib/vpsctl` 和 `/var/lib/vpsctl/self`，退出时恢复，清理测试标记。已确认测试机 `current` 恢复到原 `0.1.0` 版本。

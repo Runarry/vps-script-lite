@@ -64,7 +64,7 @@ bash bin/vpsctl --yes --non-interactive security access ssh apply --password-log
 
 ### 3.3 公钥
 
-`key add` 接受一条 OpenSSH 公钥记录：自动化可通过 `--stdin` 管道传入，或用 `--public-key-file FILE` 指定文件。入口验证公钥记录后写入目标用户的 `~/.ssh/authorized_keys`，并保持目录、文件所有者和权限适合 OpenSSH 使用；重复添加同一公钥不得产生重复行。私钥不会被该动作读取或复制。
+`key add` 接受一条 OpenSSH 公钥记录：自动化可通过 `--stdin` 管道传入，或用 `--public-key-file FILE` 指定可读普通文件或指向它的符号链接；断链、目录以及无效公钥仍会拒绝。入口验证公钥记录后写入目标用户的 `~/.ssh/authorized_keys`，并保持目录、文件所有者和权限适合 OpenSSH 使用；重复添加同一公钥不得产生重复行。私钥不会被该动作读取或复制。
 
 添加或生成密钥时，若 `PubkeyAuthentication` 尚未启用，会在公钥安装成功后自动启用。重复添加已有公钥也会检查并启用认证。修改前备份受管 SSH 配置，通过配置校验后 reload，并检查全局、root 和目标用户的有效配置；端口、密码认证和 root 登录策略保持原值。启用或验证失败时恢复 SSH 配置并撤销本次新增公钥。存在活动 SSH 事务或不支持的复杂配置时拒绝自动修改；`--dry-run` 只展示计划。
 

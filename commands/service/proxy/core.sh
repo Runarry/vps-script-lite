@@ -709,17 +709,11 @@ proxy_core_update() (
 )
 
 _proxy_core_confirm_restart() {
-    local core="$1" confirmed="$2" status token
-    token="RESTART-${core^^}"
-    [[ "${VPSCTL_DRY_RUN:-0}" == "1" ]] && return 0
-    if [[ "${VPSCTL_NON_INTERACTIVE:-0}" == "1" || ! -t 0 || ! -t 1 ]]; then
-        [[ "$confirmed" == "1" ]] && return 0
-        vps_cmd_error "restart 是中断性操作；非交互模式需 --confirm-disruptive"
-        return 3
-    fi
-    vps_cmd_confirm_token "重启会短暂中断 $(proxy_core_label "$core") 连接" "$token" && return 0
+    local core="$1" confirmed="$2" status
+    [[ "$confirmed" == "1" ]] && return 0
+    vps_cmd_confirm "重启会短暂中断 $(proxy_core_label "$core") 连接，是否继续？" && return 0
     status=$?
-    [[ "$status" == "130" ]] && return 130
+    [[ "$status" == "1" ]] || return "$status"
     vps_cmd_info "已取消重启，服务状态未改变"
     return 1
 }
@@ -866,9 +860,6 @@ proxy_core_restart() (
     proxy_ensure_mutation_tools core-restart jq || return $?
     if proxy_stop_after_dependency_plan; then return 0; fi
     _proxy_core_require_registered "$core" || return $?
-    vps_cmd_lock proxy || return $?
-    trap 'vps_cmd_unlock' EXIT
-    _proxy_core_validate_current_config "$core" || return $?
     if _proxy_core_confirm_restart "$core" "$confirmed"; then
         :
     else
@@ -876,6 +867,9 @@ proxy_core_restart() (
         [[ "$rc" == "1" ]] && return 0
         return "$rc"
     fi
+    vps_cmd_lock proxy || return $?
+    trap 'vps_cmd_unlock' EXIT
+    _proxy_core_validate_current_config "$core" || return $?
     _proxy_core_restart_locked "$core"
 )
 

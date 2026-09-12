@@ -191,7 +191,7 @@ vpsctl_validate_archive_paths() {
             vpsctl_bootstrap_die "core archive escapes its root: ${entry}"
         case "$entry" in
             VERSION) found_version=1 ;;
-            bin | bin/ | bin/vpsctl | lib | lib/ | lib/environment.sh | lib/registry.sh | lib/ui.sh | lib/command.sh | lib/ufw.sh | lib/distribution.sh | commands | commands/ | commands/self | commands/self/ | commands/self/*) ;;
+            bin | bin/ | bin/vpsctl | lib | lib/* | commands | commands/ | commands/self | commands/self/ | commands/self/*) ;;
             *) vpsctl_bootstrap_die "unexpected path in core archive: ${entry}" ;;
         esac
         [[ "$entry" != bin/vpsctl ]] || found_entry=1

@@ -59,7 +59,7 @@ fail2ban_usage() {
   fail2ban.sh [global-options] start|stop|restart
   fail2ban.sh [global-options] logs [--lines N]
   fail2ban.sh [global-options] restore --backup ID --confirm-restore ID
-  fail2ban.sh [global-options] uninstall --confirm-uninstall REMOVE-VPSCTL-FAIL2BAN
+  fail2ban.sh [global-options] uninstall [--confirm-uninstall REMOVE-VPSCTL-FAIL2BAN]
 
 全局选项：
   --dry-run --install-deps --yes --non-interactive --quiet --verbose --no-color
@@ -67,6 +67,7 @@ fail2ban_usage() {
 
 仅支持 systemd 与 OpenSSH。安装支持 apt、dnf5、dnf、yum、pacman 和 zypper；
 明确拒绝 apk/OpenRC。uninstall 仅删除 vpsctl 受管 jail，不删除软件包、服务或备份。
+卸载可交互确认或使用全局 --yes，也兼容原确认令牌。
 EOF
 }
 
@@ -1035,9 +1036,34 @@ fail2ban_restore() {
 }
 
 fail2ban_uninstall() {
-    local confirm='' backup was_active=0
-    while (($#)); do case "$1" in --confirm-uninstall) (($# >= 2)) || { vps_cmd_error "--confirm-uninstall 需要值"; return 2; }; [[ -z "$confirm" ]] || { vps_cmd_error "重复指定 --confirm-uninstall"; return 2; }; confirm="$2"; shift 2 ;; *) vps_cmd_error "uninstall 未知选项：$1"; return 2 ;; esac; done
-    [[ "$confirm" == "$FAIL2BAN_UNINSTALL_TOKEN" ]] || { vps_cmd_error "uninstall 需要 --confirm-uninstall $FAIL2BAN_UNINSTALL_TOKEN"; return 2; }
+    local confirm=0 backup was_active=0
+    while (($#)); do
+        case "$1" in
+            --confirm-uninstall)
+                (($# >= 2)) || {
+                    vps_cmd_error "--confirm-uninstall 需要值"
+                    return 2
+                }
+                ((confirm == 0)) || {
+                    vps_cmd_error "重复指定 --confirm-uninstall"
+                    return 2
+                }
+                [[ "$2" == "$FAIL2BAN_UNINSTALL_TOKEN" ]] || {
+                    vps_cmd_error "卸载确认令牌不匹配"
+                    return 2
+                }
+                confirm=1
+                shift 2
+                ;;
+            *)
+                vps_cmd_error "uninstall 未知选项：$1"
+                return 2
+                ;;
+        esac
+    done
+    if ((confirm == 0)); then
+        vps_cmd_confirm "确认移除 vpsctl 受管 Fail2ban 配置？软件包、服务与备份会保留。" || return $?
+    fi
     fail2ban_require_managed || return $?
     vps_cmd_require_root || return $?
     vps_cmd_lock security-fail2ban || return $?
@@ -1102,8 +1128,7 @@ fail2ban_menu() {
                 fail2ban_restore --backup "$backup" --confirm-restore "$backup" || status=$?
                 ;;
             uninstall)
-                vps_cmd_confirm_token "仅移除 vpsctl 受管配置" "$FAIL2BAN_UNINSTALL_TOKEN" || continue
-                fail2ban_uninstall --confirm-uninstall "$FAIL2BAN_UNINSTALL_TOKEN" || status=$?
+                fail2ban_uninstall || status=$?
                 ;;
             quit) return "$status" ;;
         esac

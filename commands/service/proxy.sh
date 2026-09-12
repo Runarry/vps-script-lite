@@ -136,6 +136,7 @@ REALITY 防偷：仅适用于 REALITY 配置，新增默认 on；已有节点保
 交互模式会根据操作和当前状态自动选择内核，存在多个候选时提供编号
 选择；节点菜单输出订阅时可选择全部或有节点的已安装内核。运行中的内核
 在节点和中转配置变更后自动重启应用；二进制更新仍需显式 restart。
+restart 使用普通确认，可用全局 --yes 或 --confirm-disruptive 跳过确认。
 
 高级脚本用法：CORE 为 sing-box 或 xray；生命周期操作可显式传入
 --core CORE，install/update 还支持 --core all。非交互模式存在多个候选

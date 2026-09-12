@@ -28,14 +28,14 @@ vpsctl security tls renew [--id ID | --all] [--force]
 vpsctl security tls credentials --id ID --dns-credential-file FILE
 
 vpsctl security tls timer status|enable|disable
-vpsctl security tls uninstall --confirm-uninstall REMOVE-VPSCTL-TLS
+vpsctl [--yes] security tls uninstall [--confirm-uninstall REMOVE-VPSCTL-TLS]
 vpsctl security tls uninstall --purge --confirm-uninstall REMOVE-VPSCTL-TLS
     --confirm-purge
 ```
 
 无参数且连接交互终端时进入编号菜单；无参数非交互调用等同于人类可读的 `status`。菜单执行真实动作，不提供 dry-run 或机器格式开关。
 
-帮助、`status`、`list`、`show` 和 `paths` 允许普通用户执行；读不到私钥目录时该项显示为权限不足，不把私钥写入 stdout、日志或 JSON。所有变更动作需要 root。`--yes` 不能替代 `--confirm-delete`、`--confirm-uninstall` 或 `--confirm-purge`。
+帮助、`status`、`list`、`show` 和 `paths` 允许普通用户执行；读不到私钥目录时该项显示为权限不足，不把私钥写入 stdout、日志或 JSON。所有变更动作需要 root。普通 `uninstall` 可用全局 `--yes` 或兼容的 `--confirm-uninstall REMOVE-VPSCTL-TLS` 授权，交互未授权时确认一次；`--yes` 不替代删除及 purge 的专用确认，CLI purge 仍需 `--confirm-uninstall REMOVE-VPSCTL-TLS --purge --confirm-purge`。
 
 `status --json` 的顶层包含 `schema_version: 1`，并报告 lego 安装状态、timer、证书列表（域名、来源、指纹、到期、live 路径）以及即将到期计数。私钥内容不会出现在任何输出中。
 
@@ -56,7 +56,7 @@ live 路径必须是普通文件的原子替换，不能使用符号链接。项
 
 写入事务顺序：获取锁、校验 PEM 与未加密私钥、确认公钥匹配、确认 SAN 覆盖声明域名、写入 fingerprint 归档、备份旧 live、原子替换 live、写入 metadata。失败时回滚 live 与 metadata；回滚也失败则返回 `30` 并输出备份 ID。metadata 与 live 指纹不一致时，写操作拒绝覆盖。
 
-`self uninstall` 不得删除上述路径。`tls uninstall` 只停用并删除续期 unit；`--purge` 再删除 live、账户、凭证和 lego 二进制，保留 backups。
+`self uninstall` 不得删除上述路径。`tls uninstall` 只停用并删除续期 unit，支持 `vpsctl --yes security tls uninstall`；菜单清库只进行一次说明完整删除范围的强确认；`--purge` 再删除 live、账户、凭证和 lego 二进制，保留 backups。
 
 ## 导入与替换
 

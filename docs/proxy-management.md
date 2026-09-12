@@ -109,7 +109,7 @@ Xray 与 sing-box 使用相同的命令模式生命周期接口：
 vpsctl service proxy restart --core sing-box
 ```
 
-非交互执行显式 `restart` 还需 `--confirm-disruptive`。`status` 中“待重启”为“是”表示磁盘配置或二进制尚未由当前进程采用；若服务已在运行，此时再次 `start` 会被拒绝并要求显式 `restart`。若服务未运行，`start` 会尝试待生效版本，失败时自动恢复记录的上一版。`relay status` 会分别显示核心配置待重启状态和转发运行状态。
+显式 `restart` 可用全局 `--yes` 或兼容的 `--confirm-disruptive` 授权；交互未授权时进行一次普通确认，非交互未授权时立即失败。确认后才获取锁并执行配置恢复、校验及重启，取消不改变状态。`status` 中“待重启”为“是”表示磁盘配置或二进制尚未由当前进程采用；若服务已在运行，此时再次 `start` 会被拒绝并要求显式 `restart`。若服务未运行，`start` 会尝试待生效版本，失败时自动恢复记录的上一版。`relay status` 会分别显示核心配置待重启状态和转发运行状态。
 
 ### 卸载与彻底清除
 
@@ -306,8 +306,8 @@ vpsctl service proxy time sync
 
 ## 9. 依赖、演练与退出码
 
-支持的平台范围是 Linux、systemd 或 OpenRC，以及 `x86_64`/`amd64`、`aarch64`/`arm64`、`armv7l`/`armv7` 架构。状态、清单和配置渲染依赖 `jq`；端口检查与订阅输出使用 `ss`、`base64`、`tr`、`awk` 和 `mktemp`；证书与稳定 ID 操作依赖 `openssl` 与 `sha256sum`；端口转发依赖 `nft`、`ip`、`getent` 和 `sysctl`；受管变更使用 `flock` 加锁；官方 Release 安装还依赖 `curl` 以及 Xray 的 `unzip` 或 sing-box 的 `tar`。功能只在当前动作实际需要时检查对应工具：真实执行的交互环境发现缺失后才列出缺失项并询问是否安装，不会在进入代理菜单时预装所有工具；非交互调用和 `--dry-run` 依赖计划仍必须提供 `--install-deps`。获得授权后，当前动作可通过 `apt-get`、`dnf5`、`dnf`、`yum`、`apk`、`pacman` 或 `zypper` 补齐缺失工具；时间同步只在缺少可用 NTP 后端时补齐 chrony。systemd 的 `journalctl`、OpenRC 的 `tail`、服务管理器和 CPU 架构属于平台前置条件，不由该选项安装或绕过。
+支持的平台范围是 Linux、systemd 或 OpenRC，以及 `x86_64`/`amd64`、`aarch64`/`arm64`、`armv7l`/`armv7` 架构。状态、清单和配置渲染依赖 `jq`；端口检查与订阅输出使用 `ss`、`base64`、`tr`、`awk` 和 `mktemp`；证书与稳定 ID 操作依赖 `openssl` 与 `sha256sum`；端口转发依赖 `nft`、`ip`、`getent` 和 `sysctl`；受管变更使用 `flock` 加锁；官方 Release 安装还依赖 `curl` 以及 Xray 的 `unzip` 或 sing-box 的 `tar`。功能只在当前动作实际需要时检查对应工具：真实执行的交互环境发现缺失后才列出缺失项并询问是否安装，不会在进入代理菜单时预装所有工具；真实非交互安装仍必须提供 `--install-deps`；`--dry-run` 无需该授权即可展示依赖安装计划。获得授权后，当前动作可通过 `apt-get`、`dnf5`、`dnf`、`yum`、`apk`、`pacman` 或 `zypper` 补齐缺失工具；时间同步只在缺少可用 NTP 后端时补齐 chrony。systemd 的 `journalctl`、OpenRC 的 `tail`、服务管理器和 CPU 架构属于平台前置条件，不由该选项安装或绕过。
 
 真实协议链路验收脚本为 `tests/integration/test-service-proxy-relay-connectivity-real.sh`，默认对任何失败都严格退出。Xray 26.3.27 与 26.6.27 的 `trojan-grpc-reality` 已确认在 REALITY 认证完成后由 gRPC 传输层关闭连接；需要执行其余完整矩阵时可显式设置 `ALLOW_XRAY_TROJAN_GRPC_REALITY_XFAIL=1`。该豁免只接受日志中的 server-preface 关闭特征；若未来版本修复并实际连通，脚本以 XPASS 失败，要求移除豁免，避免永久静默跳过。
 
-`--dry-run` 会展示安装、写入、服务控制和时间同步命令，不下载、不写受管配置、不安装包，也不启停服务。与 `--install-deps` 组合且发现工具缺失时，会先展示固定的软件包安装计划，再安全停止并提示安装后重跑完整计划。常见退出码遵循项目统一约定：`2` 为参数错误，`3` 为前置条件或依赖不满足，`4` 为权限不足，`10` 为配置或证书校验失败，`20` 为外部命令或远端服务失败，`30` 为部分完成、同步确认超时或需要人工恢复，`130` 为用户中断。发生 `30` 时先查看 `status`、待重启记录和服务日志，不要直接删除状态或备份文件。
+`--dry-run` 会展示安装、写入、服务控制和时间同步命令，不下载、不写受管配置、不安装包，也不启停服务。发现工具缺失时，无需 `--install-deps` 即可展示固定的软件包安装计划，再安全停止并提示安装后重跑完整计划；不会改变真实安装的授权。常见退出码遵循项目统一约定：`2` 为参数错误，`3` 为前置条件或依赖不满足，`4` 为权限不足，`10` 为配置或证书校验失败，`20` 为外部命令或远端服务失败，`30` 为部分完成、同步确认超时或需要人工恢复，`130` 为用户中断。发生 `30` 时先查看 `status`、待重启记录和服务日志，不要直接删除状态或备份文件。

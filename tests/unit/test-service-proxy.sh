@@ -607,12 +607,14 @@ test_dependency_install_plans() {
     hint_count="$(grep -o -- '--install-deps' <<<"$RUN_OUTPUT" | wc -l | tr -d ' ')"
     assert_equal 1 "$hint_count" "status has one centralized install-deps hint"
 
-    RUN_PROXY_PATH="$TEST_DEP_BIN" run_proxy --dry-run --install-deps install --core sing-box
+    RUN_PROXY_PATH="$TEST_DEP_BIN" run_proxy --dry-run install --core sing-box
     assert_equal 0 "$RUN_STATUS" "sing-box dependency dry-run"
     assert_contains "$RUN_OUTPUT" "jq" "sing-box jq package plan"
     assert_contains "$RUN_OUTPUT" "curl" "sing-box curl package plan"
     assert_contains "$RUN_OUTPUT" "coreutils" "sing-box checksum package plan"
     assert_contains "$RUN_OUTPUT" "tar" "sing-box archive package plan"
+    assert_contains "$RUN_OUTPUT" "apt-get update" "sing-box dependency update command"
+    assert_contains "$RUN_OUTPUT" "apt-get install -y --no-install-recommends" "sing-box dependency install command"
     assert_contains "$RUN_OUTPUT" "安装依赖后重跑完整计划" "sing-box dependency rerun message"
     [[ ! -e "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy" ]] || fail "sing-box dependency plan wrote proxy state"
 
@@ -632,7 +634,7 @@ test_dependency_install_plans() {
     assert_equal 2 "$RUN_STATUS" "missing node port before dependency install"
     assert_not_contains "$RUN_OUTPUT" "apt-get" "missing node port dependency plan"
 
-    RUN_PROXY_PATH="$TEST_DEP_BIN" run_proxy --dry-run --install-deps node add \
+    RUN_PROXY_PATH="$TEST_DEP_BIN" run_proxy --dry-run node add \
         --profile vless-ws-tls --core sing-box --port 19991 --address proxy.example \
         --sni proxy.example --path /dependency-plan
     assert_equal 0 "$RUN_STATUS" "node add dependency dry-run"
@@ -643,15 +645,17 @@ test_dependency_install_plans() {
     assert_contains "$RUN_OUTPUT" "安装依赖后重跑完整计划" "node add dependency rerun message"
     [[ ! -e "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy" ]] || fail "node dependency plan wrote proxy state"
 
-    RUN_PROXY_PATH="$TEST_DEP_BIN" run_proxy --dry-run --install-deps subscription --core all
+    RUN_PROXY_PATH="$TEST_DEP_BIN" run_proxy --dry-run subscription --core all
     assert_equal 0 "$RUN_STATUS" "subscription dependency dry-run"
     assert_contains "$RUN_OUTPUT" "jq" "subscription jq package plan"
     assert_contains "$RUN_OUTPUT" "coreutils" "subscription base64 and tr package plan"
     assert_contains "$RUN_OUTPUT" "安装依赖后重跑完整计划" "subscription dependency rerun message"
 
-    VPSCTL_ENV_PACKAGE_MANAGER=unsupported RUN_PROXY_PATH="$TEST_DEP_BIN" run_proxy --dry-run --install-deps status
+    VPSCTL_ENV_PACKAGE_MANAGER=unsupported RUN_PROXY_PATH="$TEST_DEP_BIN" run_proxy --dry-run status
     assert_equal 2 "$RUN_STATUS" "unknown package manager"
     assert_contains "$RUN_OUTPUT" "无效的软件包管理器" "unknown package manager message"
+    assert_not_contains "$(<"$MOCK_LOG")" "apt-get " "dependency plans must not execute package manager"
+    assert_not_contains "$(<"$MOCK_LOG")" "curl " "dependency plans must not download cores"
 }
 
 test_status_service_and_logs() {
@@ -761,8 +765,13 @@ test_core_choice_crud_pending_and_validation() {
     grep -Fq 'restart vpsctl-proxy-xray.service' "$MOCK_LOG" || fail "running edit did not restart automatically"
     [[ ! -e "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/pending/xray.json" ]] || fail "auto-applied edit left pending state"
     assert_equal x-pending "$(jq -r '.nodes[0].name' "$(manifest_path)")" "auto-applied edit name"
+    : >"$MOCK_LOG"
     run_proxy restart --core xray
     assert_equal 3 "$RUN_STATUS" "restart confirmation"
+    assert_not_contains "$(<"$MOCK_LOG")" "restart vpsctl-proxy-xray.service" "unconfirmed restart must not restart service"
+    run_proxy --yes restart --core xray
+    assert_equal 0 "$RUN_STATUS" "--yes authorizes explicit restart"
+    assert_file_contains "$MOCK_LOG" "restart vpsctl-proxy-xray.service" "--yes restarts service"
     run_proxy restart --core xray --confirm-disruptive
     assert_equal 0 "$RUN_STATUS" "explicit restart"
 
@@ -795,6 +804,10 @@ test_core_choice_crud_pending_and_validation() {
 
     before="$(sha256sum "$(manifest_path)" | awk '{print $1}')"
     touch "${TEST_SYSTEM_ROOT}/run/fail-core-validation"
+    : >"$MOCK_LOG"
+    run_proxy --yes restart --core xray
+    assert_equal 10 "$RUN_STATUS" "--yes restart preserves binary config validation"
+    assert_not_contains "$(<"$MOCK_LOG")" "restart vpsctl-proxy-xray.service" "invalid config must not restart service"
     run_proxy node edit --id "$id" --name rejected
     assert_equal 10 "$RUN_STATUS" "binary config validation failure"
     assert_contains "$RUN_OUTPUT" "fixture core validation rejected" "binary config validation detail"
@@ -832,6 +845,8 @@ test_overlap_port_ambiguity_and_uninstall() {
 
     run_proxy update --core sing-box
     assert_equal 3 "$RUN_STATUS" "external update strong confirmation"
+    run_proxy --yes update --core sing-box
+    assert_equal 3 "$RUN_STATUS" "--yes must not authorize external binary update"
     assert_not_contains "$(<"$MOCK_LOG")" "unexpected curl" "unconfirmed update network access"
     run_proxy uninstall --core sing-box
     assert_equal 0 "$RUN_STATUS" "default uninstall"
@@ -842,6 +857,8 @@ test_overlap_port_ambiguity_and_uninstall() {
     assert_equal 0 "$RUN_STATUS" "re-register retained core"
     run_proxy uninstall --core sing-box --purge
     assert_equal 3 "$RUN_STATUS" "purge confirmation"
+    run_proxy --yes uninstall --core sing-box --purge
+    assert_equal 3 "$RUN_STATUS" "--yes must not authorize core purge"
     run_proxy uninstall --core sing-box --purge --confirm-purge
     assert_equal 0 "$RUN_STATUS" "confirmed purge"
     assert_equal 0 "$(jq -r '[.nodes[] | select(.core == "sing-box")] | length' "$(manifest_path)")" "purged core nodes"
@@ -927,6 +944,58 @@ test_unified_interactive_api() (
     # shellcheck source=../../commands/service/proxy.sh
     source "$TEST_PROXY" help >/dev/null
 
+    (
+        local interactive=1 reply expected_steps
+        local restart_steps="${TEST_TEMP}/restart.steps" restart_output="${TEST_TEMP}/restart.output"
+        vps_cmd_is_interactive() { [[ "$interactive" == 1 ]]; }
+        proxy_require_platform() { return 0; }
+        proxy_ensure_mutation_tools() { return 0; }
+        _proxy_core_require_registered() { return 0; }
+        vps_cmd_lock() { printf 'lock\n' >>"$restart_steps"; }
+        vps_cmd_unlock() { return 0; }
+        _proxy_core_validate_current_config() { printf 'validate\n' >>"$restart_steps"; }
+        _proxy_core_restart_locked() { printf 'restart\n' >>"$restart_steps"; }
+        expected_steps=$'lock\nvalidate\nrestart'
+        for reply in n y; do
+            : >"$restart_steps"
+            status=0
+            proxy_core_restart xray <<<"$reply" >"$restart_output" 2>&1 || status=$?
+            assert_equal 0 "$status" "interactive restart accepts ordinary y/n"
+            output="$(<"$restart_output")"
+            assert_equal 1 "$(grep -o '输入 y 确认' <<<"$output" | wc -l | tr -d ' ')" "restart prompts once"
+            assert_not_contains "$output" "RESTART-XRAY" "restart does not require a token"
+            if [[ "$reply" == y ]]; then
+                assert_equal "$expected_steps" "$(<"$restart_steps")" "confirmed restart retains validation before restart"
+            else
+                assert_equal "" "$(<"$restart_steps")" "cancelled restart does not lock, recover, validate or restart"
+            fi
+        done
+        : >"$restart_steps"
+        status=0
+        proxy_core_restart xray </dev/null >"$restart_output" 2>&1 || status=$?
+        assert_equal 130 "$status" "restart EOF cancellation"
+        assert_equal "" "$(<"$restart_steps")" "restart EOF has no mutation"
+
+        for interactive in 0 1; do
+            : >"$restart_steps"
+            VPSCTL_ASSUME_YES=1
+            proxy_core_restart xray </dev/null >"$restart_output" 2>&1 || fail "--yes restart rejected"
+            assert_equal "$expected_steps" "$(<"$restart_steps")" "--yes restart retains validation"
+            assert_not_contains "$(<"$restart_output")" "输入 y 确认" "--yes restart does not prompt"
+            : >"$restart_steps"
+            VPSCTL_ASSUME_YES=0
+            proxy_core_restart xray --confirm-disruptive </dev/null >"$restart_output" 2>&1 || fail "explicit restart authorization rejected"
+            assert_equal "$expected_steps" "$(<"$restart_steps")" "explicit restart authorization retains validation"
+            assert_not_contains "$(<"$restart_output")" "输入 y 确认" "explicit restart authorization does not prompt"
+        done
+        interactive=0
+        : >"$restart_steps"
+        status=0
+        proxy_core_restart xray </dev/null >"$restart_output" 2>&1 || status=$?
+        assert_equal 3 "$status" "noninteractive restart requires authorization"
+        assert_equal "" "$(<"$restart_steps")" "unauthorized restart has no mutation"
+    )
+
     selected="$(proxy_prompt_select "selector default" quick quick "Quick" custom "Custom" 2>"$selector_stderr" <<<"")"
     assert_equal quick "$selected" "selector default"
     selected="$(proxy_prompt_select "selector retry" quick quick "Quick" custom "Custom" 2>"$selector_stderr" <<< $'99\n2')"
@@ -994,6 +1063,17 @@ test_unified_interactive_api() (
     assert_equal xray "$(proxy_lifecycle_candidates start 1)" "active core filtered from start"
     assert_equal sing-box "$(proxy_lifecycle_candidates stop 1)" "stop candidates are active cores"
     assert_equal sing-box "$(proxy_lifecycle_candidates restart 1)" "restart candidates are active cores"
+    PROXY_INTERACTIVE=1
+    selected="$(proxy_choose_core_for_profile vless-tcp "" 2>"$guided_stderr" </dev/null)"
+    assert_equal sing-box "$selected" "unique compatible sing-box selects without confirmation"
+    assert_file_contains "$guided_stderr" "自动使用唯一已安装且兼容的内核：sing-box" "automatic core selection info uses stderr"
+    assert_not_contains "$(<"$guided_stderr")" "输入 y 确认" "unique compatible core does not prompt"
+    selected="$(proxy_choose_core_for_profile vless-grpc-reality "" 2>"$guided_stderr" </dev/null)"
+    assert_equal xray "$selected" "unique compatible Xray selects without confirmation"
+    selected="$(proxy_choose_core_for_profile shadowsocks-aes-256-gcm "" 2>"$guided_stderr" <<<2)"
+    assert_equal xray "$selected" "multiple compatible installed cores still require selection"
+    assert_file_contains "$guided_stderr" "请选择运行" "multiple compatible core selector remains"
+    PROXY_INTERACTIVE=0
     assert_equal all "$(proxy_resolve_lifecycle_core all install 1)" "install accepts all cores"
     assert_equal all "$(proxy_resolve_lifecycle_core all update 1)" "update accepts all cores"
     for selected in uninstall start stop restart logs; do
@@ -1057,6 +1137,10 @@ test_unified_interactive_api() (
 
     rm -f -- "${install_marker}-sing-box" "${install_marker}-xray"
     : >"${TEST_SYSTEM_ROOT}/run/stub-install.log"
+    status=0
+    proxy_choose_core_for_profile vless-tcp "" 2>"$guided_stderr" <<<n >/dev/null || status=$?
+    assert_equal 130 "$status" "missing unique compatible core still requires install confirmation"
+    assert_equal "" "$(<"${TEST_SYSTEM_ROOT}/run/stub-install.log")" "declined core install has no mutation"
     VPSCTL_DRY_RUN=1
     selected="$(proxy_choose_core_for_profile vless-tcp "" 2>"$guided_stderr")"
     assert_equal sing-box "$selected" "dry-run guided compatible core"

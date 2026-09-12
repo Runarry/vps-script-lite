@@ -623,6 +623,61 @@ test_user_password_and_keys() {
     fi
 }
 
+test_key_file_sources() {
+    local key_dir="$TEST_TEMP/key sources" key_file key_link source authorized before
+    reset_system
+    mkdir -p -- "$key_dir"
+    key_file="$key_dir/key.pub"
+    key_link="$key_dir/relative.pub"
+    authorized="$TEST_SYSTEM_ROOT/home/alice/.ssh/authorized_keys"
+    printf 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIlinked linked-source\n' >"$key_file"
+    ln -s -- key.pub "$key_link"
+    assert_status 0 "relative public key symlink" run_access key add --user alice --public-key-file "$key_link"
+    assert_file_contains "$authorized" 'linked-source' "symlink imports target key"
+    ln -s -- "$key_file" "$key_dir/absolute.pub"
+    assert_status 0 "absolute public key symlink deduplicates" run_access key add --user alice --public-key-file "$key_dir/absolute.pub"
+    assert_equal 1 "$(grep -c '^ssh-' "$authorized")" "linked source deduplicates"
+    before="$(sha256sum "$authorized")"
+
+    ln -s -- missing.pub "$key_dir/dangling.pub"
+    ln -s -- "$key_dir" "$key_dir/directory.pub"
+    mkfifo -- "$key_dir/fifo.pub"
+    ln -s -- fifo.pub "$key_dir/fifo-link.pub"
+    for source in "$key_dir/missing.pub" "$key_dir/dangling.pub" "$key_dir" "$key_dir/directory.pub" "$key_dir/fifo.pub" "$key_dir/fifo-link.pub"; do
+        assert_status 3 "non-regular public key source $source" run_access key add --user alice --public-key-file "$source"
+    done
+    : >"$key_file"
+    assert_status 10 "empty linked public key source" run_access key add --user alice --public-key-file "$key_link"
+    printf 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIlinked first\nssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIother second' >"$key_file"
+    assert_status 10 "linked public key rejects multiple lines" run_access key add --user alice --public-key-file "$key_link"
+    printf 'from=192.0.2.1 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIlinked\n' >"$key_file"
+    assert_status 10 "linked public key rejects authorized_keys options" run_access key add --user alice --public-key-file "$key_link"
+    printf 'ssh-ed25519 invalid! linked-source\n' >"$key_file"
+    assert_status 10 "linked public key rejects malformed content" run_access key add --user alice --public-key-file "$key_link"
+    assert_equal "$before" "$(sha256sum "$authorized")" "invalid sources preserve authorized_keys"
+
+    printf 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIother valid-source\n' >"$key_file"
+    chmod 0000 -- "$key_file"
+    if ((EUID != 0)); then
+        assert_status 3 "unreadable linked public key" run_access key add --user alice --public-key-file "$key_link"
+    elif command -v setpriv >/dev/null 2>&1; then
+        assert_status 3 "unreadable linked public key without DAC override" setpriv --bounding-set=-dac_override,-dac_read_search \
+            bash "$TEST_ROOT/commands/security/access.sh" --no-color --non-interactive key add --user alice --public-key-file "$key_link"
+    else
+        fail "unreadable source test as root requires util-linux setpriv"
+    fi
+    chmod 0600 -- "$key_file"
+    mv -- "$authorized" "$key_dir/authorized-target"
+    ln -s -- "$key_dir/authorized-target" "$authorized"
+    assert_status 3 "authorized_keys target symlink stays forbidden" run_access key add --user alice --public-key-file "$key_link"
+    assert_equal "${before%% *}" "$(sha256sum "$key_dir/authorized-target" | awk '{print $1}')" "rejected target symlink preserves destination"
+    rm -f -- "$authorized"
+    mv -- "${authorized%/*}" "$key_dir/ssh-target"
+    ln -s -- "$key_dir/ssh-target" "${authorized%/*}"
+    assert_status 3 "authorized_keys parent symlink stays forbidden" run_access key add --user alice --public-key-file "$key_link"
+    [[ ! -e "$key_dir/ssh-target/authorized_keys" ]] || fail "rejected parent symlink wrote authorized_keys"
+}
+
 test_key_pubkey_enable() {
     local key_file="$TEST_TEMP/enable.pub" managed authorized baseline before marker expected tx state_sha command reply output status
     managed="$TEST_SYSTEM_ROOT/etc/ssh/sshd_config.d/00-vpsctl-access.conf"
@@ -1190,6 +1245,7 @@ test_cli_validation_and_status
 test_direct_ssh_policy_apply
 test_target_login_policy
 test_user_password_and_keys
+test_key_file_sources
 test_key_pubkey_enable
 test_sshd_shape_and_firewall_rejections
 test_abort_expiry_and_reload_rollback

@@ -39,10 +39,10 @@ vpsctl self uninstall [--purge] [--confirm-uninstall] [--confirm-purge]
 | --- | --- |
 | `status` | 只读显示本地运行模式、分发版本、受管路径和领域缓存状态；不检查远端更新 |
 | `update` | 用户显式触发更新；默认使用 latest，`--version vX.Y.Z` 固定目标 tag；校验完成并落盘后才原子切换 current，失败保留原版本 |
-| `uninstall` | 交互模式现场确认；非交互模式需要 `--confirm-uninstall`；移除快捷入口、current 和 vpsctl 分发文件，不卸载任何功能组件 |
+| `uninstall` | 交互模式确认一次；非交互模式需要全局 `--yes` 或兼容的 `--confirm-uninstall`；移除快捷入口、current 和 vpsctl 分发文件，不卸载任何功能组件 |
 | `uninstall --purge` | 交互模式再次确认；非交互模式还需要 `--confirm-purge`；在普通卸载基础上只额外删除 `/var/lib/vpsctl/self/` 元数据 |
 
-普通卸载和 purge 均不得删除或修改 `/etc/vpsctl/`、功能状态与备份、功能安装的软件包/服务/规则/内核及 `/usr/local/libexec/`。`--yes` 不能替代非交互调用所需的两个 self 确认标志。该边界独立于各功能命令自己的 `uninstall` 或 `--purge`，后者仍按各自命令文档处理。
+普通卸载和 purge 均不得删除或修改 `/etc/vpsctl/`、功能状态与备份、功能安装的软件包/服务/规则/内核及 `/usr/local/libexec/`。`--yes` 不能替代非交互 purge 所需的两个 self 确认标志。该边界独立于各功能命令自己的 `uninstall` 或 `--purge`，后者仍按各自命令文档处理。
 
 ## 3. 已登记命令清单
 
@@ -63,7 +63,7 @@ vpsctl self uninstall [--purge] [--confirm-uninstall] [--confirm-purge]
 | `test nodequality` | `commands/test/nodequality.sh` | 运行 NodeQuality 服务器综合质量测试 | `disruptive` | `root` | `unsupported` | `linux,root` | `experimental` |
 | `test tcpquality` | `commands/test/tcpquality.sh` | 运行 TcpQuality TCP 网络质量测试 | `disruptive` | `root` | `unsupported` | `linux,root` | `experimental` |
 
-`optional-root` 表示只读查询、帮助或部分计划阶段可以普通用户运行；实际系统变更仍须 root 或在具体步骤提权。依赖只在当前动作实际需要且确实缺失时处理：真实执行的交互模式列出缺失项并询问是否安装，非交互模式和 `--dry-run` 依赖计划必须显式提供 `--install-deps`。`--dry-run --install-deps` 只展示安装计划，仍不写配置、不安装依赖、不启动或重启服务。
+`optional-root` 表示只读查询、帮助或部分计划阶段可以普通用户运行；实际系统变更仍须 root 或在具体步骤提权。依赖只在当前动作实际需要且确实缺失时处理：真实执行的交互模式列出缺失项并询问是否安装，真实非交互安装必须显式提供 `--install-deps`。`--dry-run` 无需安装授权即可展示缺失依赖与安装计划，不询问、不写配置、不安装依赖、不启动或重启服务。
 
 在 Release 安装态，注册表仍登记相同的公开命令，但命令文件按领域来自当前分发版本的 bundle：`network`、`system`、`security`、`service` 和 `test` 分别对应同名 bundle，`self` 来自常驻 core。某领域首次分发前必须从 current 对应的同一个 GitHub Release 下载其资产，并以 `vpsctl-manifest.tsv` 中的 SHA-256 校验后缓存到版本隔离目录；未校验文件、其他版本缓存或临时下载都不得进入注册表解析与分发。源码树运行继续直接使用仓库固定路径。
 

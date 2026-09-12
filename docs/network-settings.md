@@ -20,8 +20,8 @@ bash bin/vpsctl --dry-run --install-deps network dns set --server 1.1.1.1
 
 三项功能的公共约定如下：
 
-- `--install-deps` 为非交互调用和 `--dry-run` 依赖计划明确授权按当前动作安装缺失的系统工具；真实执行的交互流程则只在当前动作确有缺失时询问。它支持 `apt-get`、`dnf5`、`dnf`、`yum`、`apk`、`pacman` 与 `zypper`，但不安装或绕过内核、init 系统、CPU 架构、XDP/BPF 等平台能力。
-- `--dry-run` 展示检测结果和计划，不写系统、不安装依赖、不改变服务状态。与 `--install-deps` 组合时会展示包管理器命令；DNS 可继续展示后续计划，BBR 和 RFW 在缺失工具妨碍安全验证时会提示安装后重跑。
+- `--install-deps` 为真实非交互调用明确授权按当前动作安装缺失的系统工具；演练无需安装授权；真实执行的交互流程则只在当前动作确有缺失时询问。它支持 `apt-get`、`dnf5`、`dnf`、`yum`、`apk`、`pacman` 与 `zypper`，但不安装或绕过内核、init 系统、CPU 架构、XDP/BPF 等平台能力。
+- `--dry-run` 展示检测结果和计划，不写系统、不安装依赖、不改变服务状态。缺少工具时无需 `--install-deps` 即可展示包管理器计划；DNS 可继续展示后续计划，BBR 和 RFW 在缺失工具妨碍安全验证时会提示安装后重跑。
 - `--yes` 只跳过允许自动同意的普通提示，不绕过能力检查、写前验证或 RFW 的中断性操作强确认。
 - `--non-interactive` 禁止读取终端；缺少必要参数或必要的强确认时立即失败。
 - 修改操作分别使用 `/run/vpsctl/network-bbr.lock`、`/run/vpsctl/network-dns.lock` 和 `/run/vpsctl/network-rfw.lock`，阻止同一功能的并发事务互相覆盖。
@@ -136,7 +136,7 @@ RFW 入口仅支持以下组合：
 
 `install` 和 `update` 只从 [narwhal-cloud/rfw 官方 Releases](https://github.com/narwhal-cloud/rfw/releases)解析最新稳定 release，拒绝 prerelease、草稿、非 HTTPS 下载和无法匹配本机架构的资产。下载的二进制必须按官方 checksum 验证并核对版本后才能替换；校验信息缺失、不匹配或含糊时安全失败，不安装未验证资产。
 
-RFW 会在参数校验以及 Linux、systemd、架构和内核版本门禁通过后，只检查当前动作实际需要的 `curl`、`sha256sum`、`flock`、`ip`，以及启用端口日志时所需的 `mountpoint`。真实执行的交互环境发现这些可安装工具缺失时才列出缺失项并询问是否安装；非交互调用和 `--dry-run` 依赖计划仍需预先提供 `--install-deps`，否则返回依赖缺失。`systemctl`、`journalctl`、XDP、BPF 文件系统和 RFW 二进制能力仍按平台或功能前置条件处理，不作为通用软件包自动安装。
+RFW 会在参数校验以及 Linux、systemd、架构和内核版本门禁通过后，只检查当前动作实际需要的 `curl`、`sha256sum`、`flock`、`ip`，以及启用端口日志时所需的 `mountpoint`。真实执行的交互环境发现这些可安装工具缺失时才列出缺失项并询问是否安装；真实非交互安装仍需预先提供 `--install-deps`，否则返回依赖缺失；`--dry-run` 直接展示依赖安装计划，不询问也不执行安装。`systemctl`、`journalctl`、XDP、BPF 文件系统和 RFW 二进制能力仍按平台或功能前置条件处理，不作为通用软件包自动安装。
 
 ### 5.2 子动作和选项
 

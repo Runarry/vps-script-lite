@@ -124,7 +124,7 @@ vpsctl-service-0.8.7.tar.gz
 vpsctl-test-0.8.7.tar.gz
 ```
 
-bundle 内部使用项目根相对路径，不能再包一层顶级目录。`vpsctl-manifest.tsv` 是严格 TSV，字段顺序如下；SHA-256 使用 64 位小写十六进制：
+bundle 内部使用项目根相对路径，不能再包一层顶级目录。core 允许 `lib/` 及其子路径内的公共库，构建脚本仍显式选择发布文件；保留必需入口、哈希、路径越界及链接/特殊文件检查。`vpsctl-manifest.tsv` 是严格 TSV，字段顺序如下；SHA-256 使用 64 位小写十六进制：
 
 ```text
 schema_version<TAB>1
@@ -141,7 +141,7 @@ bundle<TAB>test<TAB>vpsctl-test-0.8.7.tar.gz<TAB>SHA256
 
 manifest 的 `version`、tag、文件名、安装目标版本和应用展示版本必须一致。`current` 只在 manifest、core 及必要安装文件完成校验并落盘后切换；更新提交完成前失败时保留原 release，并按现有事务流程恢复原 current、入口和 self 元数据。
 
-`self update` 仅在跨版本更新的 current、快捷入口及 self 元数据全部提交成功后清理历史 release，不保留自动回退版本。清理只处理 `releases/` 下名称为 `X.Y.Z` 的非符号链接目录，且普通文件 `.vpsctl-managed-release` 的单条记录必须为 `Runarry/vps-script-lite<TAB>X.Y.Z`、与目录名称匹配；当前 release、临时目录及不受管或异常条目跳过。历史清理失败时不回滚已激活的新版本，返回 `30` 并报告未完成路径；部分删除若已移除归属标识，则在原安全目录仍存在时恢复该标识，供下次成功跨版本更新重试。同版本无操作更新和提交失败路径不清理历史版本。初始安装、卸载及业务功能的状态与备份不受此策略影响。
+`self update` 仅在跨版本更新的 current、快捷入口及 self 元数据全部提交成功后清理历史 release，不保留自动回退版本。清理只处理 `releases/` 下名称为 `X.Y.Z` 的非符号链接目录，且普通文件 `.vpsctl-managed-release` 的单条记录必须为 `Runarry/vps-script-lite<TAB>X.Y.Z`、与目录名称匹配；当前 release、临时目录及不受管或异常条目跳过。历史清理失败时不回滚已激活的新版本，返回 `30` 并报告未完成路径；部分删除若已移除归属标识，则在原安全目录仍存在时恢复该标识，供下次成功跨版本更新重试。同版本更新只同步 self 缓存，同版本更新和提交失败路径均不清理历史版本。self 缓存缺失或普通文件内容损坏不阻断操作；更新回滚材料来自当前已验证入口和 release manifest，当前安装归属与完整性检查仍保留。初始安装、卸载及业务功能的状态与备份不受此策略影响。
 
 ### 3.5 配置与运行数据
 

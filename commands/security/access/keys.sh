@@ -479,8 +479,8 @@ access_key_add() {
             fi
             ;;
         file)
-            [[ -f "$source_value" && ! -L "$source_value" && -r "$source_value" ]] || {
-                vps_cmd_error "公钥文件必须是可读普通文件且不能是符号链接：$source_value"
+            [[ -f "$source_value" && -r "$source_value" ]] || {
+                vps_cmd_error "公钥文件必须是可读普通文件：$source_value"
                 return 3
             }
             IFS= read -r line <"$source_value" || {

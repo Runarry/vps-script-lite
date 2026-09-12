@@ -21,7 +21,7 @@ vpsctl security fail2ban verify
 vpsctl security fail2ban start|stop|restart
 vpsctl security fail2ban logs [--lines N]
 vpsctl security fail2ban restore --backup ID --confirm-restore ID
-vpsctl security fail2ban uninstall --confirm-uninstall REMOVE-VPSCTL-FAIL2BAN
+vpsctl [--yes] security fail2ban uninstall [--confirm-uninstall REMOVE-VPSCTL-FAIL2BAN]
 ```
 
 无参数且连接交互终端时进入编号菜单；无参数非交互调用等同于人类可读的 `status`。菜单执行真实动作，不提供 dry-run 或机器格式开关。
@@ -60,7 +60,7 @@ vpsctl security fail2ban uninstall --confirm-uninstall REMOVE-VPSCTL-FAIL2BAN
 
 `verify` 选择一个未被封禁的 TEST-NET 地址执行临时 ban/unban，以验证实际动作能够运行；退出和可捕获信号都会尝试解封。`unban` 只接受单个规范 IP。
 
-`uninstall` 需要固定强确认词，只删除带 vpsctl 标记且哈希匹配的受管 jail，随后验证并 reload。它保留 Fail2ban 软件包、服务启用/运行状态、用户配置、运行数据库和历史备份。
+`uninstall` 支持 `vpsctl --yes security fail2ban uninstall`，也兼容原 `--confirm-uninstall REMOVE-VPSCTL-FAIL2BAN`；交互未授权时确认一次，非交互未授权立即失败。它只删除带 vpsctl 标记且哈希匹配的受管 jail，随后验证并 reload。它保留 Fail2ban 软件包、服务启用/运行状态、用户配置、运行数据库和历史备份。
 
 ## 验收
 

@@ -144,8 +144,7 @@ fail2ban-client get sshd banip 2>/dev/null | tr ' ' '\n' | grep -Fxq "$test_ip" 
 timeout 3 ip netns exec "$namespace" bash -c "exec 3<>/dev/tcp/${host_ip}/${port}"
 
 bash "$TEST_ROOT/bin/vpsctl" --no-color security fail2ban verify
-bash "$TEST_ROOT/bin/vpsctl" --no-color security fail2ban uninstall \
-    --confirm-uninstall REMOVE-VPSCTL-FAIL2BAN
+bash "$TEST_ROOT/bin/vpsctl" --no-color --yes --non-interactive security fail2ban uninstall
 [[ ! -e "$managed" ]] || {
     printf 'FAIL: uninstall retained the vpsctl-managed jail\n' >&2
     exit 30

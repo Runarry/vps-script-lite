@@ -102,7 +102,7 @@ test_init_and_paths() {
 }
 
 test_dependency_installation() (
-    local manager calls expected status output_file marker installed output
+    local manager calls expected status output_file marker installed output install_deps interactive
     local -a managers=(apt-get dnf5 dnf yum apk pacman zypper)
     local -A expected_calls=(
         [apt-get]=$'apt-get update\napt-get install -y --no-install-recommends curl jq\n'
@@ -159,24 +159,48 @@ test_dependency_installation() (
     # Restore helper definitions after the argv-capture stubs above.
     source "${TEST_ROOT}/lib/command.sh"
     VPSCTL_DRY_RUN=1
-    VPSCTL_INSTALL_DEPS=1
     VPSCTL_ENV_PACKAGE_MANAGER=apt-get
-    VPS_CMD_DEPENDENCIES_PLANNED=0
     marker="${TEST_TEMP}/dependency-manager-ran"
     output_file="${TEST_TEMP}/dependency-dry-run-output"
     _vps_cmd_tool_available() { return 1; }
-    vps_cmd_detect_package_manager() { printf 'apt-get\n'; }
+    vps_cmd_is_interactive() { [[ "$interactive" == 1 ]]; }
+    _vps_cmd_confirm_dependency_install() { test_fail "dry-run dependency check prompted"; }
     apt-get() { touch "$marker"; }
-    vps_cmd_ensure_tools test-feature curl jq >"$output_file" 2>&1
-    test_assert_equal 1 "$VPS_CMD_DEPENDENCIES_PLANNED" "dry-run dependency plan flag"
-    [[ ! -e "$marker" ]] || test_fail "dry-run dependency plan executed the package manager"
-    calls="$(<"$output_file")"
-    [[ "$calls" == *'apt-get update'* && "$calls" == *'apt-get install -y --no-install-recommends curl jq'* ]] || test_fail "dry-run dependency argv"
+    for interactive in 0 1; do
+        for install_deps in 0 1; do
+            VPSCTL_INSTALL_DEPS="$install_deps"
+            VPS_CMD_DEPENDENCIES_PLANNED=0
+            vps_cmd_ensure_tools test-feature curl jq >"$output_file" 2>&1
+            test_assert_equal 1 "$VPS_CMD_DEPENDENCIES_PLANNED" "dry-run dependency plan flag"
+            test_assert_equal "$install_deps" "$VPSCTL_INSTALL_DEPS" "dry-run must not change install authorization"
+            [[ ! -e "$marker" ]] || test_fail "dry-run dependency plan executed the package manager"
+            calls="$(<"$output_file")"
+            [[ "$calls" == *'缺少工具：curl jq'* && "$calls" == *'将安装软件包：curl jq'* ]] || test_fail "dry-run dependency summary"
+            [[ "$calls" == *'apt-get update'* && "$calls" == *'apt-get install -y --no-install-recommends curl jq'* ]] || test_fail "dry-run dependency argv"
+        done
+    done
 
     VPSCTL_INSTALL_DEPS=0
+    VPS_CMD_DEPENDENCIES_PLANNED=0
+    status=0
+    vps_cmd_ensure_tools test-feature custom-missing-tool >/dev/null 2>&1 || status=$?
+    test_assert_equal 3 "$status" "dry-run unknown tool package mapping"
+    test_assert_equal 0 "$VPS_CMD_DEPENDENCIES_PLANNED" "unknown tool must not mark dependency plan complete"
+    VPSCTL_ENV_PACKAGE_MANAGER=unsupported
     status=0
     vps_cmd_ensure_tools test-feature curl >/dev/null 2>&1 || status=$?
-    test_assert_equal 3 "$status" "dependency installation authorization status"
+    test_assert_equal 2 "$status" "dry-run invalid package manager"
+    test_assert_equal 0 "$VPS_CMD_DEPENDENCIES_PLANNED" "invalid manager must not mark dependency plan complete"
+    [[ ! -e "$marker" ]] || test_fail "failed dependency plan executed the package manager"
+    VPSCTL_ENV_PACKAGE_MANAGER=apt-get
+    VPSCTL_DRY_RUN=0
+    VPSCTL_ASSUME_YES=1
+    interactive=0
+    status=0
+    vps_cmd_ensure_tools test-feature curl >/dev/null 2>&1 || status=$?
+    test_assert_equal 3 "$status" "noninteractive --yes must not authorize dependency installation"
+    [[ ! -e "$marker" ]] || test_fail "unauthorized dependency check executed the package manager"
+    VPSCTL_ASSUME_YES=0
 
     # Available tools require no package mapping or installation work.
     _vps_cmd_tool_available() { return 0; }
@@ -216,17 +240,6 @@ test_dependency_installation() (
     test_assert_equal "" "$calls" "declined dependency must not install"
     test_assert_equal 0 "$VPSCTL_INSTALL_DEPS" "declined authorization must not leak"
 
-    VPSCTL_DRY_RUN=1
-    _vps_cmd_confirm_dependency_install() { test_fail "dry-run dependency check prompted"; }
-    status=0
-    output_file="${TEST_TEMP}/dependency-unauthorized-dry-run-output"
-    vps_cmd_ensure_tools test-feature curl >"$output_file" 2>&1 || status=$?
-    test_assert_equal 3 "$status" "unauthorized dry-run dependency status"
-    output="$(<"$output_file")"
-    [[ "$output" == *'--install-deps'* ]] || test_fail "unauthorized dry-run dependency hint"
-    test_assert_equal "" "$calls" "unauthorized dry-run must not install"
-
-    VPSCTL_DRY_RUN=0
     VPSCTL_ASSUME_YES=1
     _vps_cmd_confirm_dependency_install() { return 3; }
     status=0

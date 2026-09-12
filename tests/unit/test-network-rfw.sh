@@ -535,12 +535,13 @@ test_dependency_install_controls() {
 
     reset_case
     status=0
-    output="$(RFW_TEST_PATH="$NO_DOWNLOAD_DEPS_BIN" MOCK_PACKAGE_MANAGER=apt-get rfw --dry-run --install-deps install 2>&1)" || status=$?
-    assert_status 0 "$status" "authorized dry-run dependency plan"
+    output="$(RFW_TEST_PATH="$NO_DOWNLOAD_DEPS_BIN" MOCK_PACKAGE_MANAGER=apt-get rfw --dry-run install 2>&1)" || status=$?
+    assert_status 0 "$status" "dry-run dependency plan without install authorization"
     assert_contains "$output" "apt-get update" "fixed apt dependency refresh plan"
     assert_contains "$output" "apt-get install -y --no-install-recommends curl coreutils" "fixed apt download dependency plan"
     assert_contains "$output" "iproute2" "install default-interface dependency plan"
     assert_contains "$output" "安装依赖后重新运行" "dependency plan rerun guidance"
+    assert_not_contains "$(<"$MOCK_LOG")" "apt-get " "dependency-only plan executed package manager"
     assert_not_contains "$(<"$MOCK_LOG")" "curl " "dependency-only plan downloaded release"
     [[ ! -e "${SYSTEM_ROOT}/usr/local/bin/rfw" ]] || fail "dependency-only plan wrote binary"
     [[ ! -e "${SYSTEM_ROOT}/etc/vpsctl/rfw.conf" ]] || fail "dependency-only plan wrote configuration"
@@ -575,6 +576,7 @@ test_dependency_install_controls() {
     assert_status 0 "$status" "logged start dependency plan"
     assert_contains "$output" "apt-get install -y --no-install-recommends iproute2 util-linux" "logged start ip and mountpoint dependency plan"
     assert_contains "$output" "安装依赖后重新运行" "logged start dependency rerun guidance"
+    assert_not_contains "$(<"$MOCK_LOG")" "apt-get " "logged start dependency plan executed package manager"
     assert_not_contains "$(<"$MOCK_LOG")" "curl " "logged start dependency plan downloaded release"
     [[ "$config_hash" == "$(/usr/bin/sha256sum "${SYSTEM_ROOT}/etc/vpsctl/rfw.conf")" ]] || fail "logged start dependency plan changed configuration"
     [[ "$pending_hash" == "$(/usr/bin/sha256sum "${SYSTEM_ROOT}/var/lib/vpsctl/network/rfw/pending")" ]] || fail "logged start dependency plan changed pending state"

@@ -69,10 +69,21 @@ systemctl is-enabled --quiet vpsctl-tls-renew.timer || {
     exit 20
 }
 
+bash "$TEST_ROOT/bin/vpsctl" --no-color --yes --non-interactive security tls uninstall
+[[ ! -e /etc/systemd/system/vpsctl-tls-renew.timer && ! -e /etc/systemd/system/vpsctl-tls-renew.service ]] || {
+    printf 'FAIL: ordinary uninstall retained renewal units\n' >&2
+    exit 20
+}
+[[ -f "/var/lib/vpsctl/security/tls/live/${id}/fullchain.pem" && -f "/var/lib/vpsctl/security/tls/live/${id}/privkey.pem" ]] || {
+    printf 'FAIL: ordinary uninstall removed certificate or private key\n' >&2
+    exit 20
+}
+timer_enabled=0
+
 if [[ -n "${VPSCTL_TLS_TEST_DOMAIN:-}" ]]; then
     printf 'INFO: VPSCTL_TLS_TEST_DOMAIN is set; HTTP-01 staging issue is operator-run\n' >&2
     printf 'INFO: example: vpsctl security tls issue --domain %s --challenge http-01 --email test@example.test --staging\n' \
         "$VPSCTL_TLS_TEST_DOMAIN" >&2
 fi
 
-printf 'PASS: security tls real import and timer\n'
+printf 'PASS: security tls real import, timer and --yes uninstall preserving certificate/private key\n'
