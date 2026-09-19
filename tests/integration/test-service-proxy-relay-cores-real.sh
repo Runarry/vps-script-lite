@@ -44,6 +44,8 @@ source "${TEST_ROOT}/commands/service/proxy/ufw.sh"
 vps_cmd_init "relay real core test" "$TEST_ROOT"
 # shellcheck source=../../commands/service/proxy/common.sh
 source "${TEST_ROOT}/commands/service/proxy/common.sh"
+# shellcheck source=../../commands/service/proxy/core.sh
+source "${TEST_ROOT}/commands/service/proxy/core.sh"
 # shellcheck source=../../commands/service/proxy/protocols-sing-box.sh
 source "${TEST_ROOT}/commands/service/proxy/protocols-sing-box.sh"
 # shellcheck source=../../commands/service/proxy/protocols-xray.sh
@@ -61,8 +63,17 @@ proxy_common_init
 proxy_relay_init
 proxy_ensure_layout
 mkdir -p -- "${TEST_SYSTEM_ROOT}/usr/local/bin"
-if [[ -n "$SING_BOX_BINARY" ]]; then cp -p -- "$SING_BOX_BINARY" "${TEST_SYSTEM_ROOT}/usr/local/bin/sing-box"; fi
-if [[ -n "$XRAY_BINARY" ]]; then cp -p -- "$XRAY_BINARY" "${TEST_SYSTEM_ROOT}/usr/local/bin/xray"; fi
+declare -A core_versions=()
+if [[ -n "$SING_BOX_BINARY" ]]; then
+    cp -p -- "$SING_BOX_BINARY" "${TEST_SYSTEM_ROOT}/usr/local/bin/sing-box"
+    core_versions[sing-box]="$(_proxy_core_binary_version sing-box "${TEST_SYSTEM_ROOT}/usr/local/bin/sing-box")"
+    printf 'TEST: sing-box %s\n' "${core_versions[sing-box]}"
+fi
+if [[ -n "$XRAY_BINARY" ]]; then
+    cp -p -- "$XRAY_BINARY" "${TEST_SYSTEM_ROOT}/usr/local/bin/xray"
+    core_versions[xray]="$(_proxy_core_binary_version xray "${TEST_SYSTEM_ROOT}/usr/local/bin/xray")"
+    printf 'TEST: Xray %s\n' "${core_versions[xray]}"
+fi
 
 count=0
 while IFS=$'\t' read -r profile _label; do
@@ -112,7 +123,12 @@ while IFS=$'\t' read -r profile _label; do
                      created_at:$now,updated_at:$now}],
              bindings:[{id:$bind_id,node_id:$node_id,exit_id:$exit_id,created_at:$now,updated_at:$now}],
              forwards:[]}' >"$relay"
-        proxy_render_config "$core" "$manifest" "$relay" >"$config" || {
+        if [[ "$core" == sing-box && "$(jq -r '.tls.mode' <<<"$descriptor")" == tls ]]; then
+            pinned_exit="$(proxy_relay_apply_client_options "$(jq -c '.exits[0]' "$relay")" "$(jq -r '.tls.certificate_path' <<<"$node")")" || exit 1
+            jq --argjson exit "$pinned_exit" '.exits[0]=$exit' "$relay" >"${relay}.next" || exit 1
+            mv -- "${relay}.next" "$relay"
+        fi
+        proxy_render_config "$core" "$manifest" "$relay" "${core_versions[$core]}" >"$config" || {
             printf 'FAIL: config render %s/%s\n' "$profile" "$core" >&2
             exit 1
         }
@@ -220,7 +236,7 @@ if [[ -n "$SING_BOX_BINARY" && -n "$XRAY_BINARY" ]]; then
             config="${TEST_TEMP}/config-switch-${switch_count}.json"
             jq -n --argjson node "$render_node" '{schema_version:1,nodes:[$node]}' >"$manifest"
             proxy_relay_forward_manifest_default >"$relay"
-            proxy_render_config "$target_core" "$manifest" "$relay" >"$config" || {
+            proxy_render_config "$target_core" "$manifest" "$relay" "${core_versions[$target_core]}" >"$config" || {
                 printf 'FAIL: core switch target config render %s/%s->%s\n' \
                     "$profile" "$source_core" "$target_core" >&2
                 exit 1
@@ -236,8 +252,8 @@ if [[ -n "$SING_BOX_BINARY" && -n "$XRAY_BINARY" ]]; then
             }
         done
     done < <(proxy_all_profiles)
-    [[ "$switch_profile_count" == 6 && "$switch_count" == 12 ]] || {
-        printf 'FAIL: expected 6 dual-core profiles and 12 core switches, got %s and %s\n' \
+    [[ "$switch_profile_count" == 7 && "$switch_count" == 14 ]] || {
+        printf 'FAIL: expected 7 dual-core profiles and 14 core switches, got %s and %s\n' \
             "$switch_profile_count" "$switch_count" >&2
         exit 1
     }
@@ -274,7 +290,7 @@ for core in sing-box xray; do
     config="${TEST_TEMP}/config-policy-${core}.json"
     jq -n --argjson nodes "$policy_nodes" '{schema_version:1,nodes:$nodes}' >"$manifest"
     proxy_relay_forward_manifest_default >"$relay"
-    proxy_render_config "$core" "$manifest" "$relay" >"$config" || {
+    proxy_render_config "$core" "$manifest" "$relay" "${core_versions[$core]}" >"$config" || {
         printf 'FAIL: policy config render %s\n' "$core" >&2
         exit 1
     }
@@ -298,14 +314,21 @@ for core in sing-box xray; do
             }
             ;;
         xray)
-            jq -e --argjson ids "$policy_ids" '
+            sockopt_strategy=false
+            if proxy_core_version_at_least "${core_versions[xray]}" 26.9.8; then sockopt_strategy=true; fi
+            jq -e --argjson ids "$policy_ids" --argjson sockopt_strategy "$sockopt_strategy" '
                 {prefer_ipv4:"UseIPv4v6",prefer_ipv6:"UseIPv6v4",ipv4_only:"ForceIPv4",ipv6_only:"ForceIPv6"} as $mapping |
                 . as $root |
                 all($root.outbounds[]; .tag != ("direct-" + $ids.auto)) and
                 all($mapping | keys[];
                     . as $strategy |
                     any($root.outbounds[]; .tag == ("direct-" + $ids[$strategy]) and
-                        .protocol == "freedom" and .settings.domainStrategy == $mapping[$strategy]) and
+                        .protocol == "freedom" and
+                        (if $sockopt_strategy then
+                             .streamSettings.sockopt.domainStrategy == $mapping[$strategy] and
+                             (.settings | has("domainStrategy") | not)
+                         else .settings.domainStrategy == $mapping[$strategy] and
+                             (.streamSettings.sockopt | has("domainStrategy") | not) end)) and
                     any($root.routing.rules[]; .inboundTag == [$ids[$strategy]] and
                         .outboundTag == ("direct-" + $ids[$strategy])))
             ' "$config" >/dev/null || { printf 'FAIL: Xray real policy mapping\n' >&2; exit 1; }
@@ -338,7 +361,7 @@ for core in sing-box xray; do
                  created_at:$now,updated_at:$now}],
          bindings:[{id:$bind_id,node_id:$node_id,exit_id:$exit_id,created_at:$now,updated_at:$now}],
          forwards:[]}' >"$relay"
-    proxy_render_config "$core" "$manifest" "$relay" >"$config" || {
+    proxy_render_config "$core" "$manifest" "$relay" "${core_versions[$core]}" >"$config" || {
         printf 'FAIL: relay-bound policy config render %s\n' "$core" >&2
         exit 1
     }

@@ -55,10 +55,11 @@ proxy_relay_validate_file() {
             ((.created_at | type) == "string") and ((.updated_at | type) == "string") and
             (if .type == "protocol" then
                 (.core == "sing-box" or .core == "xray") and
-                (.profile | name) and (.uri | uri) and ((.descriptor | type) == "object")
+                (.profile | name) and (.uri | uri) and ((.descriptor // {} | type) == "object")
              else
                 ((.core // "") == "") and ((.profile // "") == "") and
-                ((.uri // "") == "") and ((.descriptor // {}) | type == "object")
+                ((.uri // "") == "") and ((.descriptor // {}) | type == "object") and
+                ((.client_options // {}) == {})
              end)
         ) and
         all(.bindings[];
@@ -89,19 +90,12 @@ proxy_relay_validate_file() {
         while IFS= read -r exit; do
             parsed="$(proxy_relay_uri_parse "$(jq -r '.uri' <<<"$exit")" "$(jq -r '.profile' <<<"$exit")")" || return $?
             jq -e --argjson parsed "$parsed" '
-                .descriptor == $parsed and .endpoint == $parsed.endpoint and
-                .network_hint == $parsed.network_hint and
-                (.core as $core | $parsed.compatible_cores | index($core) != null)
+                .endpoint == $parsed.endpoint and .network_hint == $parsed.network_hint
             ' <<<"$exit" >/dev/null 2>&1 || {
-                vps_cmd_error "协议出口的 URI、规范化描述或内核选择不一致：$(jq -r '.id' <<<"$exit")"
+                vps_cmd_error "协议出口的 URI 与地址或网络建议不一致：$(jq -r '.id' <<<"$exit")"
                 return 10
             }
-            if declare -F proxy_relay_render_outbound >/dev/null 2>&1; then
-                proxy_relay_render_outbound "$(jq -r '.core' <<<"$exit")" "$exit" >/dev/null || {
-                    vps_cmd_error "协议出口无法由所选内核安全渲染：$(jq -r '.id' <<<"$exit")"
-                    return 10
-                }
-            fi
+            _proxy_relay_validate_client_options "$exit" "$parsed" || return $?
         done < <(jq -c '.exits[] | select(.type == "protocol")' "$file")
     fi
 
@@ -129,6 +123,28 @@ proxy_relay_validate_file() {
         proxy_relay_forward_validate_manifest "$file" "$nodes_file" || return $?
     fi
 }
+
+_proxy_relay_normalized_state() {
+    local source="$1" manifest="${2:-${PROXY_MANIFEST:-}}" state exit normalized
+    proxy_relay_validate_file "$source" "$manifest" || return $?
+    state="$(<"$source")"
+    while IFS= read -r exit; do
+        normalized="$(proxy_relay_normalize_exit "$exit" "$manifest")" || return $?
+        state="$(jq -c --argjson item "$normalized" \
+            '(.exits[] | select(.id == $item.id))=$item' <<<"$state")" || return 10
+    done < <(jq -c '.exits[] | select(.type == "protocol")' "$source")
+    printf '%s\n' "$state"
+}
+
+# A migration candidate is separate from the source, even during core updates.
+proxy_relay_normalize_file() (
+    local source="${1-}" destination="${2-}" manifest="${3:-${PROXY_MANIFEST:-}}" state
+    [[ $# -ge 2 && $# -le 3 && -n "$source" && -n "$destination" && "$source" != "$destination" &&
+        ! "$source" -ef "$destination" && ! -L "$destination" ]] || return 2
+    state="$(_proxy_relay_normalized_state "$source" "$manifest")" || return $?
+    umask 077
+    printf '%s\n' "$state" >"$destination" || return 20
+)
 
 proxy_relay_ensure() {
     proxy_ensure_layout || return $?
@@ -177,9 +193,10 @@ proxy_relay_generate_id() {
 }
 
 proxy_relay_exit() {
-    local id="$1" file="${2:-$PROXY_RELAY_FILE}"
+    local id="$1" file="${2:-$PROXY_RELAY_FILE}" exit
     [[ -f "$file" ]] || return 1
-    jq -ce --arg id "$id" '.exits[] | select(.id == $id)' "$file" 2>/dev/null
+    exit="$(jq -ce --arg id "$id" '.exits[] | select(.id == $id)' "$file" 2>/dev/null)" || return $?
+    proxy_relay_normalize_exit "$exit"
 }
 
 proxy_relay_binding() {
@@ -269,11 +286,17 @@ proxy_relay_write_state_only() {
 }
 
 proxy_relay_commit_candidate() {
-    if [[ "${4:-0}" == 1 ]]; then
-        proxy_ufw_relay_transaction _proxy_relay_commit_candidate "$@"
+    local normalized status=0
+    normalized="$(proxy_relay_candidate_file normalized)" || return 20
+    proxy_relay_normalize_file "$1" "$normalized" || { status=$?; rm -f -- "$normalized"; return "$status"; }
+    shift
+    if [[ "${3:-0}" == 1 ]]; then
+        proxy_ufw_relay_transaction _proxy_relay_commit_candidate "$normalized" "$@" || status=$?
     else
-        _proxy_relay_commit_candidate "$@"
+        _proxy_relay_commit_candidate "$normalized" "$@" || status=$?
     fi
+    rm -f -- "$normalized"
+    return "$status"
 }
 
 _proxy_relay_commit_candidate() {
@@ -381,7 +404,7 @@ proxy_relay_print_exit_references() {
 }
 
 proxy_relay_exit_list() {
-    local json=0 arg sing_box_verified=false xray_verified=false
+    local json=0 arg sing_box_verified=false xray_verified=false state
     while (($#)); do
         arg="$1"
         case "$arg" in --json) json=1 ;; *) vps_cmd_error "relay exit list 的未知选项：$arg"; return 2 ;; esac
@@ -390,17 +413,17 @@ proxy_relay_exit_list() {
     proxy_require_state_access || return $?
     proxy_ensure_tools relay-exit-list jq || return $?
     [[ -f "$PROXY_RELAY_FILE" ]] || { ((json)) && printf '{"schema_version":1,"exits":[]}\n' || printf '当前没有出口。\n'; return 0; }
-    proxy_relay_validate_file "$PROXY_RELAY_FILE" || return $?
+    state="$(_proxy_relay_normalized_state "$PROXY_RELAY_FILE")" || return $?
     proxy_core_registered sing-box && sing_box_verified=true
     proxy_core_registered xray && xray_verified=true
     if ((json)); then
         jq --argjson sing_box_verified "$sing_box_verified" --argjson xray_verified "$xray_verified" '. as $root | {schema_version:1,exits:[.exits[] as $e | {
             id:$e.id,name:$e.name,type:$e.type,core:$e.core,profile:$e.profile,
-            endpoint:$e.endpoint,network_hint:$e.network_hint,
+            endpoint:$e.endpoint,network_hint:$e.network_hint,client_options:($e.client_options // {}),
             binary_verified:(if $e.type == "direct" then null elif $e.core == "sing-box" then $sing_box_verified else $xray_verified end),
             binding_count:([$root.bindings[] | select(.exit_id == $e.id)] | length),
             forward_count:([$root.forwards[] | select(.exit_id == $e.id)] | length)
-        }]}' "$PROXY_RELAY_FILE"
+        }]}' <<<"$state"
         return
     fi
     local exit type core bindings forwards verified
@@ -443,6 +466,17 @@ proxy_relay_exit_show() {
         "$(jq -r '.name' <<<"$exit")" "$id" "$([[ "$(jq -r '.type' <<<"$exit")" == protocol ]] && printf '协议' || printf '直连')"
     if [[ "$(jq -r '.type' <<<"$exit")" == protocol ]]; then
         printf '  内核：%s\n  Profile：%s\n' "$(jq -r '.core' <<<"$exit")" "$(jq -r '.profile' <<<"$exit")"
+        if [[ "$(jq -r '.client_options.tls_spki_sha256 // empty' <<<"$exit")" != '' ]]; then
+            printf '  TLS SPKI SHA256：%s\n' "$(jq -r '.client_options.tls_spki_sha256' <<<"$exit")"
+        elif [[ "$(jq -r '.descriptor.tls.certificate_sha256 // empty' <<<"$exit")" != '' && "$(jq -r '.core' <<<"$exit")" == sing-box ]]; then
+            printf '  TLS pin：尚需证书或 SPKI（纯端口转发可用）\n'
+        fi
+        if jq -e '.client_options | has("chrome_parrot")' <<<"$exit" >/dev/null 2>&1; then
+            printf '  Chrome QUIC：%s\n' "$(jq -r 'if .client_options.chrome_parrot then "on" else "off" end' <<<"$exit")"
+        fi
+        if jq -e '.client_options | has("bbr_profile")' <<<"$exit" >/dev/null 2>&1; then
+            printf '  BBR Profile：%s\n' "$(jq -r '.client_options.bbr_profile' <<<"$exit")"
+        fi
         if proxy_core_registered "$(jq -r '.core' <<<"$exit")"; then printf '  二进制验证：可用\n'; else printf '  二进制验证：尚未验证（建立关联前需安装内核）\n'; fi
     fi
     printf '  目标：%s:%s\n  网络建议：%s\n' "$(jq -r '.endpoint.host' <<<"$exit")" \
@@ -465,9 +499,47 @@ proxy_relay_copy_current() {
     fi
 }
 
+proxy_relay_apply_client_options() {
+    local exit_json="$1" cert_file="${2-}" spki="${3-}" chrome="${4-}" bbr="${5-}" pins
+    [[ -z "$cert_file" || -z "$spki" ]] || {
+        vps_cmd_error "--tls-cert-file 与 --tls-spki-sha256 互斥"; return 2;
+    }
+    if [[ -n "$cert_file" ]]; then
+        pins="$(_proxy_relay_certificate_pins "$cert_file")" || {
+            vps_cmd_error "无法读取 TLS PEM 叶证书或提取公钥"; return 10;
+        }
+        exit_json="$(jq -c --argjson pins "$pins" '.client_options=(.client_options // {}) + $pins' <<<"$exit_json")" || return 10
+    elif [[ -n "$spki" ]]; then
+        exit_json="$(jq -c --arg spki "$spki" \
+            '.client_options=(.client_options // {}) | del(.client_options.tls_cert_sha256) |
+             .client_options.tls_spki_sha256=$spki' <<<"$exit_json")" || return 10
+    fi
+    if [[ -n "$chrome" ]]; then
+        [[ "$chrome" == on || "$chrome" == off ]] || { vps_cmd_error "--chrome-parrot 需要 on|off"; return 2; }
+        exit_json="$(jq -c --arg chrome "$chrome" \
+            '.client_options=(.client_options // {}) + {chrome_parrot:($chrome == "on")}' <<<"$exit_json")" || return 10
+    fi
+    if [[ -n "$bbr" ]]; then
+        case "$bbr" in
+            standard | conservative | aggressive) ;;
+            *) vps_cmd_error "--bbr-profile 需要 standard|conservative|aggressive"; return 2 ;;
+        esac
+        exit_json="$(jq -c --arg bbr "$bbr" \
+            '.client_options=(.client_options // {}) + {bbr_profile:$bbr}' <<<"$exit_json")" || return 10
+    fi
+    exit_json="$(proxy_relay_normalize_exit "$exit_json")" || return $?
+    if jq -e '.core == "xray" and (.client_options | has("tls_spki_sha256")) and
+        ((.client_options.tls_cert_sha256 // "") == "")' <<<"$exit_json" >/dev/null 2>&1; then
+        vps_cmd_error "Xray 无法表达独立 SPKI 固定，请使用 --tls-cert-file"
+        return 10
+    fi
+    printf '%s' "$exit_json"
+}
+
 proxy_relay_exit_add() (
     local name="" uri="" profile="" requested_core="" target="" target_port="" arg
     local id descriptor="" core="" type exit_json candidate now status=0
+    local tls_cert_file="" tls_spki_sha256="" chrome_parrot="" bbr_profile="" tls_source
     while (($#)); do
         arg="$1"
         case "$arg" in
@@ -477,6 +549,10 @@ proxy_relay_exit_add() (
             --core) (($# >= 2)) || return 2; requested_core="$2"; shift 2; continue ;;
             --target) (($# >= 2)) || return 2; target="$2"; shift 2; continue ;;
             --target-port) (($# >= 2)) || return 2; target_port="$2"; shift 2; continue ;;
+            --tls-cert-file) (($# >= 2)) && [[ -n "$2" ]] || return 2; tls_cert_file="$2"; shift 2; continue ;;
+            --tls-spki-sha256) (($# >= 2)) && [[ -n "$2" ]] || return 2; tls_spki_sha256="$2"; shift 2; continue ;;
+            --chrome-parrot) (($# >= 2)) && [[ -n "$2" ]] || return 2; chrome_parrot="$2"; shift 2; continue ;;
+            --bbr-profile) (($# >= 2)) && [[ -n "$2" ]] || return 2; bbr_profile="$2"; shift 2; continue ;;
             *) vps_cmd_error "relay exit add 的未知选项：$arg"; return 2 ;;
         esac
     done
@@ -505,6 +581,24 @@ proxy_relay_exit_add() (
         descriptor="$(proxy_relay_parse_exit_uri "$uri" "$profile")" || return $?
         core="$(proxy_relay_select_core "$descriptor" "$requested_core")" || return $?
         profile="$(jq -r '.profile' <<<"$descriptor")" || return 10
+        if proxy_is_interactive; then
+            if [[ "$(jq -r '.tls.mode' <<<"$descriptor")" == tls && -z "$tls_cert_file$tls_spki_sha256" ]]; then
+                tls_source="$(proxy_prompt_select "TLS 公钥固定" auto auto "自动查找本机证书／保留 URI 设置" cert "提供 PEM 证书" spki "提供可信 SPKI SHA256")" || return $?
+                case "$tls_source" in
+                    cert) tls_cert_file="$(proxy_prompt_value "PEM 证书路径" "")" || return $? ;;
+                    spki) tls_spki_sha256="$(proxy_prompt_value "SPKI SHA256（Base64）" "")" || return $? ;;
+                esac
+            fi
+            if [[ "$core:$profile" == sing-box:hysteria2 && -z "$chrome_parrot" ]]; then
+                chrome_parrot="$(proxy_prompt_select "Chrome QUIC" default default "核心默认" on "开启" off "关闭")" || return $?
+                [[ "$chrome_parrot" != default ]] || chrome_parrot=""
+            fi
+            if [[ "$core:$profile" == sing-box:hysteria2 && -z "$bbr_profile" ]]; then
+                printf 'BBR Profile 仅在协商使用 BBR 时生效，不替代带宽设置。\n' >&2
+                bbr_profile="$(proxy_prompt_select "BBR Profile" default default "核心默认" standard "standard" conservative "conservative" aggressive "aggressive")" || return $?
+                [[ "$bbr_profile" != default ]] || bbr_profile=""
+            fi
+        fi
     else
         type="direct"
         [[ -n "$target" && -n "$target_port" ]] || {
@@ -512,6 +606,7 @@ proxy_relay_exit_add() (
             return 2
         }
         [[ -z "$profile$requested_core" ]] || { vps_cmd_error "直连出口不能指定 --profile/--core"; return 2; }
+        [[ -z "$tls_cert_file$tls_spki_sha256$chrome_parrot$bbr_profile" ]] || { vps_cmd_error "直连出口不能设置 TLS、Chrome QUIC 或 BBR 参数"; return 2; }
         proxy_valid_host "$target" || { vps_cmd_error "目标地址无效"; return 2; }
         proxy_valid_port "$target_port" || { vps_cmd_error "目标端口无效"; return 2; }
         target_port=$((10#$target_port))
@@ -526,6 +621,10 @@ proxy_relay_exit_add() (
             {id:$id,name:$name,type:"protocol",core:$core,profile:$profile,uri:$uri,
              descriptor:$descriptor,endpoint:$descriptor.endpoint,network_hint:$descriptor.network_hint,
              created_at:$now,updated_at:$now}')" || return 10
+        exit_json="$(proxy_relay_apply_client_options "$exit_json" "$tls_cert_file" "$tls_spki_sha256" "$chrome_parrot" "$bbr_profile")" || return $?
+        if [[ "$core" == xray ]]; then
+            proxy_relay_render_outbound "$core" "$exit_json" >/dev/null || return $?
+        fi
     else
         exit_json="$(jq -cn --arg id "$id" --arg name "$name" --arg host "$target" \
             --argjson port "$target_port" --arg now "$now" '
@@ -553,6 +652,7 @@ proxy_relay_exit_edit() (
     local id="" name="" uri="" profile="" requested_core="" target="" target_port="" arg
     local old current type descriptor="" core old_core refs binding_count forward_count candidate updated status=0 now
     local parse_profile="" explicit=0 uri_changed=0 profile_changed=0
+    local tls_cert_file="" tls_spki_sha256="" chrome_parrot="" bbr_profile="" render_core=""
     while (($#)); do
         arg="$1"
         case "$arg" in
@@ -563,6 +663,10 @@ proxy_relay_exit_edit() (
             --core) (($# >= 2)) || return 2; requested_core="$2"; explicit=1; shift 2; continue ;;
             --target) (($# >= 2)) || return 2; target="$2"; explicit=1; shift 2; continue ;;
             --target-port) (($# >= 2)) || return 2; target_port="$2"; explicit=1; shift 2; continue ;;
+            --tls-cert-file) (($# >= 2)) && [[ -n "$2" ]] || return 2; tls_cert_file="$2"; explicit=1; shift 2; continue ;;
+            --tls-spki-sha256) (($# >= 2)) && [[ -n "$2" ]] || return 2; tls_spki_sha256="$2"; explicit=1; shift 2; continue ;;
+            --chrome-parrot) (($# >= 2)) && [[ -n "$2" ]] || return 2; chrome_parrot="$2"; explicit=1; shift 2; continue ;;
+            --bbr-profile) (($# >= 2)) && [[ -n "$2" ]] || return 2; bbr_profile="$2"; explicit=1; shift 2; continue ;;
             *) vps_cmd_error "relay exit edit 的未知选项：$arg"; return 2 ;;
         esac
     done
@@ -583,13 +687,16 @@ proxy_relay_exit_edit() (
     if [[ "$type" == protocol ]]; then
         [[ -z "$target$target_port" ]] || { vps_cmd_error "协议出口不能使用 --target/--target-port 编辑"; return 2; }
         uri="${uri:-$(jq -r '.uri' <<<"$old")}"
+        [[ "$uri" != "$(jq -r '.uri' <<<"$old")" ]] || uri_changed=0
         if ((profile_changed)); then
             parse_profile="$profile"
         elif ((uri_changed == 0)); then
             parse_profile="$(jq -r '.profile' <<<"$old")"
         fi
         descriptor="$(proxy_relay_parse_exit_uri "$uri" "$parse_profile")" || return $?
-        if [[ -n "$requested_core" ]]; then
+        if [[ -z "$requested_core" ]] && ((uri_changed == 0 && profile_changed == 0)); then
+            core="$old_core"
+        elif [[ -n "$requested_core" ]]; then
             core="$(proxy_relay_select_core "$descriptor" "$requested_core")" || return $?
         elif jq -e --arg core "$old_core" '.compatible_cores | index($core) != null' <<<"$descriptor" >/dev/null 2>&1; then
             core="$old_core"
@@ -607,8 +714,16 @@ proxy_relay_exit_edit() (
             .name=$name | .core=$core | .profile=$profile | .uri=$uri | .descriptor=$descriptor |
             .endpoint=$descriptor.endpoint | .network_hint=$descriptor.network_hint | .updated_at=$now
         ' <<<"$old")" || return 10
+        if ((uri_changed)); then
+            updated="$(jq 'del(.client_options.tls_spki_sha256,.client_options.tls_cert_sha256)' <<<"$updated")" || return 10
+        fi
+        updated="$(proxy_relay_apply_client_options "$updated" "$tls_cert_file" "$tls_spki_sha256" "$chrome_parrot" "$bbr_profile")" || return $?
+        if ((binding_count > 0)) && { ((uri_changed || profile_changed)) || [[ -n "$requested_core$tls_cert_file$tls_spki_sha256$chrome_parrot$bbr_profile" ]]; }; then
+            render_core="$old_core"
+        fi
     else
         [[ -z "$uri$profile$requested_core" ]] || { vps_cmd_error "直连出口不能使用 URI/profile/core 编辑"; return 2; }
+        [[ -z "$tls_cert_file$tls_spki_sha256$chrome_parrot$bbr_profile" ]] || { vps_cmd_error "直连出口不能设置 TLS、Chrome QUIC 或 BBR 参数"; return 2; }
         target="${target:-$(jq -r '.endpoint.host' <<<"$old")}"
         target_port="${target_port:-$(jq -r '.endpoint.port' <<<"$old")}"
         proxy_valid_host "$target" || { vps_cmd_error "目标地址无效"; return 2; }
@@ -631,7 +746,7 @@ proxy_relay_exit_edit() (
     jq --arg id "$id" --argjson item "$updated" '(.exits[] | select(.id == $id))=$item' \
         "$PROXY_RELAY_FILE" >"$candidate" || return 10
     proxy_relay_commit_candidate "$candidate" relay-exit-edit \
-        "$([[ "$binding_count" != 0 ]] && printf '%s' "$old_core")" \
+        "$render_core" \
         "$([[ "$forward_count" != 0 ]] && printf 1 || printf 0)" || status=$?
     rm -f -- "$candidate"
     trap 'vps_cmd_unlock' EXIT
@@ -1321,17 +1436,33 @@ proxy_relay_menu_exit_show() {
 
 proxy_relay_menu_exit_edit() {
     local id exit type field value
+    local -a choices=()
     id="$(proxy_relay_select_exit "请选择要编辑的出口")" || return $?
     exit="$(proxy_relay_exit "$id")" || return 3
     type="$(jq -r '.type' <<<"$exit")"
     if [[ "$type" == protocol ]]; then
-        field="$(proxy_prompt_select "编辑字段" name name "名称" uri "节点 URI")" || return $?
+        choices=(name "名称" uri "节点 URI")
+        if [[ "$(jq -r '.descriptor.tls.mode' <<<"$exit")" == tls ]]; then
+            choices+=(tls-cert-file "TLS PEM 证书" tls-spki-sha256 "TLS SPKI SHA256")
+        fi
+        if [[ "$(jq -r '.core + ":" + .profile' <<<"$exit")" == sing-box:hysteria2 ]]; then
+            choices+=(chrome-parrot "Chrome QUIC 开关" bbr-profile "BBR Profile")
+        fi
+        field="$(proxy_prompt_select "编辑字段" name "${choices[@]}")" || return $?
     else
         field="$(proxy_prompt_select "编辑字段" name name "名称" target "目标地址" port "目标端口")" || return $?
     fi
     case "$field" in
         name) value="$(proxy_prompt_value "新名称" "$(jq -r '.name' <<<"$exit")")" || return $?; proxy_relay_exit_edit --id "$id" --name "$value" ;;
         uri) value="$(proxy_prompt_value "新节点 URI" "")" || return $?; proxy_relay_exit_edit --id "$id" --uri "$value" ;;
+        tls-cert-file) value="$(proxy_prompt_value "PEM 叶证书或证书链路径" "")" || return $?; proxy_relay_exit_edit --id "$id" --tls-cert-file "$value" ;;
+        tls-spki-sha256) value="$(proxy_prompt_value "可信 SPKI SHA256（Base64）" "")" || return $?; proxy_relay_exit_edit --id "$id" --tls-spki-sha256 "$value" ;;
+        chrome-parrot) value="$(proxy_prompt_select "Chrome QUIC" on on "开启" off "关闭")" || return $?; proxy_relay_exit_edit --id "$id" --chrome-parrot "$value" ;;
+        bbr-profile)
+            printf 'BBR Profile 仅在协商使用 BBR 时生效，不替代带宽设置。\n' >&2
+            value="$(proxy_prompt_select "BBR Profile" "$(jq -r '.client_options.bbr_profile // "standard"' <<<"$exit")" standard "standard" conservative "conservative" aggressive "aggressive")" || return $?
+            proxy_relay_exit_edit --id "$id" --bbr-profile "$value"
+            ;;
         target) value="$(proxy_prompt_value "新目标地址" "$(jq -r '.endpoint.host' <<<"$exit")")" || return $?; proxy_relay_exit_edit --id "$id" --target "$value" ;;
         port) value="$(proxy_prompt_value "新目标端口" "$(jq -r '.endpoint.port' <<<"$exit")")" || return $?; proxy_relay_exit_edit --id "$id" --target-port "$value" ;;
     esac

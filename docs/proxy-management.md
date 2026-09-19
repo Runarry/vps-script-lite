@@ -72,7 +72,7 @@ Xray 与 sing-box 使用相同的命令模式生命周期接口：
 | 动作 | 用法与行为 |
 | --- | --- |
 | `install` | `install --core CORE|all [--release-channel stable\|prerelease] [--version TAG]`；按需安装指定内核，写入最小配置和服务定义，但不自动启动或设为开机启动。 |
-| `update` | `update [--core CORE\|all] [--release-channel stable\|prerelease] [--version TAG] [--confirm-external-update]`；下载并校验目标版本，原子替换二进制，不自动重启。 |
+| `update` | `update [--core CORE\|all] [--release-channel stable\|prerelease] [--version TAG] [--confirm-external-update]`；校验目标版本并重建配置，原子提交二进制、配置及必要状态迁移，不自动重启。 |
 | `uninstall` | `uninstall [--core CORE] [--purge] [--confirm-purge]`；停止、禁用并移除受管服务，默认保留配置、节点和备份。 |
 | `start` | `start [--core CORE] [--enable]`；启动内核，`--enable` 同时加入开机启动。 |
 | `stop` | `stop [--core CORE] [--disable]`；停止内核，`--disable` 同时取消开机启动。 |
@@ -83,7 +83,9 @@ Xray 与 sing-box 使用相同的命令模式生命周期接口：
 
 `--release-channel` 与 `--version` 互斥。默认或显式选择 `stable` 时，安装和更新从对应项目的 GitHub `latest` Release 选择当前稳定版本，并拒绝 draft 或被标记为 prerelease 的响应。选择 `prerelease` 时，命令分页读取 Releases 列表并选择返回顺序中首个非 draft 的预发布版本；如果没有可用预发布版本会明确失败，不回退稳定版。指定 `TAG` 时则精确请求该 tag，可接受稳定版或预发布版，但仍拒绝 draft、tag 回显不一致或无效格式，不会自动改选其他版本。安装通道不写入元数据，也不会由后续更新自动跟随；以后不带 `--release-channel` 或 `--version` 执行 `update` 仍选择最新稳定版。
 
-无论选择哪个通道或精确 tag，下载与替换仍执行相同的安全检查：只接受对应官方 GitHub HTTPS Release 的唯一匹配资产，动态取得并验证 digest 或 `.dgst` 中的 SHA-256，检查解压目标和二进制版本，验证现有配置兼容性，再原子替换。摘要不是仓库内的固定版本或固定值。
+无论选择哪个通道或精确 tag，下载与替换仍执行相同的安全检查：只接受对应官方 GitHub HTTPS Release 的唯一匹配资产，动态取得并验证 digest 或 `.dgst` 中的 SHA-256，检查解压目标和二进制版本，再用候选二进制验证重建的配置后原子提交。摘要不是仓库内的固定版本或固定值。
+
+`update` 会按候选内核版本重新生成受管配置，并归一化中转描述缓存；使用候选二进制校验通过后，将二进制、配置和必要状态迁移一并提交。即使二进制未改变，只要配置或迁移状态有变化，也会提交并记录待重启；全部无变化才返回无需更新。提交或后续启动失败时，按同一事务恢复旧二进制、配置、元数据和中转状态。
 
 ### 外部二进制所有权
 
@@ -131,8 +133,10 @@ vpsctl service proxy node add --profile PROFILE [--core CORE] [--name NAME] [--p
     [--listen ADDRESS] [--address CLIENT_ADDRESS] [--sni HOST]
     [--reality-anti-relay on|off]
     [--path PATH] [--service-name NAME]
+    [--xhttp-mode auto|packet-up|stream-up|stream-one] [--host HOST]
     [--cert-mode self-signed|imported|managed --cert-file FILE --key-file FILE --cert-id ID]
-    [--obfs none|salamander] [--up-mbps N] [--down-mbps N]
+    [--obfs none|salamander|gecko] [--up-mbps N] [--down-mbps N]
+    [--bbr-profile standard|conservative|aggressive]
     [--congestion-control bbr|cubic|new_reno]
     [--ip-strategy auto|prefer_ipv4|prefer_ipv6|ipv4_only|ipv6_only]
 vpsctl service proxy node edit --id NODE_ID [可修改上述非凭据字段]
@@ -159,6 +163,26 @@ vpsctl service proxy subscription [--core CORE|all]
 
 切换属于立即接管的中断性事务，不采用普通配置变更的待重启流程；非交互调用必须显式传入 `--confirm-disruptive`，全局 `--yes` 不能替代该确认。目标服务的 active/enabled 状态按源服务可用性继承。命令会先验证目标清单、目标内核配置、中转和证书迁移计划，再一次提交并完成服务接管；任何阶段失败都会回滚节点清单、两侧内核配置、中转状态、证书内部路径以及服务 active/enabled 状态。
 
+切核还校验 URI 不能表达的运行参数。Hysteria2 的带宽原值保留；Gecko、显式 BBR profile 和中转出口的显式 Chrome QUIC 开关本轮只支持 sing-box，切到 Xray 时会在写入前报错，不会自动丢弃这些选项。仅保存 SPKI 信任值而没有可供 Xray 使用的整证书指纹的出口，同样不能随节点切到 Xray。
+
+### XHTTP 与 Hysteria2 参数
+
+`vless-xhttp-tls`、`vless-xhttp-reality` 和 `trojan-xhttp-reality` 支持 `auto`、`packet-up`、`stream-up`、`stream-one` 四种 XHTTP 模式。新建 TLS 节点默认 `auto`，新建 REALITY 节点默认 `stream-one`。`--host` 单独保存 HTTP Host，`--sni` 保存 TLS/REALITY 名称，`--path` 保存传输路径；这些基础连接参数在分享 URI、导入和中转渲染之间往返保留。
+
+旧节点没有 `transport.mode` 时仍按原 profile 渲染：旧 VLESS XHTTP TLS 使用 `stream-one`，旧 Trojan XHTTP REALITY 服务端保持自动模式，旧链接客户端继续使用 `stream-one`。编辑时省略模式不会重置旧行为。本轮只支持 HTTP/2，不接受 XHTTP/3、XMUX 或任意 `extra`。
+
+`hysteria2` 支持 sing-box 和 Xray；Xray 最低版本为 `26.3.27`，支持无混淆和 Salamander。Xray 配置使用 `protocol:"hysteria"` 和版本 2，入站密码写入 `settings.clients[].auth`，出站密码写入 `streamSettings.hysteriaSettings.auth`。带宽和 Salamander 分别写入 `finalmask.quicParams` 和 `finalmask.udp`。带宽仍使用正整数十进制 Mbps，例如 `100 Mbps` 输出字符串 `"100000000"`，由内核解析为 `12500000 B/s`，不使用含二进制倍率的 `"100mbps"`。[Xray 带宽解析](https://github.com/XTLS/Xray-core/blob/v26.3.27/infra/conf/transport_internet.go#L460)
+
+sing-box `1.14+` 的 Hysteria2 额外支持 `--obfs gecko` 与 `--bbr-profile standard|conservative|aggressive`。Gecko 采用上游默认包大小；BBR profile 仅在协商进入 BBR 时生效，不会覆盖现有带宽设置。未设置 BBR profile 时不输出该字段，沿用内核默认值。交互菜单使用编号选择这些值。[sing-box Hysteria2](https://sing-box.sagernet.org/configuration/inbound/hysteria2/)
+
+```text
+vpsctl service proxy node add --profile vless-xhttp-reality --core xray --port 8443 --sni example.com --xhttp-mode stream-one --path /proxy
+vpsctl service proxy node add --profile hysteria2 --core xray --port 8443 --obfs salamander --up-mbps 100 --down-mbps 100
+vpsctl service proxy node add --profile hysteria2 --core sing-box --port 8443 --obfs gecko --bbr-profile conservative
+```
+
+Hysteria2 分享 URI 使用标准 `obfs`、`obfs-password` 和 `pinSHA256` 等字段。带宽、BBR profile、Chrome QUIC 开关和公钥固定属于本地运行选项，不写入标准 URI。[Hysteria URI 规范](https://hysteria.network/docs/developers/URI-Scheme/)
+
 每个节点独立保存 `ip_strategy`；旧清单缺失该字段时按 `auto` 处理，列表和详情 JSON 始终补出有效默认值。`auto` 使用代理内核自身默认行为，且不会继承 [`network ip-policy`](network-settings.md#4-ip-地址族偏好) 的系统策略。其他策略通过节点专属直连出站和入站标签路由实现：
 
 | 节点策略 | sing-box `domain_resolver.strategy` | Xray Freedom `domainStrategy` |
@@ -170,6 +194,8 @@ vpsctl service proxy subscription [--core CORE|all]
 | `ipv6_only` | `ipv6_only` | `ForceIPv6` |
 
 这些策略只约束内核对目标域名的解析和选址，不阻断写死的异族字面量 IP。节点绑定中转后，流量优先使用 relay 规则；策略仍保存在节点中，但列表和详情会显示“已绑定中转，暂不生效”。解除绑定后的同一重渲染流程会自动恢复节点策略。
+
+Xray `26.9.8` 起将上述策略写入 `streamSettings.sockopt.domainStrategy`，更早版本继续使用 Freedom 的 `settings.domainStrategy`。受管 Freedom 出站保留访问公网、本机和内网地址的既有能力：`26.5.3` 起显式使用 `finalRules` 放行，`26.4.15` 至此前版本使用空 `ipsBlocked`，更早版本沿用原配置。REALITY 防偷的精确域名路由和拒绝规则仍然生效。
 
 `node ip-policy set` 只接受单一内核，可重复 `--id` 去重选择节点，也可按一个 profile 或该内核全部节点设置。命令先构造统一候选 manifest、渲染配置并调用真实内核校验，再通过现有事务一次提交；任一节点或配置校验失败时整批不写入。运行中的内核在提交成功后自动重启应用；若存在待应用的二进制更新则仍只记录待重启。交互界面提供多选节点、按 profile 和当前内核全部节点三种范围。
 
@@ -211,6 +237,8 @@ vpsctl service proxy relay status [--json]
 vpsctl service proxy relay exit list [--json]
 vpsctl service proxy relay exit show --id EXIT_ID [--uri]
 vpsctl service proxy relay exit add --name NAME --uri URI [--profile PROFILE] [--core CORE]
+    [--tls-cert-file FILE | --tls-spki-sha256 BASE64] [--chrome-parrot on|off]
+    [--bbr-profile standard|conservative|aggressive]
 vpsctl service proxy relay exit add --name NAME --target HOST --target-port PORT
 vpsctl service proxy relay exit edit --id EXIT_ID [...]
 vpsctl service proxy relay exit delete --id EXIT_ID [--cascade --confirm-cascade]
@@ -223,7 +251,13 @@ vpsctl service proxy relay bind delete --id BIND_ID [--confirm-delete]
 
 协议出口保存原始 URI、内核无关的规范化描述、profile、所选内核、目标地址端口和网络建议。一个 URI 有多个可用内核时必须明确选择；Shadowsocks 2022 普通与 Padding 无法仅从链接区分，必须使用 `--profile` 或在交互菜单中编号选择。内核尚未安装时可以保存协议出口，列表和状态会标记“尚未二进制验证”；实际建立节点关联时才要求同内核已登记，并用真实二进制校验完整配置。
 
-URI 层接受协议矩阵对应的标准 VLESS、Trojan、AnyTLS、Hysteria2/Hy2、TUIC、Shadowsocks/SIP002（含旧式整段 Base64）、ShadowTLS 插件和 SOCKS5 链接。VLESS TCP/REALITY 分享链接中常见的无操作参数 `headerType=none` 会被兼容接受，其他 header 类型仍会拒绝。未知或重复参数、矩阵外组合和无法渲染的变体会被拒绝；新版 Xray 已移除 `allowInsecure`，因此选择 Xray 的不安全 TLS URI 必须同时带有本项目的 `pcs` 证书指纹，渲染时使用证书固定。sing-box 按 inbound tag 生成 `route` 动作，Xray 使用 `inboundTag`/`outboundTag`；每个被使用的出口只生成一份稳定 tag 的 outbound。
+URI 层接受协议矩阵对应的标准 VLESS、Trojan、AnyTLS、Hysteria2/Hy2、TUIC、Shadowsocks/SIP002（含旧式整段 Base64）、ShadowTLS 插件和 SOCKS5 链接。VLESS TCP/REALITY 分享链接中常见的无操作参数 `headerType=none` 会被兼容接受，其他 header 类型仍会拒绝。未知或重复参数、矩阵外组合和无法渲染的变体会被拒绝；新版 Xray 已移除 `allowInsecure`，因此选择 Xray 的不安全 TLS URI 必须具有整证书指纹（URI 的 `pcs`/`pinSHA256`，或显式提供的证书），渲染时使用证书固定。sing-box 按 inbound tag 生成 `route` 动作，Xray 使用 `inboundTag`/`outboundTag`；每个被使用的出口只生成一份稳定 tag 的 outbound。
+
+sing-box 使用 `certificate_public_key_sha256` 固定证书公钥；URI 的 `pcs`/`pinSHA256` 仍表示整证书指纹，不能直接转码充当公钥指纹。创建或编辑证书 TLS 出口时，可提供 `--tls-cert-file` 的叶证书 PEM（有原指纹时先核对），或通过 `--tls-spki-sha256` 提供 Base64 编码、解码后为 32 字节的公钥 SHA-256；二者互斥。未提供时会按原指纹匹配当前受管节点引用的本地证书。公钥固定信息单独保存在出口 `client_options`，不加入标准分享 URI；即使 URI 带 `insecure=1`，也不能绕过已经配置的公钥固定。Xray 不能表达独立 SPKI 固定，只有保留原证书指纹的出口才能转为 Xray。
+
+旧中转描述是从 URI 派生的缓存，读取时在内存中重建，写入时才保存归一化结果。无法自动完成指纹迁移的旧出口仍可查看、编辑、删除，也可用于纯 nftables 转发；将其绑定为 sing-box 代理出站前必须补齐证书或公钥指纹。更换 URI 会重新确认绑定到服务器的证书信息，重命名保留已有设置。
+
+sing-box Hysteria2 出口可用 `--chrome-parrot on|off` 控制 Chrome QUIC 模拟，省略时沿用内核默认值；可用 `--bbr-profile standard|conservative|aggressive` 设置协商进入 BBR 后的参数档位，两者均要求 sing-box `1.14+`。Hysteria2 节点使用 Ed25519 证书时会提示兼容风险：新版客户端默认 Chrome 握手不支持此算法，可换用 RSA/ECDSA 证书或为相应中转出口关闭模拟。项目默认自签证书仍为 RSA。
 
 删除仍被引用的出口默认拒绝。`--cascade --confirm-cascade` 会同时删除该出口、全部节点关联和端口转发，并将核心配置、relay 状态和运行规则作为一个可回滚变更处理。关联修改沿用待重启策略：运行中的内核在仅配置变更时自动重启应用；pending 与 LKG 快照同时记录 relay 定义、DNS 运行缓存和受管 nftables 规则，核心应用失败时恢复同一代数据面。
 
@@ -261,7 +295,7 @@ nftables 规则只写入独立的 `ip vpsctl_proxy_forward4` 和 `ip6 vpsctl_pro
 | `vless-grpc-tls` | 是 | 是 |
 | `anytls-tls` | 是 |  |
 | `anytls-reality` | 是 |  |
-| `hysteria2` | 是 |  |
+| `hysteria2` | 是 | 是（26.3.27+） |
 | `tuic-v5` | 是 |  |
 | `shadowsocks-aes-256-gcm` | 是 | 是 |
 | `shadowsocks-chacha20-poly1305` | 是 | 是 |
@@ -271,12 +305,13 @@ nftables 规则只写入独立的 `ip vpsctl_proxy_forward4` 和 `ip6 vpsctl_pro
 | `vless-tcp` | 是 |  |
 | `socks5` | 是 |  |
 | `vless-grpc-reality` |  | 是 |
+| `vless-xhttp-reality` |  | 是 |
 | `trojan-xhttp-reality` |  | 是 |
 | `trojan-grpc-reality` |  | 是 |
 | `vless-xhttp-tls` |  | 是 |
 | `trojan-grpc-tls` |  | 是 |
 
-其中 `vless-reality-vision`、`vless-grpc-tls`、`shadowsocks-aes-256-gcm`、`shadowsocks-chacha20-poly1305`、`shadowsocks-2022` 和 `shadowsocks-2022-padding` 由两个内核共同支持。
+其中 `vless-reality-vision`、`vless-grpc-tls`、`hysteria2`、`shadowsocks-aes-256-gcm`、`shadowsocks-chacha20-poly1305`、`shadowsocks-2022` 和 `shadowsocks-2022-padding` 由两个内核共同支持。Gecko、BBR profile 和 Chrome QUIC 开关限定 sing-box，不改变基础 Hysteria2 的双核支持。
 
 ## 7. 系统时间
 
@@ -300,6 +335,7 @@ vpsctl service proxy time sync
 - DNS 修改、域名解析托管或分流 DNS 配置。
 - 节点批量导入、除 IP 地址族策略外的批量编辑、批量删除或批量部署。
 - Hysteria2 端口跳跃；`hysteria2` profile 只使用单个监听端口。
+- Snell、Realm、Dashboard、TUN、ECH、XHTTP/3、XMUX 与通用高级配置透传。
 - ACME 申请与自动续期。
 
 如需修改本机 DNS，应单独使用 [`vpsctl network dns`](network-settings.md)，不要把 DNS 变更与代理事务混合执行。
@@ -308,6 +344,8 @@ vpsctl service proxy time sync
 
 支持的平台范围是 Linux、systemd 或 OpenRC，以及 `x86_64`/`amd64`、`aarch64`/`arm64`、`armv7l`/`armv7` 架构。状态、清单和配置渲染依赖 `jq`；端口检查与订阅输出使用 `ss`、`base64`、`tr`、`awk` 和 `mktemp`；证书与稳定 ID 操作依赖 `openssl` 与 `sha256sum`；端口转发依赖 `nft`、`ip`、`getent` 和 `sysctl`；受管变更使用 `flock` 加锁；官方 Release 安装还依赖 `curl` 以及 Xray 的 `unzip` 或 sing-box 的 `tar`。功能只在当前动作实际需要时检查对应工具：真实执行的交互环境发现缺失后才列出缺失项并询问是否安装，不会在进入代理菜单时预装所有工具；真实非交互安装仍必须提供 `--install-deps`；`--dry-run` 无需该授权即可展示依赖安装计划。获得授权后，当前动作可通过 `apt-get`、`dnf5`、`dnf`、`yum`、`apk`、`pacman` 或 `zypper` 补齐缺失工具；时间同步只在缺少可用 NTP 后端时补齐 chrony。systemd 的 `journalctl`、OpenRC 的 `tail`、服务管理器和 CPU 架构属于平台前置条件，不由该选项安装或绕过。
 
-真实协议链路验收脚本为 `tests/integration/test-service-proxy-relay-connectivity-real.sh`，默认对任何失败都严格退出。Xray 26.3.27 与 26.6.27 的 `trojan-grpc-reality` 已确认在 REALITY 认证完成后由 gRPC 传输层关闭连接；需要执行其余完整矩阵时可显式设置 `ALLOW_XRAY_TROJAN_GRPC_REALITY_XFAIL=1`。该豁免只接受日志中的 server-preface 关闭特征；若未来版本修复并实际连通，脚本以 XPASS 失败，要求移除豁免，避免永久静默跳过。
+真实协议链路验收脚本为 `tests/integration/test-service-proxy-relay-connectivity-real.sh`，默认对任何失败都严格退出。Xray 26.3.27、26.6.27 和本轮复验的 26.9.9 的 `trojan-grpc-reality` 仍在 REALITY 认证完成后由 gRPC 传输层关闭连接；需要执行其余完整矩阵时可显式设置 `ALLOW_XRAY_TROJAN_GRPC_REALITY_XFAIL=1`。该豁免只接受原有 server-preface 关闭特征；若未来版本修复并实际连通，脚本以 XPASS 失败，要求移除豁免，避免永久静默跳过。
+
+本轮兼容迁移、XHTTP、Hysteria2 与预发布冒烟的环境、证据及复验方式见 [内核兼容升级验收](proxy-core-compat-validation.md)。
 
 `--dry-run` 会展示安装、写入、服务控制和时间同步命令，不下载、不写受管配置、不安装包，也不启停服务。发现工具缺失时，无需 `--install-deps` 即可展示固定的软件包安装计划，再安全停止并提示安装后重跑完整计划；不会改变真实安装的授权。常见退出码遵循项目统一约定：`2` 为参数错误，`3` 为前置条件或依赖不满足，`4` 为权限不足，`10` 为配置或证书校验失败，`20` 为外部命令或远端服务失败，`30` 为部分完成、同步确认超时或需要人工恢复，`130` 为用户中断。发生 `30` 时先查看 `status`、待重启记录和服务日志，不要直接删除状态或备份文件。

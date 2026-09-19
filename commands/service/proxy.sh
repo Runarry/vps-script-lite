@@ -93,8 +93,10 @@ proxy_usage() {
            [--listen ADDRESS] [--address CLIENT_ADDRESS] [--sni HOST]
            [--reality-anti-relay on|off]
            [--path PATH] [--service-name NAME]
+           [--xhttp-mode auto|packet-up|stream-up|stream-one] [--host HOST]
            [--cert-mode self-signed|imported|managed --cert-file FILE --key-file FILE --cert-id ID]
-           [--obfs none|salamander] [--up-mbps N] [--down-mbps N]
+           [--obfs none|salamander|gecko] [--up-mbps N] [--down-mbps N]
+           [--bbr-profile standard|conservative|aggressive]
            [--congestion-control bbr|cubic|new_reno] [--ip-strategy STRATEGY]
   node edit --id NODE_ID [可修改 node add 中的非凭据字段]
   node core set --id NODE_ID --core sing-box|xray [--confirm-disruptive]
@@ -114,6 +116,8 @@ REALITY 防偷：仅适用于 REALITY 配置，新增默认 on；已有节点保
   relay exit show --id EXIT_ID [--uri]
   relay exit add --name NAME (--uri URI [--profile PROFILE] [--core CORE] |
                  --target HOST --target-port PORT)
+                 [--tls-cert-file FILE | --tls-spki-sha256 BASE64]
+                 [--chrome-parrot on|off] [--bbr-profile standard|conservative|aggressive]
   relay exit edit --id EXIT_ID [出口字段]
   relay exit delete --id EXIT_ID [--cascade --confirm-cascade]
   relay bind list [--core CORE|all] [--json]
@@ -128,6 +132,13 @@ REALITY 防偷：仅适用于 REALITY 配置，新增默认 on；已有节点保
   relay forward edit --id FORWARD_ID [--family dual|ipv4|ipv6] [其他转发字段]
   relay forward delete --id FORWARD_ID [--confirm-delete]
   relay forward refresh [--id FORWARD_ID]
+
+证书 TLS 出口可提供证书或 Base64 公钥 SHA-256 固定值。sing-box 无法仅凭
+整证书指纹固定公钥；受管证书可自动匹配，否则需补充上述材料后绑定节点。
+Chrome QUIC 开关仅适用于 sing-box Hysteria2 出口，省略时使用内核默认值。
+Gecko 与 BBR profile 仅适用于 sing-box 1.14+ Hysteria2；BBR profile
+仅在协商进入 BBR 时生效，不覆盖带宽设置。Xray Hysteria2 要求 26.3.27+。
+新建 TLS XHTTP 默认 auto，REALITY XHTTP 默认 stream-one；仅支持 HTTP/2。
 
 系统时间：
   time status [--json]

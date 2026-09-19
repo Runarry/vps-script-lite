@@ -6,7 +6,7 @@
 #       Print a schema_version=1 neutral JSON object. PROFILE is optional, but is
 #       required to select shadowsocks-2022-padding because SIP002 has no padding
 #       flag. Returns 2 for bad arguments and 10 for a malformed/unsupported URI.
-#   proxy_relay_render_outbound CORE EXIT_JSON
+#   proxy_relay_render_outbound CORE EXIT_JSON [VERSION]
 #       Validate a protocol exit object and print {outbounds:[...],target_tag:"..."}
 #       for sing-box or Xray. EXIT_JSON.id is used to derive all outbound tags.
 #   proxy_relay_uri_rewrite URI HOST PORT
@@ -212,15 +212,15 @@ _proxy_relay_bool_json() {
 
 _proxy_relay_profile_cores_json() {
     case "${1-}" in
-        vless-reality-vision | vless-grpc-tls | shadowsocks-aes-256-gcm | \
+        vless-reality-vision | vless-grpc-tls | hysteria2 | shadowsocks-aes-256-gcm | \
             shadowsocks-chacha20-poly1305 | shadowsocks-2022 | shadowsocks-2022-padding)
             printf '["sing-box","xray"]'
             ;;
-        vless-ws-tls | trojan-ws-tls | anytls-tls | anytls-reality | hysteria2 | tuic-v5 | \
+        vless-ws-tls | trojan-ws-tls | anytls-tls | anytls-reality | tuic-v5 | \
             shadowsocks-2022-shadowtls | vless-tcp | socks5)
             printf '["sing-box"]'
             ;;
-        vless-grpc-reality | trojan-xhttp-reality | trojan-grpc-reality | \
+        vless-grpc-reality | vless-xhttp-reality | trojan-xhttp-reality | trojan-grpc-reality | \
             vless-xhttp-tls | trojan-grpc-tls)
             printf '["xray"]'
             ;;
@@ -348,6 +348,7 @@ proxy_relay_uri_parse() {
             case "$security:$type:$flow" in
                 reality:tcp:xtls-rprx-vision) profile='vless-reality-vision'; transport='tcp' ;;
                 reality:grpc:) profile='vless-grpc-reality'; transport='grpc' ;;
+                reality:xhttp:) profile='vless-xhttp-reality'; transport='xhttp' ;;
                 tls:ws:) profile='vless-ws-tls'; transport='ws' ;;
                 tls:grpc:) profile='vless-grpc-tls'; transport='grpc' ;;
                 tls:xhttp:) profile='vless-xhttp-tls'; transport='xhttp' ;;
@@ -386,7 +387,7 @@ proxy_relay_uri_parse() {
             obfs_type="$(_proxy_relay_query_value "$query_json" obfs)" || return 10
             obfs_type="${obfs_type:-none}"
             obfs_password="$(_proxy_relay_query_value "$query_json" obfs-password)" || return 10
-            [[ "$obfs_type" == none || ( "$obfs_type" == salamander && -n "$obfs_password" ) ]] || parse_valid='false'
+            [[ "$obfs_type" == none || ( ( "$obfs_type" == salamander || "$obfs_type" == gecko ) && -n "$obfs_password" ) ]] || parse_valid='false'
             ;;
         tuic)
             [[ "$userinfo" == *:* ]] || parse_valid='false'
@@ -469,7 +470,7 @@ proxy_relay_uri_parse() {
     fi
 
     case "$profile" in
-        vless-reality-vision | vless-grpc-reality | trojan-xhttp-reality | trojan-grpc-reality | anytls-reality)
+        vless-reality-vision | vless-grpc-reality | vless-xhttp-reality | trojan-xhttp-reality | trojan-grpc-reality | anytls-reality)
             tls_enabled='true'; tls_mode='reality'
             [[ -n "$sni" && "$public_key" =~ ^[A-Za-z0-9_-]{32,64}$ && "$short_id" =~ ^([0-9A-Fa-f]{2}){1,8}$ ]] || {
                 _proxy_relay_uri_error 'invalid REALITY parameters'; return 10;
@@ -490,21 +491,32 @@ proxy_relay_uri_parse() {
         ws | xhttp) [[ "$path" == /* ]] || { _proxy_relay_uri_error 'invalid transport path'; return 10; } ;;
         grpc) [[ "$service_name" =~ ^[A-Za-z0-9._/-]{1,128}$ ]] || { _proxy_relay_uri_error 'invalid gRPC service'; return 10; } ;;
     esac
+    if [[ "$transport" == xhttp ]]; then
+        mode="${mode:-stream-one}"
+        case "$mode" in
+            auto | packet-up | stream-up | stream-one) ;;
+            *) _proxy_relay_uri_error 'unsupported XHTTP mode'; return 10 ;;
+        esac
+        [[ -z "$alpn_value" || "$alpn_value" == h2 ]] || {
+            _proxy_relay_uri_error 'XHTTP supports H2 only'; return 10;
+        }
+        alpn='["h2"]'
+    fi
     case "$profile" in
         vless-reality-vision)
             _proxy_relay_query_keys_allowed "$query_json" security encryption pbk fp type flow sni sid headerType || return 10 ;;
         vless-grpc-reality | trojan-grpc-reality)
             _proxy_relay_query_keys_allowed "$query_json" security encryption pbk fp type serviceName authority sni sid || return 10 ;;
         trojan-xhttp-reality)
-            _proxy_relay_query_keys_allowed "$query_json" security pbk fp type path sni sid || return 10 ;;
+            _proxy_relay_query_keys_allowed "$query_json" security pbk fp type path host sni sid alpn mode || return 10 ;;
+        vless-xhttp-reality)
+            _proxy_relay_query_keys_allowed "$query_json" security encryption pbk fp type path host sni sid alpn mode || return 10 ;;
         vless-ws-tls | trojan-ws-tls)
             _proxy_relay_query_keys_allowed "$query_json" security encryption type host path sni insecure pcs || return 10 ;;
         vless-grpc-tls | trojan-grpc-tls)
             _proxy_relay_query_keys_allowed "$query_json" security encryption type serviceName authority sni insecure pcs || return 10 ;;
         vless-xhttp-tls)
-            _proxy_relay_query_keys_allowed "$query_json" security encryption type alpn mode path host sni insecure pcs || return 10
-            [[ -z "$mode" || "$mode" == stream-one ]] || return 10
-            ;;
+            _proxy_relay_query_keys_allowed "$query_json" security encryption type alpn mode path host sni insecure pcs || return 10 ;;
         anytls-tls)
             _proxy_relay_query_keys_allowed "$query_json" security sni type insecure pcs || return 10 ;;
         anytls-reality)
@@ -578,9 +590,141 @@ proxy_relay_uri_parse() {
         }
 }
 
+_proxy_relay_spki_valid() {
+    local pin="${1-}" canonical
+    # A SHA-256 digest is exactly 32 bytes, including canonical Base64 pad bits.
+    [[ "$pin" =~ ^[A-Za-z0-9+/]{43}=$ ]] || return 10
+    canonical="$(set -o pipefail; printf '%s' "$pin" | base64 -d 2>/dev/null | base64 | tr -d '\r\n')" || return 10
+    [[ "$canonical" == "$pin" ]]
+}
+
+_proxy_relay_certificate_pins() {
+    local file="${1-}" fingerprint spki
+    [[ -f "$file" && -r "$file" ]] || return 10
+    # openssl x509 reads the first (leaf) certificate of a PEM chain.
+    fingerprint="$(openssl x509 -in "$file" -noout -fingerprint -sha256 2>/dev/null)" || return 10
+    fingerprint="${fingerprint#*=}"
+    fingerprint="${fingerprint//:/}"
+    [[ "$fingerprint" =~ ^[0-9A-Fa-f]{64}$ ]] || return 10
+    spki="$(set -o pipefail
+        openssl x509 -in "$file" -pubkey -noout 2>/dev/null |
+            openssl pkey -pubin -outform DER 2>/dev/null |
+            openssl dgst -sha256 -binary 2>/dev/null | base64 | tr -d '\r\n'
+    )" || return 10
+    _proxy_relay_spki_valid "$spki" || return 10
+    jq -cn --arg cert "${fingerprint,,}" --arg spki "$spki" \
+        '{tls_cert_sha256:$cert,tls_spki_sha256:$spki}'
+}
+
+_proxy_relay_find_certificate_pins() {
+    local pin="${1-}" manifest="${2:-${PROXY_MANIFEST:-}}" logical physical pins
+    [[ -n "$pin" && -f "$manifest" ]] || return 1
+    command -v openssl >/dev/null 2>&1 || return 1
+    while IFS= read -r logical; do
+        # Only inspect managed certificates referenced by the current manifest.
+        case "$logical" in
+            "${PROXY_ETC_LOGICAL:-/etc/vpsctl/proxy}/sing-box/certs/"* | \
+                "${PROXY_ETC_LOGICAL:-/etc/vpsctl/proxy}/xray/certs/"* | \
+                /var/lib/vpsctl/security/tls/live/*/fullchain.pem) ;;
+            *) continue ;;
+        esac
+        [[ "$logical" != */../* && "$logical" != */./* ]] || continue
+        if declare -F vps_cmd_system_path >/dev/null 2>&1; then
+            physical="$(vps_cmd_system_path "$logical")" || continue
+        else
+            physical="$logical"
+        fi
+        pins="$(_proxy_relay_certificate_pins "$physical")" || continue
+        [[ "$(jq -r '.tls_cert_sha256' <<<"$pins")" == "${pin,,}" ]] || continue
+        printf '%s' "$pins"
+        return 0
+    done < <(jq -r '[.nodes[]?.tls.certificate_path | select(type == "string" and length > 0)] | unique[]' "$manifest" 2>/dev/null)
+    return 1
+}
+
+_proxy_relay_validate_client_options() {
+    local exit_json="$1" node="$2" spki cert uri_pin
+    jq -e --argjson n "$node" '
+        (if has("client_options") then .client_options else {} end) as $c |
+        ($c | type == "object") and
+        (($c | keys - ["tls_spki_sha256","tls_cert_sha256","chrome_parrot","bbr_profile"] | length) == 0) and
+        (if $c | has("tls_spki_sha256") then
+            ($c.tls_spki_sha256 | type == "string" and length > 0) and
+            $n.tls.enabled and $n.tls.mode == "tls" else true end) and
+        (if $c | has("tls_cert_sha256") then
+            ($c.tls_cert_sha256 | type == "string" and test("^[0-9A-Fa-f]{64}$")) and
+            ($c | has("tls_spki_sha256")) else true end) and
+        (if $c | has("chrome_parrot") then
+            ($c.chrome_parrot | type == "boolean") and .core == "sing-box" and
+            $n.profile == "hysteria2" else true end) and
+        (if $c | has("bbr_profile") then
+            ($c.bbr_profile == "standard" or $c.bbr_profile == "conservative" or $c.bbr_profile == "aggressive") and
+            .core == "sing-box" and $n.profile == "hysteria2" else true end)
+    ' <<<"$exit_json" >/dev/null 2>&1 || {
+        _proxy_relay_uri_error 'invalid or unsupported client options'
+        return 10
+    }
+    if [[ "$(jq -r '.core' <<<"$exit_json")" == xray && "$(jq -r '.options.obfs_type' <<<"$node")" == gecko ]]; then
+        _proxy_relay_uri_error 'Gecko obfuscation requires sing-box'
+        return 10
+    fi
+    spki="$(jq -r '.client_options.tls_spki_sha256 // empty' <<<"$exit_json")" || return 10
+    cert="$(jq -r '.client_options.tls_cert_sha256 // empty' <<<"$exit_json")" || return 10
+    uri_pin="$(jq -r '.tls.certificate_sha256 // empty' <<<"$node")" || return 10
+    if [[ -n "$spki" ]]; then
+        _proxy_relay_spki_valid "$spki" || { _proxy_relay_uri_error 'SPKI pin must be canonical Base64 for 32 bytes'; return 10; }
+    fi
+    if [[ -n "$cert" && -n "$uri_pin" && "${cert,,}" != "${uri_pin,,}" ]]; then
+        _proxy_relay_uri_error 'SPKI source certificate does not match URI certificate pin'
+        return 10
+    fi
+}
+
+proxy_relay_normalize_exit() {
+    local exit_json="${1-}" manifest="${2:-${PROXY_MANIFEST:-}}" node pin spki pins
+    [[ "$(jq -r '.type' <<<"$exit_json" 2>/dev/null)" == protocol ]] || { printf '%s' "$exit_json"; return 0; }
+    node="$(proxy_relay_uri_parse "$(jq -r '.uri' <<<"$exit_json")" "$(jq -r '.profile' <<<"$exit_json")")" || return $?
+    _proxy_relay_validate_client_options "$exit_json" "$node" || return $?
+    exit_json="$(jq -c --argjson node "$node" '.descriptor=$node' <<<"$exit_json")" || return 10
+    pin="$(jq -r '.tls.certificate_sha256' <<<"$node")" || return 10
+    spki="$(jq -r '.client_options.tls_spki_sha256 // empty' <<<"$exit_json")" || return 10
+    if [[ -n "$pin" && -z "$spki" ]] && pins="$(_proxy_relay_find_certificate_pins "$pin" "$manifest")"; then
+        exit_json="$(jq -c --argjson pins "$pins" '.client_options=(.client_options // {}) + $pins' <<<"$exit_json")" || return 10
+    fi
+    printf '%s' "$exit_json"
+}
+
+_proxy_relay_require_sb_version() {
+    local version="${1-}" minimum="$2" major minor required_minor
+    [[ -n "$version" ]] || return 0
+    if declare -F proxy_core_version_at_least >/dev/null 2>&1; then
+        proxy_core_version_at_least "$version" "$minimum" && return 0
+    elif [[ "$version" =~ ^v?([0-9]+)\.([0-9]+)\.([0-9]+) ]]; then
+        major="${BASH_REMATCH[1]}"; minor="${BASH_REMATCH[2]}"
+        required_minor="${minimum#*.}"; required_minor="${required_minor%%.*}"
+        ((10#$major > 1 || (10#$major == 1 && 10#$minor >= 10#$required_minor))) && return 0
+    fi
+    _proxy_relay_uri_error "selected client options require sing-box >= ${minimum}"
+    return 10
+}
+
+_proxy_relay_require_xray_hysteria_version() {
+    local version="${1-}" major minor patch
+    [[ -n "$version" ]] || return 0
+    if declare -F proxy_core_version_at_least >/dev/null 2>&1; then
+        proxy_core_version_at_least "$version" 26.3.27 && return 0
+    elif [[ "$version" =~ ^v?([0-9]+)\.([0-9]+)\.([0-9]+) ]]; then
+        major="${BASH_REMATCH[1]}"; minor="${BASH_REMATCH[2]}"; patch="${BASH_REMATCH[3]}"
+        ((10#$major > 26 || (10#$major == 26 && (10#$minor > 3 || (10#$minor == 3 && 10#$patch >= 27))))) && return 0
+    fi
+    _proxy_relay_uri_error 'Hysteria2 outbound requires Xray >= 26.3.27'
+    return 10
+}
+
 _proxy_relay_render_outbound_from_uri() {
-    local core="${1-}" exit_id="${2-}" uri="${3-}" profile="${4-}" node tag
-    [[ $# -ge 3 && $# -le 4 ]] || { _proxy_relay_uri_error 'missing or extra argument'; return 2; }
+    local core="${1-}" exit_id="${2-}" uri="${3-}" profile="${4-}" client_options="${5-}" version="${6:-${PROXY_RENDER_CORE_VERSION:-}}" node tag spki cert
+    [[ $# -ge 3 && $# -le 6 ]] || { _proxy_relay_uri_error 'missing or extra argument'; return 2; }
+    [[ -n "$client_options" ]] || client_options='{}'
     [[ "$core" == sing-box || "$core" == xray ]] || { _proxy_relay_uri_error 'unsupported core'; return 2; }
     [[ "$exit_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || { _proxy_relay_uri_error 'invalid exit id'; return 2; }
     node="$(proxy_relay_uri_parse "$uri" "$profile")" || return $?
@@ -588,6 +732,29 @@ _proxy_relay_render_outbound_from_uri() {
         _proxy_relay_uri_error 'profile is not supported by selected core'
         return 10
     }
+    spki="$(jq -r '.tls_spki_sha256 // empty' <<<"$client_options")" || return 10
+    cert="$(jq -r '.tls_cert_sha256 // empty' <<<"$client_options")" || return 10
+    if [[ "$core" == sing-box ]]; then
+        if [[ -n "$spki" ]]; then
+            _proxy_relay_require_sb_version "$version" 1.13.0 || return $?
+        elif [[ "$(jq -r '.tls.certificate_sha256' <<<"$node")" != '' ]]; then
+            _proxy_relay_uri_error 'certificate pin requires --tls-cert-file or --tls-spki-sha256 before proxy outbound use'
+            return 10
+        fi
+        if jq -e 'has("chrome_parrot") or has("bbr_profile")' <<<"$client_options" >/dev/null ||
+            [[ "$(jq -r '.options.obfs_type' <<<"$node")" == gecko ]]; then
+            _proxy_relay_require_sb_version "$version" 1.14.0 || return $?
+        fi
+    elif [[ -n "$spki" && -z "$cert" ]]; then
+        _proxy_relay_uri_error 'Xray cannot express an SPKI-only pin; supply --tls-cert-file'
+        return 10
+    fi
+    if [[ "$core" == xray && "$(jq -r '.profile' <<<"$node")" == hysteria2 ]]; then
+        _proxy_relay_require_xray_hysteria_version "$version" || return $?
+    fi
+    if [[ -n "$cert" ]]; then
+        node="$(jq -c --arg cert "$cert" '.tls.certificate_sha256=$cert' <<<"$node")" || return 10
+    fi
     if [[ "$core" == xray ]] && jq -e '
         .tls.enabled and .tls.mode == "tls" and .tls.insecure and
         .tls.certificate_sha256 == ""
@@ -597,9 +764,12 @@ _proxy_relay_render_outbound_from_uri() {
     fi
     tag="relay-exit-$exit_id"
     if [[ "$core" == sing-box ]]; then
-        jq -cn --argjson n "$node" --arg tag "$tag" '
+        jq -cn --argjson n "$node" --argjson client "$client_options" --arg tag "$tag" '
             def tls:
-                {enabled:true,server_name:$n.tls.server_name,insecure:$n.tls.insecure} +
+                {enabled:true,server_name:$n.tls.server_name,
+                    insecure:(if $client | has("tls_spki_sha256") then false else $n.tls.insecure end)} +
+                (if $client | has("tls_spki_sha256") then
+                    {certificate_public_key_sha256:[$client.tls_spki_sha256]} else {} end) +
                 (if ($n.tls.alpn|length)>0 then {alpn:$n.tls.alpn} else {} end);
             def reality_tls:
                 tls + {utls:{enabled:true,fingerprint:"chrome"},reality:{enabled:true,
@@ -626,8 +796,10 @@ _proxy_relay_render_outbound_from_uri() {
                     tls:(if $n.tls.mode == "reality" then reality_tls else tls end)}]
             elif $n.profile == "hysteria2" then
                 [base("hysteria2") + {password:$n.credentials.password,tls:tls} +
-                    (if $n.options.obfs_type == "salamander" then
-                        {obfs:{type:"salamander",password:$n.options.obfs_password}} else {} end)]
+                    (if $client | has("chrome_parrot") then {disable_chrome_parrot:($client.chrome_parrot | not)} else {} end) +
+                    (if $client | has("bbr_profile") then {bbr_profile:$client.bbr_profile} else {} end) +
+                    (if $n.options.obfs_type == "salamander" or $n.options.obfs_type == "gecko" then
+                        {obfs:{type:$n.options.obfs_type,password:$n.options.obfs_password}} else {} end)]
             elif $n.profile == "tuic-v5" then
                 [base("tuic") + {uuid:$n.credentials.uuid,password:$n.credentials.password,
                     congestion_control:$n.options.congestion_control,udp_relay_mode:$n.options.udp_relay_mode,tls:tls}]
@@ -670,6 +842,12 @@ _proxy_relay_render_outbound_from_uri() {
             elif ($n.profile|startswith("trojan-")) then
                 [{tag:$tag,protocol:"trojan",settings:{address:$n.endpoint.host,
                     port:$n.endpoint.port,password:$n.credentials.password},streamSettings:stream}]
+            elif $n.profile == "hysteria2" then
+                [{tag:$tag,protocol:"hysteria",settings:{version:2,address:$n.endpoint.host,port:$n.endpoint.port},
+                    streamSettings:({network:"hysteria",security:"tls",tlsSettings:tls_settings,
+                        hysteriaSettings:{version:2,auth:$n.credentials.password}} +
+                        (if $n.options.obfs_type == "salamander" then
+                            {finalmask:{udp:[{type:"salamander",settings:{password:$n.options.obfs_password}}]}} else {} end))}]
             elif ($n.profile|startswith("shadowsocks-")) then
                 [{tag:$tag,protocol:"shadowsocks",settings:{servers:[{address:$n.endpoint.host,
                     port:$n.endpoint.port,method:$n.options.method,password:$n.credentials.password}]}}]
@@ -681,8 +859,8 @@ _proxy_relay_render_outbound_from_uri() {
 }
 
 proxy_relay_render_outbound() {
-    local core="${1-}" exit_json="${2-}" exit_id uri profile
-    [[ $# -eq 2 ]] || { _proxy_relay_uri_error 'missing or extra argument'; return 2; }
+    local core="${1-}" exit_json="${2-}" version="${3:-${PROXY_RENDER_CORE_VERSION:-}}" exit_id uri profile client_options
+    [[ $# -ge 2 && $# -le 3 ]] || { _proxy_relay_uri_error 'missing or extra argument'; return 2; }
     [[ "$core" == sing-box || "$core" == xray ]] || { _proxy_relay_uri_error 'unsupported core'; return 2; }
     jq -e --arg core "$core" '
         type == "object" and .type == "protocol" and .core == $core and
@@ -693,10 +871,12 @@ proxy_relay_render_outbound() {
         _proxy_relay_uri_error 'invalid protocol exit object'
         return 10
     }
+    exit_json="$(proxy_relay_normalize_exit "$exit_json")" || return $?
     exit_id="$(jq -r '.id' <<<"$exit_json" 2>/dev/null)" || return 10
     uri="$(jq -r '.uri' <<<"$exit_json" 2>/dev/null)" || return 10
     profile="$(jq -r '.profile' <<<"$exit_json" 2>/dev/null)" || return 10
-    _proxy_relay_render_outbound_from_uri "$core" "$exit_id" "$uri" "$profile"
+    client_options="$(jq -c '.client_options // {}' <<<"$exit_json")" || return 10
+    _proxy_relay_render_outbound_from_uri "$core" "$exit_id" "$uri" "$profile" "$client_options" "$version"
 }
 
 proxy_relay_uri_rewrite() {

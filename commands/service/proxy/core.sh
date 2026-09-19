@@ -82,17 +82,7 @@ _proxy_core_validate_binary_config() {
         vps_cmd_error "待验证的代理配置不是普通文件"
         return 3
     }
-    jq -e . "$config" >/dev/null 2>&1 || {
-        vps_cmd_error "$(proxy_core_label "$core") 配置不是有效 JSON"
-        return 10
-    }
-    case "$core" in
-        sing-box) "$binary" check -c "$config" >/dev/null 2>&1 ;;
-        xray) "$binary" run -test -c "$config" >/dev/null 2>&1 ;;
-    esac || {
-        vps_cmd_error "新 $(proxy_core_label "$core") 二进制拒绝当前配置"
-        return 10
-    }
+    proxy_validate_config_with_binary "$core" "$config" "$binary"
 }
 
 _proxy_core_is_musl() {
@@ -413,9 +403,9 @@ _proxy_core_write_meta() {
 }
 
 _proxy_core_render_candidate() {
-    local core="$1" output="$2"
+    local core="$1" output="$2" version="${3:-}" relay="${4:-${PROXY_RELAY_FILE:-}}"
     proxy_manifest_ensure || return $?
-    proxy_render_config "$core" "$PROXY_MANIFEST" >"$output" || return $?
+    proxy_render_config "$core" "$PROXY_MANIFEST" "$relay" "$version" >"$output" || return $?
     chmod 0600 -- "$output" || return 20
 }
 
@@ -531,10 +521,10 @@ proxy_core_install() (
     candidate_config="${tmp}/config.json"
     downloaded="${tmp}/${core}"
     info="${tmp}/release-info.json"
-    _proxy_core_render_candidate "$core" "$candidate_config" || { local rc=$?; _proxy_core_remove_tmp "$tmp"; return "$rc"; }
     if [[ "$owned" == "true" ]]; then
         _proxy_core_fetch_release "$core" "$release_channel" "$requested_tag" "$downloaded" "$info" || { local rc=$?; _proxy_core_remove_tmp "$tmp"; return "$rc"; }
         version="$(jq -r '.version' "$info")"; tag="$(jq -r '.release_tag' "$info")"; sha="$(jq -r '.sha256' "$info")"
+        _proxy_core_render_candidate "$core" "$candidate_config" "$version" || { local rc=$?; _proxy_core_remove_tmp "$tmp"; return "$rc"; }
         _proxy_core_validate_binary_config "$core" "$downloaded" "$candidate_config" || { local rc=$?; _proxy_core_remove_tmp "$tmp"; return "$rc"; }
     else
         local external_path target_release target_tag=""
@@ -556,6 +546,7 @@ proxy_core_install() (
         fi
         sha="$(_proxy_core_sha256 "$external_path")" || { local rc=$?; _proxy_core_remove_tmp "$tmp"; return "$rc"; }
         tag="$target_tag"
+        _proxy_core_render_candidate "$core" "$candidate_config" "$version" || { local rc=$?; _proxy_core_remove_tmp "$tmp"; return "$rc"; }
         _proxy_core_validate_binary_config "$core" "$external_path" "$candidate_config" || { local rc=$?; _proxy_core_remove_tmp "$tmp"; return "$rc"; }
     fi
     mkdir -p -- "$(dirname -- "$(proxy_core_config_path "$core")")" "$(dirname -- "$service_path")" \
@@ -604,9 +595,57 @@ _proxy_core_confirm_external_update() {
     return 1
 }
 
+# This journal covers the immediate pre-update generation. Pending separately
+# keeps the first unapplied generation so repeated updates retain one rollback.
+_proxy_core_recover_update_transaction() {
+    local core binary_logical binary_backup config_backup meta_backup pending_backup pending_existed
+    local relay_backup relay_touched failed=0
+    [[ -f "$PROXY_TRANSACTION" && ! -L "$PROXY_TRANSACTION" ]] || return 30
+    if [[ "${VPSCTL_DRY_RUN:-0}" == 1 ]]; then
+        vps_cmd_warning "演练检测到未完成的内核更新事务；实际执行前必须先恢复"
+        return 30
+    fi
+    jq -e '
+        .schema_version == 1 and .kind == "core-update" and
+        (.core == "sing-box" or .core == "xray") and
+        ((.binary_logical | type) == "string" and (.binary_logical | startswith("/"))) and
+        all(.binary_backup,.config_backup,.meta_backup; type == "string" and length > 0) and
+        ((.pending_backup | type) == "string") and ((.pending_existed | type) == "boolean") and
+        ((.relay_backup | type) == "string") and ((.relay_touched | type) == "boolean")
+    ' "$PROXY_TRANSACTION" >/dev/null 2>&1 || {
+        vps_cmd_error "无法解析内核更新事务；恢复记录已保留"
+        return 30
+    }
+    core="$(jq -r '.core' "$PROXY_TRANSACTION")"
+    binary_logical="$(jq -r '.binary_logical' "$PROXY_TRANSACTION")"
+    binary_backup="$(jq -r '.binary_backup' "$PROXY_TRANSACTION")"
+    config_backup="$(jq -r '.config_backup' "$PROXY_TRANSACTION")"
+    meta_backup="$(jq -r '.meta_backup' "$PROXY_TRANSACTION")"
+    pending_backup="$(jq -r '.pending_backup' "$PROXY_TRANSACTION")"
+    pending_existed="$(jq -r '.pending_existed' "$PROXY_TRANSACTION")"
+    relay_backup="$(jq -r '.relay_backup' "$PROXY_TRANSACTION")"
+    relay_touched="$(jq -r '.relay_touched' "$PROXY_TRANSACTION")"
+    vps_cmd_warning "正在恢复内核更新前的二进制、配置和状态"
+    proxy_restore_backup "$binary_backup" "$binary_logical" 0755 || failed=1
+    proxy_restore_backup "$config_backup" "$(proxy_core_config_logical "$core")" 0600 || failed=1
+    proxy_restore_backup "$meta_backup" "$(proxy_core_meta_logical "$core")" 0600 || failed=1
+    if [[ "$relay_touched" == true ]]; then
+        proxy_restore_backup "$relay_backup" "${PROXY_RELAY_LOGICAL}" 0600 || failed=1
+    fi
+    if [[ "$pending_existed" == true ]]; then
+        proxy_restore_backup "$pending_backup" "$(proxy_core_pending_logical "$core")" 0600 || failed=1
+    else
+        rm -f -- "$(proxy_core_pending_path "$core")" || failed=1
+    fi
+    ((failed == 0)) || { vps_cmd_error "内核更新回滚不完整；事务记录已保留"; return 30; }
+    rm -f -- "$PROXY_TRANSACTION" || return 30
+}
+
 proxy_core_update() (
     local core="${1:-}" release_channel=stable channel_set=0 requested_tag="" version_set=0 confirmed=0 arg meta binary_logical binary_path owned installed_at
     local tmp downloaded info config version tag sha old_sha binary_backup meta_backup active=0 failed=0 rc
+    local candidate_config candidate_relay config_backup relay_backup="" relay_touched=false
+    local pending pending_backup="" pending_existed=false transaction_json metadata_same=false config_same=false
     local -a required_tools=(jq curl sha256sum)
     (($# >= 1)) || { vps_cmd_error "update 需要 CORE"; return 2; }
     shift
@@ -659,6 +698,11 @@ proxy_core_update() (
     fi
     config="$(proxy_core_config_path "$core")" || return $?
     [[ -f "$config" && ! -L "$config" ]] || { vps_cmd_error "现有配置不安全或不存在：$config"; return 3; }
+    pending="$(proxy_core_pending_path "$core")" || return $?
+    if [[ -e "$pending" || -L "$pending" ]]; then
+        [[ -f "$pending" && ! -L "$pending" ]] || { vps_cmd_error "待生效状态文件不安全：$pending"; return 30; }
+        pending_existed=true
+    fi
     if [[ "${VPSCTL_DRY_RUN:-0}" == "1" ]]; then
         if [[ -n "$requested_tag" ]]; then
             vps_cmd_info "演练：下载并验证官方 Release tag $requested_tag 后原子更新 $binary_logical；不重启服务"
@@ -667,15 +711,38 @@ proxy_core_update() (
         else
             vps_cmd_info "演练：下载并验证最新官方稳定 Release 后原子更新 $binary_logical；不重启服务"
         fi
+        vps_cmd_info "演练：按目标版本重建受管配置、归一化已有中转状态，并保存同代回滚点"
         return 0
     fi
     tmp="$(mktemp -d "${TMPDIR:-/tmp}/vpsctl-proxy.XXXXXX")" || return 20
     downloaded="${tmp}/${core}"; info="${tmp}/release-info.json"
+    candidate_config="${tmp}/config.json"; candidate_relay="${tmp}/relay.json"
     _proxy_core_fetch_release "$core" "$release_channel" "$requested_tag" "$downloaded" "$info" || { rc=$?; _proxy_core_remove_tmp "$tmp"; return "$rc"; }
-    _proxy_core_validate_binary_config "$core" "$downloaded" "$config" || { rc=$?; _proxy_core_remove_tmp "$tmp"; return "$rc"; }
     version="$(jq -r '.version' "$info")"; tag="$(jq -r '.release_tag' "$info")"; sha="$(jq -r '.sha256' "$info")"
+    proxy_manifest_validate_file "$PROXY_MANIFEST" || { rc=$?; _proxy_core_remove_tmp "$tmp"; return "$rc"; }
+    if [[ -n "${PROXY_RELAY_FILE:-}" && ( -e "$PROXY_RELAY_FILE" || -L "$PROXY_RELAY_FILE" ) ]]; then
+        if [[ ! -f "$PROXY_RELAY_FILE" || -L "$PROXY_RELAY_FILE" ]]; then
+            vps_cmd_error "中转状态不是安全的普通文件"
+            _proxy_core_remove_tmp "$tmp"
+            return 3
+        fi
+        if ! declare -F proxy_relay_normalize_file >/dev/null 2>&1; then
+            vps_cmd_error "中转状态归一化模块不可用"
+            _proxy_core_remove_tmp "$tmp"
+            return 20
+        fi
+        proxy_relay_normalize_file "$PROXY_RELAY_FILE" "$candidate_relay" "$PROXY_MANIFEST" || { rc=$?; _proxy_core_remove_tmp "$tmp"; return "$rc"; }
+        if [[ "$(jq -Sc . "$candidate_relay")" != "$(jq -Sc . "$PROXY_RELAY_FILE")" ]]; then relay_touched=true; fi
+    fi
+    # A missing relay file remains missing; this path is only a render input.
+    proxy_render_config "$core" "$PROXY_MANIFEST" "$candidate_relay" "$version" >"$candidate_config" || { rc=$?; _proxy_core_remove_tmp "$tmp"; return "$rc"; }
+    chmod 0600 -- "$candidate_config" || { _proxy_core_remove_tmp "$tmp"; return 20; }
+    _proxy_core_validate_binary_config "$core" "$downloaded" "$candidate_config" || { rc=$?; _proxy_core_remove_tmp "$tmp"; return "$rc"; }
     old_sha="$(_proxy_core_sha256 "$binary_path")" || { rc=$?; _proxy_core_remove_tmp "$tmp"; return "$rc"; }
-    if [[ "$sha" == "$old_sha" ]]; then
+    if [[ "$(jq -Sc . "$candidate_config")" == "$(jq -Sc . "$config")" ]]; then config_same=true; fi
+    if jq -e --arg version "$version" --arg tag "$tag" --arg sha "$sha" \
+        '.version == $version and .release_tag == $tag and .sha256 == $sha' "$meta" >/dev/null 2>&1; then metadata_same=true; fi
+    if [[ "$sha" == "$old_sha" && "$config_same" == true && "$metadata_same" == true && "$relay_touched" == false ]]; then
         _proxy_core_remove_tmp "$tmp"
         vps_cmd_success "$(proxy_core_label "$core") $version 已是目标版本，无需更改"
         return 0
@@ -683,22 +750,42 @@ proxy_core_update() (
     proxy_service_is_active "$core" && active=1
     binary_backup="$(proxy_backup_file "$core" "$binary_logical" binary)" || { _proxy_core_remove_tmp "$tmp"; return 20; }
     meta_backup="$(proxy_backup_file "$core" "$(proxy_core_meta_logical "$core")" core.json)" || { _proxy_core_remove_tmp "$tmp"; return 20; }
+    config_backup="$(proxy_backup_file "$core" "$(proxy_core_config_logical "$core")" config.json)" || { _proxy_core_remove_tmp "$tmp"; return 20; }
+    if [[ "$relay_touched" == true ]]; then
+        relay_backup="$(proxy_backup_file "$core" "$PROXY_RELAY_LOGICAL" relay.json)" || { _proxy_core_remove_tmp "$tmp"; return 20; }
+    fi
+    if [[ "$pending_existed" == true ]]; then
+        pending_backup="$(proxy_backup_file "$core" "$(proxy_core_pending_logical "$core")" pending.json)" || { _proxy_core_remove_tmp "$tmp"; return 20; }
+    fi
+    transaction_json="$(jq -n --arg core "$core" --arg binary_logical "$binary_logical" \
+        --arg binary_backup "$binary_backup" --arg config_backup "$config_backup" --arg meta_backup "$meta_backup" \
+        --arg relay_backup "$relay_backup" --argjson relay_touched "$relay_touched" \
+        --arg pending_backup "$pending_backup" --argjson pending_existed "$pending_existed" \
+        '{schema_version:1,kind:"core-update",core:$core,binary_logical:$binary_logical,
+          binary_backup:$binary_backup,config_backup:$config_backup,meta_backup:$meta_backup,
+          relay_backup:$relay_backup,relay_touched:$relay_touched,
+          pending_backup:$pending_backup,pending_existed:$pending_existed}')" || { _proxy_core_remove_tmp "$tmp"; return 20; }
+    proxy_atomic_write_json "${PROXY_STATE_LOGICAL}/transaction.json" 0600 "$transaction_json" || { _proxy_core_remove_tmp "$tmp"; return 20; }
     proxy_atomic_write_from_file "$downloaded" "$binary_logical" 0755 || failed=1
+    ((failed)) || proxy_atomic_write_from_file "$candidate_config" "$(proxy_core_config_logical "$core")" 0600 || failed=1
+    if ((failed == 0)) && [[ "$relay_touched" == true ]]; then
+        proxy_atomic_write_from_file "$candidate_relay" "$PROXY_RELAY_LOGICAL" 0600 || failed=1
+    fi
     ((failed)) || _proxy_core_write_meta "$core" "$binary_logical" "$owned" "$version" "$tag" "$sha" "$installed_at" || failed=1
+    ((failed)) || proxy_mark_pending "$core" "core-update" "" "$config_backup" "$binary_backup" "$meta_backup" \
+        "$relay_backup" "$relay_touched" "$relay_touched" || failed=1
     if ((failed)); then
-        proxy_restore_backup "$binary_backup" "$binary_logical" 0755 || failed=2
-        proxy_restore_backup "$meta_backup" "$(proxy_core_meta_logical "$core")" 0600 || failed=2
+        _proxy_core_recover_update_transaction || failed=2
         _proxy_core_remove_tmp "$tmp"
         ((failed == 2)) && return 30
         return 20
     fi
-    proxy_mark_pending "$core" "core-update" "" "" "$binary_backup" "$meta_backup" || {
-        proxy_restore_backup "$binary_backup" "$binary_logical" 0755 || failed=2
-        proxy_restore_backup "$meta_backup" "$(proxy_core_meta_logical "$core")" 0600 || failed=2
+    if ! rm -f -- "$PROXY_TRANSACTION"; then
+        _proxy_core_recover_update_transaction || failed=2
         _proxy_core_remove_tmp "$tmp"
         ((failed == 2)) && return 30
         return 20
-    }
+    fi
     if ((active)); then
         vps_cmd_warning "内核已更新但服务仍运行旧进程；请显式 restart 应用"
     else

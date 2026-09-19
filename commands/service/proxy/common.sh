@@ -533,7 +533,7 @@ proxy_valid_host() {
 
 proxy_reality_guard_profile_valid() {
     case "${1:-}" in
-        vless-reality-vision | vless-grpc-reality | trojan-xhttp-reality | trojan-grpc-reality | anytls-reality)
+        vless-reality-vision | vless-grpc-reality | vless-xhttp-reality | trojan-xhttp-reality | trojan-grpc-reality | anytls-reality)
             return 0
             ;;
         *) return 1 ;;
@@ -690,6 +690,31 @@ proxy_core_registered() {
     [[ -x "$binary" && ! -L "$binary" ]]
 }
 
+# SemVer ordering also covers Xray date versions. Build metadata does not affect
+# precedence; a prerelease sorts before the stable release with the same triple.
+proxy_core_version_at_least() {
+    jq -en --arg version "${1:-}" --arg minimum "${2:-}" '
+        def rank:
+            capture("^v?(?<major>[0-9]+)\\.(?<minor>[0-9]+)\\.(?<patch>[0-9]+)(?:-(?<pre>[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*))?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$") |
+            [(.major | tonumber), (.minor | tonumber), (.patch | tonumber),
+             (if .pre == null then 1 else 0 end),
+             ((.pre // "") | split(".") | map(if test("^[0-9]+$") then [0,tonumber] else [1,.] end))];
+        ($version | rank) >= ($minimum | rank)
+    ' >/dev/null 2>&1
+}
+
+proxy_core_config_version() {
+    local core="$1" meta version binary
+    proxy_core_meta_valid "$core" || return 0
+    meta="$(proxy_core_meta_path "$core")" || return 2
+    version="$(jq -r '.version' "$meta")" || return 20
+    if [[ -z "$version" ]] && declare -F _proxy_core_binary_version >/dev/null 2>&1; then
+        binary="$(proxy_core_binary_path "$core")" || return 3
+        version="$(_proxy_core_binary_version "$core" "$binary")" || return $?
+    fi
+    printf '%s' "$version"
+}
+
 proxy_service_is_active() {
     local core="$1" service
     service="$(proxy_core_service_name "$core")" || return 2
@@ -739,10 +764,17 @@ proxy_service_action() {
 
 proxy_render_config() {
     local core="$1" manifest="$2" relay_manifest="${3:-${PROXY_RELAY_FILE:-}}"
+    # Helpers inherit this render's manifest/version without changing registered
+    # metadata or leaking a candidate version into the next operation.
+    local PROXY_MANIFEST="$manifest" PROXY_RENDER_CORE_VERSION="${4:-}"
     local node rendered inbounds='[]' relay_state='{"schema_version":1,"exits":[],"bindings":[],"forwards":[]}'
     local exit exit_id outbound_bundle target_tag node_id used_exit_ids
     local relay_outbounds='[]' relay_rules='[]' policy_nodes='[]' policy_outbounds='[]' policy_rules='[]' guard_nodes='[]'
+    local freedom_settings='{}' sockopt_strategy=false
     proxy_core_valid "$core" || return 2
+    if [[ -z "$PROXY_RENDER_CORE_VERSION" ]]; then
+        PROXY_RENDER_CORE_VERSION="$(proxy_core_config_version "$core")" || return $?
+    fi
     proxy_manifest_validate_file "$manifest" || return $?
     if [[ -n "$relay_manifest" && -f "$relay_manifest" ]]; then
         if declare -F proxy_relay_validate_file >/dev/null 2>&1; then
@@ -781,7 +813,7 @@ proxy_render_config() {
         while IFS= read -r exit_id; do
             [[ -n "$exit_id" ]] || continue
             exit="$(jq -ce --arg id "$exit_id" '.exits[] | select(.id == $id)' <<<"$relay_state")" || return 10
-            outbound_bundle="$(proxy_relay_render_outbound "$core" "$exit")" || return $?
+            outbound_bundle="$(proxy_relay_render_outbound "$core" "$exit" "$PROXY_RENDER_CORE_VERSION")" || return $?
             jq -e '
                 type == "object" and ((.outbounds | type) == "array") and
                 ((.target_tag | type) == "string" and (.target_tag | length) > 0)
@@ -855,7 +887,14 @@ proxy_render_config() {
             '
             ;;
         xray)
-            policy_outbounds="$(jq -cn --argjson nodes "$policy_nodes" '
+            if proxy_core_version_at_least "$PROXY_RENDER_CORE_VERSION" 26.5.3; then
+                freedom_settings='{"finalRules":[{"action":"allow"}]}'
+            elif proxy_core_version_at_least "$PROXY_RENDER_CORE_VERSION" 26.4.15; then
+                freedom_settings='{"ipsBlocked":[]}'
+            fi
+            if proxy_core_version_at_least "$PROXY_RENDER_CORE_VERSION" 26.9.8; then sockopt_strategy=true; fi
+            policy_outbounds="$(jq -cn --argjson nodes "$policy_nodes" --argjson sockopt_strategy "$sockopt_strategy" \
+                --argjson freedom_settings "$freedom_settings" '
                 def domain_strategy:
                     if . == "prefer_ipv4" then "UseIPv4v6"
                     elif . == "prefer_ipv6" then "UseIPv6v4"
@@ -864,16 +903,20 @@ proxy_render_config() {
                     else error("invalid IP strategy") end;
                 $nodes | map(. as $node |
                     {protocol:"freedom",tag:("direct-" + $node.id),
-                     settings:{domainStrategy:($node.ip_strategy | domain_strategy)}})
+                     settings:$freedom_settings} +
+                    (if $sockopt_strategy then
+                         {streamSettings:{sockopt:{domainStrategy:($node.ip_strategy | domain_strategy)}}}
+                     else {settings:($freedom_settings + {domainStrategy:($node.ip_strategy | domain_strategy)})} end))
             ')" || return 10
             policy_rules="$(jq -cn --argjson nodes "$policy_nodes" '
                 $nodes | map({type:"field",inboundTag:[.id],outboundTag:("direct-" + .id)})
             ')" || return 10
             jq -n --argjson inbounds "$inbounds" --argjson relay_outbounds "$relay_outbounds" \
                 --argjson relay_rules "$relay_rules" --argjson policy_outbounds "$policy_outbounds" \
-                --argjson policy_rules "$policy_rules" --argjson guard_nodes "$guard_nodes" '
+                --argjson policy_rules "$policy_rules" --argjson guard_nodes "$guard_nodes" \
+                --argjson freedom_settings "$freedom_settings" '
                 ($guard_nodes | map({protocol:"freedom",tag:("reality-target-" + .id),
-                                    settings:{redirect:(.tls.server_name + ":443")}})) as $guard_outbounds |
+                                    settings:($freedom_settings + {redirect:(.tls.server_name + ":443")})})) as $guard_outbounds |
                 ($guard_nodes | map([
                     {type:"field",inboundTag:[("reality-guard-" + .id)],protocol:["tls"],
                      domain:[("full:" + (.tls.server_name | ascii_downcase))],outboundTag:("reality-target-" + .id)},
@@ -883,7 +926,8 @@ proxy_render_config() {
                     log: {loglevel: "warning"},
                     inbounds: $inbounds,
                     outbounds: ([
-                        {protocol: "freedom", tag: "direct"},
+                        ({protocol: "freedom", tag: "direct"} +
+                         (if $freedom_settings == {} then {} else {settings:$freedom_settings} end)),
                         {protocol: "blackhole", tag: "block"}
                     ] + $guard_outbounds + $policy_outbounds + $relay_outbounds),
                     routing: {rules: ($guard_rules + $relay_rules + $policy_rules)}
@@ -892,9 +936,24 @@ proxy_render_config() {
     esac
 }
 
+proxy_config_validation_detail() {
+    local config="$1" output="$2"
+    # Core errors can quote rejected credentials. Redact both literal and JSON-
+    # escaped values before retaining a short diagnostic line.
+    jq -nr --slurpfile config "$config" --arg output "$output" '
+        [$config[0] | paths(strings) as $path |
+         select(any($path[]; type == "string" and test("^(passwords?|private_?key|key|id|uuid|auth|secret|token|seed)$"; "i"))) |
+         getpath($path) | select(length > 0) | ., (tojson | .[1:-1])] | unique | sort_by(length) | reverse as $secrets |
+        ($output | split("\n") | map(select(test("\\S"))) | last // "") |
+        reduce $secrets[] as $secret (. ; split($secret) | join("[redacted]")) |
+        gsub("[\\x00-\\x1f\\x7f]"; "") |
+        if length > 512 then .[0:509] + "..." else . end
+    ' 2>/dev/null
+}
+
 proxy_validate_config_with_binary() {
-    local core="$1" config="$2" binary validation_output="" validation_detail=""
-    binary="$(proxy_core_binary_path "$core")" || return 3
+    local core="$1" config="$2" binary="${3:-}" validation_output="" validation_detail=""
+    if [[ -z "$binary" ]]; then binary="$(proxy_core_binary_path "$core")" || return 3; fi
     [[ -x "$binary" ]] || {
         vps_cmd_error "$(proxy_core_label "$core") 二进制不可执行：$binary"
         return 3
@@ -912,22 +971,14 @@ proxy_validate_config_with_binary() {
                 elif jq -e 'any(.outbounds[]?; has("domain_resolver"))' "$config" >/dev/null 2>&1; then
                     vps_cmd_error "该节点策略需要支持现代 domain_resolver 的 sing-box；请先更新内核后重试"
                 fi
-                validation_detail="$(awk 'NF { detail=$0 } END { print detail }' <<<"$validation_output")"
-                validation_detail="${validation_detail%$'\r'}"
-                if ((${#validation_detail} > 512)); then
-                    validation_detail="${validation_detail:0:509}..."
-                fi
+                validation_detail="$(proxy_config_validation_detail "$config" "$validation_output")" || validation_detail=""
                 [[ -z "$validation_detail" ]] || vps_cmd_error "sing-box 校验详情：$validation_detail"
                 return 10
             }
             ;;
         xray)
             validation_output="$("$binary" run -test -c "$config" 2>&1)" || {
-                validation_detail="$(awk 'NF { detail=$0 } END { print detail }' <<<"$validation_output")"
-                validation_detail="${validation_detail%$'\r'}"
-                if ((${#validation_detail} > 512)); then
-                    validation_detail="${validation_detail:0:509}..."
-                fi
+                validation_detail="$(proxy_config_validation_detail "$config" "$validation_output")" || validation_detail=""
                 vps_cmd_error "Xray 拒绝生成的配置"
                 if jq -e 'any(.inbounds[]?; (.tag // "") | startswith("reality-guard-"))' "$config" >/dev/null 2>&1; then
                     vps_cmd_error "REALITY 防偷需要支持 TLS routeOnly 嗅探、精确域名路由和 freedom redirect 的 Xray；请更新内核并检查配置后重试"
@@ -1137,6 +1188,11 @@ proxy_recover_transaction() {
     if [[ -f "$PROXY_TRANSACTION" && ! -L "$PROXY_TRANSACTION" ]] &&
        jq -e '.schema_version == 2 and .kind == "node-core-switch"' "$PROXY_TRANSACTION" >/dev/null 2>&1; then
         proxy_recover_core_switch_transaction
+        return $?
+    fi
+    if [[ -f "$PROXY_TRANSACTION" && ! -L "$PROXY_TRANSACTION" ]] &&
+       jq -e '.schema_version == 1 and .kind == "core-update"' "$PROXY_TRANSACTION" >/dev/null 2>&1; then
+        _proxy_core_recover_update_transaction
         return $?
     fi
     if [[ "${VPSCTL_DRY_RUN:-0}" == "1" ]]; then

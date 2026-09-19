@@ -332,7 +332,7 @@ write_core_binary() {
 
 install_external() {
     local core="$1"
-    write_core_binary "$core"
+    write_core_binary "$core" "/usr/bin/$core" "${2:-}"
     run_proxy install --core "$core"
     assert_equal 0 "$RUN_STATUS" "external $core install"
     jq -e '.owned == false' "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/cores/${core}.json" >/dev/null || fail "$core external ownership"
@@ -528,7 +528,7 @@ test_core_release_channels() {
         set_release_scenario bad-config
         run_proxy install --core "$core" --release-channel prerelease
         assert_equal 10 "$RUN_STATUS" "$core prerelease config compatibility rejection"
-        assert_contains "$RUN_OUTPUT" "拒绝当前配置" "$core prerelease config compatibility error"
+        assert_contains "$RUN_OUTPUT" "拒绝生成的配置" "$core prerelease config compatibility error"
         assert_not_contains "$(<"$MOCK_LOG")" "/releases/latest" "$core config failure does not fall back"
         [[ ! -e "$meta" ]] || fail "$core incompatible prerelease wrote metadata"
     done
@@ -1165,7 +1165,7 @@ test_unified_interactive_api() (
     assert_contains "$output" "证书文件绝对路径" "imported certificate selection"
     assert_contains "$output" "出站 IP 策略" "custom node IP strategy choice"
 
-    output="$(proxy_node_add --profile hysteria2 --port 19402 --address proxy.example <<< $'\n\n2\n\n\n\n\n2\n123\n456\n' 2>&1)"
+    output="$(proxy_node_add --profile hysteria2 --port 19402 --address proxy.example <<< $'\n\n2\n\n\n\n\n2\n123\n456\n\n' 2>&1)"
     assert_contains "$output" "混淆方式" "custom obfuscation enum"
     assert_contains "$output" "不使用混淆" "obfuscation none choice"
     assert_contains "$output" "Salamander" "obfuscation Salamander choice"
@@ -1374,7 +1374,8 @@ test_protocol_matrix() {
     mkdir -p "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/cores" "${TEST_SYSTEM_ROOT}/etc/vpsctl/proxy" "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy"
     local core logical version
     for core in sing-box xray; do
-        logical="/usr/bin/$core"; version=fixture
+        logical="/usr/bin/$core"
+        case "$core" in sing-box) version=1.14.0 ;; xray) version=26.3.27 ;; esac
         jq -n --arg core "$core" --arg binary "$logical" --arg version "$version" \
           '{schema_version:1,core:$core,binary:$binary,owned:false,version:$version,release_tag:"",sha256:"fixture",service:("vpsctl-proxy-"+$core),installed_at:"2026-01-01T00:00:00Z",updated_at:"2026-01-01T00:00:00Z"}' \
           >"${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/cores/${core}.json"
@@ -1389,8 +1390,10 @@ test_protocol_matrix() {
     source "${TEST_ROOT}/commands/service/proxy/nodes.sh"
     source "${TEST_ROOT}/commands/service/proxy/relay-uri.sh"
     source "${TEST_ROOT}/commands/service/proxy/relay-forward.sh"
+    source "${TEST_ROOT}/commands/service/proxy/relay.sh"
     source "${TEST_ROOT}/commands/service/proxy/core.sh"
     proxy_common_init
+    proxy_relay_init
 
     _proxy_relay_forward_valid_ipv6 '2001:db8::1' || fail "valid compressed IPv6 literal rejected"
     _proxy_relay_forward_valid_ipv6 '::ffff:192.0.2.1' || fail "valid IPv4-mapped IPv6 literal rejected"
@@ -1455,6 +1458,7 @@ test_protocol_matrix() {
         [vless-tcp]='VLESS + TCP'
         [socks5]='SOCKS5'
         [vless-grpc-reality]='VLESS + gRPC + REALITY'
+        [vless-xhttp-reality]='VLESS + XHTTP + REALITY'
         [trojan-xhttp-reality]='Trojan + XHTTP + REALITY'
         [trojan-grpc-reality]='Trojan + gRPC + REALITY'
         [vless-xhttp-tls]='VLESS + XHTTP + TLS'
@@ -1507,7 +1511,12 @@ test_protocol_matrix() {
             esac
             jq -e 'type == "array"' >/dev/null <<<"$rendered" || fail "$profile/$core rendered invalid JSON array"
             if [[ "$profile" == hysteria2 ]]; then
-                jq -e '.[0].up_mbps == 100 and .[0].down_mbps == 200' >/dev/null <<<"$rendered" || fail "hysteria2 bandwidth renderer fields"
+                if [[ "$core" == sing-box ]]; then
+                    jq -e '.[0].up_mbps == 100 and .[0].down_mbps == 200' >/dev/null <<<"$rendered" || fail "sing-box hysteria2 bandwidth renderer fields"
+                else
+                    jq -e '.[0].streamSettings.finalmask.quicParams |
+                        .brutalUp == "100000000" and .brutalDown == "200000000"' >/dev/null <<<"$rendered" || fail "Xray hysteria2 decimal Mbps renderer fields"
+                fi
             fi
             [[ -n "$uri" ]] || fail "$profile/$core empty URI"
             descriptor="$(proxy_relay_uri_parse "$uri" "$profile")" || fail "$profile/$core relay URI parse"
@@ -1517,6 +1526,9 @@ test_protocol_matrix() {
                 --arg profile "$profile" --arg uri "$uri" --argjson descriptor "$descriptor" \
                 '{id:$id,name:$name,type:"protocol",core:$core,profile:$profile,uri:$uri,descriptor:$descriptor,
                   endpoint:$descriptor.endpoint,network_hint:$descriptor.network_hint}')"
+            if [[ "$core" == sing-box && "$(jq -r '.tls.mode == "tls" and .tls.certificate_sha256 != ""' <<<"$descriptor")" == true ]]; then
+                relay_exit="$(proxy_relay_apply_client_options "$relay_exit" "$cert_dir/cert.pem")" || fail "$profile/$core relay certificate migration"
+            fi
             outbound="$(proxy_relay_render_outbound "$core" "$relay_exit")" || fail "$profile/$core relay outbound render"
             jq -e '(.outbounds | type) == "array" and (.outbounds | length) > 0 and (.target_tag | length) > 0' \
                 >/dev/null <<<"$outbound" || fail "$profile/$core relay outbound shape"
@@ -1544,12 +1556,12 @@ test_protocol_matrix() {
             *) fail "$profile has an invalid core mapping" ;;
         esac
     done < <(proxy_all_profiles)
-    assert_equal 20 "$profile_count" "unique profile count"
+    assert_equal 21 "$profile_count" "unique profile count"
     assert_equal 15 "$sb_count" "sing-box profile count"
-    assert_equal 11 "$xray_count" "Xray profile count"
-    assert_equal 6 "$overlap_count" "shared profile count"
-    assert_equal 9 "$sb_only_count" "sing-box-only profile count"
-    assert_equal 5 "$xray_only_count" "Xray-only profile count"
+    assert_equal 13 "$xray_count" "Xray profile count"
+    assert_equal 7 "$overlap_count" "shared profile count"
+    assert_equal 8 "$sb_only_count" "sing-box-only profile count"
+    assert_equal 6 "$xray_only_count" "Xray-only profile count"
     parse_status=0
     proxy_relay_uri_parse "$ss2022_uri" >/dev/null 2>&1 || parse_status=$?
     assert_equal 2 "$parse_status" "ambiguous Shadowsocks 2022 profile selection"
@@ -1975,7 +1987,7 @@ test_node_core_switch() {
     local profile source_core target_core matrix_name matrix_id matrix_before matrix_after port=35400
     local cert_dir="${TEST_TEMP}/node-core-switch-cert"
     local -a shared_profiles=(
-        vless-reality-vision vless-grpc-tls shadowsocks-aes-256-gcm
+        vless-reality-vision vless-grpc-tls hysteria2 shadowsocks-aes-256-gcm
         shadowsocks-chacha20-poly1305 shadowsocks-2022 shadowsocks-2022-padding
     )
 
@@ -2230,8 +2242,8 @@ test_node_core_switch() {
 
     # Every profile shared by the public matrix can reuse source-generated credentials in both directions.
     reset_root
-    install_external sing-box
-    install_external xray
+    install_external sing-box 1.14.0
+    install_external xray 26.3.27
     for profile in "${shared_profiles[@]}"; do
         for source_core in sing-box xray; do
             case "$source_core" in sing-box) target_core=xray ;; xray) target_core=sing-box ;; esac

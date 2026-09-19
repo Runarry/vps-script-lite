@@ -94,7 +94,9 @@ proxy_sb_validate_node() {
         elif $profile == "hysteria2" then
             password and tls_common and
             (.options.obfs_type == "none" or
-             (.options.obfs_type == "salamander" and (.options.obfs_password | text))) and
+             ((.options.obfs_type == "salamander" or .options.obfs_type == "gecko") and (.options.obfs_password | text))) and
+            ((.options | has("bbr_profile") | not) or
+             (.options.bbr_profile == "standard" or .options.bbr_profile == "conservative" or .options.bbr_profile == "aggressive")) and
             ((.options.up_mbps | type) == "number" and (.options.up_mbps | floor) == .options.up_mbps and .options.up_mbps > 0) and
             ((.options.down_mbps | type) == "number" and (.options.down_mbps | floor) == .options.down_mbps and .options.down_mbps > 0)
         elif $profile == "tuic-v5" then
@@ -126,7 +128,7 @@ proxy_sb_validate_node() {
 }
 
 proxy_sb_render_node() {
-    local node="${1:-}" profile
+    local node="${1:-}" profile version="${PROXY_RENDER_CORE_VERSION:-}"
     proxy_sb_validate_node "$node" || return $?
     profile="$(jq -r '.profile' <<<"$node")" || return 10
 
@@ -203,15 +205,23 @@ proxy_sb_render_node() {
             }] else [] end)'
             ;;
         hysteria2)
+            if jq -e '.options.obfs_type == "gecko" or (.options | has("bbr_profile"))' <<<"$node" >/dev/null; then
+                if [[ -z "$version" ]]; then version="$(proxy_core_config_version sing-box)" || return $?; fi
+                if [[ -n "$version" ]] && ! proxy_core_version_at_least "$version" 1.14.0; then
+                    printf 'Hysteria2 Gecko / BBR profile 运行配置要求 sing-box >= 1.14.0。\n' >&2
+                    return 10
+                fi
+            fi
             jq -n --argjson n "$node" '[{
                 type:"hysteria2", tag:$n.id, listen:($n.listen // "::"), listen_port:$n.port,
                 up_mbps:$n.options.up_mbps, down_mbps:$n.options.down_mbps,
                 users:[{password:$n.credentials.password}],
                 tls:{enabled:true, alpn:["h3"],
                      certificate_path:$n.tls.certificate_path, key_path:$n.tls.key_path}
-            } | if $n.options.obfs_type == "salamander" then
-                .obfs={type:"salamander", password:$n.options.obfs_password}
-            else . end]'
+            } | (if $n.options.obfs_type == "salamander" or $n.options.obfs_type == "gecko" then
+                .obfs={type:$n.options.obfs_type, password:$n.options.obfs_password}
+            else . end) |
+            if $n.options | has("bbr_profile") then .bbr_profile=$n.options.bbr_profile else . end]'
             ;;
         tuic-v5)
             jq -n --argjson n "$node" '[{
@@ -318,8 +328,8 @@ proxy_sb_render_uri() {
             "hysteria2://" + (.credentials.password | enc) + "@" + endpoint + "?" + query(([
                 ["sni", .tls.server_name]
             ] + (if .tls.insecure then [["insecure", "1"]] else [] end) +
-                (if .options.obfs_type == "salamander" then
-                    [["obfs", "salamander"], ["obfs-password", .options.obfs_password]] else [] end) +
+                (if .options.obfs_type == "salamander" or .options.obfs_type == "gecko" then
+                    [["obfs", .options.obfs_type], ["obfs-password", .options.obfs_password]] else [] end) +
                 (if .tls.certificate_sha256 != "" then
                     [["pinSHA256", .tls.certificate_sha256]] else [] end))) + "#" + (.name | enc)
         elif .profile == "tuic-v5" then

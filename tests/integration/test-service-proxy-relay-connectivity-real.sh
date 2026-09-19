@@ -100,6 +100,8 @@ source "${TEST_ROOT}/commands/service/proxy/relay-uri.sh"
 source "${TEST_ROOT}/commands/service/proxy/relay-forward.sh"
 # shellcheck source=../../commands/service/proxy/relay.sh
 source "${TEST_ROOT}/commands/service/proxy/relay.sh"
+# shellcheck source=../../commands/service/proxy/core.sh
+source "${TEST_ROOT}/commands/service/proxy/core.sh"
 
 proxy_common_init
 proxy_relay_init
@@ -248,8 +250,8 @@ run_node_core_switch_smoke() {
     jq -n --argjson node "$source_node" '{schema_version:1,nodes:[$node]}' >"$source_manifest"
     jq -n --argjson node "$target_node" '{schema_version:1,nodes:[$node]}' >"$target_manifest"
     proxy_relay_default >"$empty_relay"
-    proxy_render_config sing-box "$source_manifest" "$empty_relay" >"$source_config" || return 1
-    proxy_render_config xray "$target_manifest" "$empty_relay" >"$target_config" || return 1
+    proxy_render_config sing-box "$source_manifest" "$empty_relay" "$(_proxy_core_binary_version sing-box "$SING_BOX_BINARY")" >"$source_config" || return 1
+    proxy_render_config xray "$target_manifest" "$empty_relay" "$(_proxy_core_binary_version xray "$XRAY_BINARY")" >"$target_config" || return 1
     render_shadowsocks_client_config "$source_uri" "$socks_port" "$client_config" || return 1
     validate_config sing-box "$SING_BOX_BINARY" "$source_config" || return 1
     validate_config xray "$XRAY_BINARY" "$target_config" || return 1
@@ -324,9 +326,9 @@ run_relay_core_switch_smoke() {
          bindings:[{id:$bind_id,node_id:$node_id,exit_id:$exit_id,created_at:$now,updated_at:$now}],
          forwards:[]}' >"$source_relay"
     jq '(.exits[0].core)="xray"' "$source_relay" >"$target_relay"
-    proxy_render_config sing-box "$landing_manifest" "$empty_relay" >"$landing_config" || return 1
-    proxy_render_config sing-box "$source_manifest" "$source_relay" >"$source_config" || return 1
-    proxy_render_config xray "$target_manifest" "$target_relay" >"$target_config" || return 1
+    proxy_render_config sing-box "$landing_manifest" "$empty_relay" "$(_proxy_core_binary_version sing-box "$SING_BOX_BINARY")" >"$landing_config" || return 1
+    proxy_render_config sing-box "$source_manifest" "$source_relay" "$(_proxy_core_binary_version sing-box "$SING_BOX_BINARY")" >"$source_config" || return 1
+    proxy_render_config xray "$target_manifest" "$target_relay" "$(_proxy_core_binary_version xray "$XRAY_BINARY")" >"$target_config" || return 1
     render_shadowsocks_client_config "$entry_source_uri" "$socks_port" "$client_config" || return 1
     validate_config sing-box "$SING_BOX_BINARY" "$landing_config" || return 1
     validate_config sing-box "$SING_BOX_BINARY" "$source_config" || return 1
@@ -440,8 +442,14 @@ while IFS=$'\t' read -r profile _label; do
                      created_at:$now,updated_at:$now}],
              bindings:[{id:$bind_id,node_id:$node_id,exit_id:$exit_id,created_at:$now,updated_at:$now}],
              forwards:[]}' >"$relay"
-        proxy_render_config "$core" "$landing_manifest" "$empty_relay" >"$landing_config" || exit 1
-        proxy_render_config "$core" "$entry_manifest" "$relay" >"$relay_config" || exit 1
+        if [[ "$core" == sing-box && "$(jq -r '.tls.mode' <<<"$descriptor")" == tls ]]; then
+            pinned_exit="$(proxy_relay_apply_client_options "$(jq -c '.exits[0]' "$relay")" "$shared_cert")" || exit 1
+            jq --argjson exit "$pinned_exit" '.exits[0]=$exit' "$relay" >"${relay}.next" || exit 1
+            mv -- "${relay}.next" "$relay"
+        fi
+        render_version="$(_proxy_core_binary_version "$core" "$binary")" || exit 1
+        proxy_render_config "$core" "$landing_manifest" "$empty_relay" "$render_version" >"$landing_config" || exit 1
+        proxy_render_config "$core" "$entry_manifest" "$relay" "$render_version" >"$relay_config" || exit 1
         if [[ "$core" == xray ]]; then
             jq '.log.loglevel="debug"' "$landing_config" >"${landing_config}.debug"
             mv -- "${landing_config}.debug" "$landing_config"

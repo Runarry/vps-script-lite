@@ -81,7 +81,7 @@ XRAY_BINARY="${XRAY_BINARY:-$(command -v xray 2>/dev/null || true)}"
 if ss -H -ltn | grep -Eq "(^|[[:space:]])([^[:space:]]*:)?${TARGET_PORT}([[:space:]]|$)"; then
     blocked '127.0.0.1:443 must be free for the controlled REALITY target'
 fi
-for port in 10000 43001 43002 43101 43102 43103 43104; do
+for port in 10000 43001 43002 43101 43102 43103 43104 43105; do
     if ss -H -ltn | grep -Eq "(^|[[:space:]])([^[:space:]]*:)?${port}([[:space:]]|$)"; then
         blocked "required test port is already listening: $port"
     fi
@@ -105,6 +105,8 @@ source "${TEST_ROOT}/commands/service/proxy/ufw.sh"
 vps_cmd_init "REALITY anti-relay real test" "$TEST_ROOT"
 # shellcheck source=../../commands/service/proxy/common.sh
 source "${TEST_ROOT}/commands/service/proxy/common.sh"
+# shellcheck source=../../commands/service/proxy/core.sh
+source "${TEST_ROOT}/commands/service/proxy/core.sh"
 # shellcheck source=../../commands/service/proxy/protocols-sing-box.sh
 source "${TEST_ROOT}/commands/service/proxy/protocols-sing-box.sh"
 # shellcheck source=../../commands/service/proxy/protocols-xray.sh
@@ -124,12 +126,14 @@ proxy_ensure_layout
 mkdir -p -- "${TEST_SYSTEM_ROOT}/usr/local/bin" "${PROXY_STATE_DIR}/cores"
 cp -p -- "$SING_BOX_BINARY" "${TEST_SYSTEM_ROOT}/usr/local/bin/sing-box"
 cp -p -- "$XRAY_BINARY" "${TEST_SYSTEM_ROOT}/usr/local/bin/xray"
-jq -n '{schema_version:1,core:"sing-box",binary:"/usr/local/bin/sing-box",owned:false,
-    version:"real",release_tag:"",sha256:"real",service:"vpsctl-proxy-sing-box",
+jq -n --arg version "$(_proxy_core_binary_version sing-box "$SING_BOX_BINARY")" \
+    '{schema_version:1,core:"sing-box",binary:"/usr/local/bin/sing-box",owned:false,
+    version:$version,release_tag:"",sha256:"real",service:"vpsctl-proxy-sing-box",
     installed_at:"2026-01-01T00:00:00Z",updated_at:"2026-01-01T00:00:00Z"}' \
     >"${PROXY_STATE_DIR}/cores/sing-box.json"
-jq -n '{schema_version:1,core:"xray",binary:"/usr/local/bin/xray",owned:false,
-    version:"real",release_tag:"",sha256:"real",service:"vpsctl-proxy-xray",
+jq -n --arg version "$(_proxy_core_binary_version xray "$XRAY_BINARY")" \
+    '{schema_version:1,core:"xray",binary:"/usr/local/bin/xray",owned:false,
+    version:$version,release_tag:"",sha256:"real",service:"vpsctl-proxy-xray",
     installed_at:"2026-01-01T00:00:00Z",updated_at:"2026-01-01T00:00:00Z"}' \
     >"${PROXY_STATE_DIR}/cores/xray.json"
 proxy_manifest_default >"$PROXY_MANIFEST"
@@ -204,8 +208,9 @@ append_guarded_node xray vless-reality-vision 257 43101 auto
 append_guarded_node xray vless-grpc-reality 258 43102 auto
 append_guarded_node xray trojan-xhttp-reality 259 43103 auto
 append_guarded_node xray trojan-grpc-reality 260 43104 auto
+append_guarded_node xray vless-xhttp-reality 261 43105 auto
 
-# The real listener on 10000 is skipped and all six guard ports are allocated
+# The real listener on 10000 is skipped and all seven guard ports are allocated
 # monotonically across both cores.
 expected_guard=10001
 for record in "${NODE_RECORDS[@]}"; do
@@ -256,11 +261,11 @@ jq -e '
         .tls.reality.handshake == {server:"127.0.0.1",server_port:10001})
 ' "$SB_CONFIG" >/dev/null || fail 'sing-box guard ordering, loopback target or IP-policy isolation'
 jq -e '
-    ([.inbounds[] | select(.tag | startswith("reality-guard-"))] | length) == 4 and
-    ([.outbounds[] | select(.tag | startswith("reality-target-"))] | length) == 4 and
-    (.routing.rules[0:8] | all(.inboundTag[0] | startswith("reality-guard-"))) and
-    (.routing.rules[8].inboundTag == ["node-0000000000000101"]) and
-    (.routing.rules[8].outboundTag | startswith("relay-exit-")) and
+    ([.inbounds[] | select(.tag | startswith("reality-guard-"))] | length) == 5 and
+    ([.outbounds[] | select(.tag | startswith("reality-target-"))] | length) == 5 and
+    (.routing.rules[0:10] | all(.inboundTag[0] | startswith("reality-guard-"))) and
+    (.routing.rules[10].inboundTag == ["node-0000000000000101"]) and
+    (.routing.rules[10].outboundTag | startswith("relay-exit-")) and
     any(.inbounds[]; .tag == "node-0000000000000101" and
         .streamSettings.realitySettings.target == "127.0.0.1:10003")
 ' "$XRAY_CONFIG" >/dev/null || fail 'Xray guard ordering, loopback target or relay isolation'

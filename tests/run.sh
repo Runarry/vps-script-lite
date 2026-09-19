@@ -57,7 +57,14 @@ for syntax_file in \
     "${TEST_ROOT}/tests/unit/test-security-tls.sh" \
     "${TEST_ROOT}/tests/unit/test-server-test.sh" \
     "${TEST_ROOT}/tests/unit/test-service-proxy.sh" \
+    "${TEST_ROOT}/tests/unit/test-service-proxy-version-compat.sh" \
+    "${TEST_ROOT}/tests/unit/test-service-proxy-relay-tls.sh" \
+    "${TEST_ROOT}/tests/unit/test-service-proxy-protocol-enhancements.sh" \
+    "${TEST_ROOT}/tests/unit/test-service-proxy-relay-enhancements.sh" \
+    "${TEST_ROOT}/tests/unit/test-service-proxy-node-enhancements.sh" \
     "${TEST_ROOT}/tests/integration/test-service-proxy-relay-connectivity-real.sh" \
+    "${TEST_ROOT}/tests/integration/test-service-proxy-compat-real.sh" \
+    "${TEST_ROOT}/tests/integration/test-service-proxy-protocol-enhancements-real.sh" \
     "${TEST_ROOT}/tests/integration/test-service-proxy-reality-anti-relay-real.sh" \
     "${TEST_ROOT}/tests/integration/test-distribution-real.sh" \
     "${TEST_ROOT}/tests/integration/test-service-proxy-relay-cores-real.sh" \
@@ -96,6 +103,11 @@ bash "${TEST_ROOT}/tests/unit/test-security-fail2ban.sh"
 bash "${TEST_ROOT}/tests/unit/test-security-tls.sh"
 bash "${TEST_ROOT}/tests/unit/test-server-test.sh"
 bash "${TEST_ROOT}/tests/unit/test-service-proxy.sh"
+bash "${TEST_ROOT}/tests/unit/test-service-proxy-version-compat.sh"
+bash "${TEST_ROOT}/tests/unit/test-service-proxy-relay-tls.sh"
+bash "${TEST_ROOT}/tests/unit/test-service-proxy-protocol-enhancements.sh"
+bash "${TEST_ROOT}/tests/unit/test-service-proxy-relay-enhancements.sh"
+bash "${TEST_ROOT}/tests/unit/test-service-proxy-node-enhancements.sh"
 bash "${TEST_ROOT}/tests/integration/test-vpsctl.sh"
 
 printf 'PASS: all tests\n'
