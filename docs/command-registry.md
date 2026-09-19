@@ -46,7 +46,7 @@ vpsctl self uninstall [--purge] [--confirm-uninstall] [--confirm-purge]
 
 ## 3. 已登记命令清单
 
-0.8.7 登记以下网络、系统、安全、服务与服务器测试入口。状态列描述接口生命周期，不表示已经完成真实 VPS 或 VM 验证；隔离环境验收要求见[网络设置](network-settings.md)、[系统内核管理](kernel-management.md)、[访问管理](access-management.md)、[Fail2ban 管理](fail2ban-management.md)、[TLS 证书管理](tls-management.md)、[代理管理](proxy-management.md)和[服务器测试](server-testing.md)。
+0.8.8 登记以下网络、系统、安全、服务与服务器测试入口。状态列描述接口生命周期，不表示已经完成真实 VPS 或 VM 验证；隔离环境验收要求见[网络设置](network-settings.md)、[系统内核管理](kernel-management.md)、[访问管理](access-management.md)、[Fail2ban 管理](fail2ban-management.md)、[TLS 证书管理](tls-management.md)、[代理管理](proxy-management.md)和[服务器测试](server-testing.md)。
 
 | 命令 | 文件 | 摘要 | 风险 | 权限 | 演练 | 能力要求 | 状态 |
 | --- | --- | --- | --- | --- | --- | --- | --- |

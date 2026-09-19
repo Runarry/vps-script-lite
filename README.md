@@ -4,9 +4,9 @@
 
 项目采用“一个管理入口、多个独立命令”的结构：管理入口只负责参数解析、固定命令登记、公共上下文和分发；每项实际功能原则上由一个公开入口脚本实现，复杂入口可拆为不单独分发的私有子模块。这样既能通过统一入口使用，也能单独运行、测试和排错。
 
-> 当前版本为 0.8.7，提供网络、系统内核、访问、TLS 证书、代理与服务器测试入口。系统变更命令应先使用 `--dry-run` 并阅读对应恢复说明；内核变更需提前确认带外控制台或救援入口可用，服务器测试会下载并运行第三方代码、产生明显 CPU/磁盘/网络负载且不支持演练。
+> 当前版本为 0.8.8，提供网络、系统内核、访问、TLS 证书、代理与服务器测试入口。系统变更命令应先使用 `--dry-run` 并阅读对应恢复说明；内核变更需提前确认带外控制台或救援入口可用，服务器测试会下载并运行第三方代码、产生明显 CPU/磁盘/网络负载且不支持演练。
 
-应用、功能与 GitHub Release 分发统一使用 `0.8.7`。仓库根 `VERSION` 是规范版本源，tag 为 `v0.8.7`；发布资产、安装目录、`vpsctl self` 与命令行版本展示均使用同一版本号。
+应用、功能与 GitHub Release 分发统一使用 `0.8.8`。仓库根 `VERSION` 是规范版本源，tag 为 `v0.8.8`；发布资产、安装目录、`vpsctl self` 与命令行版本展示均使用同一版本号。
 
 ## 文档
 
@@ -54,21 +54,21 @@ apk add --no-cache bash curl ca-certificates
 curl -fsSL https://github.com/Runarry/vps-script-lite/releases/latest/download/vpsctl.sh | bash
 ```
 
-**从 v0.8.6 及更早版本首次升级到 v0.8.7，需要普通卸载管理器代码后重新安装。** 旧更新器的 core 白名单不包含新增的 `lib/ufw.sh`，会拒绝直接 `self update`；直接重跑安装器也只会启动已有管理器。请先按下方固定 tag 流程下载并校验安装器和 manifest，再运行 `vpsctl --non-interactive self uninstall --confirm-uninstall`（不加 `--purge`），然后执行已下载的安装器。普通卸载保留功能配置、服务和备份。完整步骤见 [v0.8.7 发布说明](https://github.com/Runarry/vps-script-lite/releases/tag/v0.8.7)。
+**从 v0.8.6 及更早版本首次升级到 v0.8.7 及更新版本，需要普通卸载管理器代码后重新安装。** 旧更新器的 core 白名单不包含新增的 `lib/ufw.sh`，会拒绝直接 `self update`；直接重跑安装器也只会启动已有管理器。请先按下方固定 tag 流程下载并校验安装器和 manifest，再运行 `vpsctl --non-interactive self uninstall --confirm-uninstall`（不加 `--purge`），然后执行已下载的安装器。普通卸载保留功能配置、服务和备份。完整步骤见 [v0.8.7 发布说明](https://github.com/Runarry/vps-script-lite/releases/tag/v0.8.7)。
 
 安装后使用快捷命令 `vpsctl`。启动 `vpsctl` 只读取本地已安装内容，不联网检查更新；完成上述首次迁移后，需要查看或执行同格式分发更新时显式运行：
 
 ```text
 vpsctl self status
 vpsctl self update
-vpsctl self update --version v0.8.7
+vpsctl self update --version v0.8.8
 ```
 
 `curl | bash` 的初始执行信任边界包括 HTTPS、GitHub、仓库及 Release 发布权限，以及当前 `latest` 指向的 `vpsctl.sh`；同一 Release 中的校验清单只能在安装器已经开始执行后保护后续资产，不能倒过来证明安装器自身可信。更稳妥的方式是先下载安装器和清单，检查来源、版本、SHA-256 与脚本内容，再执行本地文件：
 
 ```bash
 tmp_dir="$(mktemp -d)"
-base_url="https://github.com/Runarry/vps-script-lite/releases/download/v0.8.7"
+base_url="https://github.com/Runarry/vps-script-lite/releases/download/v0.8.8"
 curl -fL "$base_url/vpsctl.sh" -o "$tmp_dir/vpsctl.sh"
 curl -fL "$base_url/vpsctl-manifest.tsv" -o "$tmp_dir/vpsctl-manifest.tsv"
 awk -F '\t' '$1 == "asset" && $2 == "launcher" { print $4 "  vpsctl.sh" }' \
@@ -184,7 +184,7 @@ bash bin/vpsctl service proxy update --core xray --version vX.Y.Z
 
 - 规范：已建立。
 - 目录骨架：已建立。
-- 当前版本：0.8.7。
+- 当前版本：0.8.8。
 - 管理入口：提供环境检测、终端 UI、固定注册表和安全分发。
 - 功能命令：提供 `network bbr`、`network dns`、`network ip-policy`、`network ufw`、`network rfw`、`system kernel`、`security access`、`security fail2ban`、`security tls`、`service proxy`、`test nodequality` 和 `test tcpquality`；均处于 `experimental` 生命周期。
 - UFW：主菜单提供简洁端口管理，进阶功能放在“高级规则管理”。启用后自动维护 SSH、代理节点、中转转发及 HTTP-01 临时端口；支持等价已有规则接管、共享引用和按服务解除联动。安装默认不启用，服务停止但配置保留时规则继续保留。接口和恢复说明见 [UFW 管理](docs/ufw-management.md)。
