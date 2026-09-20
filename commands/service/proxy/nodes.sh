@@ -2537,7 +2537,10 @@ proxy_purge_core_nodes() {
     [[ -f "$PROXY_MANIFEST" ]] || return 0
     candidate_manifest="$(mktemp "${PROXY_STATE_DIR}/.nodes.purge.XXXXXX")" || return 20
     candidate_config="$(proxy_mktemp_json "$PROXY_STATE_DIR" config.purge)" || { rm -f "$candidate_manifest"; return 20; }
-    if ! jq --arg core "$core" 'del(.nodes[] | select(.core == $core))' "$PROXY_MANIFEST" >"$candidate_manifest"; then
+    if ! jq --arg core "$core" '
+        del(.nodes[] | select(.core == $core)) |
+        if $core == "sing-box" then del(.settings.sing_box.dns) else . end
+    ' "$PROXY_MANIFEST" >"$candidate_manifest"; then
         status=10
     fi
     if ((status == 0)); then

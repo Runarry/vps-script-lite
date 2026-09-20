@@ -144,9 +144,21 @@ Gecko 与 BBR profile 仅适用于 sing-box 1.14+ Hysteria2；BBR profile
   time status [--json]
   time sync
 
+sing-box DNS（--core 省略时为 sing-box）：
+  dns show [--core sing-box] [--json]
+  dns set [--core sing-box] --mode system|system-native|udp|tcp|dot|doh
+          [--server IP_OR_HOST] [--port PORT] [--tls-server-name HOST]
+          [--path /dns-query] [--bootstrap IP]
+  dns set [--core sing-box] --preset cloudflare-doh
+  dns reset [--core sing-box]
+  默认使用系统 DNS 兼容模式；原生模式保留 sing-box 的系统集成行为。
+  自定义 DNS 默认端口为 UDP/TCP 53、DoT 853、DoH 443。
+  DNS 设置要求 sing-box 1.12+；兼容模式在 1.13+ 使用 prefer_go。
+  覆盖 sing-box 本机解析，保留节点 IP 策略；不修改本机系统 DNS。
+
 交互模式会根据操作和当前状态自动选择内核，存在多个候选时提供编号
 选择；节点菜单输出订阅时可选择全部或有节点的已安装内核。运行中的内核
-在节点和中转配置变更后自动重启应用；二进制更新仍需显式 restart。
+在节点、中转和 DNS 配置变更后自动重启应用；二进制更新仍需显式 restart。
 restart 使用普通确认，可用全局 --yes 或 --confirm-disruptive 跳过确认。
 
 高级脚本用法：CORE 为 sing-box 或 xray；生命周期操作可显式传入
@@ -653,7 +665,7 @@ proxy_menu_run() {
         proxy_core_status all || true
         if choice="$(proxy_prompt_select "代理能力" "" \
             core "内核管理" nodes "节点管理" relay "中转管理" service "服务控制" \
-            logs "日志" time "时间" protocols "协议")"; then
+            logs "日志" time "时间" protocols "协议" dns "sing-box DNS")"; then
             :
         else
             rc=$?
@@ -668,6 +680,7 @@ proxy_menu_run() {
             logs) proxy_logs_menu_run || status=$? ;;
             time) proxy_time_menu_run || status=$? ;;
             protocols) proxy_protocol_menu_run || status=$? ;;
+            dns) proxy_dns_menu_run || status=$? ;;
         esac
     done
 }
@@ -694,6 +707,9 @@ proxy_dispatch() {
         profiles)
             (($# == 0)) || { vps_cmd_error "profiles 不接受选项"; return 2; }
             proxy_profiles_show
+            ;;
+        dns)
+            proxy_dns_dispatch "$@"
             ;;
         node)
             (($# >= 1)) || { vps_cmd_error "node 需要 list|show|add|edit|core|ip-policy|delete"; return 2; }

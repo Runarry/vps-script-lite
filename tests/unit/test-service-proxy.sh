@@ -2521,6 +2521,10 @@ test_reality_anti_relay_guard() {
     ' "$sb_config" >/dev/null || fail "guarded core switch target rendering"
 }
 
+if [[ "${VPSCTL_PROXY_TEST_HARNESS_ONLY:-0}" == 1 ]]; then
+    return 0 2>/dev/null || exit 0
+fi
+
 case "${VPSCTL_TEST_ONLY:-}" in
     core-release) test_core_release_channels; printf 'PASS: proxy core release tests\n'; exit 0 ;;
     node-ip-policy) test_node_ip_strategy_and_batch; printf 'PASS: node IP policy tests\n'; exit 0 ;;

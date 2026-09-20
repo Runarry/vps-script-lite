@@ -2,6 +2,9 @@
 # Private helpers for commands/service/proxy.sh. Sourcing this file only
 # defines functions; callers must invoke proxy_common_init explicitly.
 
+# shellcheck source=commands/service/proxy/dns.sh
+source "$(dirname -- "${BASH_SOURCE[0]}")/dns.sh"
+
 readonly PROXY_SCHEMA_VERSION=1
 readonly PROXY_ETC_LOGICAL="/etc/vpsctl/proxy"
 readonly PROXY_STATE_LOGICAL="/var/lib/vpsctl/service/proxy"
@@ -392,6 +395,9 @@ proxy_manifest_validate_file() {
              (select(.tls.reality_guard.enabled == true) | .tls.reality_guard.listen_port)];
         type == "object" and
         .schema_version == $schema and
+        ((has("settings") | not) or
+            ((.settings | type) == "object" and
+             ((.settings | has("sing_box") | not) or (.settings.sing_box | type) == "object"))) and
         ((.nodes | type) == "array") and
         (([.nodes[].id] | length) == ([.nodes[].id] | unique | length)) and
         (([.nodes[].name] | length) == ([.nodes[].name] | unique | length)) and
@@ -417,6 +423,9 @@ proxy_manifest_validate_file() {
         vps_cmd_error "节点清单格式或唯一性校验失败：$file"
         return 10
     }
+    if jq -e '.settings.sing_box // {} | has("dns")' "$file" >/dev/null; then
+        proxy_dns_settings_validate "$(jq -c '.settings.sing_box.dns' "$file")" || return $?
+    fi
     while IFS= read -r node; do
         proxy_reality_guard_validate_node "$node" || return $?
     done < <(jq -c '.nodes[] | select(.tls | has("reality_guard"))' "$file")
@@ -770,12 +779,22 @@ proxy_render_config() {
     local node rendered inbounds='[]' relay_state='{"schema_version":1,"exits":[],"bindings":[],"forwards":[]}'
     local exit exit_id outbound_bundle target_tag node_id used_exit_ids
     local relay_outbounds='[]' relay_rules='[]' policy_nodes='[]' policy_outbounds='[]' policy_rules='[]' guard_nodes='[]'
-    local freedom_settings='{}' sockopt_strategy=false
+    local freedom_settings='{}' sockopt_strategy=false dns_config='{}' dns_tag=local dns_settings
     proxy_core_valid "$core" || return 2
     if [[ -z "$PROXY_RENDER_CORE_VERSION" ]]; then
         PROXY_RENDER_CORE_VERSION="$(proxy_core_config_version "$core")" || return $?
     fi
     proxy_manifest_validate_file "$manifest" || return $?
+    if [[ "$core" == sing-box ]]; then
+        if proxy_core_version_at_least "$PROXY_RENDER_CORE_VERSION" 1.12.0; then
+            dns_settings="$(proxy_dns_settings_get "$manifest")" || return $?
+            dns_config="$(proxy_dns_render "$dns_settings" "$PROXY_RENDER_CORE_VERSION")" || return $?
+            dns_tag=proxy-dns
+        elif jq -e '.settings.sing_box // {} | has("dns")' "$manifest" >/dev/null; then
+            vps_cmd_error "已保存的 DNS 设置要求 sing-box >= 1.12.0，不能在旧版或未知版本内核上忽略该设置"
+            return 10
+        fi
+    fi
     if [[ -n "$relay_manifest" && -f "$relay_manifest" ]]; then
         if declare -F proxy_relay_validate_file >/dev/null 2>&1; then
             proxy_relay_validate_file "$relay_manifest" "$manifest" || return $?
@@ -856,19 +875,20 @@ proxy_render_config() {
     # Guard rules terminate auxiliary traffic before node relay or IP policy rules.
     case "$core" in
         sing-box)
-            policy_outbounds="$(jq -cn --argjson nodes "$policy_nodes" '
+            policy_outbounds="$(jq -cn --argjson nodes "$policy_nodes" --arg dns_tag "$dns_tag" '
                 $nodes | map(. as $node |
                     {type:"direct",tag:("direct-" + $node.id),
-                     domain_resolver:{server:"local",strategy:$node.ip_strategy}})
+                     domain_resolver:{server:$dns_tag,strategy:$node.ip_strategy}})
             ')" || return 10
             policy_rules="$(jq -cn --argjson nodes "$policy_nodes" '
                 $nodes | map({inbound:[.id],action:"route",outbound:("direct-" + .id)})
             ')" || return 10
             jq -n --argjson inbounds "$inbounds" --argjson relay_outbounds "$relay_outbounds" \
                 --argjson relay_rules "$relay_rules" --argjson policy_outbounds "$policy_outbounds" \
-                --argjson policy_rules "$policy_rules" --argjson guard_nodes "$guard_nodes" '
+                --argjson policy_rules "$policy_rules" --argjson guard_nodes "$guard_nodes" \
+                --arg dns_tag "$dns_tag" --argjson dns_config "$dns_config" '
                 ($guard_nodes | map({type:"direct",tag:("reality-target-" + .id),
-                                    domain_resolver:{server:"local"}})) as $guard_outbounds |
+                                    domain_resolver:{server:$dns_tag}})) as $guard_outbounds |
                 ($guard_nodes | map([
                     {inbound:[("reality-guard-" + .id)],action:"sniff",sniffer:["tls"],timeout:"1s"},
                     {inbound:[("reality-guard-" + .id)],protocol:["tls"],domain:[(.tls.server_name | ascii_downcase)],
@@ -882,8 +902,11 @@ proxy_render_config() {
                     outbounds: ([{type: "direct", tag: "direct"}] + $guard_outbounds + $policy_outbounds + $relay_outbounds),
                     route: (if (($guard_rules + $relay_rules + $policy_rules) | length) == 0 then {final:"direct"}
                             else {rules:($guard_rules + $relay_rules + $policy_rules),final:"direct"} end)
-                } + (if (($guard_outbounds + $policy_outbounds) | length) == 0 then {}
-                     else {dns:{servers:[{type:"local",tag:"local"}]}} end)
+                } | if $dns_config != {} then
+                        .dns=$dns_config.dns | .route += $dns_config.route
+                    elif (($guard_outbounds + $policy_outbounds) | length) > 0 then
+                        .dns={servers:[{type:"local",tag:"local"}]}
+                    else . end
             '
             ;;
         xray)
@@ -1503,7 +1526,7 @@ proxy_pending_can_auto_apply() {
         rest="${rest#*,}"
         [[ -n "$reason" ]] || continue
         case "$reason" in
-            node-add | node-edit | node-delete | node-ip-policy | relay-bind-add | relay-bind-delete | relay-exit-edit | relay-exit-delete) ;;
+            node-add | node-edit | node-delete | node-ip-policy | dns-set | dns-reset | relay-bind-add | relay-bind-delete | relay-exit-edit | relay-exit-delete) ;;
             *) return 1 ;;
         esac
     done

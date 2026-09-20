@@ -1,6 +1,6 @@
 # 代理管理
 
-`vpsctl service proxy` 在同一个入口下平级管理 Xray 与 sing-box，并提供出口驱动的节点中转与 nftables 端口转发。两个内核都按需安装，没有默认主次关系；可以只安装其中一个，也可以同时安装。命令支持 systemd 与 OpenRC，要求 Bash 4.4+；Alpine 核心支持范围为 3.20+ 的 `x86_64` 与 `aarch64`。帮助、协议矩阵和时间状态可由普通用户查看；内核、节点、中转状态和订阅需要 root，因为节点与出口清单包含受限凭据。
+`vpsctl service proxy` 在同一个入口下平级管理 Xray 与 sing-box，并提供出口驱动的节点中转与 nftables 端口转发。两个内核都按需安装，没有默认主次关系；可以只安装其中一个，也可以同时安装。命令支持 systemd 与 OpenRC，要求 Bash 4.4+；Alpine 核心支持范围为 3.20+ 的 `x86_64` 与 `aarch64`。帮助、协议矩阵和时间状态可由普通用户查看；内核、节点、DNS、中转状态和订阅需要 root，因为节点与出口清单包含受限凭据。
 
 本功能仍处于 `experimental` 生命周期。仓库自动化测试和 mock 验证不等同于真实 VPS 或 VM 验证；部署前应先在隔离环境使用 `--dry-run` 检查计划，并为 SSH 连接和现有配置准备恢复手段。
 
@@ -38,6 +38,7 @@ bash bin/vpsctl service proxy start --core sing-box --enable
 - 服务控制：启动、停止和重启。
 - 节点管理：添加、查看、修改、切换内核、批量设置出站 IP 策略和删除。
 - 中转管理：出口管理、节点中转、纯端口转发、状态与刷新。
+- sing-box DNS：查看、设置默认解析器和恢复系统兼容模式。
 - 查看与输出：订阅、日志和支持的协议。
 - 系统工具：系统时间状态与同步。
 
@@ -215,6 +216,42 @@ Xray 使用内置 `dokodemo-door` 入站嗅探 TLS SNI，以 `full:` 精确域�
 
 真实配置、连通性、负向过滤和恢复结果见 [REALITY 防偷验收记录](proxy-reality-guard-validation.md)。真实链路脚本支持 `CONNECTIVITY_PROFILE=reality` 仅检查 REALITY 组合，并用 `CONNECTIVITY_REALITY_GUARD=on|off` 对照防护开关；默认开启。
 
+### sing-box DNS
+
+代理菜单中的“sing-box DNS”提供查看、修改和恢复默认。设置统一用于 sing-box 在本机承担的域名解析：普通直连、REALITY 握手目标以及中转服务器地址。节点现有的 IPv4/IPv6 策略继续生效，交给中转远端解析的业务域名仍按原协议传递。此设置不改变 Xray、本机系统 DNS 或 nftables 转发的 DNS 缓存。
+
+```bash
+vpsctl service proxy dns show --core sing-box --json
+vpsctl service proxy dns set --mode system
+vpsctl service proxy dns set --mode udp --server 1.1.1.1
+vpsctl service proxy dns set --preset cloudflare-doh
+vpsctl service proxy dns set --mode doh --server dns.example.com --bootstrap 1.1.1.1
+vpsctl service proxy dns reset
+```
+
+`--core` 省略时默认为 `sing-box`，其他值会拒绝。设置和恢复默认需要已安装登记的 sing-box 1.12+；查看不要求已安装。支持以下模式：
+
+| 模式 | 行为 | 默认端口 |
+| --- | --- | --- |
+| `system`（默认） | 系统 DNS 兼容模式；1.13+ 使用 `local` + `prefer_go:true`，1.12 不输出该字段 | 系统配置 |
+| `system-native` | `local`，保留 sing-box 原生系统解析行为 | 系统配置 |
+| `udp` | 自定义 UDP DNS | 53 |
+| `tcp` | 自定义 TCP DNS | 53 |
+| `dot` | 自定义 DNS over TLS，校验服务器证书 | 853 |
+| `doh` | 自定义 DNS over HTTPS，校验服务器证书 | 443 |
+
+自定义模式接受 `--server IP_OR_HOST` 和 `--port PORT`；DoT/DoH 还接受 `--tls-server-name HOST`，默认按服务器地址校验证书，服务器是 IP 时可指定证书域名。DoH 的 `--path` 默认 `/dns-query`。`cloudflare-doh` 预设连接 `1.1.1.1:443`，TLS 名称为 `cloudflare-dns.com`，路径为 `/dns-query`；预设与自定义参数互斥。
+
+一次选择一个上游。服务器地址为域名时，通过独立的 `proxy-dns-bootstrap` 解析其地址；默认使用系统兼容模式，可用 `--bootstrap IP` 改成指定 IP 的 UDP DNS（53 端口）。服务器地址为 IP 时无需引导解析器。DNS 查询直接连接上游，不自动改走节点中转，也不增加明文回退。缓存和超时沿用 sing-box 默认值。
+
+生成配置将 `dns.final` 与 `route.default_domain_resolver` 统一指向 `proxy-dns`；防偷和节点 IP 策略出口的显式 `domain_resolver.server` 也指向该标签，同时保留节点原有 `strategy`。[官方 DNS 配置](https://sing-box.sagernet.org/configuration/dns/)、[默认域名解析器](https://sing-box.sagernet.org/configuration/route/#default_domain_resolver)。
+
+设置保存在节点清单的可选字段 `settings.sing_box.dns`。旧清单缺失时按 `system` 解释，并在下一次重渲染配置时生效；查看设置不写入状态。低于 1.12 的内核保持原行为，不接受新增设置，也不能忽略已保存的 DNS 设置后降级运行。普通卸载保留 DNS 设置，彻底清除 sing-box 时删除；节点增删、切核、内核更新保留设置。
+
+DNS 变更复用配置校验、原子提交、pending 和失败回滚。运行中的内核在仅配置变更时自动重启；已有二进制更新待应用时继续保留待重启状态。`--dry-run` 展示候选设置，不写配置或启停服务。
+
+系统兼容模式针对一种已确认的 REALITY 故障：`local` 的 resolved 分支取不到默认网卡 DNS 时，防偷出口报 `link has no DNS servers configured`，随后 REALITY 报 `processed invalid connection`。合法 REALITY 握手也依赖伪装站的响应，因此解析失败会使正常客户端断开。`prefer_go:true` 绕过该分支，但仍要求系统 DNS 可用；需要独立上游时可选择 UDP、TCP、DoT 或 DoH。[官方 `prefer_go` 说明](https://sing-box.sagernet.org/configuration/dns/server/local/#prefer_go)。真实测试和恢复记录见 [sing-box DNS 验收](proxy-dns-validation.md)。
+
 ### TLS 证书
 
 需要证书的 profile 支持两种模式：
@@ -332,7 +369,7 @@ vpsctl service proxy time sync
 
 - Argo 或其他 Cloudflare 隧道、API、DNS 和证书集成。
 - 落地机部署、多跳链路、跨主机编排、负载均衡或一个入口多出口。
-- DNS 修改、域名解析托管或分流 DNS 配置。
+- 本机系统 DNS 修改、域名解析托管或分流 DNS 配置；sing-box 内部默认解析器由“sing-box DNS”管理。
 - 节点批量导入、除 IP 地址族策略外的批量编辑、批量删除或批量部署。
 - Hysteria2 端口跳跃；`hysteria2` profile 只使用单个监听端口。
 - Snell、Realm、Dashboard、TUN、ECH、XHTTP/3、XMUX 与通用高级配置透传。

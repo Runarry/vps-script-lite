@@ -303,10 +303,11 @@ for core in sing-box xray; do
                 all(["prefer_ipv4","prefer_ipv6","ipv4_only","ipv6_only"][];
                     . as $strategy |
                     any($root.outbounds[]; .tag == ("direct-" + $ids[$strategy]) and
-                        .domain_resolver.server == "local" and .domain_resolver.strategy == $strategy) and
+                        .domain_resolver.server == "proxy-dns" and .domain_resolver.strategy == $strategy) and
                     any($root.route.rules[]; .inbound == [$ids[$strategy]] and
                         .outbound == ("direct-" + $ids[$strategy]))) and
-                any($root.dns.servers[]; .type == "local" and .tag == "local")
+                any($root.dns.servers[]; .type == "local" and .tag == "proxy-dns") and
+                $root.route.default_domain_resolver == "proxy-dns"
             ' "$config" >/dev/null || { printf 'FAIL: sing-box real policy mapping\n' >&2; exit 1; }
             validation_output="$("${TEST_SYSTEM_ROOT}/usr/local/bin/sing-box" check -c "$config" 2>&1)" || {
                 printf 'FAIL: real sing-box rejected node IP policies: %s\n' "$validation_output" >&2
