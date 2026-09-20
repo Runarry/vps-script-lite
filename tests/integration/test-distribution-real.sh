@@ -65,12 +65,12 @@ bash "$TEST_ROOT/scripts/build-release.sh" "$RELEASE_DIR"
 # Future shared libraries must be accepted by both bootstrap and update.
 EXTRA_CORE="$TEST_TEMP/extra-core"
 mkdir -p "$EXTRA_CORE"
-tar -xzf "$RELEASE_DIR/vpsctl-core-0.8.8.tar.gz" -C "$EXTRA_CORE"
+tar -xzf "$RELEASE_DIR/vpsctl-core-0.8.9.tar.gz" -C "$EXTRA_CORE"
 mkdir -p "$EXTRA_CORE/lib/nested"
 printf '# bootstrap shared helper\n' >"$EXTRA_CORE/lib/nested/bootstrap-helper.sh"
-tar -C "$EXTRA_CORE" -czf "$RELEASE_DIR/vpsctl-core-0.8.8.tar.gz" VERSION bin lib commands
-core_sha="$(sha256sum "$RELEASE_DIR/vpsctl-core-0.8.8.tar.gz" | awk '{print $1}')"
-sed -i "s/^bundle\tcore\t.*/bundle\tcore\tvpsctl-core-0.8.8.tar.gz\t${core_sha}/" "$RELEASE_DIR/vpsctl-manifest.tsv"
+tar -C "$EXTRA_CORE" -czf "$RELEASE_DIR/vpsctl-core-0.8.9.tar.gz" VERSION bin lib commands
+core_sha="$(sha256sum "$RELEASE_DIR/vpsctl-core-0.8.9.tar.gz" | awk '{print $1}')"
+sed -i "s/^bundle\tcore\t.*/bundle\tcore\tvpsctl-core-0.8.9.tar.gz\t${core_sha}/" "$RELEASE_DIR/vpsctl-manifest.tsv"
 
 cat >"$MOCK_BIN/curl" <<'MOCK_CURL'
 #!/usr/bin/env bash
@@ -105,12 +105,12 @@ export VPSCTL_TEST_ASSET_DIR="$RELEASE_DIR"
 
 install_output="$(PATH="$MOCK_BIN:$PATH" bash "$RELEASE_DIR/vpsctl.sh" \
     --verified-manifest "$RELEASE_DIR/vpsctl-manifest.tsv" --version)"
-[[ "$install_output" == 'vpsctl 0.8.8' ]] || fail 'bootstrap did not enter the installed CLI'
+[[ "$install_output" == 'vpsctl 0.8.9' ]] || fail 'bootstrap did not enter the installed CLI'
 [[ -x "$ENTRY" && -L "$INSTALL_ROOT/current" ]] || fail 'managed launcher/current were not installed'
 release_root="$(readlink -f -- "$INSTALL_ROOT/current")"
 [[ -f "$release_root/.bundles/core.sha256" ]] || fail 'core marker is missing'
 [[ -f "$release_root/lib/nested/bootstrap-helper.sh" ]] || fail 'bootstrap rejected new shared library'
-su nobody -s /bin/bash -c "$ENTRY --version" | grep -Fx 'vpsctl 0.8.8' >/dev/null ||
+su nobody -s /bin/bash -c "$ENTRY --version" | grep -Fx 'vpsctl 0.8.9' >/dev/null ||
     fail 'ordinary user could not execute the freshly installed shortcut'
 # Reproduce an older updater leaving a valid, managed core without execute bits.
 chmod 0644 "$release_root/bin/vpsctl"
@@ -140,7 +140,7 @@ printf 'corrupt cache\n' >"$SELF_ROOT/manifest.tsv"
 PATH="$MOCK_BIN:$PATH" "$ENTRY" --yes --non-interactive self update >/dev/null
 cmp "$ENTRY" "$SELF_ROOT/vpsctl.sh" || fail 'same-version update did not repair cached launcher'
 cmp "$release_root/.release/manifest.tsv" "$SELF_ROOT/manifest.tsv" || fail 'same-version update did not repair cached manifest'
-su nobody -s /bin/bash -c "$ENTRY --version" | grep -Fx 'vpsctl 0.8.8' >/dev/null ||
+su nobody -s /bin/bash -c "$ENTRY --version" | grep -Fx 'vpsctl 0.8.9' >/dev/null ||
     fail 'ordinary user could not execute the installed shortcut'
 
 # Exercise a real version change, with a legacy core archive lacking execute
@@ -150,30 +150,30 @@ NEXT_ASSETS="$TEST_TEMP/next-assets"
 mkdir -p "$NEXT_SOURCE" "$NEXT_ASSETS"
 cp -a -- "$TEST_ROOT/bin" "$TEST_ROOT/lib" "$TEST_ROOT/commands" \
     "$TEST_ROOT/scripts" "$TEST_ROOT/vpsctl.sh" "$NEXT_SOURCE/"
-printf '0.8.9\n' >"$NEXT_SOURCE/VERSION"
-sed -i 's/^readonly VPSCTL_VERSION="0.8.8"$/readonly VPSCTL_VERSION="0.8.9"/' "$NEXT_SOURCE/bin/vpsctl"
+printf '0.8.10\n' >"$NEXT_SOURCE/VERSION"
+sed -i 's/^readonly VPSCTL_VERSION="0.8.9"$/readonly VPSCTL_VERSION="0.8.10"/' "$NEXT_SOURCE/bin/vpsctl"
 bash "$NEXT_SOURCE/scripts/build-release.sh" "$NEXT_ASSETS" >/dev/null
 LEGACY_CORE="$TEST_TEMP/legacy-core"
 mkdir -p "$LEGACY_CORE"
-tar -xzf "$NEXT_ASSETS/vpsctl-core-0.8.9.tar.gz" -C "$LEGACY_CORE"
+tar -xzf "$NEXT_ASSETS/vpsctl-core-0.8.10.tar.gz" -C "$LEGACY_CORE"
 mkdir -p "$LEGACY_CORE/lib/nested"
 printf '# update shared helper\n' >"$LEGACY_CORE/lib/nested/update-helper.sh"
 chmod 0644 "$LEGACY_CORE/bin/vpsctl"
-tar -C "$LEGACY_CORE" -czf "$NEXT_ASSETS/vpsctl-core-0.8.9.tar.gz" VERSION bin lib commands
-core_sha="$(sha256sum "$NEXT_ASSETS/vpsctl-core-0.8.9.tar.gz" | awk '{print $1}')"
-sed -i "s/^bundle\tcore\t.*/bundle\tcore\tvpsctl-core-0.8.9.tar.gz\t${core_sha}/" "$NEXT_ASSETS/vpsctl-manifest.tsv"
+tar -C "$LEGACY_CORE" -czf "$NEXT_ASSETS/vpsctl-core-0.8.10.tar.gz" VERSION bin lib commands
+core_sha="$(sha256sum "$NEXT_ASSETS/vpsctl-core-0.8.10.tar.gz" | awk '{print $1}')"
+sed -i "s/^bundle\tcore\t.*/bundle\tcore\tvpsctl-core-0.8.10.tar.gz\t${core_sha}/" "$NEXT_ASSETS/vpsctl-manifest.tsv"
 export VPSCTL_TEST_ASSET_DIR="$NEXT_ASSETS"
 rm -rf -- "$SELF_ROOT"
-PATH="$MOCK_BIN:$PATH" "$ENTRY" --yes --non-interactive self update --version v0.8.9 >/dev/null
+PATH="$MOCK_BIN:$PATH" "$ENTRY" --yes --non-interactive self update --version v0.8.10 >/dev/null
 [[ -f "$INSTALL_ROOT/current/lib/nested/update-helper.sh" ]] || fail 'update rejected new shared library'
 cmp "$ENTRY" "$SELF_ROOT/vpsctl.sh" || fail 'versioned update did not restore cached launcher'
-[[ "$(readlink -f "$INSTALL_ROOT/current")" == "$INSTALL_ROOT/releases/0.8.9" ]] || fail 'versioned update did not switch current'
+[[ "$(readlink -f "$INSTALL_ROOT/current")" == "$INSTALL_ROOT/releases/0.8.10" ]] || fail 'versioned update did not switch current'
 [[ ! -e "$release_root" && ! -L "$release_root" ]] || fail 'versioned update retained the previous release'
-[[ "$(find "$INSTALL_ROOT/releases" -mindepth 1 -maxdepth 1 -type d -printf '%f\n')" == 0.8.9 ]] ||
+[[ "$(find "$INSTALL_ROOT/releases" -mindepth 1 -maxdepth 1 -type d -printf '%f\n')" == 0.8.10 ]] ||
     fail 'versioned update did not leave only the current release'
-VPSCTL_TEST_CURL_FAIL=1 PATH="$MOCK_BIN:$PATH" "$ENTRY" --version | grep -Fx 'vpsctl 0.8.9' >/dev/null ||
+VPSCTL_TEST_CURL_FAIL=1 PATH="$MOCK_BIN:$PATH" "$ENTRY" --version | grep -Fx 'vpsctl 0.8.10' >/dev/null ||
     fail 'updated shortcut could not run offline as root'
-su nobody -s /bin/bash -c "$ENTRY --version" | grep -Fx 'vpsctl 0.8.9' >/dev/null ||
+su nobody -s /bin/bash -c "$ENTRY --version" | grep -Fx 'vpsctl 0.8.10' >/dev/null ||
     fail 'updated shortcut could not run as an ordinary user'
 for domain in network system security service test; do
     [[ -f "$INSTALL_ROOT/current/.bundles/${domain}.sha256" ]] || fail "updated ${domain} cache is missing"
