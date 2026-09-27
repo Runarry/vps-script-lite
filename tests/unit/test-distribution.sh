@@ -26,6 +26,7 @@ export VPSCTL_ASSUME_YES=1
 
 # shellcheck source=../../lib/distribution.sh
 source "$TEST_ROOT/lib/distribution.sh"
+vps_registry_init
 
 fail() {
     printf 'FAIL: %s\n' "$1" >&2
@@ -39,18 +40,23 @@ sha_file() { sha256sum -- "$1" | awk '{print $1}'; }
 write_manifest() {
     local path="$1" version="$2" launcher_sha="$3" network_sha="$4" core_sha="${5:-}"
     local zero='0000000000000000000000000000000000000000000000000000000000000000'
+    local bundle digest archive
     [[ -n "$core_sha" ]] || core_sha="$zero"
     {
-        printf 'schema_version\t1\n'
+        printf 'schema_version\t2\n'
         printf 'version\t%s\n' "$version"
         printf 'repository\tRunarry/vps-script-lite\n'
         printf 'asset\tlauncher\tvpsctl.sh\t%s\n' "$launcher_sha"
-        printf 'bundle\tcore\tvpsctl-core-%s.tar.gz\t%s\n' "$version" "$core_sha"
-        printf 'bundle\tnetwork\tvpsctl-network-%s.tar.gz\t%s\n' "$version" "$network_sha"
-        printf 'bundle\tsystem\tvpsctl-system-%s.tar.gz\t%s\n' "$version" "$zero"
-        printf 'bundle\tsecurity\tvpsctl-security-%s.tar.gz\t%s\n' "$version" "$zero"
-        printf 'bundle\tservice\tvpsctl-service-%s.tar.gz\t%s\n' "$version" "$zero"
-        printf 'bundle\ttest\tvpsctl-test-%s.tar.gz\t%s\n' "$version" "$zero"
+        for bundle in "${VPS_BUNDLE_IDS[@]}"; do
+            digest="$zero"
+            archive="$TEST_ASSETS/vpsctl-${bundle}-${version}.tar.gz"
+            [[ ! -f "$archive" ]] || digest="$(sha_file "$archive")"
+            case "$bundle" in
+                core) digest="$core_sha" ;;
+                network-bbr) digest="$network_sha" ;;
+            esac
+            printf 'bundle\t%s\tvpsctl-%s-%s.tar.gz\t%s\n' "$bundle" "$bundle" "$version" "$digest"
+        done
     } >"$path"
 }
 
@@ -60,7 +66,7 @@ make_core_asset() {
     mkdir -p "$build/bin" "$build/lib" "$build/commands/self"
     printf '%s\n' "$version" >"$build/VERSION"
     printf '#!/usr/bin/env bash\nexit 0\n' >"$build/bin/vpsctl"
-    for required in environment registry ui command distribution; do
+    for required in environment registry ui distribution; do
         printf '#!/usr/bin/env bash\n' >"$build/lib/${required}.sh"
     done
     for required in status update uninstall; do
@@ -71,24 +77,28 @@ make_core_asset() {
     tar -C "$build" -czf "${TEST_ASSETS}/vpsctl-core-${version}.tar.gz" VERSION bin lib commands
 }
 
-make_network_asset() {
-    local version="$1" build="${TEST_TEMP}/build-network" script
-    rm -rf -- "$build"
-    mkdir -p "$build/commands/network"
-    for script in bbr dns ip-policy rfw; do
-        printf '#!/usr/bin/env bash\nprintf "network bundle\\n"\n' >"$build/commands/network/${script}.sh"
+make_feature_assets() {
+    local version="$1" build="${TEST_TEMP}/build-feature" bundle files path
+    for bundle in shared-command shared-ufw network-bbr network-dns network-ufw; do
+        rm -rf -- "$build"
+        mkdir -p "$build"
+        files="$(vps_registry_bundle_files "$bundle")"
+        while IFS= read -r path; do
+            mkdir -p "$build/${path%/*}"
+            printf '#!/usr/bin/env bash\n# feature fixture\n' >"$build/$path"
+        done <<<"$files"
+        tar -C "$build" -czf "${TEST_ASSETS}/vpsctl-${bundle}-${version}.tar.gz" "${files%%/*}"
     done
-    tar -C "$build" -czf "${TEST_ASSETS}/vpsctl-network-${version}.tar.gz" commands
 }
 
 prepare_update_assets() {
     local version="$1" launcher_sha core_sha network_sha
     make_core_asset "$version"
-    make_network_asset "$version"
+    make_feature_assets "$version"
     printf '#!/usr/bin/env bash\n# release %s\nexit 0\n' "$version" >"$TEST_ASSETS/vpsctl.sh"
     launcher_sha="$(sha_file "$TEST_ASSETS/vpsctl.sh")"
     core_sha="$(sha_file "$TEST_ASSETS/vpsctl-core-${version}.tar.gz")"
-    network_sha="$(sha_file "$TEST_ASSETS/vpsctl-network-${version}.tar.gz")"
+    network_sha="$(sha_file "$TEST_ASSETS/vpsctl-network-bbr-${version}.tar.gz")"
     write_manifest "$TEST_ASSETS/vpsctl-manifest.tsv" "$version" "$launcher_sha" "$network_sha" "$core_sha"
 }
 
@@ -100,26 +110,112 @@ test_source_mode_is_offline_and_mutations_refuse() (
         calls=$((calls + 1))
         return 20
     }
-    vps_distribution_ensure_domain network || fail 'source mode ensure failed'
+    vps_distribution_ensure_command network:bbr || fail 'source mode ensure failed'
     assert_equal 0 "$calls" 'source mode network calls'
     vps_distribution_self_update '' >/dev/null 2>&1 || status=$?
     assert_equal 3 "$status" 'source mode update refusal'
 )
 
 test_manifest_is_strict() (
-    local manifest="${TEST_TEMP}/strict.tsv" status=0
+    local manifest="${TEST_TEMP}/strict.tsv" status scenario
     write_manifest "$manifest" 0.1.0 "$(printf x | sha256sum | awk '{print $1}')" "$(printf y | sha256sum | awk '{print $1}')"
     vps_distribution_parse_manifest "$manifest" || fail 'canonical manifest rejected'
-    sed '5s/core/network/' "$manifest" >"${manifest}.bad"
-    vps_distribution_parse_manifest "${manifest}.bad" >/dev/null 2>&1 || status=$?
-    assert_equal 10 "$status" 'out-of-order/duplicate manifest rejection'
+    for scenario in schema1 duplicate missing-core traversal version uppercase extra-field empty-field blank; do
+        case "$scenario" in
+            schema1) sed '1s/2/1/' "$manifest" >"${manifest}.bad" ;;
+            duplicate)
+                cat "$manifest" >"${manifest}.bad"
+                sed -n '5p' "$manifest" >>"${manifest}.bad"
+                ;;
+            missing-core) sed '5d' "$manifest" >"${manifest}.bad" ;;
+            traversal) sed '5s/core/..\/core/' "$manifest" >"${manifest}.bad" ;;
+            version) sed '5s/0.1.0/0.2.0/' "$manifest" >"${manifest}.bad" ;;
+            uppercase) sed '5s/0$/A/' "$manifest" >"${manifest}.bad" ;;
+            extra-field) sed '5s/$/\textra/' "$manifest" >"${manifest}.bad" ;;
+            empty-field) sed '5s/bundle\t/bundle\t\t/' "$manifest" >"${manifest}.bad" ;;
+            blank)
+                cat "$manifest" >"${manifest}.bad"
+                printf '\n' >>"${manifest}.bad"
+                ;;
+        esac
+        status=0
+        vps_distribution_parse_manifest "${manifest}.bad" >/dev/null 2>&1 || status=$?
+        assert_equal 10 "$status" "runtime rejects $scenario manifest"
+        status=0
+        (
+            # shellcheck disable=SC1090
+            source <(sed '/^vpsctl_main "\$@"$/d' "$TEST_ROOT/vpsctl.sh")
+            vpsctl_validate_manifest "${manifest}.bad"
+        ) >/dev/null 2>&1 || status=$?
+        assert_equal 1 "$status" "bootstrap rejects $scenario manifest"
+    done
 )
 
-test_lazy_domain_install_and_cache() (
-    local release="${TEST_INSTALL_ROOT}/releases/0.1.0" manifest network_sha calls=0
-    make_network_asset 0.1.0
-    network_sha="$(sha_file "${TEST_ASSETS}/vpsctl-network-0.1.0.tar.gz")"
+test_failed_downloads_retry_and_lock_recheck() (
+    local release="$TEST_INSTALL_ROOT/releases/0.1.0" status scenario expected calls=0
+    local archive="$TEST_ASSETS/vpsctl-network-ufw-0.1.0.tar.gz"
+    make_feature_assets 0.1.0
     mkdir -p "$release/.release" "$release/.bundles"
+    printf '0.1.0\n' >"$release/VERSION"
+    write_manifest "$release/.release/manifest.tsv" 0.1.0 "$(sha_file "$archive")" "$(sha_file "$TEST_ASSETS/vpsctl-network-bbr-0.1.0.tar.gz")"
+    VPSCTL_DISTRIBUTED=1
+    VPSCTL_PROJECT_ROOT="$release"
+    vps_distribution_download() { cp -- "${TEST_ASSETS}/${1##*/}" "$2"; }
+    vps_distribution_ensure_command network:ufw || fail 'initial UFW load failed'
+    expected="$(<"$release/.bundles/network-ufw.sha256")"
+    cp "$archive" "$archive.good"
+    for scenario in interrupted hash missing-module; do
+        rm "$release/commands/network/ufw/menu.sh"
+        case "$scenario" in
+            interrupted) vps_distribution_download() {
+                printf 'partial' >"$2"
+                return 20
+            } ;;
+            hash) vps_distribution_download() { printf 'wrong hash' >"$2"; } ;;
+            missing-module)
+                rm -rf "$TEST_TEMP/incomplete"
+                mkdir -p "$TEST_TEMP/incomplete"
+                tar -xzf "$archive.good" -C "$TEST_TEMP/incomplete"
+                rm "$TEST_TEMP/incomplete/commands/network/ufw/menu.sh"
+                tar -C "$TEST_TEMP/incomplete" -czf "$archive" commands
+                write_manifest "$release/.release/manifest.tsv" 0.1.0 "$expected" "$(sha_file "$TEST_ASSETS/vpsctl-network-bbr-0.1.0.tar.gz")"
+                vps_distribution_download() { cp -- "${TEST_ASSETS}/${1##*/}" "$2"; }
+                ;;
+        esac
+        status=0
+        vps_distribution_ensure_command network:ufw >/dev/null 2>&1 || status=$?
+        if [[ "$scenario" == interrupted ]]; then
+            assert_equal 20 "$status" 'interrupted download status'
+        else
+            assert_equal 10 "$status" "$scenario rejected"
+        fi
+        [[ ! -e "$release/.bundles/network-ufw.sha256" ]] || fail 'failed repair retained success marker'
+        [[ -z "$(find "$release/.bundles" -mindepth 1 ! -name '*.sha256' -print -quit)" ]] || fail 'failure left temporary download or lock'
+        cp "$archive.good" "$archive"
+        write_manifest "$release/.release/manifest.tsv" 0.1.0 "$expected" "$(sha_file "$TEST_ASSETS/vpsctl-network-bbr-0.1.0.tar.gz")"
+        vps_distribution_download() { cp -- "${TEST_ASSETS}/${1##*/}" "$2"; }
+        vps_distribution_ensure_command network:ufw || fail "$scenario retry failed"
+        assert_equal "$expected" "$(<"$release/.bundles/network-ufw.sha256")" 'repaired marker'
+    done
+    rm "$release/.bundles/network-ufw.sha256"
+    vps_distribution_acquire_lock() {
+        mkdir "$1"
+        printf '%s\n' "$expected" >"$release/.bundles/network-ufw.sha256"
+    }
+    vps_distribution_download() {
+        calls=$((calls + 1))
+        return 20
+    }
+    vps_distribution_ensure_bundle network-ufw || fail 'cache was not rechecked under lock'
+    assert_equal 0 "$calls" 'lock recheck repeated download'
+)
+
+test_lazy_feature_install_and_cache() (
+    local release="${TEST_INSTALL_ROOT}/releases/0.1.0" manifest network_sha calls=0
+    make_feature_assets 0.1.0
+    network_sha="$(sha_file "${TEST_ASSETS}/vpsctl-network-bbr-0.1.0.tar.gz")"
+    mkdir -p "$release/.release" "$release/.bundles"
+    printf '0.1.0\n' >"$release/VERSION"
     manifest="$release/.release/manifest.tsv"
     write_manifest "$manifest" 0.1.0 "$(printf launcher | sha256sum | awk '{print $1}')" "$network_sha"
     VPSCTL_DISTRIBUTED=1
@@ -128,11 +224,18 @@ test_lazy_domain_install_and_cache() (
         calls=$((calls + 1))
         cp -- "${TEST_ASSETS}/${1##*/}" "$2"
     }
-    vps_distribution_ensure_domain network || fail 'lazy network install failed'
+    vps_distribution_ensure_command network:bbr || fail 'lazy network install failed'
     [[ -f "$release/commands/network/bbr.sh" ]] || fail 'lazy command missing'
-    assert_equal "$network_sha" "$(<"$release/.bundles/network.sha256")" 'network cache marker'
-    vps_distribution_ensure_domain network || fail 'cached network ensure failed'
-    assert_equal 1 "$calls" 'cached ensure download count'
+    assert_equal "$network_sha" "$(<"$release/.bundles/network-bbr.sha256")" 'network cache marker'
+    vps_distribution_ensure_command network:bbr || fail 'cached network ensure failed'
+    assert_equal 2 "$calls" 'feature plus shared dependency download count'
+    [[ ! -e "$release/commands/network/dns.sh" && ! -e "$release/lib/ufw.sh" ]] || fail 'BBR downloaded unrelated code'
+    vps_distribution_ensure_command network:dns || fail 'DNS install failed'
+    assert_equal 3 "$calls" 'shared command dependency was downloaded twice'
+    vps_distribution_download() { return 20; }
+    vps_distribution_ensure_command network:bbr || fail 'cached BBR failed offline'
+    vps_distribution_ensure_command network:dns || fail 'cached DNS failed offline'
+    [[ -z "$(find "$release/.bundles" -mindepth 1 ! -name '*.sha256' -print -quit)" ]] || fail 'lazy download left temporary assets'
 )
 
 test_status_is_offline() (
@@ -219,7 +322,8 @@ test_manual_update_is_atomic_and_versioned() (
     assert_equal 755 "$(stat -c %a "$new_release")" 'updated release directory permissions'
     assert_equal 644 "$(stat -c %a "$new_release/.release/manifest.tsv")" 'updated manifest permissions'
     [[ ! -e "$old_release" && ! -e "$history" ]] || fail 'update retained a managed historical release'
-    [[ -f "$new_release/commands/network/bbr.sh" ]] || fail 'update did not prefetch cached domain'
+    [[ ! -e "$new_release/commands/network" && ! -e "$new_release/lib/command.sh" && ! -e "$new_release/lib/ufw.sh" ]] || fail 'update prefetched feature or shared code'
+    assert_equal core.sha256 "$(find "$new_release/.bundles" -type f -printf '%f\n')" 'update fetched only core'
     [[ -f "$new_release/lib/nested/future-helper.sh" ]] || fail 'update rejected new shared helper'
     assert_equal 0.2.0 "$(find "$TEST_INSTALL_ROOT/releases" -mindepth 1 -maxdepth 1 -printf '%f\n')" 'only current release remains'
     [[ "$(sha_file "$TEST_ENTRY")" == "$launcher_sha" ]] || fail 'managed launcher was not updated'
@@ -231,7 +335,7 @@ test_manual_update_is_atomic_and_versioned() (
     printf 'Runarry/vps-script-lite\t0.0.9\n' >"$history/.vpsctl-managed-release"
     prepare_update_assets 0.3.0
     launcher_sha="$(sha_file "$TEST_ASSETS/vpsctl.sh")"
-    network_sha="$(sha_file "$TEST_ASSETS/vpsctl-network-0.3.0.tar.gz")"
+    network_sha="$(sha_file "$TEST_ASSETS/vpsctl-network-bbr-0.3.0.tar.gz")"
     write_manifest "$TEST_ASSETS/vpsctl-manifest.tsv" 0.3.0 "$launcher_sha" "$network_sha"
     current_before="$(readlink "$TEST_INSTALL_ROOT/current")"
     vps_distribution_self_update 0.3.0 >/dev/null 2>&1 || status=$?
@@ -359,14 +463,15 @@ prepare_managed_install() {
     printf '#!/usr/bin/env bash\nexit 0\n' >"$TEST_ENTRY"
     cp -- "$TEST_ENTRY" "$TEST_SELF_ROOT/vpsctl.sh"
     launcher_sha="$(sha_file "$TEST_ENTRY")"
-    make_network_asset "$version"
-    network_sha="$(sha_file "${TEST_ASSETS}/vpsctl-network-${version}.tar.gz")"
+    make_feature_assets "$version"
+    network_sha="$(sha_file "${TEST_ASSETS}/vpsctl-network-bbr-${version}.tar.gz")"
     mkdir -p "$release/.release" "$release/.bundles" "$release/bin" "$release/lib" "$release/commands/self"
     printf '%s\n' "$version" >"$release/VERSION"
     printf '#!/usr/bin/env bash\nexit 0\n' >"$release/bin/vpsctl"
-    for required in environment registry ui command distribution; do
+    for required in environment registry ui distribution; do
         printf '#!/usr/bin/env bash\n' >"$release/lib/${required}.sh"
     done
+    cp -- "$TEST_ROOT/lib/registry.sh" "$release/lib/registry.sh"
     for required in status update uninstall; do
         printf '#!/usr/bin/env bash\n' >"$release/commands/self/${required}.sh"
     done
@@ -375,7 +480,7 @@ prepare_managed_install() {
     printf '%s\n' "$launcher_sha" >"$TEST_SELF_ROOT/entry.sha256"
     printf '%064d\n' 0 >"$release/.bundles/core.sha256"
     printf 'Runarry/vps-script-lite\t%s\n' "$version" >"$release/.vpsctl-managed-release"
-    printf '%s\n' "$network_sha" >"$release/.bundles/network.sha256"
+    printf '%s\n' "$network_sha" >"$release/.bundles/network-bbr.sha256"
     ln -s "$release" "$TEST_INSTALL_ROOT/current"
 }
 
@@ -515,33 +620,48 @@ test_system_bundle_requires_kernel_modules() (
     mkdir -p "$tree/commands/system/kernel"
     printf '#!/usr/bin/env bash\n' >"$tree/commands/system/kernel.sh"
     status=0
-    vps_distribution_validate_domain_tree "$tree" system >/dev/null 2>&1 || status=$?
+    vps_distribution_validate_bundle_tree "$tree" system-kernel >/dev/null 2>&1 || status=$?
     assert_equal 10 "$status" 'incomplete system kernel bundle rejected'
     for module in providers inventory grub grub-install; do
         printf '#!/usr/bin/env bash\n' >"$tree/commands/system/kernel/$module.sh"
     done
-    vps_distribution_validate_domain_tree "$tree" system || fail 'complete system kernel bundle rejected'
+    vps_distribution_validate_bundle_tree "$tree" system-kernel || fail 'complete system kernel bundle rejected'
     for module in providers inventory grub grub-install; do
         mv "$tree/commands/system/kernel/$module.sh" "$tree/$module.sh"
         status=0
-        vps_distribution_validate_domain_tree "$tree" system >/dev/null 2>&1 || status=$?
+        vps_distribution_validate_bundle_tree "$tree" system-kernel >/dev/null 2>&1 || status=$?
         assert_equal 10 "$status" "system bundle missing $module rejected"
         mv "$tree/$module.sh" "$tree/commands/system/kernel/$module.sh"
     done
 )
 
-test_core_ufw_library_compatibility() (
-    local tree="${TEST_TEMP}/ufw-core" required status=0
-    mkdir -p "$tree/bin" "$tree/lib" "$tree/commands/self"
-    for required in VERSION bin/vpsctl lib/environment.sh lib/registry.sh lib/ui.sh lib/command.sh lib/distribution.sh commands/self/status.sh commands/self/update.sh commands/self/uninstall.sh; do
-        printf '# fixture\n' >"$tree/$required"
+test_private_modules_and_shared_boundaries() (
+    local bundle tree="$TEST_TEMP/private-modules" path files status archive="$TEST_TEMP/boundary.tar.gz"
+    for bundle in network-ufw security-access security-tls service-proxy; do
+        rm -rf "$tree"
+        mkdir -p "$tree"
+        files="$(vps_registry_bundle_files "$bundle")"
+        while IFS= read -r path; do
+            mkdir -p "$tree/${path%/*}"
+            cp "$TEST_ROOT/$path" "$tree/$path"
+        done <<<"$files"
+        vps_distribution_validate_bundle_tree "$tree" "$bundle" || fail "complete $bundle rejected"
+        while IFS= read -r path; do
+            mv "$tree/$path" "$tree/missing"
+            status=0
+            vps_distribution_validate_bundle_tree "$tree" "$bundle" >/dev/null 2>&1 || status=$?
+            assert_equal 10 "$status" "missing private file: $path"
+            mv "$tree/missing" "$tree/$path"
+        done <<<"$files"
     done
-    vps_distribution_validate_domain_tree "$tree" core || fail 'historical core without UFW rejected'
-    printf '%s\n' '"commands/network/ufw.sh"' >>"$tree/lib/registry.sh"
-    vps_distribution_validate_domain_tree "$tree" core >/dev/null 2>&1 || status=$?
-    assert_equal 10 "$status" 'new core missing shared UFW rejected'
-    printf '# shared UFW fixture\n' >"$tree/lib/ufw.sh"
-    vps_distribution_validate_domain_tree "$tree" core || fail 'complete UFW core rejected'
+    for bundle in shared-command shared-ufw shared-server-test network-bbr security-fail2ban; do
+        status=0
+        vps_distribution_archive_path_allowed "$bundle" lib/distribution.sh || status=$?
+        assert_equal 1 "$status" "$bundle may overwrite core"
+        status=0
+        vps_distribution_archive_path_allowed "$bundle" commands/network/dns.sh || status=$?
+        assert_equal 1 "$status" "$bundle contains an unrelated command"
+    done
 )
 
 test_core_archive_boundaries() (
@@ -564,12 +684,13 @@ test_core_archive_boundaries() (
 )
 
 test_core_archive_boundaries
-test_core_ufw_library_compatibility
+test_private_modules_and_shared_boundaries
 test_system_bundle_requires_kernel_modules
 test_source_mode_is_offline_and_mutations_refuse
 test_manifest_is_strict
-test_lazy_domain_install_and_cache
+test_lazy_feature_install_and_cache
 test_status_is_offline
+test_failed_downloads_retry_and_lock_recheck
 test_manual_update_is_atomic_and_versioned
 test_update_cleanup_skips_unmanaged_entries
 test_update_cleanup_failure_keeps_new_release_and_retries

@@ -44,8 +44,8 @@ vpsctl_load_library() {
 }
 
 vpsctl_load_library "${VPSCTL_PROJECT_ROOT}/lib/environment.sh"
-vpsctl_load_library "${VPSCTL_PROJECT_ROOT}/lib/distribution.sh"
 vpsctl_load_library "${VPSCTL_PROJECT_ROOT}/lib/registry.sh"
+vpsctl_load_library "${VPSCTL_PROJECT_ROOT}/lib/distribution.sh"
 vpsctl_load_library "${VPSCTL_PROJECT_ROOT}/lib/ui.sh"
 
 vpsctl_usage() {
@@ -310,7 +310,7 @@ vpsctl_dispatch() {
         return 2
     fi
 
-    if vps_distribution_ensure_domain "$(vps_registry_distribution_domain "$domain")"; then
+    if vps_distribution_ensure_command "$command_key"; then
         :
     else
         return $?

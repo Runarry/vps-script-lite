@@ -43,7 +43,11 @@ state="${VPSCTL_SYSTEM_ROOT}/run/mock-systemd"; mkdir -p "$state"
 case "${1:-}" in
   is-active) [[ -f "$state/active-${*: -1}" ]] ;;
   is-enabled) [[ -f "$state/enabled-${*: -1}" ]] ;;
-  start) touch "$state/active-${2}" ;;
+  start)
+    [[ ! -e "${VPSCTL_SYSTEM_ROOT}/run/skip-service-start" ]] || exit 0
+    touch "$state/active-${2}"
+    [[ ! -e "${VPSCTL_SYSTEM_ROOT}/run/fail-service-start" && ! -e "${VPSCTL_SYSTEM_ROOT}/run/fail-start-${2}" ]] || exit 20
+    ;;
   restart)
     if [[ -e "${VPSCTL_SYSTEM_ROOT}/run/fail-service-restart-once" ]]; then
       rm -f "${VPSCTL_SYSTEM_ROOT}/run/fail-service-restart-once"
@@ -51,8 +55,12 @@ case "${1:-}" in
     fi
     touch "$state/active-${2}"
     ;;
-  stop) rm -f "$state/active-${2}" ;;
+  stop)
+    [[ ! -e "${VPSCTL_SYSTEM_ROOT}/run/fail-service-stop" ]] || exit 20
+    rm -f "$state/active-${2}"
+    ;;
   enable)
+    [[ ! -e "${VPSCTL_SYSTEM_ROOT}/run/skip-service-enable" ]] || exit 0
     unit="${*: -1}"; touch "$state/enabled-$unit"
     [[ ! -e "${VPSCTL_SYSTEM_ROOT}/run/fail-service-enable" ]] || exit 20
     [[ " $* " != *" --now "* ]] || touch "$state/active-$unit"
@@ -67,12 +75,27 @@ esac'
 make_mock rc-service '
 printf "rc-service %s\n" "$*" >>"$MOCK_LOG"
 state="${VPSCTL_SYSTEM_ROOT}/run/mock-openrc"; mkdir -p "$state"
-case "${2:-}" in start|restart) touch "$state/active-${1}" ;; stop) rm -f "$state/active-${1}" ;; status) [[ -f "$state/active-${1}" ]] ;; esac'
+case "${2:-}" in
+  start|restart)
+    [[ ! -e "${VPSCTL_SYSTEM_ROOT}/run/skip-service-start" ]] || exit 0
+    touch "$state/active-${1}"
+    [[ ! -e "${VPSCTL_SYSTEM_ROOT}/run/fail-service-start" ]] || exit 20
+    ;;
+  stop)
+    [[ ! -e "${VPSCTL_SYSTEM_ROOT}/run/fail-service-stop" ]] || exit 20
+    rm -f "$state/active-${1}"
+    ;;
+  status) [[ -f "$state/active-${1}" ]] ;;
+esac'
 make_mock rc-update '
 printf "rc-update %s\n" "$*" >>"$MOCK_LOG"
 state="${VPSCTL_SYSTEM_ROOT}/run/mock-openrc"; mkdir -p "$state"
 case "${1:-}" in
-  add) touch "$state/enabled-${2}" ;;
+  add)
+    [[ ! -e "${VPSCTL_SYSTEM_ROOT}/run/skip-service-enable" ]] || exit 0
+    touch "$state/enabled-${2}"
+    [[ ! -e "${VPSCTL_SYSTEM_ROOT}/run/fail-service-enable" ]] || exit 20
+    ;;
   del) rm -f "$state/enabled-${2}" ;;
   show)
     if [[ -e "$state/long-show" ]]; then
@@ -342,6 +365,139 @@ manifest_path() { printf '%s' "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/
 relay_path() { printf '%s' "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/relay.json"; }
 node_id_by_name() { jq -r --arg name "$1" '.nodes[] | select(.name == $name) | .id' "$(manifest_path)"; }
 
+test_core_install_autostart() {
+    local init core ownership state unit config service meta lkg before fault
+    for init in systemd openrc; do
+        export VPSCTL_ENV_INIT="$init"
+        for core in sing-box xray; do
+            unit="vpsctl-proxy-${core}"
+            [[ "$init" != systemd ]] || unit+='.service'
+            state="${TEST_SYSTEM_ROOT}/run/mock-${init}"
+            config="${TEST_SYSTEM_ROOT}/etc/vpsctl/proxy/${core}/config.json"
+            meta="${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/cores/${core}.json"
+            lkg="${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/lkg/${core}"
+            if [[ "$init" == systemd ]]; then
+                service="${TEST_SYSTEM_ROOT}/etc/systemd/system/${unit}"
+            else
+                service="${TEST_SYSTEM_ROOT}/etc/init.d/${unit}"
+            fi
+            for ownership in owned external; do
+                reset_root
+                set_release_scenario default
+                if [[ "$ownership" == external ]]; then
+                    write_core_binary "$core"
+                    before="$(sha256sum "${TEST_SYSTEM_ROOT}/usr/bin/${core}")"
+                fi
+                run_proxy install --core "$core"
+                assert_equal 0 "$RUN_STATUS" "$init $ownership $core install"
+                assert_contains "$RUN_OUTPUT" '已安装、启动并启用开机启动' "install success state"
+                [[ -f "$state/active-$unit" && -f "$state/enabled-$unit" ]] || fail "$init $core install service defaults"
+                [[ -f "$lkg/config.json" && -f "$lkg/core.json" && -f "$lkg/binary" ]] || fail "$init $core install LKG missing"
+                cmp -s "$config" "$lkg/config.json" || fail "$core LKG config mismatch"
+                if [[ "$ownership" == external ]]; then
+                    assert_equal "$before" "$(sha256sum "${TEST_SYSTEM_ROOT}/usr/bin/${core}")" "external install modified binary"
+                    jq -e '.owned == false' "$meta" >/dev/null || fail "external ownership changed"
+                else
+                    jq -e '.owned == true' "$meta" >/dev/null || fail "downloaded ownership changed"
+                fi
+                run_proxy stop --core "$core" --disable
+                assert_equal 0 "$RUN_STATUS" "manual stop and disable"
+                before="$(sha256sum "$config" "$meta" "$service")"
+                : >"$MOCK_LOG"
+                run_proxy install --core "$core"
+                assert_equal 0 "$RUN_STATUS" "repeated $init $ownership $core install"
+                assert_equal "$before" "$(sha256sum "$config" "$meta" "$service")" "repeated install changed files"
+                [[ ! -e "$state/active-$unit" && ! -e "$state/enabled-$unit" ]] || fail "repeated install undid manual stop/disable"
+                assert_not_contains "$(<"$MOCK_LOG")" 'curl ' "repeated install downloaded"
+
+                for fault in fail-service-start fail-service-enable skip-service-start skip-service-enable; do
+                    reset_root
+                    set_release_scenario default
+                    if [[ "$ownership" == external ]]; then
+                        write_core_binary "$core"
+                        before="$(sha256sum "${TEST_SYSTEM_ROOT}/usr/bin/${core}")"
+                    fi
+                    touch "${TEST_SYSTEM_ROOT}/run/$fault"
+                    run_proxy install --core "$core"
+                    assert_equal 20 "$RUN_STATUS" "$init $ownership $core $fault rollback"
+                    [[ ! -e "$state/active-$unit" && ! -e "$state/enabled-$unit" ]] || fail "$fault leaked service state"
+                    [[ ! -e "$config" && ! -e "$meta" && ! -e "$service" && ! -e "$lkg" ]] || fail "$fault leaked install files"
+                    if [[ "$ownership" == external ]]; then
+                        assert_equal "$before" "$(sha256sum "${TEST_SYSTEM_ROOT}/usr/bin/${core}")" "$fault removed external binary"
+                    else
+                        [[ ! -e "${TEST_SYSTEM_ROOT}/usr/local/bin/${core}" ]] || fail "$fault leaked owned binary"
+                    fi
+                done
+            done
+
+            reset_root
+            write_core_binary "$core"
+            touch "${TEST_SYSTEM_ROOT}/run/fail-service-enable" "${TEST_SYSTEM_ROOT}/run/fail-service-stop"
+            run_proxy install --core "$core"
+            assert_equal 30 "$RUN_STATUS" "$init $core incomplete service rollback"
+            assert_contains "$RUN_OUTPUT" '回滚不完整' "incomplete rollback message"
+
+            reset_root
+            write_core_binary "$core"
+            mkdir -p "$(dirname -- "$lkg")"
+            touch "$lkg"
+            run_proxy install --core "$core"
+            assert_equal 30 "$RUN_STATUS" "$init $core LKG failure"
+            assert_contains "$RUN_OUTPUT" '保存 LKG 失败' "LKG partial success message"
+            [[ -f "$meta" && -f "$state/active-$unit" && -f "$state/enabled-$unit" ]] || fail "LKG failure discarded running install"
+        done
+    done
+    export VPSCTL_ENV_INIT=systemd
+
+    # Recover a retained managed service and config, including its prior state.
+    reset_root
+    install_external xray
+    run_proxy stop --core xray --disable
+    assert_equal 0 "$RUN_STATUS" "retained-service stop"
+    config="${TEST_SYSTEM_ROOT}/etc/vpsctl/proxy/xray/config.json"
+    service="${TEST_SYSTEM_ROOT}/etc/systemd/system/vpsctl-proxy-xray.service"
+    meta="${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/cores/xray.json"
+    printf '\n# retained definition\n' >>"$service"
+    printf '{"retained":true}\n' >"$config"
+    before="$(sha256sum "$service" "$config" "${TEST_SYSTEM_ROOT}/usr/bin/xray")"
+    rm -f -- "$meta"
+    touch "${TEST_SYSTEM_ROOT}/run/fail-service-enable"
+    run_proxy install --core xray
+    assert_equal 20 "$RUN_STATUS" "retained stopped service rollback"
+    assert_equal "$before" "$(sha256sum "$service" "$config" "${TEST_SYSTEM_ROOT}/usr/bin/xray")" "retained service file restore"
+    [[ ! -e "$meta" ]] || fail "retained install failure kept metadata"
+    state="${TEST_SYSTEM_ROOT}/run/mock-systemd"
+    touch "$state/active-vpsctl-proxy-xray.service" "$state/enabled-vpsctl-proxy-xray.service"
+    run_proxy install --core xray
+    assert_equal 20 "$RUN_STATUS" "retained active service rollback"
+    assert_equal "$before" "$(sha256sum "$service" "$config" "${TEST_SYSTEM_ROOT}/usr/bin/xray")" "retained active file restore"
+    [[ -f "$state/active-vpsctl-proxy-xray.service" && -f "$state/enabled-vpsctl-proxy-xray.service" ]] || fail "retained service state not restored"
+
+    reset_root
+    set_release_scenario default
+    run_proxy install --core all
+    assert_equal 0 "$RUN_STATUS" "all-core autostart install"
+    for core in sing-box xray; do
+        [[ -f "$state/active-vpsctl-proxy-${core}.service" && -f "$state/enabled-vpsctl-proxy-${core}.service" ]] || fail "$core all install service defaults"
+    done
+    reset_root
+    install_external sing-box
+    run_proxy stop --core sing-box --disable
+    assert_equal 0 "$RUN_STATUS" "stop registered core before mixed all install"
+    write_core_binary xray
+    run_proxy install --core all
+    assert_equal 0 "$RUN_STATUS" "all install with registered and new cores"
+    [[ ! -e "$state/active-vpsctl-proxy-sing-box.service" && ! -e "$state/enabled-vpsctl-proxy-sing-box.service" ]] || fail "all install changed registered core state"
+    [[ -f "$state/active-vpsctl-proxy-xray.service" && -f "$state/enabled-vpsctl-proxy-xray.service" ]] || fail "all install skipped new core activation"
+    reset_root
+    set_release_scenario default
+    touch "${TEST_SYSTEM_ROOT}/run/fail-start-vpsctl-proxy-sing-box.service"
+    run_proxy install --core all
+    assert_equal 30 "$RUN_STATUS" "all install partial failure"
+    [[ ! -e "$state/active-vpsctl-proxy-sing-box.service" && ! -e "$state/enabled-vpsctl-proxy-sing-box.service" ]] || fail "failed all install core state leaked"
+    [[ -f "$state/active-vpsctl-proxy-xray.service" && -f "$state/enabled-vpsctl-proxy-xray.service" ]] || fail "all install did not continue after first failure"
+}
+
 test_arguments_dry_run_and_time() {
     local manifest_hash config_hash
     reset_root
@@ -352,6 +508,10 @@ test_arguments_dry_run_and_time() {
     run_proxy --dry-run install --core sing-box
     assert_equal 0 "$RUN_STATUS" "install dry-run"
     assert_contains "$RUN_OUTPUT" "演练" "install dry-run output"
+    assert_contains "$RUN_OUTPUT" 'systemctl start vpsctl-proxy-sing-box.service' "install dry-run start plan"
+    assert_contains "$RUN_OUTPUT" 'systemctl enable vpsctl-proxy-sing-box.service' "install dry-run enable plan"
+    assert_not_contains "$(<"$MOCK_LOG")" 'systemctl start ' "install dry-run started service"
+    assert_not_contains "$(<"$MOCK_LOG")" 'systemctl enable ' "install dry-run enabled service"
     [[ ! -e "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/cores/sing-box.json" ]] || fail "dry-run wrote core metadata"
 
     install_external sing-box
@@ -505,6 +665,8 @@ test_core_release_channels() {
     assert_file_contains "$MOCK_LOG" "/SagerNet/sing-box/releases/latest" "default sing-box update stable endpoint"
     assert_file_contains "$MOCK_LOG" "/XTLS/Xray-core/releases/latest" "default Xray update stable endpoint"
     assert_not_contains "$(<"$MOCK_LOG")" "/releases?per_page=" "default update does not follow prior channel"
+    assert_not_contains "$(<"$MOCK_LOG")" 'systemctl restart ' "core update must preserve explicit restart contract"
+    assert_not_contains "$(<"$MOCK_LOG")" 'systemctl start ' "core update must not start services"
 
     for core in sing-box xray; do
         case "$core" in sing-box) meta="$sing_meta" ;; xray) meta="$xray_meta" ;; esac
@@ -662,6 +824,10 @@ test_status_service_and_logs() {
     reset_root
     install_external sing-box
     install_external xray
+    run_proxy stop --core sing-box --disable
+    assert_equal 0 "$RUN_STATUS" "stop sing-box before explicit service lifecycle checks"
+    run_proxy stop --core xray --disable
+    assert_equal 0 "$RUN_STATUS" "stop Xray before explicit service lifecycle checks"
     jq '.nodes = [
         {id:"node-0000000000000001",core:"sing-box",profile:"shadowsocks-aes-256-gcm",name:"status-sb",listen:"::",port:18001,address:"proxy.example",credentials:{},tls:{},transport:{},options:{}},
         {id:"node-0000000000000002",core:"xray",profile:"shadowsocks-aes-256-gcm",name:"status-xr",listen:"::",port:18002,address:"proxy.example",credentials:{},tls:{},transport:{},options:{}}
@@ -703,6 +869,8 @@ test_status_service_and_logs() {
     printf '  OpenRC install/start/logs\n'
     install_external sing-box
     install_external xray
+    run_proxy stop --core xray --disable
+    assert_equal 0 "$RUN_STATUS" "stop OpenRC Xray before explicit start"
     assert_file_contains "${TEST_SYSTEM_ROOT}/etc/init.d/vpsctl-proxy-xray" 'command="/usr/bin/xray"' "OpenRC service command"
     assert_file_contains "${TEST_SYSTEM_ROOT}/etc/init.d/vpsctl-proxy-xray" 'output_log="/var/log/vpsctl/proxy/xray.log"' "OpenRC log path"
     printf 'openrc fixture\n' >"${TEST_SYSTEM_ROOT}/var/log/vpsctl/proxy/xray.log"
@@ -726,6 +894,8 @@ test_status_service_and_logs() {
 test_core_choice_crud_pending_and_validation() {
     reset_root
     install_external xray
+    run_proxy stop --core xray
+    assert_equal 0 "$RUN_STATUS" "stop Xray before inactive CRUD checks"
     run_proxy node add --profile shadowsocks-aes-256-gcm --name x-one --port 19001 --address proxy.example
     assert_equal 0 "$RUN_STATUS" "single installed core choice"
     assert_equal xray "$(jq -r '.nodes[0].core' "$(manifest_path)")" "single core selected"
@@ -1058,6 +1228,11 @@ test_unified_interactive_api() (
     install_external xray
     assert_equal "" "$(proxy_lifecycle_candidates install 1)" "registered cores filtered from install"
     assert_equal $'sing-box\nxray' "$(proxy_lifecycle_candidates update 1)" "update candidates are registered cores"
+    assert_equal "" "$(proxy_lifecycle_candidates start 1)" "fresh installs are already active"
+    run_proxy stop --core sing-box
+    assert_equal 0 "$RUN_STATUS" "stop sing-box for lifecycle candidate checks"
+    run_proxy stop --core xray
+    assert_equal 0 "$RUN_STATUS" "stop Xray for lifecycle candidate checks"
     assert_equal $'sing-box\nxray' "$(proxy_lifecycle_candidates start 1)" "start candidates are inactive cores"
     touch "${TEST_SYSTEM_ROOT}/run/mock-systemd/active-vpsctl-proxy-sing-box.service"
     assert_equal xray "$(proxy_lifecycle_candidates start 1)" "active core filtered from start"
@@ -1995,6 +2170,8 @@ test_node_core_switch() {
     reset_root
     install_external sing-box
     install_external xray
+    run_proxy stop --core xray --disable
+    assert_equal 0 "$RUN_STATUS" "stop target for core switch dry-run checks"
     run_proxy node add --profile shadowsocks-aes-256-gcm --core sing-box \
         --name switch-guard --port 35101 --address switch.example
     assert_equal 0 "$RUN_STATUS" "core switch guard node add"
@@ -2101,6 +2278,8 @@ test_node_core_switch() {
     reset_root
     install_external sing-box
     install_external xray
+    run_proxy stop --core xray --disable
+    assert_equal 0 "$RUN_STATUS" "stop target before core switch takeover"
     mkdir -p "$cert_dir"
     openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj '/CN=switch.example' \
         -addext 'subjectAltName=DNS:switch.example' \
@@ -2202,6 +2381,8 @@ test_node_core_switch() {
     reset_root
     install_external sing-box
     install_external xray
+    run_proxy stop --core xray --disable
+    assert_equal 0 "$RUN_STATUS" "disable target before core switch rollback checks"
     run_proxy node add --profile shadowsocks-aes-256-gcm --core sing-box \
         --name switch-rollback --port 35301 --address rollback.example
     assert_equal 0 "$RUN_STATUS" "core switch rollback node add"
@@ -2526,6 +2707,7 @@ if [[ "${VPSCTL_PROXY_TEST_HARNESS_ONLY:-0}" == 1 ]]; then
 fi
 
 case "${VPSCTL_TEST_ONLY:-}" in
+    core-install) test_core_install_autostart; printf 'PASS: proxy install autostart tests\n'; exit 0 ;;
     core-release) test_core_release_channels; printf 'PASS: proxy core release tests\n'; exit 0 ;;
     node-ip-policy) test_node_ip_strategy_and_batch; printf 'PASS: node IP policy tests\n'; exit 0 ;;
     relay-state) test_relay_state_bindings_and_purge; printf 'PASS: relay state tests\n'; exit 0 ;;
@@ -2542,6 +2724,8 @@ printf 'TEST: proxy arguments, dry-run and time\n'
 test_arguments_dry_run_and_time
 printf 'TEST: proxy core release channels\n'
 test_core_release_channels
+printf 'TEST: proxy install autostart and rollback\n'
+test_core_install_autostart
 printf 'TEST: proxy dependency installation plans\n'
 test_dependency_install_plans
 printf 'TEST: proxy status, services and logs\n'

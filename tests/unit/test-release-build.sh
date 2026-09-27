@@ -35,16 +35,16 @@ trap cleanup EXIT
 [[ "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail 'distribution VERSION must use X.Y.Z format'
 bash "${TEST_ROOT}/scripts/build-release.sh" "$RELEASE_DIR"
 
-expected_assets=(
-    vpsctl.sh
-    vpsctl-manifest.tsv
-    "vpsctl-core-${RELEASE_VERSION}.tar.gz"
-    "vpsctl-network-${RELEASE_VERSION}.tar.gz"
-    "vpsctl-system-${RELEASE_VERSION}.tar.gz"
-    "vpsctl-security-${RELEASE_VERSION}.tar.gz"
-    "vpsctl-service-${RELEASE_VERSION}.tar.gz"
-    "vpsctl-test-${RELEASE_VERSION}.tar.gz"
+expected_bundles=(
+    core shared-command shared-ufw shared-server-test
+    network-bbr network-dns network-ip-policy network-ufw network-rfw
+    system-kernel security-access security-fail2ban security-tls
+    service-proxy test-nodequality test-tcpquality
 )
+expected_assets=(vpsctl.sh vpsctl-manifest.tsv)
+for bundle in "${expected_bundles[@]}"; do
+    expected_assets+=("vpsctl-${bundle}-${RELEASE_VERSION}.tar.gz")
+done
 for asset in "${expected_assets[@]}"; do
     assert_file "${RELEASE_DIR}/${asset}"
 done
@@ -53,12 +53,12 @@ expected_sorted="$(printf '%s\n' "${expected_assets[@]}" | sort)"
 [[ "$actual_assets" == "$expected_sorted" ]] || fail 'release output contains an unexpected asset set'
 
 mapfile -t manifest <"${RELEASE_DIR}/vpsctl-manifest.tsv"
-[[ ${#manifest[@]} -eq 10 ]] || fail 'manifest record count is not 10'
-[[ ${manifest[0]} == $'schema_version\t1' ]] || fail 'manifest schema record is invalid'
+[[ ${#manifest[@]} -eq 20 ]] || fail 'manifest record count is not 20'
+[[ ${manifest[0]} == $'schema_version\t2' ]] || fail 'manifest schema record is invalid'
 [[ ${manifest[1]} == $'version\t'"${RELEASE_VERSION}" ]] || fail 'manifest distribution version is invalid'
 [[ ${manifest[2]} == $'repository\tRunarry/vps-script-lite' ]] || fail 'manifest repository is invalid'
 
-expected_names=(launcher core network system security service test)
+expected_names=(launcher "${expected_bundles[@]}")
 for index in "${!expected_names[@]}"; do
     IFS=$'\t' read -r kind name filename digest extra <<<"${manifest[index + 3]}"
     [[ -z "$extra" && "$name" == "${expected_names[index]}" ]] || fail "invalid manifest asset record ${index}"
@@ -83,8 +83,6 @@ for member in \
     lib/environment.sh \
     lib/registry.sh \
     lib/ui.sh \
-    lib/command.sh \
-    lib/ufw.sh \
     lib/distribution.sh; do
     assert_archive_has "$core" "$member"
 done
@@ -92,20 +90,19 @@ for member in commands/self/status.sh commands/self/update.sh commands/self/unin
     assert_archive_has "$core" "$member"
 done
 
-assert_archive_has "${RELEASE_DIR}/vpsctl-network-${RELEASE_VERSION}.tar.gz" commands/network/bbr.sh
-assert_archive_has "${RELEASE_DIR}/vpsctl-network-${RELEASE_VERSION}.tar.gz" commands/network/ufw.sh
-assert_archive_has "${RELEASE_DIR}/vpsctl-system-${RELEASE_VERSION}.tar.gz" commands/system/kernel.sh
-for member in providers inventory grub grub-install; do
-    assert_archive_has "${RELEASE_DIR}/vpsctl-system-${RELEASE_VERSION}.tar.gz" "commands/system/kernel/${member}.sh"
+# Check exact per-bundle file boundaries, including every required private module.
+# shellcheck source=../../lib/distribution.sh disable=SC1091
+source "$TEST_ROOT/lib/distribution.sh"
+for bundle in "${expected_bundles[@]}"; do
+    archive="${RELEASE_DIR}/vpsctl-${bundle}-${RELEASE_VERSION}.tar.gz"
+    vps_distribution_validate_archive "$archive" "$bundle" || fail "unsafe bundle: $bundle"
+    expected_files="$(vps_registry_bundle_files "$bundle" | sort)"
+    actual_files="$(tar -tzf "$archive" | grep -v '/$' | sort)"
+    [[ "$actual_files" == "$expected_files" ]] || fail "unexpected files in $bundle"
 done
-assert_archive_has "${RELEASE_DIR}/vpsctl-security-${RELEASE_VERSION}.tar.gz" commands/security/access.sh
-assert_archive_has "${RELEASE_DIR}/vpsctl-security-${RELEASE_VERSION}.tar.gz" commands/security/fail2ban.sh
-assert_archive_has "${RELEASE_DIR}/vpsctl-security-${RELEASE_VERSION}.tar.gz" commands/security/tls.sh
-assert_archive_has "${RELEASE_DIR}/vpsctl-service-${RELEASE_VERSION}.tar.gz" commands/service/proxy.sh
-assert_archive_has "${RELEASE_DIR}/vpsctl-test-${RELEASE_VERSION}.tar.gz" commands/test/nodequality.sh
-assert_archive_has "${RELEASE_DIR}/vpsctl-test-${RELEASE_VERSION}.tar.gz" commands/test/tcpquality.sh
-assert_archive_has "${RELEASE_DIR}/vpsctl-test-${RELEASE_VERSION}.tar.gz" lib/server-test.sh
-
+for shared in command ufw server-test; do
+    assert_archive_has "${RELEASE_DIR}/vpsctl-shared-${shared}-${RELEASE_VERSION}.tar.gz" "lib/${shared}.sh"
+done
 for archive in "${RELEASE_DIR}"/*.tar.gz; do
     while IFS= read -r member; do
         [[ "$member" != /* && "$member" != ./* && "$member" != */../* ]] || fail "non-relative archive member: ${member}"

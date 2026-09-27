@@ -54,20 +54,21 @@ apk add --no-cache bash curl ca-certificates
 curl -fsSL https://github.com/Runarry/vps-script-lite/releases/latest/download/vpsctl.sh | bash
 ```
 
-**从 v0.8.6 及更早版本首次升级到 v0.8.7 及更新版本，需要普通卸载管理器代码后重新安装。** 旧更新器的 core 白名单不包含新增的 `lib/ufw.sh`，会拒绝直接 `self update`；直接重跑安装器也只会启动已有管理器。请先按下方固定 tag 流程下载并校验安装器和 manifest，再运行 `vpsctl --non-interactive self uninstall --confirm-uninstall`（不加 `--purge`），然后执行已下载的安装器。普通卸载保留功能配置、服务和备份。完整步骤见 [v0.8.7 发布说明](https://github.com/Runarry/vps-script-lite/releases/tag/v0.8.7)。
+**当前源码采用 manifest schema 2，与旧版按领域打包的 schema 1 不兼容。** 从旧格式迁移时，请先下载并校验使用新格式的安装器和 manifest，再运行 `vpsctl --non-interactive self uninstall --confirm-uninstall`（不加 `--purge`），然后执行新安装器。直接重跑安装器只会启动已有管理器；不要用旧版 `self update` 跨格式升级。普通卸载保留已部署服务、配置、功能状态和备份；反向迁移也使用普通卸载再安装。此源码更改不改变版本号或已发布资产。
 
 安装后使用快捷命令 `vpsctl`。启动 `vpsctl` 只读取本地已安装内容，不联网检查更新；完成上述首次迁移后，需要查看或执行同格式分发更新时显式运行：
 
 ```text
 vpsctl self status
 vpsctl self update
-vpsctl self update --version v0.8.9
+vpsctl self update --version vX.Y.Z  # 替换为已发布的同格式版本
 ```
 
 `curl | bash` 的初始执行信任边界包括 HTTPS、GitHub、仓库及 Release 发布权限，以及当前 `latest` 指向的 `vpsctl.sh`；同一 Release 中的校验清单只能在安装器已经开始执行后保护后续资产，不能倒过来证明安装器自身可信。更稳妥的方式是先下载安装器和清单，检查来源、版本、SHA-256 与脚本内容，再执行本地文件：
 
 ```bash
 tmp_dir="$(mktemp -d)"
+# v0.8.9 是已发布的 schema 1 示例；迁移 schema 2 时改为未来发布的新格式 tag。
 base_url="https://github.com/Runarry/vps-script-lite/releases/download/v0.8.9"
 curl -fL "$base_url/vpsctl.sh" -o "$tmp_dir/vpsctl.sh"
 curl -fL "$base_url/vpsctl-manifest.tsv" -o "$tmp_dir/vpsctl-manifest.tsv"
@@ -87,7 +88,7 @@ bash "$tmp_dir/vpsctl.sh" --verified-manifest "$tmp_dir/vpsctl-manifest.tsv"
 
 `self update` 跨版本更新完整提交成功后，会删除所有可验证归属的受管历史 release，仅保留当前版本，不保留自动回退版本；需要回退时重新安装指定 Release。新版本提交完成前发生失败时仍保留原版本；若提交后历史版本清理失败，新版本保持激活，命令报错并返回 `30`，下次成功跨版本更新会再次尝试清理。同版本更新不执行清理，只同步 self 缓存；临时目录、不受管或异常条目以及功能状态与备份均不在清理范围内。self 启动器、manifest 和入口校验值是可恢复缓存，缺失或普通文件内容损坏不阻断更新与普通卸载；更新从当前已校验入口及 release manifest 保存回滚材料并修复缓存。当前代码或入口损坏、归属不明，以及缓存路径为链接或异常文件类型仍会拒绝。
 
-`core` 常驻安装；`network`、`system`、`security`、`service` 与 `test` 按领域拆分。首次调用某领域时，只从当前分发版本对应的同一个 GitHub Release 下载该领域资产，按 `vpsctl-manifest.tsv` 的 SHA-256 校验后缓存；不同版本的 core 与领域资产不得混用。core 允许 `lib/` 下新增公共库文件，构建仍显式选择发布文件，并保留入口完整性、哈希、路径边界和文件类型检查。
+源码中的 schema 2：`core` 仅包含入口、版本、环境检测、注册表、UI、分发逻辑和 `self` 命令。每个非 self 公开命令单独发布 `<domain>-<action>` bundle，例如 `network-bbr`；首次执行功能（包括功能帮助）时才下载该功能及其固定共享依赖，浏览全局帮助、清单、环境、版本、菜单和 `self status` 不下载功能。所有功能依赖 `shared-command`；UFW、访问、TLS 和代理另依赖 `shared-ufw`，两项服务器测试另依赖 `shared-server-test`。已缓存功能可离线重复使用；跨版本 `self update` 只获取 manifest、安装器和 core，新版本的功能重新按需下载，不预取旧缓存。文件名、版本、SHA-256、路径和文件类型校验仍保留，失败临时下载不会成为有效缓存。
 
 如果旧版升级后启动报 `current/bin/vpsctl: Permission denied`，可能是 core 入口缺少执行位。可在 root shell 中恢复并检查：
 

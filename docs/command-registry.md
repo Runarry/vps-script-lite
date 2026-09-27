@@ -4,7 +4,7 @@
 
 当前固定注册表位于 `lib/registry.sh`；领域菜单和命令列表均由它生成。
 
-安装态的 core 还提供并固定登记 `self` 自管理命令。其实现随 core 常驻，不依赖任何按需领域 bundle，也不能被其他领域 bundle 覆盖。
+安装态的 core 还提供并固定登记 `self` 自管理命令。其实现随 core 常驻，不依赖任何按需功能 bundle，也不能被功能或共享库 bundle 覆盖。
 
 ## 1. 每个命令必须登记的字段
 
@@ -37,7 +37,7 @@ vpsctl self uninstall [--purge] [--confirm-uninstall] [--confirm-purge]
 
 | 子命令 | 语义 |
 | --- | --- |
-| `status` | 只读显示本地运行模式、分发版本、受管路径和领域缓存状态；不检查远端更新 |
+| `status` | 只读显示本地运行模式、分发版本、受管路径和功能及共享库缓存状态；不检查远端更新 |
 | `update` | 用户显式触发更新；默认使用 latest，`--version vX.Y.Z` 固定目标 tag；校验完成并落盘后才原子切换 current，失败保留原版本 |
 | `uninstall` | 交互模式确认一次；非交互模式需要全局 `--yes` 或兼容的 `--confirm-uninstall`；移除快捷入口、current 和 vpsctl 分发文件，不卸载任何功能组件 |
 | `uninstall --purge` | 交互模式再次确认；非交互模式还需要 `--confirm-purge`；在普通卸载基础上只额外删除 `/var/lib/vpsctl/self/` 元数据 |
@@ -65,7 +65,7 @@ vpsctl self uninstall [--purge] [--confirm-uninstall] [--confirm-purge]
 
 `optional-root` 表示只读查询、帮助或部分计划阶段可以普通用户运行；实际系统变更仍须 root 或在具体步骤提权。依赖只在当前动作实际需要且确实缺失时处理：真实执行的交互模式列出缺失项并询问是否安装，真实非交互安装必须显式提供 `--install-deps`。`--dry-run` 无需安装授权即可展示缺失依赖与安装计划，不询问、不写配置、不安装依赖、不启动或重启服务。
 
-在 Release 安装态，注册表仍登记相同的公开命令，但命令文件按领域来自当前分发版本的 bundle：`network`、`system`、`security`、`service` 和 `test` 分别对应同名 bundle，`self` 来自常驻 core。某领域首次分发前必须从 current 对应的同一个 GitHub Release 下载其资产，并以 `vpsctl-manifest.tsv` 中的 SHA-256 校验后缓存到版本隔离目录；未校验文件、其他版本缓存或临时下载都不得进入注册表解析与分发。源码树运行继续直接使用仓库固定路径。
+在 Release 安装态，公开命令不变，每个非 self 命令对应 `<domain>-<action>` bundle，self 来自 core。`VPS_BUNDLE_IDS` 和 `vps_registry_bundle_files` 定义发布顺序与精确文件清单，必须列出每个私有模块；`vps_registry_command_bundles` 定义固定依赖。所有非 self 命令先加载 `shared-command`；UFW、access、TLS、proxy 再加载 `shared-ufw`；nodequality、tcpquality 再加载 `shared-server-test`；最后加载功能包。功能帮助也执行该流程，菜单浏览不执行。只使用当前版本经过 manifest 校验的缓存；源码模式直接使用本地路径。
 
 `system kernel` 的状态可由普通用户读取，安装、切换和卸载要求 root 与各自的强确认短语，`--yes` 不能绕过。它只支持 Debian/Ubuntu amd64：可从当前发行版受信 APT 源安装官方标准内核、Debian Cloud 或有候选的 Ubuntu LTS HWE，也可从 XanMod 官方源安装 BBRv3 并验证完整仓库密钥指纹。直接 CLI 省略安装类型仍默认 XanMod，交互菜单默认推荐官方标准内核。状态按 release 展示来源、关联包、启动完整性和 current/default/next/保护状态；标准 GRUB 2 环境可把具体 release 的稳定 entry ID 固定为默认项，其他启动器或无法解析的默认项拒绝危险动作。卸载必须明确指定非 current/default/next 的 release，只提交经过模拟验证的精确包数组，保护共享包和其他版本，不使用通配符或 `autoremove`。完整恢复边界见[系统内核管理](kernel-management.md)。
 

@@ -1,6 +1,12 @@
 # shellcheck shell=bash
 # Runtime bundle loading and self-management for installed releases.
 
+# Self commands also load this library directly, without the CLI entry point.
+if ! declare -F vps_registry_bundle_files >/dev/null; then
+    # shellcheck source=registry.sh disable=SC1091
+    source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/registry.sh"
+fi
+
 declare -g VPS_DISTRIBUTION_MANIFEST_VERSION=""
 declare -g VPS_DISTRIBUTION_MANIFEST_REPOSITORY=""
 declare -g VPS_DISTRIBUTION_LAUNCHER_FILE=""
@@ -100,7 +106,8 @@ vps_distribution_verify_sha256() {
 }
 
 vps_distribution_parse_manifest() {
-    local manifest="$1" line key name filename sha expected_name
+    local manifest="$1" line key name filename sha
+    local LC_ALL=C
     local schema_count=0 version_count=0 repository_count=0 launcher_count=0 line_number=0
     local -A seen_bundle=()
     local -a fields=()
@@ -127,7 +134,10 @@ vps_distribution_parse_manifest() {
         key="${fields[0]:-}"
         case "$key" in
             schema_version)
-                ((line_number == 1 && ${#fields[@]} == 2)) && [[ "$line" == $'schema_version\t1' ]] && ((schema_count == 0)) || return 10
+                if ! ((line_number == 1 && ${#fields[@]} == 2 && schema_count == 0)) || [[ "$line" != $'schema_version\t2' ]]; then
+                    vps_distribution_error '不支持的 manifest 格式；旧分发请先普通卸载再重新安装（保留业务数据）'
+                    return 10
+                fi
                 schema_count=1
                 ;;
             version)
@@ -150,15 +160,12 @@ vps_distribution_parse_manifest() {
                 launcher_count=1
                 ;;
             bundle)
-                ((line_number >= 5 && line_number <= 10 && ${#fields[@]} == 4)) || return 10
+                ((line_number >= 5 && ${#fields[@]} == 4)) || return 10
                 name="${fields[1]}"
                 filename="${fields[2]}"
                 sha="${fields[3]}"
-                case "$line_number" in
-                    5) expected_name='core' ;; 6) expected_name='network' ;; 7) expected_name='system' ;;
-                    8) expected_name='security' ;; 9) expected_name='service' ;; 10) expected_name='test' ;;
-                esac
-                [[ "$name" == "$expected_name" && -z "${seen_bundle[$name]+set}" ]] || return 10
+                [[ "$name" == core || "$name" =~ ^(shared|network|system|security|service|test)-[a-z][a-z0-9]*(-[a-z0-9]+)*$ ]] || return 10
+                [[ -z "${seen_bundle[$name]+set}" ]] || return 10
                 [[ "$line" == $'bundle\t'"${name}"$'\t'"${filename}"$'\t'"${sha}" && "$filename" == "vpsctl-${name}-${VPS_DISTRIBUTION_MANIFEST_VERSION}.tar.gz" && "$sha" =~ ^[0-9a-f]{64}$ ]] || return 10
                 seen_bundle[$name]=1
                 VPS_DISTRIBUTION_BUNDLE_FILE[$name]="$filename"
@@ -168,16 +175,10 @@ vps_distribution_parse_manifest() {
         esac
     done <"$manifest"
 
-    ((line_number == 10 && schema_count == 1 && version_count == 1 && repository_count == 1 && launcher_count == 1)) || {
+    if ! ((line_number >= 5 && schema_count == 1 && version_count == 1 && repository_count == 1 && launcher_count == 1)) || [[ -z "${seen_bundle[core]+set}" ]]; then
         vps_distribution_error 'release manifest 缺少必需字段'
         return 10
-    }
-    for name in core network system security service test; do
-        [[ -n "${seen_bundle[$name]+set}" ]] || {
-            vps_distribution_error "release manifest 缺少 ${name} bundle"
-            return 10
-        }
-    done
+    fi
 }
 
 vps_distribution_download() {
@@ -198,20 +199,13 @@ vps_distribution_release_url() {
 }
 
 vps_distribution_archive_path_allowed() {
-    local domain="$1" entry="${2%/}"
-    case "$domain" in
-        core)
-            case "$entry" in
-                VERSION | bin | bin/vpsctl | lib | lib/* | commands | commands/self | commands/self/*) return 0 ;;
-            esac
-            ;;
-        network | system | security | service)
-            [[ "$entry" == commands || "$entry" == "commands/${domain}" || "$entry" == "commands/${domain}/"* ]] && return 0
-            ;;
-        test)
-            [[ "$entry" == commands || "$entry" == commands/test || "$entry" == commands/test/* || "$entry" == lib || "$entry" == lib/server-test.sh ]] && return 0
-            ;;
-    esac
+    local bundle="$1" entry="${2%/}" files required
+    # Future core releases can introduce internal helpers unknown to the updater.
+    [[ "$bundle" == core && "$entry" == lib/* ]] && return 0
+    files="$(vps_registry_bundle_files "$bundle")" || return $?
+    while IFS= read -r required; do
+        [[ "$entry" == "$required" || "$required" == "$entry/"* ]] && return 0
+    done <<<"$files"
     return 1
 }
 
@@ -264,44 +258,17 @@ vps_distribution_validate_tree() {
     done < <(find "$tree" -type f \( -name '*.sh' -o -path '*/bin/vpsctl' \) -print0)
 }
 
-vps_distribution_validate_domain_tree() {
-    local tree="$1" domain="$2" required
+vps_distribution_validate_bundle_tree() {
+    local tree="$1" bundle="$2" required files
     local -a required_files=()
-    case "$domain" in
-        core)
-            required_files=(VERSION bin/vpsctl lib/environment.sh lib/registry.sh lib/ui.sh lib/command.sh lib/distribution.sh commands/self/status.sh commands/self/update.sh commands/self/uninstall.sh)
-            ;;
-        network)
-            required_files=(commands/network/bbr.sh commands/network/dns.sh commands/network/ip-policy.sh commands/network/rfw.sh)
-            ;;
-        system) required_files=(commands/system/kernel.sh commands/system/kernel/providers.sh commands/system/kernel/inventory.sh commands/system/kernel/grub.sh commands/system/kernel/grub-install.sh) ;;
-        security) required_files=(commands/security/access.sh commands/security/fail2ban.sh commands/security/tls.sh) ;;
-        service) required_files=(commands/service/proxy.sh) ;;
-        test) required_files=(commands/test/nodequality.sh commands/test/tcpquality.sh lib/server-test.sh) ;;
-        *) return 2 ;;
-    esac
+    files="$(vps_registry_bundle_files "$bundle")" || return $?
+    mapfile -t required_files <<<"$files"
     for required in "${required_files[@]}"; do
-        [[ -f "$tree/$required" && ! -L "$tree/$required" ]] || {
-            vps_distribution_error "${domain} 领域包缺少必需文件：$required"
+        if [[ ! -f "$tree/$required" || -L "$tree/$required" ]] || ! vps_distribution_require_no_symlink_components "$tree/$required"; then
+            vps_distribution_error "${bundle} bundle 缺少必需文件或路径不安全：$required"
             return 10
-        }
+        fi
     done
-    # Older releases predate the shared UFW library. Require it only when the
-    # same core registers the new command, so explicit historical installs work.
-    if [[ "$domain" == core ]] && grep -Fq '"commands/network/ufw.sh"' "$tree/lib/registry.sh"; then
-        [[ -f "$tree/lib/ufw.sh" && ! -L "$tree/lib/ufw.sh" ]] || {
-            vps_distribution_error 'core 领域包缺少 UFW 共享库：lib/ufw.sh'
-            return 10
-        }
-    fi
-    if [[ "$domain" == network && -f "$tree/commands/network/ufw.sh" ]]; then
-        for required in common inventory rules actions menu; do
-            [[ -f "$tree/commands/network/ufw/$required.sh" && ! -L "$tree/commands/network/ufw/$required.sh" ]] || {
-                vps_distribution_error "network 领域包缺少 UFW 模块：$required.sh"
-                return 10
-            }
-        done
-    fi
 }
 
 vps_distribution_atomic_marker() {
@@ -362,7 +329,11 @@ vps_distribution_install_bundle() {
     vps_distribution_validate_archive "$archive" "$domain" || return $?
     tar --no-same-owner --no-same-permissions -xzf "$archive" -C "$extract_root" || return 20
     vps_distribution_validate_tree "$extract_root" || return $?
-    vps_distribution_validate_domain_tree "$extract_root" "$domain" || return $?
+    vps_distribution_validate_bundle_tree "$extract_root" "$domain" || return $?
+    if [[ "$domain" == core && "$(<"$extract_root/VERSION")" != "$VPS_DISTRIBUTION_MANIFEST_VERSION" ]]; then
+        vps_distribution_error 'core bundle 版本与 manifest 不符'
+        return 10
+    fi
     [[ -d "$release_root" && ! -L "$release_root" ]] || return 3
     if [[ -n "$(find "$release_root" -type l -print -quit)" ]]; then
         vps_distribution_error "release 含有异常符号链接：$release_root"
@@ -376,9 +347,9 @@ vps_distribution_current_manifest() {
     printf '%s/.release/manifest.tsv' "${VPSCTL_PROJECT_ROOT:?}"
 }
 
-vps_distribution_ensure_domain() {
+vps_distribution_ensure_bundle() {
     local domain="${1:-}" manifest release_root marker expected work_root lock status=0 base_url
-    case "$domain" in core | network | system | security | service | test) ;; *) return 2 ;; esac
+    vps_registry_bundle_files "$domain" >/dev/null || return 2
     vps_distribution_is_distributed || return 0
     vps_distribution_init_paths
     release_root="${VPSCTL_PROJECT_ROOT:?}"
@@ -393,20 +364,31 @@ vps_distribution_ensure_domain() {
     # Core is the code currently executing. It is installed by the bootstrap,
     # never fetched lazily; in particular, self status must remain offline.
     if [[ "$domain" == core ]]; then
-        vps_distribution_validate_domain_tree "$release_root" core
+        vps_distribution_validate_bundle_tree "$release_root" core
         return $?
     fi
     manifest="$(vps_distribution_current_manifest)"
     vps_distribution_parse_manifest "$manifest" || return $?
-    expected="${VPS_DISTRIBUTION_BUNDLE_SHA256[$domain]}"
+    expected="${VPS_DISTRIBUTION_BUNDLE_SHA256[$domain]:-}"
+    [[ -n "$expected" && -f "$release_root/VERSION" && "$(<"$release_root/VERSION")" == "$VPS_DISTRIBUTION_MANIFEST_VERSION" ]] || return 10
     marker="${release_root}/.bundles/${domain}.sha256"
-    if [[ -f "$marker" && ! -L "$marker" && "$(<"$marker")" == "$expected" ]]; then
+    if [[ -f "$marker" && ! -L "$marker" && "$(<"$marker")" == "$expected" ]] && vps_distribution_validate_bundle_tree "$release_root" "$domain" >/dev/null 2>&1; then
         return 0
     fi
     mkdir -p -- "$release_root/.bundles" || return 20
     [[ -d "$release_root/.bundles" && ! -L "$release_root/.bundles" ]] || return 3
     lock="${release_root}/.bundles/.${domain}.lock"
     vps_distribution_acquire_lock "$lock" || return $?
+    # A preceding invocation may have populated the cache before lock acquisition.
+    if [[ -f "$marker" && ! -L "$marker" && "$(<"$marker")" == "$expected" ]] && vps_distribution_validate_bundle_tree "$release_root" "$domain" >/dev/null 2>&1; then
+        vps_distribution_release_lock "$lock"
+        return 0
+    fi
+    # A repair must not retain an old success marker while files are replaced.
+    rm -f -- "$marker" || {
+        vps_distribution_release_lock "$lock"
+        return 20
+    }
     work_root="$(mktemp -d "${release_root}/.bundles/.${domain}.work.XXXXXX")" || {
         vps_distribution_release_lock "$lock"
         return 20
@@ -418,14 +400,13 @@ vps_distribution_ensure_domain() {
     return "$status"
 }
 
-vps_distribution_cached_domains() {
-    local release_root="${1:-${VPSCTL_PROJECT_ROOT:-}}" marker domain
-    printf 'core\n'
-    for domain in network system security service test; do
-        marker="${release_root}/.bundles/${domain}.sha256"
-        [[ -f "$marker" && ! -L "$marker" ]] && printf '%s\n' "$domain"
-    done
-    return 0
+vps_distribution_ensure_command() {
+    local bundles bundle
+    vps_distribution_is_distributed || return 0
+    bundles="$(vps_registry_command_bundles "$1")" || return $?
+    while IFS= read -r bundle; do
+        vps_distribution_ensure_bundle "$bundle" || return $?
+    done <<<"$bundles"
 }
 
 vps_distribution_require_self_mutation() {
@@ -508,7 +489,7 @@ vps_distribution_validate_managed_install() {
     release_name="${resolved##*/}"
     [[ "$release_name" == "$VPS_DISTRIBUTION_MANIFEST_VERSION" && -f "$resolved/.vpsctl-managed-release" && ! -L "$resolved/.vpsctl-managed-release" ]] || return 3
     [[ "$(<"$resolved/.vpsctl-managed-release")" == $'Runarry/vps-script-lite\t'"${VPS_DISTRIBUTION_MANIFEST_VERSION}" ]] || return 3
-    vps_distribution_validate_domain_tree "$resolved" core || return $?
+    vps_distribution_validate_bundle_tree "$resolved" core || return $?
     [[ -f "$resolved/.bundles/core.sha256" && ! -L "$resolved/.bundles/core.sha256" && "$(<"$resolved/.bundles/core.sha256")" == "${VPS_DISTRIBUTION_BUNDLE_SHA256[core]}" ]] || return 3
     [[ -f "$VPSCTL_MANAGED_ENTRY" && ! -L "$VPSCTL_MANAGED_ENTRY" ]] || {
         vps_distribution_error '受管入口缺失、不是普通文件或是符号链接'
@@ -567,15 +548,15 @@ vps_distribution_self_status() {
     manifest="${VPSCTL_PROJECT_ROOT}/.release/manifest.tsv"
     if vps_distribution_is_distributed && vps_distribution_parse_manifest "$manifest" >/dev/null 2>&1; then
         printf '分发版本：%s\n' "$VPS_DISTRIBUTION_MANIFEST_VERSION"
-        for domain in core network system security service test; do
+        for domain in "${VPS_BUNDLE_IDS[@]}"; do
             marker="${VPSCTL_PROJECT_ROOT}/.bundles/${domain}.sha256"
-            [[ -f "$marker" && ! -L "$marker" && "$(<"$marker")" == "${VPS_DISTRIBUTION_BUNDLE_SHA256[$domain]}" ]] || continue
+            [[ -f "$marker" && ! -L "$marker" && "$(<"$marker")" == "${VPS_DISTRIBUTION_BUNDLE_SHA256[$domain]:-}" ]] || continue
             cached+="${separator}${domain}"
             separator=', '
         done
-        printf '缓存领域：%s\n' "${cached:-无}"
+        printf '缓存功能与共享包：%s\n' "${cached:-无}"
     else
-        printf '分发版本：未安装\n缓存领域：不适用\n'
+        printf '分发版本：未安装\n缓存功能与共享包：不适用\n'
     fi
     printf '项目路径：%s\n安装根：%s\nself 状态：%s\n' "$VPSCTL_PROJECT_ROOT" "$VPSCTL_INSTALL_ROOT" "$VPSCTL_SELF_STATE_ROOT"
 }
@@ -621,10 +602,9 @@ vps_distribution_cleanup_old_releases() {
 }
 
 vps_distribution_self_update_locked() {
-    local requested="${1:-}" work_root manifest launcher version release_target staging base_url domain status=0 current_tmp old_current
+    local requested="${1:-}" work_root manifest launcher version release_target staging base_url status=0 current_tmp old_current
     local entry_tmp state_launcher_tmp state_manifest_tmp state_sha_tmp rollback_ok=0
     local old_state_launcher old_state_manifest old_state_sha
-    local -a domains=()
     vps_distribution_validate_managed_install || return $?
     vps_distribution_confirm '确认下载并切换 vpsctl release，成功后删除受管历史版本？' || return $?
     work_root="$(mktemp -d "${VPSCTL_INSTALL_ROOT}/.update.XXXXXX")" || return 20
@@ -678,15 +658,12 @@ vps_distribution_self_update_locked() {
         rm -rf -- "$staging" "$work_root"
         return 20
     }
-    mapfile -t domains < <(vps_distribution_cached_domains "$VPSCTL_PROJECT_ROOT")
     base_url="https://github.com/Runarry/vps-script-lite/releases/download/v${version}"
-    for domain in "${domains[@]}"; do
-        if vps_distribution_install_bundle "$staging" "$domain" "$base_url" "$work_root"; then :; else
-            status=$?
-            rm -rf -- "$staging" "$work_root"
-            return "$status"
-        fi
-    done
+    if vps_distribution_install_bundle "$staging" core "$base_url" "$work_root"; then :; else
+        status=$?
+        rm -rf -- "$staging" "$work_root"
+        return "$status"
+    fi
     [[ -f "$staging/VERSION" && "$(<"$staging/VERSION")" == "$version" && -f "$staging/bin/vpsctl" && -f "$staging/lib/distribution.sh" && -f "$staging/commands/self/status.sh" ]] || {
         vps_distribution_error 'core bundle 不完整'
         rm -rf -- "$staging" "$work_root"

@@ -428,7 +428,7 @@ _proxy_core_restore_or_remove() {
 proxy_core_install() (
     local core="${1:-}" release_channel=stable channel_set=0 requested_tag="" version_set=0 arg external="" binary_logical owned=true
     local tmp="" candidate_config downloaded info version tag sha service_path service_logical config_logical meta_path pending_path
-    local config_backup="" service_backup="" failed=0
+    local config_backup="" service_backup="" failed=0 service_attempted=0 was_active=false was_enabled=false
     local -a required_tools=(jq curl sha256sum)
     (($# >= 1)) || { vps_cmd_error "install 需要 CORE"; return 2; }
     shift
@@ -514,7 +514,10 @@ proxy_core_install() (
                 vps_cmd_info "演练：复用外部普通可执行文件 $binary_logical（owned=false）"
             fi
         fi
-        vps_cmd_info "演练：写入 $config_logical、$service_logical 和内核元数据；不启动、不启用服务"
+        vps_cmd_info "演练：校验并写入 $config_logical、$service_logical 和内核元数据；立即启动、启用开机启动，确认运行和启用状态后保存 LKG"
+        proxy_service_action "$core" reload-manager || return $?
+        proxy_service_action "$core" start || return $?
+        proxy_service_action "$core" enable || return $?
         return 0
     fi
     tmp="$(mktemp -d "${TMPDIR:-/tmp}/vpsctl-proxy.XXXXXX")" || return 20
@@ -553,6 +556,8 @@ proxy_core_install() (
         "$(dirname -- "$(vps_cmd_system_path "$binary_logical")")" || { _proxy_core_remove_tmp "$tmp"; return 20; }
     [[ ! -f "$(proxy_core_config_path "$core")" ]] || config_backup="$(proxy_backup_file "$core" "$config_logical" config.json)" || { _proxy_core_remove_tmp "$tmp"; return 20; }
     [[ ! -f "$service_path" ]] || service_backup="$(proxy_backup_file "$core" "$service_logical" service)" || { _proxy_core_remove_tmp "$tmp"; return 20; }
+    proxy_service_is_active "$core" && was_active=true
+    proxy_service_is_enabled "$core" && was_enabled=true
     if [[ "$owned" == "true" ]]; then
         proxy_atomic_write_from_file "$downloaded" "$binary_logical" 0755 || failed=1
     fi
@@ -563,18 +568,56 @@ proxy_core_install() (
     ((failed)) || proxy_atomic_write_from_file "${tmp}/service" "$service_logical" "$( [[ "$PROXY_INIT_SYSTEM" == systemd ]] && printf 0644 || printf 0755 )" || failed=1
     ((failed)) || _proxy_core_write_meta "$core" "$binary_logical" "$owned" "$version" "$tag" "$sha" "" || failed=1
     ((failed)) || proxy_service_action "$core" reload-manager || failed=1
+    if ((failed == 0)); then
+        service_attempted=1
+        if [[ "$was_active" == true ]]; then
+            proxy_service_action "$core" restart || failed=1
+        else
+            proxy_service_action "$core" start || failed=1
+        fi
+    fi
+    ((failed)) || proxy_service_is_active "$core" || failed=1
+    ((failed)) || proxy_service_action "$core" enable || failed=1
+    ((failed)) || proxy_service_is_enabled "$core" || failed=1
+    ((failed)) || proxy_service_is_active "$core" || failed=1
     if ((failed)); then
+        # A failed service command may still have started or enabled the unit.
+        # Remove new enablement while its service definition still exists.
+        ((service_attempted == 0)) || proxy_service_action "$core" stop || failed=2
+        if [[ "$was_enabled" == false ]] && proxy_service_is_enabled "$core"; then
+            proxy_service_action "$core" disable || failed=2
+        fi
         _proxy_core_restore_or_remove "$config_backup" "$config_logical" 0600 || failed=2
         _proxy_core_restore_or_remove "$service_backup" "$service_logical" "$( [[ "$PROXY_INIT_SYSTEM" == systemd ]] && printf 0644 || printf 0755 )" || failed=2
         rm -f -- "$meta_path" || failed=2
         [[ "$owned" != "true" ]] || rm -f -- "$(vps_cmd_system_path "$binary_logical")" || failed=2
         proxy_service_action "$core" reload-manager >/dev/null 2>&1 || failed=2
+        proxy_core_switch_restore_service "$core" true "$was_active" "$was_enabled" || failed=2
+        if [[ "$was_active" == true ]]; then
+            proxy_service_is_active "$core" || failed=2
+        elif proxy_service_is_active "$core"; then
+            failed=2
+        fi
+        if [[ "$was_enabled" == true ]]; then
+            proxy_service_is_enabled "$core" || failed=2
+        elif proxy_service_is_enabled "$core"; then
+            failed=2
+        fi
         _proxy_core_remove_tmp "$tmp"
-        ((failed == 2)) && return 30
+        if ((failed == 2)); then
+            vps_cmd_error "$(proxy_core_label "$core") 安装失败，回滚不完整；请检查服务状态、配置和备份"
+            return 30
+        fi
+        vps_cmd_error "$(proxy_core_label "$core") 安装失败；已恢复安装前的文件和服务状态"
         return 20
     fi
+    if ! proxy_save_lkg "$core"; then
+        _proxy_core_remove_tmp "$tmp"
+        vps_cmd_error "$(proxy_core_label "$core") 已安装、启动并启用开机启动，但保存 LKG 失败"
+        return 30
+    fi
     _proxy_core_remove_tmp "$tmp"
-    vps_cmd_success "$(proxy_core_label "$core") $version 已安装；服务未启动或启用"
+    vps_cmd_success "$(proxy_core_label "$core") $version 已安装、启动并启用开机启动"
     [[ "$owned" == "true" ]] || vps_cmd_info "已复用外部二进制 $binary_logical（owned=false）"
 )
 

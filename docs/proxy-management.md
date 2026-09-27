@@ -23,7 +23,7 @@ bash bin/vpsctl service proxy install --core all --release-channel prerelease
 bash bin/vpsctl service proxy update --core xray --version vX.Y.Z
 bash bin/vpsctl service proxy node add --profile hysteria2 --core sing-box --port 8443 --address 203.0.113.10 --sni example.com
 bash bin/vpsctl service proxy relay status
-bash bin/vpsctl service proxy start --core sing-box --enable
+bash bin/vpsctl service proxy status --core all
 ```
 
 不带动作时，交互终端进入代理菜单；非交互环境显示全部内核状态。交互菜单不要求用户输入 `--core`、节点 ID 或内部枚举，而是根据当前状态列出有效候选并使用编号选择；地址、端口、名称等开放值在输入后校验。命令模式保留 `--core sing-box|xray|all` 作为高级消歧接口：只有一个符合动作要求的候选时可以自动选中，存在多个候选时，非交互调用必须显式指定适用的单个内核或 `all`。
@@ -72,7 +72,7 @@ Xray 与 sing-box 使用相同的命令模式生命周期接口：
 
 | 动作 | 用法与行为 |
 | --- | --- |
-| `install` | `install --core CORE|all [--release-channel stable\|prerelease] [--version TAG]`；按需安装指定内核，写入最小配置和服务定义，但不自动启动或设为开机启动。 |
+| `install` | `install --core CORE\|all [--release-channel stable\|prerelease] [--version TAG]`；按需安装指定内核，校验并写入配置、元数据和服务定义，立即启动并设为开机启动，确认状态后保存 LKG。 |
 | `update` | `update [--core CORE\|all] [--release-channel stable\|prerelease] [--version TAG] [--confirm-external-update]`；校验目标版本并重建配置，原子提交二进制、配置及必要状态迁移，不自动重启。 |
 | `uninstall` | `uninstall [--core CORE] [--purge] [--confirm-purge]`；停止、禁用并移除受管服务，默认保留配置、节点和备份。 |
 | `start` | `start [--core CORE] [--enable]`；启动内核，`--enable` 同时加入开机启动。 |
@@ -87,6 +87,8 @@ Xray 与 sing-box 使用相同的命令模式生命周期接口：
 无论选择哪个通道或精确 tag，下载与替换仍执行相同的安全检查：只接受对应官方 GitHub HTTPS Release 的唯一匹配资产，动态取得并验证 digest 或 `.dgst` 中的 SHA-256，检查解压目标和二进制版本，再用候选二进制验证重建的配置后原子提交。摘要不是仓库内的固定版本或固定值。
 
 `update` 会按候选内核版本重新生成受管配置，并归一化中转描述缓存；使用候选二进制校验通过后，将二进制、配置和必要状态迁移一并提交。即使二进制未改变，只要配置或迁移状态有变化，也会提交并记录待重启；全部无变化才返回无需更新。提交或后续启动失败时，按同一事务恢复旧二进制、配置、元数据和中转状态。
+
+首次安装和首次登记外部二进制均默认立即启动并启用开机启动；安装过程中启动、启用或状态确认失败时，会恢复原配置、服务定义和服务状态，移除本次元数据与自有二进制，并保留外部二进制。完整回滚返回 `20`，回滚不完整返回 `30`。服务已启动并启用后若 LKG 保存失败，则保留已运行的安装并返回 `30`。已经登记的内核重复执行 `install` 不改变服务状态，因此不会撤销手动停止或禁用；需要恢复运行时使用 `start --enable`。`install --core all` 逐个处理，单个失败不阻止另一个内核安装，部分成功返回 `30`。
 
 ### 外部二进制所有权
 

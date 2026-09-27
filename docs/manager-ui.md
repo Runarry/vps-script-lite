@@ -16,7 +16,7 @@
 | `vpsctl env` | 重新检测并显示完整环境信息 |
 | `vpsctl list` | 列出已登记的功能命令 |
 | `vpsctl help` | 显示参数和调用说明 |
-| `vpsctl self status` | 只读显示本地运行模式、分发版本、受管路径及领域缓存状态 |
+| `vpsctl self status` | 只读显示本地运行模式、分发版本、受管路径和功能、共享库缓存状态 |
 | `vpsctl self update [--version vX.Y.Z]` | 显式更新到 latest 或指定分发版本 |
 | `vpsctl self uninstall [--purge] [--confirm-uninstall] [--confirm-purge]` | 卸载 vpsctl 分发文件；purge 只额外清除 self 元数据 |
 
@@ -41,7 +41,7 @@ UI 显示以下摘要：
 
 容器、WSL、未知发行版或缺少基础管理器时显示黄色“受限”；非 Linux 显示红色“不支持”；满足基础条件时显示绿色“支持”。该状态只是入口层的快速提示，功能脚本仍必须自行验证它实际需要的全部前置条件。
 
-安装态的 core 常驻在 `/usr/local/lib/vpsctl/releases/<version>/`，`/usr/local/lib/vpsctl/current` 指向当前分发版本。首次选择 `network`、`system`、`security`、`service` 或 `test` 领域时，core 可以先显示一次下载提示，再从当前版本对应的同一个 GitHub Release 获取相应 bundle；只有 `vpsctl-manifest.tsv` 中的文件名、版本和 SHA-256 全部通过校验后才缓存和分发。缓存命中时不联网，不得混用其他分发版本的领域代码。
+安装态的 core 常驻在 `/usr/local/lib/vpsctl/releases/<version>/`，`current` 指向当前版本。全局帮助、环境、版本、清单和菜单浏览无需功能下载；真正选择某个功能或调用其帮助时，才按注册表加载共享依赖和 `<domain>-<action>` bundle。文件名、版本、SHA-256、路径及必需私有模块校验通过后才写入有效缓存；已经缓存的功能可离线运行，不混用其他版本代码。
 
 ## 3. UI 层级
 
@@ -128,7 +128,7 @@ UI 使用 ASCII 边框和可选 ANSI 语义色，适合普通 SSH 终端：青�
 
 ### 4.1 Self 管理边界
 
-`vpsctl self status` 只读取本地安装与缓存元数据，不借机访问 GitHub。`vpsctl self update` 默认解析 latest；`--version vX.Y.Z` 固定目标 Release。更新必须下载并校验该版本的 `vpsctl-manifest.tsv` 与 core；当前版本已经缓存的领域也从目标版本的同一 Release 下载、校验并写入新版本目录，随后才原子切换 `/usr/local/lib/vpsctl/current`。任何失败都保留原 current；此前未缓存的领域仍在新版本首次使用时按需下载。
+`vpsctl self status` 只读取本地元数据，显示缓存功能与共享包，不访问 GitHub。`self update` 默认解析 latest，`--version vX.Y.Z` 固定目标；跨版本只下载并验证 manifest、安装器和 core，不预取任何旧缓存功能或共享包。提交前失败保留原 current；成功后新版本各功能在首次调用时下载。旧 schema 1 分发须先普通卸载管理器再安装 schema 2，服务、配置、功能状态和备份保持不变。
 
 普通卸载在交互菜单中确认一次；直接调用可用全局 `--yes` 或兼容的 `--confirm-uninstall` 授权，非交互未授权时立即失败。它删除 `/usr/local/bin/vpsctl`、vpsctl 分发版本目录和 current，但不得触碰：
 

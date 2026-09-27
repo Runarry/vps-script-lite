@@ -109,37 +109,57 @@ vps-script-lite/
 /var/lib/vpsctl/self/                        # 安装、自更新、资产缓存元数据
 ```
 
-`core` 随每个分发版本常驻，必须足以完成启动、帮助、版本解析、固定登记、自管理和领域资产装载。`network`、`system`、`security`、`service` 与 `test` 是按领域发布的 bundle；首次分发某领域命令时，core 从当前版本对应的同一个 GitHub Release 下载 bundle，先按清单中的 SHA-256 校验，再写入该版本缓存并执行。校验失败、版本不匹配或资产缺失时不得执行已有临时文件，也不得回退到其他分发版本的 bundle。正常启动和菜单刷新均不检查更新，不应因为 GitHub 不可用而阻断已经缓存的功能。
+`core` 常驻，只包含 `bin/vpsctl`、`VERSION`、`environment.sh`、`registry.sh`、`ui.sh`、`distribution.sh` 和三个 self 命令。每个非 self 公开命令独立打包为 `<domain>-<action>`，文件边界和全部私有模块由 `lib/registry.sh` 的固定清单定义。所有功能依赖 `shared-command`；`network ufw`、`security access`、`security tls`、`service proxy` 另依赖 `shared-ufw`；两项测试另依赖 `shared-server-test`。首次执行功能或功能帮助时，按依赖顺序下载、校验、缓存，再分发。全局帮助、版本、环境、清单、菜单浏览和 self 状态保持离线。更新只获取目标版本的 manifest、安装器和 core，不预取旧缓存；不同版本的功能和共享库不得混用。
 
-仓库根 `VERSION` 是项目版本的规范来源。当前版本 `0.8.9` 的 tag 为 `v0.8.9`，Release 必须同时包含：
+仓库根 `VERSION` 是项目版本的规范来源。以下是未发布源码的 schema 2 命名示例，借用当前源码版本 `0.8.9`；已发布 `v0.8.9` 仍是 schema 1。未来发布 schema 2 必须使用新版本 tag 和完整资产，不覆盖现有 Release：
 
 ```text
 vpsctl.sh
 vpsctl-manifest.tsv
 vpsctl-core-0.8.9.tar.gz
-vpsctl-network-0.8.9.tar.gz
-vpsctl-system-0.8.9.tar.gz
-vpsctl-security-0.8.9.tar.gz
-vpsctl-service-0.8.9.tar.gz
-vpsctl-test-0.8.9.tar.gz
+vpsctl-shared-command-0.8.9.tar.gz
+vpsctl-shared-ufw-0.8.9.tar.gz
+vpsctl-shared-server-test-0.8.9.tar.gz
+vpsctl-network-bbr-0.8.9.tar.gz
+vpsctl-network-dns-0.8.9.tar.gz
+vpsctl-network-ip-policy-0.8.9.tar.gz
+vpsctl-network-ufw-0.8.9.tar.gz
+vpsctl-network-rfw-0.8.9.tar.gz
+vpsctl-system-kernel-0.8.9.tar.gz
+vpsctl-security-access-0.8.9.tar.gz
+vpsctl-security-fail2ban-0.8.9.tar.gz
+vpsctl-security-tls-0.8.9.tar.gz
+vpsctl-service-proxy-0.8.9.tar.gz
+vpsctl-test-nodequality-0.8.9.tar.gz
+vpsctl-test-tcpquality-0.8.9.tar.gz
 ```
 
 bundle 内部使用项目根相对路径，不能再包一层顶级目录。core 允许 `lib/` 及其子路径内的公共库，构建脚本仍显式选择发布文件；保留必需入口、哈希、路径越界及链接/特殊文件检查。`vpsctl-manifest.tsv` 是严格 TSV，字段顺序如下；SHA-256 使用 64 位小写十六进制：
 
 ```text
-schema_version<TAB>1
+schema_version<TAB>2
 version<TAB>0.8.9
 repository<TAB>Runarry/vps-script-lite
 asset<TAB>launcher<TAB>vpsctl.sh<TAB>SHA256
 bundle<TAB>core<TAB>vpsctl-core-0.8.9.tar.gz<TAB>SHA256
-bundle<TAB>network<TAB>vpsctl-network-0.8.9.tar.gz<TAB>SHA256
-bundle<TAB>system<TAB>vpsctl-system-0.8.9.tar.gz<TAB>SHA256
-bundle<TAB>security<TAB>vpsctl-security-0.8.9.tar.gz<TAB>SHA256
-bundle<TAB>service<TAB>vpsctl-service-0.8.9.tar.gz<TAB>SHA256
-bundle<TAB>test<TAB>vpsctl-test-0.8.9.tar.gz<TAB>SHA256
+bundle<TAB>shared-command<TAB>vpsctl-shared-command-0.8.9.tar.gz<TAB>SHA256
+bundle<TAB>shared-ufw<TAB>vpsctl-shared-ufw-0.8.9.tar.gz<TAB>SHA256
+bundle<TAB>shared-server-test<TAB>vpsctl-shared-server-test-0.8.9.tar.gz<TAB>SHA256
+bundle<TAB>network-bbr<TAB>vpsctl-network-bbr-0.8.9.tar.gz<TAB>SHA256
+bundle<TAB>network-dns<TAB>vpsctl-network-dns-0.8.9.tar.gz<TAB>SHA256
+bundle<TAB>network-ip-policy<TAB>vpsctl-network-ip-policy-0.8.9.tar.gz<TAB>SHA256
+bundle<TAB>network-ufw<TAB>vpsctl-network-ufw-0.8.9.tar.gz<TAB>SHA256
+bundle<TAB>network-rfw<TAB>vpsctl-network-rfw-0.8.9.tar.gz<TAB>SHA256
+bundle<TAB>system-kernel<TAB>vpsctl-system-kernel-0.8.9.tar.gz<TAB>SHA256
+bundle<TAB>security-access<TAB>vpsctl-security-access-0.8.9.tar.gz<TAB>SHA256
+bundle<TAB>security-fail2ban<TAB>vpsctl-security-fail2ban-0.8.9.tar.gz<TAB>SHA256
+bundle<TAB>security-tls<TAB>vpsctl-security-tls-0.8.9.tar.gz<TAB>SHA256
+bundle<TAB>service-proxy<TAB>vpsctl-service-proxy-0.8.9.tar.gz<TAB>SHA256
+bundle<TAB>test-nodequality<TAB>vpsctl-test-nodequality-0.8.9.tar.gz<TAB>SHA256
+bundle<TAB>test-tcpquality<TAB>vpsctl-test-tcpquality-0.8.9.tar.gz<TAB>SHA256
 ```
 
-manifest 的 `version`、tag、文件名、安装目标版本和应用展示版本必须一致。`current` 只在 manifest、core 及必要安装文件完成校验并落盘后切换；更新提交完成前失败时保留原 release，并按现有事务流程恢复原 current、入口和 self 元数据。
+manifest 的 `version`、tag、文件名、安装目标版本和应用展示版本必须一致。schema 2 不解析旧 schema 1；跨格式迁移须普通卸载管理器后重新安装，保留服务、配置、功能状态和备份。bootstrap 在 core 安装前只验证安全、唯一的 bundle 记录并要求 core，不执行下载的注册表。运行时按本地固定清单验证功能及共享包的精确路径和必需文件，锁内再次检查缓存，成功后才写 marker；失败清除本次临时资产。`current` 在 manifest、core 和安装器完成校验并落盘后切换；提交前失败仍恢复原 current、入口和 self 元数据。
 
 `self update` 仅在跨版本更新的 current、快捷入口及 self 元数据全部提交成功后清理历史 release，不保留自动回退版本。清理只处理 `releases/` 下名称为 `X.Y.Z` 的非符号链接目录，且普通文件 `.vpsctl-managed-release` 的单条记录必须为 `Runarry/vps-script-lite<TAB>X.Y.Z`、与目录名称匹配；当前 release、临时目录及不受管或异常条目跳过。历史清理失败时不回滚已激活的新版本，返回 `30` 并报告未完成路径；部分删除若已移除归属标识，则在原安全目录仍存在时恢复该标识，供下次成功跨版本更新重试。同版本更新只同步 self 缓存，同版本更新和提交失败路径均不清理历史版本。self 缓存缺失或普通文件内容损坏不阻断操作；更新回滚材料来自当前已验证入口和 release manifest，当前安装归属与完整性检查仍保留。初始安装、卸载及业务功能的状态与备份不受此策略影响。
 
@@ -170,7 +190,7 @@ manifest 的 `version`、tag、文件名、安装目标版本和应用展示版�
 
 管理入口应以子进程方式执行公开功能脚本，而不是加载其业务代码，以隔离参数、陷阱、工作目录和退出状态。公开功能脚本可以加载明确声明的公共库及自身同名目录中的固定私有模块；私有模块不得反向加载公开功能脚本或绕过入口自行分发。
 
-安装态的调用关系保持相同，只是 core 和领域代码来自 `/usr/local/lib/vpsctl/current` 指向的同一分发版本；源码树运行继续使用仓库内 `bin/`、`lib/` 和 `commands/`。领域下载与缓存属于 core 的装载职责，不改变功能脚本之间不得互相调用的边界。
+安装态的调用关系保持相同，core、功能及共享库来自 `/usr/local/lib/vpsctl/current` 指向的同一版本；源码树继续使用仓库固定路径。功能和共享库下载缓存属于 core 的装载职责，不改变功能脚本之间不得互相调用的边界。
 
 ## 5. 稳定边界
 

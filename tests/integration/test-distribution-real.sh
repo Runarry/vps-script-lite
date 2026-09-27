@@ -11,6 +11,7 @@ readonly SELF_ROOT=/var/lib/vpsctl/self
 
 [[ "$(uname -s)" == Linux ]] || { printf 'SKIP: distribution real test requires Linux\n'; exit 0; }
 ((EUID == 0)) || { printf 'FAIL: distribution real test requires root\n' >&2; exit 4; }
+command -v script >/dev/null 2>&1 || { printf 'FAIL: distribution menu test requires script\n' >&2; exit 3; }
 
 TEST_TEMP="$(mktemp -d /root/vpsctl-distribution-real.XXXXXX)"
 RELEASE_DIR="${TEST_TEMP}/release"
@@ -20,6 +21,7 @@ MARKER_ID="distribution-real-$$"
 ETC_MARKER="/etc/vpsctl/${MARKER_ID}"
 STATE_MARKER="/var/lib/vpsctl/network/${MARKER_ID}"
 LIBEXEC_MARKER="/usr/local/libexec/${MARKER_ID}"
+BACKUP_MARKER="/var/backups/vpsctl/${MARKER_ID}"
 
 fail() {
     printf 'FAIL: %s\n' "$1" >&2
@@ -48,7 +50,7 @@ cleanup() {
     restore_path "$ENTRY"
     restore_path "$INSTALL_ROOT"
     restore_path "$SELF_ROOT"
-    rm -f -- "$ETC_MARKER" "$STATE_MARKER" "$LIBEXEC_MARKER"
+    rm -f -- "$ETC_MARKER" "$STATE_MARKER" "$LIBEXEC_MARKER" "$BACKUP_MARKER"
     rm -rf -- "$TEST_TEMP"
 }
 
@@ -88,6 +90,7 @@ while (($# > 0)); do
         *) shift ;;
     esac
 done
+printf '%s\n' "${url##*/}" >>"${VPSCTL_TEST_DOWNLOAD_TRACE:?}"
 [[ "${VPSCTL_TEST_CURL_FAIL:-0}" != 1 ]] || exit 77
 [[ -n "$destination" && -n "$url" ]] || exit 2
 case "$url" in
@@ -102,9 +105,31 @@ esac
 MOCK_CURL
 chmod 0755 "$MOCK_BIN/curl"
 export VPSCTL_TEST_ASSET_DIR="$RELEASE_DIR"
+export VPSCTL_TEST_DOWNLOAD_TRACE="$TEST_TEMP/download-trace"
+mkdir -p -- "${ETC_MARKER%/*}" "${STATE_MARKER%/*}" "${LIBEXEC_MARKER%/*}" "${BACKUP_MARKER%/*}"
+touch -- "$ETC_MARKER" "$STATE_MARKER" "$LIBEXEC_MARKER" "$BACKUP_MARKER"
 
-install_output="$(PATH="$MOCK_BIN:$PATH" bash "$RELEASE_DIR/vpsctl.sh" \
-    --verified-manifest "$RELEASE_DIR/vpsctl-manifest.tsv" --version)"
+# Optional historical fixture must be the actual published schema-1 release.
+if [[ -n "${VPSCTL_TEST_LEGACY_ASSET_DIR:-}" ]]; then
+    legacy="$VPSCTL_TEST_LEGACY_ASSET_DIR"
+    [[ "$(head -n 1 "$legacy/vpsctl-manifest.tsv")" == $'schema_version\t1' ]] || fail 'legacy fixture is not schema 1'
+    awk -F '\t' '$1 == "asset" || $1 == "bundle" {print $NF "  " $(NF-1)}' "$legacy/vpsctl-manifest.tsv" |
+        (cd "$legacy" && sha256sum -c -) >/dev/null || fail 'legacy asset digest mismatch'
+    export VPSCTL_TEST_ASSET_DIR="$legacy"
+    PATH="$MOCK_BIN:$PATH" bash "$legacy/vpsctl.sh" --verified-manifest "$legacy/vpsctl-manifest.tsv" --version >/dev/null
+    PATH="$MOCK_BIN:$PATH" "$ENTRY" network bbr --help >/dev/null
+    [[ -f "$INSTALL_ROOT/current/.bundles/network.sha256" ]] || fail 'legacy domain cache missing'
+    "$ENTRY" --non-interactive self uninstall --confirm-uninstall >/dev/null
+    [[ ! -e "$ENTRY" && ! -e "$INSTALL_ROOT/releases" ]] || fail 'legacy normal uninstall left managed code'
+    export VPSCTL_TEST_ASSET_DIR="$RELEASE_DIR"
+fi
+
+: >"$VPSCTL_TEST_DOWNLOAD_TRACE"
+install_output="$(PATH="$MOCK_BIN:$PATH" bash "$RELEASE_DIR/vpsctl.sh" --version)"
+[[ "$(sort "$VPSCTL_TEST_DOWNLOAD_TRACE")" == "$(printf '%s\n' vpsctl.sh vpsctl-manifest.tsv vpsctl-core-0.8.9.tar.gz | sort)" ]] ||
+    fail 'fresh install downloaded more than launcher, manifest and core'
+[[ -f "$ETC_MARKER" && -f "$STATE_MARKER" && -f "$LIBEXEC_MARKER" && -f "$BACKUP_MARKER" ]] ||
+    fail 'migration did not preserve business data'
 [[ "$install_output" == 'vpsctl 0.8.9' ]] || fail 'bootstrap did not enter the installed CLI'
 [[ -x "$ENTRY" && -L "$INSTALL_ROOT/current" ]] || fail 'managed launcher/current were not installed'
 release_root="$(readlink -f -- "$INSTALL_ROOT/current")"
@@ -118,23 +143,44 @@ PATH="$MOCK_BIN:$PATH" bash "$RELEASE_DIR/vpsctl.sh" \
     --verified-manifest "$RELEASE_DIR/vpsctl-manifest.tsv" --version >/dev/null
 VPSCTL_TEST_CURL_FAIL=1 PATH="$MOCK_BIN:$PATH" "$ENTRY" --version >/dev/null ||
     fail 'reinstall did not repair the existing release entry permissions'
-for domain in network system security service test; do
-    [[ ! -e "$release_root/.bundles/${domain}.sha256" ]] || fail "${domain} was installed eagerly"
+[[ "$(find "$release_root/.bundles" -type f -printf '%f\n')" == core.sha256 ]] || fail 'non-core bundle installed eagerly'
+[[ ! -e "$release_root/lib/command.sh" && ! -e "$release_root/lib/ufw.sh" && ! -e "$release_root/lib/server-test.sh" ]] ||
+    fail 'core contains feature shared libraries'
+: >"$VPSCTL_TEST_DOWNLOAD_TRACE"
+for builtin in --help --version list env; do
+    VPSCTL_TEST_CURL_FAIL=1 PATH="$MOCK_BIN:$PATH" "$ENTRY" "$builtin" >/dev/null
 done
+VPSCTL_TEST_CURL_FAIL=1 PATH="$MOCK_BIN:$PATH" "$ENTRY" self status >/dev/null
+[[ ! -s "$VPSCTL_TEST_DOWNLOAD_TRACE" ]] || fail 'core browsing contacted the network'
+
+# Browse the actual TTY menus without selecting a feature: core must be enough.
+printf '1\nb\nq\n' |
+    VPSCTL_TEST_CURL_FAIL=1 PATH="$MOCK_BIN:$PATH" TERM=dumb \
+        script -q -e -c "$ENTRY --no-color --no-clear menu" /dev/null >"$TEST_TEMP/menu.log" 2>&1 ||
+    fail 'installed menu browsing failed'
+grep -Fq '主菜单 / 网络设置' "$TEST_TEMP/menu.log" || fail 'network category menu was not reached'
+[[ ! -s "$VPSCTL_TEST_DOWNLOAD_TRACE" ]] || fail 'menu browsing contacted the network'
+[[ "$(find "$release_root/.bundles" -type f -printf '%f\n')" == core.sha256 ]] || fail 'menu browsing cached a feature'
 
 PATH="$MOCK_BIN:$PATH" "$ENTRY" network bbr --help >/dev/null
-PATH="$MOCK_BIN:$PATH" "$ENTRY" network ufw --help >/dev/null
-PATH="$MOCK_BIN:$PATH" "$ENTRY" system kernel --help >/dev/null
-PATH="$MOCK_BIN:$PATH" "$ENTRY" security fail2ban --help >/dev/null
-PATH="$MOCK_BIN:$PATH" "$ENTRY" service proxy --help >/dev/null
-PATH="$MOCK_BIN:$PATH" "$ENTRY" test nodequality --help >/dev/null
-for domain in network system security service test; do
-    [[ -f "$release_root/.bundles/${domain}.sha256" ]] || fail "${domain} was not cached on demand"
+[[ "$(sort "$VPSCTL_TEST_DOWNLOAD_TRACE")" == "$(printf '%s\n' vpsctl-shared-command-0.8.9.tar.gz vpsctl-network-bbr-0.8.9.tar.gz | sort)" ]] ||
+    fail 'first BBR invocation downloaded unrelated bundles'
+[[ ! -e "$release_root/commands/network/dns.sh" && ! -e "$release_root/lib/ufw.sh" ]] || fail 'BBR cache contains unrelated code'
+features=(network-bbr network-dns network-ip-policy network-ufw network-rfw system-kernel security-access security-fail2ban security-tls service-proxy test-nodequality test-tcpquality)
+for feature in "${features[@]}"; do
+    PATH="$MOCK_BIN:$PATH" "$ENTRY" "${feature%%-*}" "${feature#*-}" --help >/dev/null
+    [[ -f "$release_root/.bundles/${feature}.sha256" ]] || fail "$feature was not cached on demand"
 done
-
-VPSCTL_TEST_CURL_FAIL=1 PATH="$MOCK_BIN:$PATH" "$ENTRY" network bbr --help >/dev/null
-VPSCTL_TEST_CURL_FAIL=1 PATH="$MOCK_BIN:$PATH" "$ENTRY" network ufw --help >/dev/null
+for shared in command ufw server-test; do
+    [[ "$(grep -Fc "vpsctl-shared-${shared}-0.8.9.tar.gz" "$VPSCTL_TEST_DOWNLOAD_TRACE")" == 1 ]] ||
+        fail "shared $shared fetched more than once"
+done
+: >"$VPSCTL_TEST_DOWNLOAD_TRACE"
+for feature in "${features[@]}"; do
+    VPSCTL_TEST_CURL_FAIL=1 PATH="$MOCK_BIN:$PATH" "$ENTRY" "${feature%%-*}" "${feature#*-}" --help >/dev/null
+done
 VPSCTL_TEST_CURL_FAIL=1 PATH="$MOCK_BIN:$PATH" "$ENTRY" self status >/dev/null
+[[ ! -s "$VPSCTL_TEST_DOWNLOAD_TRACE" ]] || fail 'cached feature contacted the network'
 rm -- "$SELF_ROOT/vpsctl.sh"
 printf 'corrupt cache\n' >"$SELF_ROOT/manifest.tsv"
 PATH="$MOCK_BIN:$PATH" "$ENTRY" --yes --non-interactive self update >/dev/null
@@ -164,7 +210,10 @@ core_sha="$(sha256sum "$NEXT_ASSETS/vpsctl-core-0.8.10.tar.gz" | awk '{print $1}
 sed -i "s/^bundle\tcore\t.*/bundle\tcore\tvpsctl-core-0.8.10.tar.gz\t${core_sha}/" "$NEXT_ASSETS/vpsctl-manifest.tsv"
 export VPSCTL_TEST_ASSET_DIR="$NEXT_ASSETS"
 rm -rf -- "$SELF_ROOT"
+: >"$VPSCTL_TEST_DOWNLOAD_TRACE"
 PATH="$MOCK_BIN:$PATH" "$ENTRY" --yes --non-interactive self update --version v0.8.10 >/dev/null
+[[ "$(sort "$VPSCTL_TEST_DOWNLOAD_TRACE")" == "$(printf '%s\n' vpsctl.sh vpsctl-manifest.tsv vpsctl-core-0.8.10.tar.gz | sort)" ]] ||
+    fail 'cross-version update prefetched feature/shared bundles'
 [[ -f "$INSTALL_ROOT/current/lib/nested/update-helper.sh" ]] || fail 'update rejected new shared library'
 cmp "$ENTRY" "$SELF_ROOT/vpsctl.sh" || fail 'versioned update did not restore cached launcher'
 [[ "$(readlink -f "$INSTALL_ROOT/current")" == "$INSTALL_ROOT/releases/0.8.10" ]] || fail 'versioned update did not switch current'
@@ -175,9 +224,10 @@ VPSCTL_TEST_CURL_FAIL=1 PATH="$MOCK_BIN:$PATH" "$ENTRY" --version | grep -Fx 'vp
     fail 'updated shortcut could not run offline as root'
 su nobody -s /bin/bash -c "$ENTRY --version" | grep -Fx 'vpsctl 0.8.10' >/dev/null ||
     fail 'updated shortcut could not run as an ordinary user'
-for domain in network system security service test; do
-    [[ -f "$INSTALL_ROOT/current/.bundles/${domain}.sha256" ]] || fail "updated ${domain} cache is missing"
-done
+[[ "$(find "$INSTALL_ROOT/current/.bundles" -type f -printf '%f\n')" == core.sha256 ]] || fail 'update is not core-only'
+[[ ! -e "$INSTALL_ROOT/current/commands/network" && ! -e "$INSTALL_ROOT/current/lib/command.sh" ]] ||
+    fail 'update copied old feature code'
+PATH="$MOCK_BIN:$PATH" "$ENTRY" network bbr --help >/dev/null
 VPSCTL_TEST_CURL_FAIL=1 PATH="$MOCK_BIN:$PATH" "$ENTRY" network bbr --help >/dev/null
 export VPSCTL_TEST_ASSET_DIR="$RELEASE_DIR"
 

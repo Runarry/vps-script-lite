@@ -69,6 +69,7 @@ for syntax_file in \
     "${TEST_ROOT}/tests/integration/test-service-proxy-reality-anti-relay-real.sh" \
     "${TEST_ROOT}/tests/integration/test-service-proxy-dns-real.sh" \
     "${TEST_ROOT}/tests/integration/test-distribution-real.sh" \
+    "${TEST_ROOT}/tests/integration/test-service-proxy-install-real.sh" \
     "${TEST_ROOT}/tests/integration/test-service-proxy-relay-cores-real.sh" \
     "${TEST_ROOT}/tests/integration/test-service-proxy-relay-real.sh" \
     "${TEST_ROOT}"/tests/integration/test-*ufw*-real.sh \

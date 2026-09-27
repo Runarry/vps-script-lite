@@ -100,3 +100,33 @@ vpsctl --version
 ```
 
 该命令只恢复当前入口的执行权限；后续升级应使用包含本修复的新 Release。
+
+## 按功能分发验收（2026-09-27，未发布）
+
+基于 `0d38992` 的工作区修改，源码版本仍为 `0.8.9`，未修改 tag 或发布资产。新格式为 manifest schema 2，包含 core、三个共享库包及十二个公开功能包；已发布的 `v0.8.9` 仍是 schema 1，后续发布必须使用新版本。全部项目执行、语法和静态检查均通过 `ssh host-vps-scripts` 在专用 Debian 13 主机进行。
+
+合并后的 `bash tests/run.sh` 完整通过，退出码为 `0`，包括全部单元测试、逐脚本语法检查和主管理入口集成测试。代理安装矩阵覆盖两个内核、systemd/OpenRC、下载与外部二进制登记、启动/启用失败后的恢复、部分恢复失败、LKG 保存失败，以及已登记内核重复安装和多内核部分成功。
+
+真实安装验收通过，退出码为 `0`：
+
+- 从 GitHub 获取实际发布的 `v0.8.9` 安装器、清单和六个旧领域包，逐项验证 SHA-256；先安装旧版并缓存 network，再普通卸载，使用工作区构建的新格式重新安装。配置、业务状态、备份及 libexec 标记均保留。
+- 首次安装的下载记录恰好为 manifest、安装器和 core；通用命令库、UFW 库、测速包装库均未预装。
+- 全局帮助、版本、清单、环境及 self 状态在下载器被禁用时仍可用。通过真实伪终端进入主菜单及网络分类、返回并退出，下载记录为空，仍只有 core 缓存标记。
+- 首次调用 BBR 只下载 `shared-command` 和 `network-bbr`，未落盘 DNS 或 UFW 代码。十二项功能帮助均可按需加载，三个共享库各下载一次；随后禁用下载器，全部功能帮助均可离线复用。
+- 在已经缓存全部功能后升级到隔离夹具 `0.8.10`，仍只请求 manifest、安装器和 core。新版本不带旧功能代码，首次再次使用 BBR 才下载新版依赖；历史版本清理、普通用户入口权限和 self 缓存修复均通过。
+- 普通卸载、purge 的业务数据保护及原有 locale 场景继续通过。分发单元测试还覆盖错误哈希、下载失败与重试、缺少私有模块、包路径边界、锁内缓存重查和失效缓存修复。
+
+关键命令在远端合并源码目录执行：
+
+```bash
+cd /var/tmp/vpsctl-lazy-autostart.sj4HrXmQ/integrated
+bash tests/run.sh
+VPSCTL_TEST_LEGACY_ASSET_DIR=/var/tmp/vpsctl-lazy-autostart.sj4HrXmQ/legacy \
+    bash tests/integration/test-distribution-real.sh
+```
+
+受影响脚本的语法检查及 `shellcheck -x -P SCRIPTDIR --severity=error --extended-analysis=false` 均通过。代理相关脚本的无限制 ShellCheck 分析曾因测试机内存限制被终止；完整告警级别还包含既有诊断，因此不把本次结果表述为全仓库零告警。没有为既有 shfmt 风格差异重排无关代码。
+
+真实分发测试退出时恢复 `/usr/local/bin/vpsctl`、`/usr/local/lib/vpsctl` 和 `/var/lib/vpsctl/self`，已核对 current 恢复为原 `0.1.0`。Xray 恢复为 active/enabled、sing-box 为 inactive/disabled、中转刷新服务为 active/enabled。代理的真实安装启动、LKG 和文件恢复证据另见 [代理安装验收](proxy-install-validation.md)。
+
+原始日志保留在专用主机 `/var/tmp/vpsctl-lazy-autostart.sj4HrXmQ/evidence/`：`tests-run.log`、`tests-run.rc`、`distribution-real.log`、`distribution-real.rc`、`static-final.log` 和 `static-final.rc`。旧版发布资产和独立代理验收记录保留在同一工作目录的 `legacy/`、`proxy-real/`，不将主机配置正文或凭据提交仓库。

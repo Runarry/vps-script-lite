@@ -68,7 +68,6 @@ vpsctl_validate_manifest() {
     local LC_ALL=C
     local manifest=$1
     local -a lines=()
-    local -a bundle_names=(core network system security service test)
     local index=0
     local line=''
     local kind=''
@@ -79,11 +78,11 @@ vpsctl_validate_manifest() {
 
     [[ -f "$manifest" && ! -L "$manifest" ]] || vpsctl_bootstrap_die 'manifest is not a safe regular file'
     mapfile -t lines <"$manifest"
-    [[ ${#lines[@]} -eq 10 ]] || vpsctl_bootstrap_die 'manifest must contain exactly 10 records'
+    [[ ${#lines[@]} -ge 5 ]] || vpsctl_bootstrap_die 'manifest is missing required records'
     for line in "${lines[@]}"; do
         [[ -n "$line" && "$line" != *$'\r'* ]] || vpsctl_bootstrap_die 'manifest contains an invalid record'
     done
-    [[ ${lines[0]} == $'schema_version\t1' ]] || vpsctl_bootstrap_die 'unsupported manifest schema'
+    [[ ${lines[0]} == $'schema_version\t2' ]] || vpsctl_bootstrap_die 'unsupported manifest schema; uninstall normally and reinstall to migrate (feature data is preserved)'
     [[ ${lines[1]} =~ ^version$'\t'([0-9]+\.[0-9]+\.[0-9]+)$ ]] ||
         vpsctl_bootstrap_die 'invalid distribution version in manifest'
     VPSCTL_DISTRIBUTION_VERSION="${BASH_REMATCH[1]}"
@@ -98,18 +97,25 @@ vpsctl_validate_manifest() {
     VPSCTL_MANIFEST_FILES[launcher]=$filename
     VPSCTL_MANIFEST_HASHES[launcher]=$digest
 
-    for index in "${!bundle_names[@]}"; do
-        IFS=$'\t' read -r kind name filename digest extra <<<"${lines[index + 4]}"
-        [[ "$kind" == bundle && "$name" == "${bundle_names[index]}" && -z "$extra" ]] ||
-            vpsctl_bootstrap_die 'invalid or out-of-order bundle manifest record'
+    VPSCTL_MANIFEST_FILES=([launcher]=vpsctl.sh)
+    VPSCTL_MANIFEST_HASHES=([launcher]="$digest")
+    for ((index = 4; index < ${#lines[@]}; index++)); do
+        IFS=$'\t' read -r kind name filename digest extra <<<"${lines[index]}"
+        [[ "$kind" == bundle && -z "$extra" ]] ||
+            vpsctl_bootstrap_die 'invalid bundle manifest record'
+        [[ "$name" == core || "$name" =~ ^(shared|network|system|security|service|test)-[a-z][a-z0-9]*(-[a-z0-9]+)*$ ]] ||
+            vpsctl_bootstrap_die 'unsafe bundle name'
+        [[ -z "${VPSCTL_MANIFEST_FILES[$name]+set}" ]] ||
+            vpsctl_bootstrap_die 'duplicate bundle manifest record'
         [[ "$filename" == "vpsctl-${name}-${VPSCTL_DISTRIBUTION_VERSION}.tar.gz" ]] ||
             vpsctl_bootstrap_die "unexpected bundle filename: ${filename}"
         [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || vpsctl_bootstrap_die "invalid SHA256 for bundle: ${name}"
-        [[ ${lines[index + 4]} == $'bundle\t'"$name"$'\t'"$filename"$'\t'"$digest" ]] ||
+        [[ ${lines[index]} == $'bundle\t'"$name"$'\t'"$filename"$'\t'"$digest" ]] ||
             vpsctl_bootstrap_die "bundle manifest record is not strict TSV: ${name}"
         VPSCTL_MANIFEST_FILES[$name]=$filename
         VPSCTL_MANIFEST_HASHES[$name]=$digest
     done
+    [[ -n "${VPSCTL_MANIFEST_FILES[core]:-}" ]] || vpsctl_bootstrap_die 'manifest is missing core'
 }
 
 vpsctl_verify_file() {
@@ -191,7 +197,7 @@ vpsctl_validate_archive_paths() {
             vpsctl_bootstrap_die "core archive escapes its root: ${entry}"
         case "$entry" in
             VERSION) found_version=1 ;;
-            bin | bin/ | bin/vpsctl | lib | lib/* | commands | commands/ | commands/self | commands/self/ | commands/self/*) ;;
+            bin | bin/ | bin/vpsctl | lib | lib/* | commands | commands/ | commands/self | commands/self/ | commands/self/status.sh | commands/self/update.sh | commands/self/uninstall.sh) ;;
             *) vpsctl_bootstrap_die "unexpected path in core archive: ${entry}" ;;
         esac
         [[ "$entry" != bin/vpsctl ]] || found_entry=1
@@ -211,7 +217,7 @@ vpsctl_validate_release_tree() {
     local special=''
     local required=''
     local -a required_files=(
-        VERSION bin/vpsctl lib/environment.sh lib/registry.sh lib/ui.sh lib/command.sh lib/distribution.sh
+        VERSION bin/vpsctl lib/environment.sh lib/registry.sh lib/ui.sh lib/distribution.sh
         commands/self/status.sh commands/self/update.sh commands/self/uninstall.sh
     )
 
@@ -221,10 +227,6 @@ vpsctl_validate_release_tree() {
         [[ -f "${root}/${required}" && ! -L "${root}/${required}" ]] ||
             vpsctl_bootstrap_die "extracted core is missing ${required}"
     done
-    if grep -Fq '"commands/network/ufw.sh"' "${root}/lib/registry.sh"; then
-        [[ -f "${root}/lib/ufw.sh" && ! -L "${root}/lib/ufw.sh" ]] ||
-            vpsctl_bootstrap_die 'extracted core is missing lib/ufw.sh'
-    fi
     [[ "$(<"${root}/VERSION")" == "$VPSCTL_DISTRIBUTION_VERSION" ]] ||
         vpsctl_bootstrap_die 'extracted core has an unexpected distribution version'
     [[ -d "${root}/commands/self" && ! -L "${root}/commands/self" ]] ||

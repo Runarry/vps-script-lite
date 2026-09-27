@@ -5,10 +5,12 @@ IFS=$'\n\t'
 umask 022
 
 readonly RELEASE_REPOSITORY='Runarry/vps-script-lite'
-readonly RELEASE_SCHEMA_VERSION='1'
+readonly RELEASE_SCHEMA_VERSION='2'
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd -P)"
+# shellcheck source=../lib/registry.sh disable=SC1091
+source "${PROJECT_ROOT}/lib/registry.sh"
 OUTPUT_DIR="${1:-${PROJECT_ROOT}/dist/release}"
 BUILD_TEMP=''
 
@@ -137,21 +139,11 @@ rm -f -- \
 
 install -m 0755 -- "${PROJECT_ROOT}/vpsctl.sh" "${OUTPUT_DIR}/vpsctl.sh"
 
-release_create_bundle core \
-    VERSION \
-    bin/vpsctl \
-    lib/environment.sh \
-    lib/registry.sh \
-    lib/ui.sh \
-    lib/command.sh \
-    lib/ufw.sh \
-    lib/distribution.sh \
-    commands/self
-release_create_bundle network commands/network
-release_create_bundle system commands/system
-release_create_bundle security commands/security
-release_create_bundle service commands/service
-release_create_bundle test commands/test lib/server-test.sh
+for name in "${VPS_BUNDLE_IDS[@]}"; do
+    bundle_files="$(vps_registry_bundle_files "$name")" || release_die "unknown bundle: $name"
+    mapfile -t bundle_paths <<<"$bundle_files"
+    release_create_bundle "$name" "${bundle_paths[@]}"
+done
 
 MANIFEST_PATH="${OUTPUT_DIR}/vpsctl-manifest.tsv"
 {
@@ -159,7 +151,7 @@ MANIFEST_PATH="${OUTPUT_DIR}/vpsctl-manifest.tsv"
     printf 'version\t%s\n' "$RELEASE_VERSION"
     printf 'repository\t%s\n' "$RELEASE_REPOSITORY"
     printf 'asset\tlauncher\tvpsctl.sh\t%s\n' "$(release_sha256 "${OUTPUT_DIR}/vpsctl.sh")"
-    for name in core network system security service test; do
+    for name in "${VPS_BUNDLE_IDS[@]}"; do
         filename="vpsctl-${name}-${RELEASE_VERSION}.tar.gz"
         printf 'bundle\t%s\t%s\t%s\n' "$name" "$filename" "$(release_sha256 "${OUTPUT_DIR}/${filename}")"
     done

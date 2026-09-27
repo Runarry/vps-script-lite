@@ -20,6 +20,50 @@ declare -gA VPS_COMMAND_REQUIREMENTS=()
 declare -gA VPS_COMMAND_LIFECYCLE=()
 declare -ga VPS_REGISTRY_RESULTS=()
 
+# Release contents are fixed, never discovered by scanning directories. Both
+# the builder and runtime use these exact file lists (including private modules).
+declare -ga VPS_BUNDLE_IDS=(
+    core shared-command shared-ufw shared-server-test
+    network-bbr network-dns network-ip-policy network-ufw network-rfw
+    system-kernel security-access security-fail2ban security-tls
+    service-proxy test-nodequality test-tcpquality
+)
+
+vps_registry_bundle_files() {
+    case "${1:-}" in
+        core) printf '%s\n' VERSION bin/vpsctl lib/environment.sh lib/registry.sh lib/ui.sh lib/distribution.sh commands/self/{status,update,uninstall}.sh ;;
+        shared-command) printf '%s\n' lib/command.sh ;;
+        shared-ufw) printf '%s\n' lib/ufw.sh ;;
+        shared-server-test) printf '%s\n' lib/server-test.sh ;;
+        network-bbr | network-dns | network-ip-policy | network-rfw)
+            printf 'commands/network/%s.sh\n' "${1#network-}"
+            ;;
+        network-ufw) printf '%s\n' commands/network/ufw.sh commands/network/ufw/{common,inventory,rules,actions,menu}.sh ;;
+        system-kernel) printf '%s\n' commands/system/kernel.sh commands/system/kernel/{providers,inventory,grub,grub-install}.sh ;;
+        security-access) printf '%s\n' commands/security/access.sh commands/security/access/{common,users,keys,firewall,sshd}.sh ;;
+        security-fail2ban) printf '%s\n' commands/security/fail2ban.sh ;;
+        security-tls) printf '%s\n' commands/security/tls.sh commands/security/tls/{common,store,issue,timer,ufw}.sh ;;
+        service-proxy) printf '%s\n' commands/service/proxy.sh commands/service/proxy/{common,core,address,dns,nodes,protocols-xray,protocols-sing-box,relay,relay-uri,relay-forward,time,ufw}.sh ;;
+        test-nodequality | test-tcpquality) printf 'commands/test/%s.sh\n' "${1#test-}" ;;
+        *) return 2 ;;
+    esac
+}
+
+vps_registry_command_bundles() {
+    local command_key="${1:-}"
+    vps_registry_has_command "$command_key" || return 2
+    if [[ "$command_key" == self:* ]]; then
+        printf 'core\n'
+        return 0
+    fi
+    printf 'shared-command\n'
+    case "$command_key" in
+        network:ufw | security:access | security:tls | service:proxy) printf 'shared-ufw\n' ;;
+        test:nodequality | test:tcpquality) printf 'shared-server-test\n' ;;
+    esac
+    printf '%s\n' "${command_key/:/-}"
+}
+
 vps_registry_register_domain() {
     local domain="$1"
     local label="$2"
@@ -281,7 +325,7 @@ vps_registry_init() {
         "self" \
         "status" \
         "分发状态" \
-        "显示本地分发版本、缓存领域和受管路径（不访问网络）" \
+        "显示本地分发版本、缓存功能及共享库和受管路径（不访问网络）" \
         "commands/self/status.sh" \
         "read-only" \
         "user" \
@@ -312,14 +356,6 @@ vps_registry_init() {
         "unsupported" \
         "none" \
         "stable"
-}
-
-vps_registry_distribution_domain() {
-    case "${1:-}" in
-        self) printf 'core' ;;
-        network | system | security | service | test) printf '%s' "$1" ;;
-        *) return 2 ;;
-    esac
 }
 
 vps_registry_has_command() {

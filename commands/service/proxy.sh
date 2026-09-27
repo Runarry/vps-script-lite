@@ -167,6 +167,7 @@ restart 使用普通确认，可用全局 --yes 或 --confirm-disruptive 跳过�
 
 安装和更新默认使用最新稳定版；--release-channel prerelease 选择最新
 预发布版，--version TAG 精确选择稳定或预发布 Release。两个选项互斥。
+首次安装或登记外部内核后立即启动并启用开机启动；重复安装保留服务状态。
 --core all 可共用 release channel，但不能共用一个 --version。选择的通道
 不会保存；后续不带版本选项的 update 仍使用稳定版，且更新后不自动重启。
 
