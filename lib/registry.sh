@@ -25,7 +25,7 @@ declare -ga VPS_REGISTRY_RESULTS=()
 declare -ga VPS_BUNDLE_IDS=(
     core shared-command shared-ufw shared-server-test
     network-bbr network-dns network-ip-policy network-ufw network-rfw
-    system-kernel security-access security-fail2ban security-tls
+    system-kernel system-reinstall security-access security-fail2ban security-tls
     service-proxy test-nodequality test-tcpquality
 )
 
@@ -40,6 +40,7 @@ vps_registry_bundle_files() {
             ;;
         network-ufw) printf '%s\n' commands/network/ufw.sh commands/network/ufw/{common,inventory,rules,actions,menu}.sh ;;
         system-kernel) printf '%s\n' commands/system/kernel.sh commands/system/kernel/{providers,inventory,grub,grub-install}.sh ;;
+        system-reinstall) printf '%s\n' commands/system/reinstall.sh ;;
         security-access) printf '%s\n' commands/security/access.sh commands/security/access/{common,users,keys,firewall,sshd}.sh ;;
         security-fail2ban) printf '%s\n' commands/security/fail2ban.sh ;;
         security-tls) printf '%s\n' commands/security/tls.sh commands/security/tls/{common,store,issue,timer,ufw}.sh ;;
@@ -247,6 +248,18 @@ vps_registry_init() {
         "optional-root" \
         "supported" \
         "linux,os:debian-family" \
+        "experimental"
+
+    vps_registry_register_command \
+        "system" \
+        "reinstall" \
+        "系统重装与 DD" \
+        "按需运行官方 reinstall，取消重装并清理工具与缓存" \
+        "commands/system/reinstall.sh" \
+        "destructive" \
+        "optional-root" \
+        "unsupported" \
+        "linux" \
         "experimental"
 
     vps_registry_register_command \

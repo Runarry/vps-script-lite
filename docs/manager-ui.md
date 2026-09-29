@@ -58,11 +58,12 @@ UI 显示以下摘要：
     │   │   └── 高级规则管理：方向、地址、网卡、策略、日志与重置
     │   └── RFW 管理（rfw）
     ├── 系统管理（system）
-    │   └── 内核管理（kernel）
-    │       ├── 查看版本、来源、关联包、启动完整性与保护状态
-    │       ├── 安装 / 更新官方、Cloud、HWE 或 XanMod 内核
-    │       ├── 固定默认启动版本
-    │       └── 按版本安全卸载非当前内核
+    │   ├── 内核管理（kernel）
+    │   │   ├── 查看版本、来源、关联包、启动完整性与保护状态
+    │   │   ├── 安装 / 更新官方、Cloud、HWE 或 XanMod 内核
+    │   │   ├── 固定默认启动版本
+    │   │   └── 按版本安全卸载非当前内核
+    │   └── 系统重装与 DD（reinstall，本地帮助与命令行入口）
     ├── 安全与访问（security）
     │   ├── 访问管理（access）
     │   │   ├── 用户、密码与公钥
@@ -91,7 +92,7 @@ UI 显示以下摘要：
         └── 卸载受管脚本（uninstall）
 ```
 
-主菜单不会扫描目录或推测功能分类，只显示固定注册表中已经登记的真实功能。业务领域登记 `network`、`system`、`security`、`service` 与 `test`，包含 `bbr`、`dns`、`ip-policy`、`ufw`、`rfw`、`kernel`、`access`、`fail2ban`、`tls`、`proxy`、`nodequality`、`tcpquality` 十二个入口，另有常驻 `self` 领域。用户选择功能后，入口立即无附加参数分发该公开脚本，由功能脚本进入自己的交互 UI 或开始测试；不再显示命令详情页，也不再要求输入 `r` 才运行。环境详情仍可通过非菜单命令 `vpsctl env` 查看。
+主菜单不会扫描目录或推测功能分类，只显示固定注册表中已经登记的真实功能。业务领域登记 `network`、`system`、`security`、`service` 与 `test`，包含 `bbr`、`dns`、`ip-policy`、`ufw`、`rfw`、`kernel`、`reinstall`、`access`、`fail2ban`、`tls`、`proxy`、`nodequality`、`tcpquality` 十三个入口，另有常驻 `self` 领域。用户选择功能后，入口立即无附加参数分发该公开脚本，由功能脚本进入自己的交互 UI、开始测试，或像轻量入口 `reinstall` 一样显示本地帮助；不再显示命令详情页，也不再要求输入 `r` 才运行。环境详情仍可通过非菜单命令 `vpsctl env` 查看。
 
 `system kernel` 的菜单展示当前运行版本，并以编号选择查看完整状态、安装/更新、固定默认版本或卸载指定版本。状态页按完整 release 汇总内核与启动信息。安装类型默认推荐发行版官方标准内核；Debian 可选 Cloud，Ubuntu LTS 仅在适配 HWE 元包有候选时显示，XanMod 继续提供 auto/main/lts 和 CPU 等级选择。切换与卸载候选由 current、default、next、启动文件完整性和 dpkg 归属状态过滤，用户无需手工输入 release。安装、切换、卸载分别要求 `INSTALL-KERNEL`、`SWITCH-KERNEL`、`REMOVE-KERNEL` 强确认；菜单不会自动重启，流程提示重启核对后再卸载旧版本。
 

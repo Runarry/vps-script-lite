@@ -71,6 +71,7 @@ test_cli() {
     test_contains "$output" "network ufw" "UFW command listing"
     test_contains "$output" "network rfw" "RFW command listing"
     test_contains "$output" "system kernel" "kernel command listing"
+    test_contains "$output" "system reinstall" "reinstall command listing"
     test_contains "$output" "security access" "access command listing"
     test_contains "$output" "security tls" "tls command listing"
     test_contains "$output" "service proxy" "proxy command listing"
@@ -200,6 +201,14 @@ printf 'kernel_args=%s\n' "$*"
 EOF
     chmod 0644 "$sandbox/commands/system/kernel.sh"
 
+    cat >"$sandbox/commands/system/reinstall.sh" <<'EOF'
+#!/usr/bin/env bash
+printf 'reinstall_noninteractive=%s\n' "${VPSCTL_NON_INTERACTIVE:-missing}"
+printf 'reinstall_arg=<%s>\n' "$@"
+exit "${VPSCTL_DISPATCH_STATUS:-0}"
+EOF
+    chmod 0644 "$sandbox/commands/system/reinstall.sh"
+
     cat >"$sandbox/commands/security/access.sh" <<'EOF'
 #!/usr/bin/env bash
 printf 'access_no_color=%s\n' "${VPSCTL_NO_COLOR:-missing}"
@@ -277,6 +286,16 @@ EOF
     output="$(VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" --no-color system kernel status)"
     test_contains "$output" "kernel_no_color=1" "kernel no-color child context"
     test_contains "$output" "kernel_args=status" "kernel status dispatch"
+    output="$(bash "$sandbox/bin/vpsctl" --non-interactive system reinstall run -- windows --image-name 'Windows 11 Enterprise LTSC 2024' --iso 'https://example.invalid/a.iso?x=1&y=two' --password 'a $b; c')"
+    test_contains "$output" 'reinstall_noninteractive=1' "reinstall global context"
+    test_contains "$output" 'reinstall_arg=<-->' "reinstall upstream separator"
+    test_contains "$output" 'reinstall_arg=<Windows 11 Enterprise LTSC 2024>' "reinstall spaced argument"
+    test_contains "$output" 'reinstall_arg=<https://example.invalid/a.iso?x=1&y=two>' "reinstall URL argument"
+    # shellcheck disable=SC2016 # The dollar sign must remain literal in forwarded arguments.
+    test_contains "$output" 'reinstall_arg=<a $b; c>' "reinstall literal shell characters"
+    status=0
+    VPSCTL_DISPATCH_STATUS=17 bash "$sandbox/bin/vpsctl" system reinstall run dd >/dev/null 2>&1 || status=$?
+    [[ "$status" == 17 ]] || test_fail "reinstall exit status was not preserved: $status"
     rm -f -- "$marker"
     status=0
     VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" --dry-run system kernel install >/dev/null 2>&1 || status=$?

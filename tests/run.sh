@@ -23,6 +23,7 @@ for syntax_file in \
     "${TEST_ROOT}/commands/network/ufw.sh" \
     "${TEST_ROOT}"/commands/network/ufw/*.sh \
     "${TEST_ROOT}/commands/system/kernel.sh" \
+    "${TEST_ROOT}/commands/system/reinstall.sh" \
     "${TEST_ROOT}"/commands/system/kernel/*.sh \
     "${TEST_ROOT}/commands/security/access.sh" \
     "${TEST_ROOT}"/commands/security/access/*.sh \
@@ -48,6 +49,7 @@ for syntax_file in \
     "${TEST_ROOT}/tests/unit/test-access-ufw.sh" \
     "${TEST_ROOT}/tests/unit/test-tls-ufw.sh" \
     "${TEST_ROOT}/tests/unit/test-system-kernel.sh" \
+    "${TEST_ROOT}/tests/unit/test-system-reinstall.sh" \
     "${TEST_ROOT}/tests/unit/test-system-kernel-providers.sh" \
     "${TEST_ROOT}/tests/unit/test-system-kernel-inventory.sh" \
     "${TEST_ROOT}/tests/unit/test-system-kernel-grub.sh" \
@@ -79,6 +81,7 @@ for syntax_file in \
     "${TEST_ROOT}/tests/integration/test-security-tls-real.sh" \
     "${TEST_ROOT}/tests/integration/test-system-kernel-grub-install-real.sh" \
     "${TEST_ROOT}/tests/integration/test-system-kernel-grub-install-rescue-real.sh" \
+    "${TEST_ROOT}/tests/integration/test-system-reinstall-real.sh" \
     "${TEST_ROOT}/tests/integration/test-vpsctl.sh"; do
     bash -n "$syntax_file"
 done
@@ -97,6 +100,7 @@ bash "${TEST_ROOT}/tests/unit/test-proxy-ufw.sh"
 bash "${TEST_ROOT}/tests/unit/test-access-ufw.sh"
 bash "${TEST_ROOT}/tests/unit/test-tls-ufw.sh"
 bash "${TEST_ROOT}/tests/unit/test-system-kernel.sh"
+bash "${TEST_ROOT}/tests/unit/test-system-reinstall.sh"
 bash "${TEST_ROOT}/tests/unit/test-system-kernel-providers.sh"
 bash "${TEST_ROOT}/tests/unit/test-system-kernel-inventory.sh"
 bash "${TEST_ROOT}/tests/unit/test-system-kernel-grub.sh"

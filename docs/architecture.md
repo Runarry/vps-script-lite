@@ -32,6 +32,7 @@ vps-script-lite/
 │   ├── test/               # 服务器综合质量与网络质量测试
 │   └── system/             # 系统信息、内核、软件包和基础维护
 │       ├── kernel.sh       # 系统内核管理公开入口
+│       ├── reinstall.sh    # 上游重装与 DD 启动及清理入口
 │       └── kernel/         # providers、inventory、grub 私有实现模块
 ├── config/                 # 可提交的默认配置与示例；禁止存放真实密钥
 ├── lib/                    # 可被入口或功能脚本复用的稳定公共函数
@@ -83,6 +84,8 @@ vps-script-lite/
 
 服务器测试入口是受控的第三方启动器：上游地址必须是代码中固定的官方 HTTPS URL，下载内容只保存到本次调用拥有的临时目录，再以前台子进程运行。临时目录从 `/var/tmp` 与 `/tmp` 中选择安全、可写且空间更大的位置，避免小容量 tmpfs 阻断上游 rootfs。入口不把上游参数提升为本项目接口，不缓存或登记远端脚本版本，也不能把上游的高负载、联网、报告上传或系统副作用包装成可演练动作。退出与常规可捕获信号只清理本次调用创建并仍可识别的临时资源；不得扫描或删除其他调用、上游历史运行或用户文件。`SIGKILL`、入口 Shell 崩溃及主机掉电等无法执行陷阱的情况不承诺自动清理。
 
+`system reinstall` 使用独立的 `system-reinstall` bundle，仅依赖 `shared-command`。它每次 `run` 下载未经修改的官方上游脚本到 `/var/lib/vpsctl/reinstall/reinstall.sh`，保留供取消和卸载使用，不在准备步骤返回时清理安装资源。包装器原样透传参数；上游负责安装与引导配置，本项目按固定专属路径清理工具残留，并在卸载待执行重装前调用上游 `reset`。该生命周期与服务器测试的一次性临时目录不同，业务实现留在独立入口，详情见[系统重装与 DD](reinstall-management.md)。
+
 ### 3.3 公共函数库
 
 `lib/` 仅存放稳定且至少被两个组件复用的基础能力，例如日志格式、平台检测、权限检查、锁和安全的文件替换。
@@ -126,6 +129,7 @@ vpsctl-network-ip-policy-0.8.9.tar.gz
 vpsctl-network-ufw-0.8.9.tar.gz
 vpsctl-network-rfw-0.8.9.tar.gz
 vpsctl-system-kernel-0.8.9.tar.gz
+vpsctl-system-reinstall-0.8.9.tar.gz
 vpsctl-security-access-0.8.9.tar.gz
 vpsctl-security-fail2ban-0.8.9.tar.gz
 vpsctl-security-tls-0.8.9.tar.gz
@@ -151,6 +155,7 @@ bundle<TAB>network-ip-policy<TAB>vpsctl-network-ip-policy-0.8.9.tar.gz<TAB>SHA25
 bundle<TAB>network-ufw<TAB>vpsctl-network-ufw-0.8.9.tar.gz<TAB>SHA256
 bundle<TAB>network-rfw<TAB>vpsctl-network-rfw-0.8.9.tar.gz<TAB>SHA256
 bundle<TAB>system-kernel<TAB>vpsctl-system-kernel-0.8.9.tar.gz<TAB>SHA256
+bundle<TAB>system-reinstall<TAB>vpsctl-system-reinstall-0.8.9.tar.gz<TAB>SHA256
 bundle<TAB>security-access<TAB>vpsctl-security-access-0.8.9.tar.gz<TAB>SHA256
 bundle<TAB>security-fail2ban<TAB>vpsctl-security-fail2ban-0.8.9.tar.gz<TAB>SHA256
 bundle<TAB>security-tls<TAB>vpsctl-security-tls-0.8.9.tar.gz<TAB>SHA256

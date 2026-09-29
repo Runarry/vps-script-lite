@@ -79,7 +79,7 @@ make_core_asset() {
 
 make_feature_assets() {
     local version="$1" build="${TEST_TEMP}/build-feature" bundle files path
-    for bundle in shared-command shared-ufw network-bbr network-dns network-ufw; do
+    for bundle in shared-command shared-ufw network-bbr network-dns network-ufw system-reinstall; do
         rm -rf -- "$build"
         mkdir -p "$build"
         files="$(vps_registry_bundle_files "$bundle")"
@@ -232,9 +232,15 @@ test_lazy_feature_install_and_cache() (
     [[ ! -e "$release/commands/network/dns.sh" && ! -e "$release/lib/ufw.sh" ]] || fail 'BBR downloaded unrelated code'
     vps_distribution_ensure_command network:dns || fail 'DNS install failed'
     assert_equal 3 "$calls" 'shared command dependency was downloaded twice'
+    [[ ! -e "$release/commands/system/reinstall.sh" ]] || fail 'unrelated commands downloaded reinstall'
+    vps_distribution_ensure_command system:reinstall || fail 'reinstall lazy install failed'
+    assert_equal 4 "$calls" 'reinstall downloaded unrelated dependencies'
+    [[ -f "$release/commands/system/reinstall.sh" ]] || fail 'reinstall command missing'
+    [[ ! -e "$TEST_SYSTEM_ROOT/var/lib/vpsctl/reinstall/reinstall.sh" ]] || fail 'feature loading downloaded the upstream installer'
     vps_distribution_download() { return 20; }
     vps_distribution_ensure_command network:bbr || fail 'cached BBR failed offline'
     vps_distribution_ensure_command network:dns || fail 'cached DNS failed offline'
+    vps_distribution_ensure_command system:reinstall || fail 'cached reinstall wrapper failed offline'
     [[ -z "$(find "$release/.bundles" -mindepth 1 ! -name '*.sha256' -print -quit)" ]] || fail 'lazy download left temporary assets'
 )
 

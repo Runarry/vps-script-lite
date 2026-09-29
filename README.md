@@ -4,7 +4,7 @@
 
 项目采用“一个管理入口、多个独立命令”的结构：管理入口只负责参数解析、固定命令登记、公共上下文和分发；每项实际功能原则上由一个公开入口脚本实现，复杂入口可拆为不单独分发的私有子模块。这样既能通过统一入口使用，也能单独运行、测试和排错。
 
-> 当前版本为 0.8.9，提供网络、系统内核、访问、TLS 证书、代理与服务器测试入口。系统变更命令应先使用 `--dry-run` 并阅读对应恢复说明；内核变更需提前确认带外控制台或救援入口可用，服务器测试会下载并运行第三方代码、产生明显 CPU/磁盘/网络负载且不支持演练。
+> 当前版本为 0.8.9，提供网络、系统内核、重装与 DD、访问、TLS 证书、代理与服务器测试入口。支持演练的系统变更命令应先使用 `--dry-run` 并阅读对应恢复说明；内核变更需提前确认带外控制台或救援入口可用。重装与服务器测试会下载并运行第三方代码，不支持演练；重装在重启后可清除目标磁盘数据，服务器测试会产生明显 CPU/磁盘/网络负载。
 
 应用、功能与 GitHub Release 分发统一使用 `0.8.9`。仓库根 `VERSION` 是规范版本源，tag 为 `v0.8.9`；发布资产、安装目录、`vpsctl self` 与命令行版本展示均使用同一版本号。
 
@@ -17,6 +17,7 @@
 - [主管理脚本与 UI](docs/manager-ui.md)：启动检测、菜单结构、非交互模式和扩展方式。
 - [网络设置](docs/network-settings.md)：BBR、DNS、IP 地址族偏好和 RFW 的接口、安全边界、持久化路径和恢复要求。
 - [系统内核管理](docs/kernel-management.md)：发行版官方内核与 XanMod BBRv3 的安装、固定默认版本、按版本卸载和恢复；另见[验收记录](docs/kernel-validation.md)。
+- [系统重装与 DD](docs/reinstall-management.md)：按需运行官方 reinstall、取消重装及卸载工具与专属缓存。
 - [代理管理](docs/proxy-management.md)：Xray/sing-box 内核、节点、出口关联、端口转发、订阅、证书、日志与时间同步。
 - [访问管理](docs/access-management.md)：用户、密码、公钥与 SSH 双端口验证事务、防火墙协同和恢复。
 - [Fail2ban 管理](docs/fail2ban-management.md)：OpenSSH jail 的安装、均衡递增策略、白名单、验证和恢复。
@@ -44,6 +45,7 @@ apk add --no-cache bash curl ca-certificates
 | `security fail2ban` | 不支持 `apk`/OpenRC；仅支持文档列出的 systemd 发行版包管理器与 Fail2ban 0.11+ |
 | `security tls` | 导入与查看支持 Alpine；续期 timer 需要 systemd；ACME 的 lego 二进制仅 `x86_64`/`aarch64` |
 | `system kernel` | 不支持 Alpine；仅支持 Debian/Ubuntu amd64 上的 APT/dpkg，可管理发行版官方内核与 XanMod 官方构建；自动切换限可识别的标准 GRUB 2 |
+| `system reinstall` | Linux 上提供下载、状态、取消和卸载；重装目标与安装依赖由运行时下载的官方 reinstall 决定 |
 | `network ip-policy` | 不支持 Alpine 的 musl；该入口只管理 glibc `getaddrinfo()` 的 `/etc/gai.conf` 排序 |
 | `service proxy` | 支持 OpenRC 与 systemd；具体内核、协议、架构和依赖仍按代理功能文档与运行时门禁判断 |
 | `test nodequality` / `test tcpquality` | vpsctl 包装入口要求 Linux/root，但运行时下载的第三方脚本会自行决定依赖和发行版兼容性；核心支持不构成其 Alpine 兼容承诺 |
@@ -142,6 +144,10 @@ bash bin/vpsctl system kernel status
 bash bin/vpsctl system kernel install --type official --confirm-install INSTALL-KERNEL
 bash bin/vpsctl system kernel switch --release RELEASE --confirm-switch SWITCH-KERNEL
 bash bin/vpsctl system kernel uninstall --release RELEASE --confirm-uninstall REMOVE-KERNEL
+bash bin/vpsctl system reinstall status
+bash bin/vpsctl system reinstall run -- debian 13
+bash bin/vpsctl system reinstall reset
+bash bin/vpsctl --yes system reinstall uninstall
 bash bin/vpsctl security access status
 bash bin/vpsctl security fail2ban status
 bash bin/vpsctl security tls status
@@ -153,6 +159,8 @@ bash bin/vpsctl service proxy dns show --json
 bash bin/vpsctl test nodequality
 bash bin/vpsctl test tcpquality
 ```
+
+`system reinstall` 无参数显示本地帮助；每次 `run` 才下载官方最新 reinstall 并原样传递后续参数。准备完成后保留安装资源，由用户决定重启或取消。`uninstall` 会先取消待执行的重装，再删除工具及专属缓存；重装后的 Linux 可重新安装 vpsctl 清理残留。具体路径、非交互方式及恢复边界见[系统重装与 DD](docs/reinstall-management.md)。
 
 直接运行 `bash bin/vpsctl system kernel` 会进入内核管理菜单，按编号查看版本状态、安装/更新、固定默认启动版本或卸载指定版本。菜单默认推荐发行版官方标准内核；直接 CLI 省略 `--type` 时仍默认 XanMod，以兼容旧调用。Debian 还提供 Cloud，Ubuntu LTS 在适配候选存在时提供 HWE。安装不会删除旧内核，切换不会重启；应在重启核对目标版本后再卸载旧版本。
 
@@ -190,7 +198,7 @@ bash bin/vpsctl service proxy update --core xray --version vX.Y.Z
 - 目录骨架：已建立。
 - 当前版本：0.8.9。
 - 管理入口：提供环境检测、终端 UI、固定注册表和安全分发。
-- 功能命令：提供 `network bbr`、`network dns`、`network ip-policy`、`network ufw`、`network rfw`、`system kernel`、`security access`、`security fail2ban`、`security tls`、`service proxy`、`test nodequality` 和 `test tcpquality`；均处于 `experimental` 生命周期。
+- 功能命令：提供 `network bbr`、`network dns`、`network ip-policy`、`network ufw`、`network rfw`、`system kernel`、`system reinstall`、`security access`、`security fail2ban`、`security tls`、`service proxy`、`test nodequality` 和 `test tcpquality`；均处于 `experimental` 生命周期。
 - UFW：主菜单提供简洁端口管理，进阶功能放在“高级规则管理”。启用后自动维护 SSH、代理节点、中转转发及 HTTP-01 临时端口；支持等价已有规则接管、共享引用和按服务解除联动。安装默认不启用，服务停止但配置保留时规则继续保留。接口和恢复说明见 [UFW 管理](docs/ufw-management.md)。
 - 公共函数库：提供环境检测、命令注册、终端 UI 及网络和服务命令所需公共能力。
 - 验收说明：所有项目测试与验证统一通过 `ssh host-vps-scripts` 在专用真实环境中执行；不得在当前系统或 WSL 中测试。发布前仍须按对应功能文档完成真实环境验收。

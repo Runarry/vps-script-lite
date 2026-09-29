@@ -56,6 +56,7 @@ vpsctl self uninstall [--purge] [--confirm-uninstall] [--confirm-purge]
 | `network rfw` | `commands/network/rfw.sh` | 安装、配置和管理 RFW systemd 服务 | `disruptive` | `optional-root` | `supported` | `linux,init:systemd` | `experimental` |
 | `network ufw` | `commands/network/ufw.sh` | 管理 UFW 并联动 SSH、节点、中转与证书端口 | `disruptive` | `optional-root` | `supported` | `linux` | `experimental` |
 | `system kernel` | `commands/system/kernel.sh` | 查看、安装、切换或卸载内核，安装与修复 BIOS GRUB | `disruptive` | `optional-root` | `supported` | `linux,os:debian-family` | `experimental` |
+| `system reinstall` | `commands/system/reinstall.sh` | 按需运行官方 reinstall、取消重装并清理工具与缓存 | `destructive` | `optional-root` | `unsupported` | `linux` | `experimental` |
 | `security access` | `commands/security/access.sh` | 管理用户、密码、公钥与可验证恢复的 SSH 访问变更 | `disruptive` | `optional-root` | `supported` | `linux,init:systemd` | `experimental` |
 | `security fail2ban` | `commands/security/fail2ban.sh` | 安装、配置和管理 OpenSSH 的 Fail2ban 防护 | `disruptive` | `optional-root` | `supported` | `linux,init:systemd` | `experimental` |
 | `security tls` | `commands/security/tls.sh` | 管理域名 TLS 证书：导入、申请与自动续期 | `disruptive` | `optional-root` | `supported` | `linux` | `experimental` |
@@ -69,7 +70,9 @@ vpsctl self uninstall [--purge] [--confirm-uninstall] [--confirm-purge]
 
 `system kernel` 的状态可由普通用户读取，安装、切换和卸载要求 root 与各自的强确认短语，`--yes` 不能绕过。它只支持 Debian/Ubuntu amd64：可从当前发行版受信 APT 源安装官方标准内核、Debian Cloud 或有候选的 Ubuntu LTS HWE，也可从 XanMod 官方源安装 BBRv3 并验证完整仓库密钥指纹。直接 CLI 省略安装类型仍默认 XanMod，交互菜单默认推荐官方标准内核。状态按 release 展示来源、关联包、启动完整性和 current/default/next/保护状态；标准 GRUB 2 环境可把具体 release 的稳定 entry ID 固定为默认项，其他启动器或无法解析的默认项拒绝危险动作。卸载必须明确指定非 current/default/next 的 release，只提交经过模拟验证的精确包数组，保护共享包和其他版本，不使用通配符或 `autoremove`。完整恢复边界见[系统内核管理](kernel-management.md)。
 
-主管理菜单选中登记功能后直接进入该功能 UI，不插入命令详情或二次运行页。封闭枚举由编号选择，开放值沿用命令参数校验；菜单真实执行动作，不暴露执行型全局参数、机器输出开关、`--force` 或 `--confirm-*` 标志。上述参数仅供直接功能 CLI；菜单中的危险动作使用对应交互确认及强确认短语。
+`system reinstall` 是轻量命令入口，无参数显示本地帮助，`status` 只读且不下载上游。`run [--] <上游参数…>` 每次下载官方最新 reinstall；`reset` 使用保留的脚本取消重装，`uninstall` 自动先取消待执行重装再清理专属文件。这三个动作要求 root 且拒绝演练，卸载支持一次普通确认与 `--yes`。系统安装、参数含义和引导撤销由上游负责；完整下载、清理及新系统边界见[系统重装与 DD](reinstall-management.md)。
+
+主管理菜单选中登记功能后直接进入该功能 UI（轻量命令入口显示帮助），不插入命令详情或二次运行页。封闭枚举由编号选择，开放值沿用命令参数校验；菜单真实执行动作，不暴露执行型全局参数、机器输出开关、`--force` 或 `--confirm-*` 标志。上述参数仅供直接功能 CLI；菜单中的危险动作使用对应交互确认及强确认短语。
 
 入口按“命令 + 完整子参数形状”计算本次调用的能力要求。`network ip-policy` 的帮助不要求 `libc:glibc`，但状态和变更都要求 glibc；`system kernel` 的帮助与无参数 `status` 不要求 `os:debian-family`，安装、切换、卸载和交互入口仍要求 Debian/Ubuntu。`network rfw` 的无附加参数 `help`/`--help`/`-h` 与 `status`，以及 `security fail2ban` 的帮助与 `status [--json]`，在 Linux 上不要求 `init:systemd`；`service proxy` 的无附加参数 `help`/`--help`/`-h`、`profiles`、`status`，以及 `time status [--json]` 在 Linux 上不要求 `service:any`。`test nodequality` 和 `test tcpquality` 的单个 `help`/`--help`/`-h` 参数不要求 `root`，但仍保留 `linux` 能力要求。未列出的参数形状和两项测试的无参数真实执行不能使用这些例外；服务器测试完整边界见[服务器测试](server-testing.md)。
 

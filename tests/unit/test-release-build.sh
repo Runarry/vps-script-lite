@@ -38,7 +38,7 @@ bash "${TEST_ROOT}/scripts/build-release.sh" "$RELEASE_DIR"
 expected_bundles=(
     core shared-command shared-ufw shared-server-test
     network-bbr network-dns network-ip-policy network-ufw network-rfw
-    system-kernel security-access security-fail2ban security-tls
+    system-kernel system-reinstall security-access security-fail2ban security-tls
     service-proxy test-nodequality test-tcpquality
 )
 expected_assets=(vpsctl.sh vpsctl-manifest.tsv)
@@ -53,7 +53,7 @@ expected_sorted="$(printf '%s\n' "${expected_assets[@]}" | sort)"
 [[ "$actual_assets" == "$expected_sorted" ]] || fail 'release output contains an unexpected asset set'
 
 mapfile -t manifest <"${RELEASE_DIR}/vpsctl-manifest.tsv"
-[[ ${#manifest[@]} -eq 20 ]] || fail 'manifest record count is not 20'
+[[ ${#manifest[@]} -eq 21 ]] || fail 'manifest record count is not 21'
 [[ ${manifest[0]} == $'schema_version\t2' ]] || fail 'manifest schema record is invalid'
 [[ ${manifest[1]} == $'version\t'"${RELEASE_VERSION}" ]] || fail 'manifest distribution version is invalid'
 [[ ${manifest[2]} == $'repository\tRunarry/vps-script-lite' ]] || fail 'manifest repository is invalid'

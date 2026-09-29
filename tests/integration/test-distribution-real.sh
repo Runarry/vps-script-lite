@@ -166,7 +166,7 @@ PATH="$MOCK_BIN:$PATH" "$ENTRY" network bbr --help >/dev/null
 [[ "$(sort "$VPSCTL_TEST_DOWNLOAD_TRACE")" == "$(printf '%s\n' vpsctl-shared-command-0.8.9.tar.gz vpsctl-network-bbr-0.8.9.tar.gz | sort)" ]] ||
     fail 'first BBR invocation downloaded unrelated bundles'
 [[ ! -e "$release_root/commands/network/dns.sh" && ! -e "$release_root/lib/ufw.sh" ]] || fail 'BBR cache contains unrelated code'
-features=(network-bbr network-dns network-ip-policy network-ufw network-rfw system-kernel security-access security-fail2ban security-tls service-proxy test-nodequality test-tcpquality)
+features=(network-bbr network-dns network-ip-policy network-ufw network-rfw system-kernel system-reinstall security-access security-fail2ban security-tls service-proxy test-nodequality test-tcpquality)
 for feature in "${features[@]}"; do
     PATH="$MOCK_BIN:$PATH" "$ENTRY" "${feature%%-*}" "${feature#*-}" --help >/dev/null
     [[ -f "$release_root/.bundles/${feature}.sha256" ]] || fail "$feature was not cached on demand"
