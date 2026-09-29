@@ -4,9 +4,9 @@
 
 项目采用“一个管理入口、多个独立命令”的结构：管理入口只负责参数解析、固定命令登记、公共上下文和分发；每项实际功能原则上由一个公开入口脚本实现，复杂入口可拆为不单独分发的私有子模块。这样既能通过统一入口使用，也能单独运行、测试和排错。
 
-> 当前版本为 0.8.9，提供网络、系统内核、重装与 DD、访问、TLS 证书、代理与服务器测试入口。支持演练的系统变更命令应先使用 `--dry-run` 并阅读对应恢复说明；内核变更需提前确认带外控制台或救援入口可用。重装与服务器测试会下载并运行第三方代码，不支持演练；重装在重启后可清除目标磁盘数据，服务器测试会产生明显 CPU/磁盘/网络负载。
+> 当前版本为 0.8.10，提供网络、系统内核、重装与 DD、访问、TLS 证书、代理、TCPing 探测监听与服务器测试入口。支持演练的系统变更命令应先使用 `--dry-run` 并阅读对应恢复说明；内核变更需提前确认带外控制台或救援入口可用。重装与服务器测试会下载并运行第三方代码，不支持演练；重装在重启后可清除目标磁盘数据，服务器测试会产生明显 CPU/磁盘/网络负载。
 
-应用、功能与 GitHub Release 分发统一使用 `0.8.9`。仓库根 `VERSION` 是规范版本源，tag 为 `v0.8.9`；发布资产、安装目录、`vpsctl self` 与命令行版本展示均使用同一版本号。
+应用、功能与 GitHub Release 分发统一使用 `0.8.10`。仓库根 `VERSION` 是规范版本源，tag 为 `v0.8.10`；发布资产、安装目录、`vpsctl self` 与命令行版本展示均使用同一版本号。
 
 ## 文档
 
@@ -60,7 +60,7 @@ curl -fsSL https://github.com/Runarry/vps-script-lite/releases/latest/download/v
 
 仓库 `master` 的 `vpsctl.sh` 也会安装最新已发布版本，不会安装未发布的源码功能。它先读取 Release 清单、校验并运行同一版本的安装器，再由该安装器校验对应的包格式。若旧源码入口报 `unsupported manifest schema`，请改用上面的 Release 地址；该报错可能只是源码与已发布清单格式不同，不需要先卸载。
 
-**当前源码采用 manifest schema 2，与旧版按领域打包的 schema 1 不兼容。** 从旧格式迁移时，请先下载并校验使用新格式的安装器和 manifest，再运行 `vpsctl --non-interactive self uninstall --confirm-uninstall`（不加 `--purge`），然后执行新安装器。直接重跑安装器只会启动已有管理器；不要用旧版 `self update` 跨格式升级。普通卸载保留已部署服务、配置、功能状态和备份；反向迁移也使用普通卸载再安装。此源码更改不改变版本号或已发布资产。
+**v0.8.10 采用 manifest schema 2，与 v0.8.9 按领域打包的 schema 1 不兼容。** 从 v0.8.9 迁移时，请先下载并校验 v0.8.10 的安装器和 manifest，再运行 `vpsctl --non-interactive self uninstall --confirm-uninstall`（不加 `--purge`），然后执行新安装器。直接重跑安装器只会启动已有管理器；不要用旧版 `self update` 跨格式升级。普通卸载保留已部署服务、配置、功能状态和备份；反向迁移也使用普通卸载再安装。
 
 安装后使用快捷命令 `vpsctl`。启动 `vpsctl` 只读取本地已安装内容，不联网检查更新；完成上述首次迁移后，需要查看或执行同格式分发更新时显式运行：
 
@@ -74,8 +74,8 @@ vpsctl self update --version vX.Y.Z  # 替换为已发布的同格式版本
 
 ```bash
 tmp_dir="$(mktemp -d)"
-# v0.8.9 是已发布的 schema 1 示例；迁移 schema 2 时改为未来发布的新格式 tag。
-base_url="https://github.com/Runarry/vps-script-lite/releases/download/v0.8.9"
+# v0.8.10 使用 schema 2；从 v0.8.9 迁移时先校验本版本安装器和清单。
+base_url="https://github.com/Runarry/vps-script-lite/releases/download/v0.8.10"
 curl -fL "$base_url/vpsctl.sh" -o "$tmp_dir/vpsctl.sh"
 curl -fL "$base_url/vpsctl-manifest.tsv" -o "$tmp_dir/vpsctl-manifest.tsv"
 awk -F '\t' '$1 == "asset" && $2 == "launcher" { print $4 "  vpsctl.sh" }' \
@@ -94,7 +94,7 @@ bash "$tmp_dir/vpsctl.sh" --verified-manifest "$tmp_dir/vpsctl-manifest.tsv"
 
 `self update` 跨版本更新完整提交成功后，会删除所有可验证归属的受管历史 release，仅保留当前版本，不保留自动回退版本；需要回退时重新安装指定 Release。新版本提交完成前发生失败时仍保留原版本；若提交后历史版本清理失败，新版本保持激活，命令报错并返回 `30`，下次成功跨版本更新会再次尝试清理。同版本更新不执行清理，只同步 self 缓存；临时目录、不受管或异常条目以及功能状态与备份均不在清理范围内。self 启动器、manifest 和入口校验值是可恢复缓存，缺失或普通文件内容损坏不阻断更新与普通卸载；更新从当前已校验入口及 release manifest 保存回滚材料并修复缓存。当前代码或入口损坏、归属不明，以及缓存路径为链接或异常文件类型仍会拒绝。
 
-源码中的 schema 2：`core` 仅包含入口、版本、环境检测、注册表、UI、分发逻辑和 `self` 命令。每个非 self 公开命令单独发布 `<domain>-<action>` bundle，例如 `network-bbr`；首次执行功能（包括功能帮助）时才下载该功能及其固定共享依赖，浏览全局帮助、清单、环境、版本、菜单和 `self status` 不下载功能。所有功能依赖 `shared-command`；UFW、访问、TLS、代理和 TCP 探测监听另依赖 `shared-ufw`，两项服务器测试另依赖 `shared-server-test`。已缓存功能可离线重复使用；`service tcping uninstall` 成功后只删除自身功能包缓存，下次调用会重新下载该包。跨版本 `self update` 只获取 manifest、安装器和 core，新版本的功能重新按需下载，不预取旧缓存。文件名、版本、SHA-256、路径和文件类型校验仍保留，失败临时下载不会成为有效缓存。
+v0.8.10 的 schema 2 分发中，`core` 仅包含入口、版本、环境检测、注册表、UI、分发逻辑和 `self` 命令。每个非 self 公开命令单独发布 `<domain>-<action>` bundle，例如 `network-bbr`；首次执行功能（包括功能帮助）时才下载该功能及其固定共享依赖，浏览全局帮助、清单、环境、版本、菜单和 `self status` 不下载功能。所有功能依赖 `shared-command`；UFW、访问、TLS、代理和 TCP 探测监听另依赖 `shared-ufw`，两项服务器测试另依赖 `shared-server-test`。已缓存功能可离线重复使用；`service tcping uninstall` 成功后只删除自身功能包缓存，下次调用会重新下载该包。跨版本 `self update` 只获取 manifest、安装器和 core，新版本的功能重新按需下载，不预取旧缓存。文件名、版本、SHA-256、路径和文件类型校验仍保留，失败临时下载不会成为有效缓存。
 
 如果旧版升级后启动报 `current/bin/vpsctl: Permission denied`，可能是 core 入口缺少执行位。可在 root shell 中恢复并检查：
 
@@ -204,7 +204,7 @@ bash bin/vpsctl service proxy update --core xray --version vX.Y.Z
 
 - 规范：已建立。
 - 目录骨架：已建立。
-- 当前版本：0.8.9。
+- 当前版本：0.8.10。
 - 管理入口：提供环境检测、终端 UI、固定注册表和安全分发。
 - 功能命令：提供 `network bbr`、`network dns`、`network ip-policy`、`network ufw`、`network rfw`、`system kernel`、`system reinstall`、`security access`、`security fail2ban`、`security tls`、`service proxy`、`service tcping`、`test nodequality` 和 `test tcpquality`；均处于 `experimental` 生命周期。
 - UFW：主菜单提供简洁端口管理，进阶功能放在“高级规则管理”。启用后自动维护 SSH、代理节点、中转转发及 HTTP-01 临时端口；支持等价已有规则接管、共享引用和按服务解除联动。安装默认不启用，服务停止但配置保留时规则继续保留。接口和恢复说明见 [UFW 管理](docs/ufw-management.md)。

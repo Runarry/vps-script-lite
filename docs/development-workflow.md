@@ -65,31 +65,31 @@
 
 ## 4. Release 资产与发布流程
 
-仓库根 `VERSION` 是项目版本的规范来源，当前源码版本为 `0.8.9`。应用、功能、tag、发布资产、安装目录和命令行展示必须使用同一版本号。当前源码使用 schema 2；旧按领域打包的已发布版本使用 schema 1，跨格式迁移不通过 self update。
+仓库根 `VERSION` 是项目版本的规范来源，当前版本为 `0.8.10`。应用、功能、tag、发布资产、安装目录和命令行展示必须使用同一版本号。v0.8.10 使用 schema 2；上一版 v0.8.9 按领域打包，使用 schema 1，跨格式迁移不通过 self update。
 
-schema 2 Release 必须一次性提供安装器、严格 TSV 清单、core、三个共享库 bundle 及十四个功能 bundle。固定清单位于 `lib/registry.sh`，构建和运行时共用。以下是未发布源码的命名示例，借用当前源码版本 `0.8.9`；已发布 `v0.8.9` 仍为 schema 1，未来 schema 2 发布须使用新 tag 和完整资产，禁止覆盖旧 Release：
+schema 2 Release 必须一次性提供安装器、严格 TSV 清单、core、三个共享库 bundle 及十四个功能 bundle。固定清单位于 `lib/registry.sh`，构建和运行时共用。v0.8.10 的资产名称如下；v0.8.9 的 schema 1 资产保持原样：
 
 ```text
 vpsctl.sh
 vpsctl-manifest.tsv
-vpsctl-core-0.8.9.tar.gz
-vpsctl-shared-command-0.8.9.tar.gz
-vpsctl-shared-ufw-0.8.9.tar.gz
-vpsctl-shared-server-test-0.8.9.tar.gz
-vpsctl-network-bbr-0.8.9.tar.gz
-vpsctl-network-dns-0.8.9.tar.gz
-vpsctl-network-ip-policy-0.8.9.tar.gz
-vpsctl-network-ufw-0.8.9.tar.gz
-vpsctl-network-rfw-0.8.9.tar.gz
-vpsctl-system-kernel-0.8.9.tar.gz
-vpsctl-system-reinstall-0.8.9.tar.gz
-vpsctl-security-access-0.8.9.tar.gz
-vpsctl-security-fail2ban-0.8.9.tar.gz
-vpsctl-security-tls-0.8.9.tar.gz
-vpsctl-service-proxy-0.8.9.tar.gz
-vpsctl-service-tcping-0.8.9.tar.gz
-vpsctl-test-nodequality-0.8.9.tar.gz
-vpsctl-test-tcpquality-0.8.9.tar.gz
+vpsctl-core-0.8.10.tar.gz
+vpsctl-shared-command-0.8.10.tar.gz
+vpsctl-shared-ufw-0.8.10.tar.gz
+vpsctl-shared-server-test-0.8.10.tar.gz
+vpsctl-network-bbr-0.8.10.tar.gz
+vpsctl-network-dns-0.8.10.tar.gz
+vpsctl-network-ip-policy-0.8.10.tar.gz
+vpsctl-network-ufw-0.8.10.tar.gz
+vpsctl-network-rfw-0.8.10.tar.gz
+vpsctl-system-kernel-0.8.10.tar.gz
+vpsctl-system-reinstall-0.8.10.tar.gz
+vpsctl-security-access-0.8.10.tar.gz
+vpsctl-security-fail2ban-0.8.10.tar.gz
+vpsctl-security-tls-0.8.10.tar.gz
+vpsctl-service-proxy-0.8.10.tar.gz
+vpsctl-service-tcping-0.8.10.tar.gz
+vpsctl-test-nodequality-0.8.10.tar.gz
+vpsctl-test-tcpquality-0.8.10.tar.gz
 ```
 
 每个 tar 包内使用项目根相对路径，不包含额外顶级包目录。`vpsctl-manifest.tsv` 依次包含 `schema_version<TAB>2`、`version<TAB>VERSION`、`repository<TAB>Runarry/vps-script-lite`、`asset<TAB>launcher<TAB>vpsctl.sh<TAB>SHA256`，以及各 bundle 的 `bundle<TAB>NAME<TAB>vpsctl-NAME-VERSION.tar.gz<TAB>SHA256`。名称唯一，文件名和版本精确对应，摘要是 64 位小写十六进制，core 必须存在；功能和共享包内容必须符合注册表固定清单。新增功能或私有模块时同步更新该清单和依赖映射。

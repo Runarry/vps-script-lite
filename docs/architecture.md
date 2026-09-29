@@ -114,56 +114,56 @@ vps-script-lite/
 
 `core` 常驻，只包含 `bin/vpsctl`、`VERSION`、`environment.sh`、`registry.sh`、`ui.sh`、`distribution.sh` 和三个 self 命令。每个非 self 公开命令独立打包为 `<domain>-<action>`，文件边界和全部私有模块由 `lib/registry.sh` 的固定清单定义。所有功能依赖 `shared-command`；`network ufw`、`security access`、`security tls`、`service proxy`、`service tcping` 另依赖 `shared-ufw`；两项测试另依赖 `shared-server-test`。首次执行功能或功能帮助时，按依赖顺序下载、校验、缓存，再分发。全局帮助、版本、环境、清单、菜单浏览和 self 状态保持离线。更新只获取目标版本的 manifest、安装器和 core，不预取旧缓存；不同版本的功能和共享库不得混用。功能卸载可在验证当前受管 release 后，持功能包下载锁删除该命令的固定文件和缓存标记；下次调用只重下该功能包。
 
-仓库根 `VERSION` 是项目版本的规范来源。以下是未发布源码的 schema 2 命名示例，借用当前源码版本 `0.8.9`；已发布 `v0.8.9` 仍是 schema 1。未来发布 schema 2 必须使用新版本 tag 和完整资产，不覆盖现有 Release：
+仓库根 `VERSION` 是项目版本的规范来源。v0.8.10 使用 schema 2，资产名称如下；上一版 v0.8.9 使用 schema 1，不能用新格式覆盖旧 Release：
 
 ```text
 vpsctl.sh
 vpsctl-manifest.tsv
-vpsctl-core-0.8.9.tar.gz
-vpsctl-shared-command-0.8.9.tar.gz
-vpsctl-shared-ufw-0.8.9.tar.gz
-vpsctl-shared-server-test-0.8.9.tar.gz
-vpsctl-network-bbr-0.8.9.tar.gz
-vpsctl-network-dns-0.8.9.tar.gz
-vpsctl-network-ip-policy-0.8.9.tar.gz
-vpsctl-network-ufw-0.8.9.tar.gz
-vpsctl-network-rfw-0.8.9.tar.gz
-vpsctl-system-kernel-0.8.9.tar.gz
-vpsctl-system-reinstall-0.8.9.tar.gz
-vpsctl-security-access-0.8.9.tar.gz
-vpsctl-security-fail2ban-0.8.9.tar.gz
-vpsctl-security-tls-0.8.9.tar.gz
-vpsctl-service-proxy-0.8.9.tar.gz
-vpsctl-service-tcping-0.8.9.tar.gz
-vpsctl-test-nodequality-0.8.9.tar.gz
-vpsctl-test-tcpquality-0.8.9.tar.gz
+vpsctl-core-0.8.10.tar.gz
+vpsctl-shared-command-0.8.10.tar.gz
+vpsctl-shared-ufw-0.8.10.tar.gz
+vpsctl-shared-server-test-0.8.10.tar.gz
+vpsctl-network-bbr-0.8.10.tar.gz
+vpsctl-network-dns-0.8.10.tar.gz
+vpsctl-network-ip-policy-0.8.10.tar.gz
+vpsctl-network-ufw-0.8.10.tar.gz
+vpsctl-network-rfw-0.8.10.tar.gz
+vpsctl-system-kernel-0.8.10.tar.gz
+vpsctl-system-reinstall-0.8.10.tar.gz
+vpsctl-security-access-0.8.10.tar.gz
+vpsctl-security-fail2ban-0.8.10.tar.gz
+vpsctl-security-tls-0.8.10.tar.gz
+vpsctl-service-proxy-0.8.10.tar.gz
+vpsctl-service-tcping-0.8.10.tar.gz
+vpsctl-test-nodequality-0.8.10.tar.gz
+vpsctl-test-tcpquality-0.8.10.tar.gz
 ```
 
 bundle 内部使用项目根相对路径，不能再包一层顶级目录。core 允许 `lib/` 及其子路径内的公共库，构建脚本仍显式选择发布文件；保留必需入口、哈希、路径越界及链接/特殊文件检查。`vpsctl-manifest.tsv` 是严格 TSV，字段顺序如下；SHA-256 使用 64 位小写十六进制：
 
 ```text
 schema_version<TAB>2
-version<TAB>0.8.9
+version<TAB>0.8.10
 repository<TAB>Runarry/vps-script-lite
 asset<TAB>launcher<TAB>vpsctl.sh<TAB>SHA256
-bundle<TAB>core<TAB>vpsctl-core-0.8.9.tar.gz<TAB>SHA256
-bundle<TAB>shared-command<TAB>vpsctl-shared-command-0.8.9.tar.gz<TAB>SHA256
-bundle<TAB>shared-ufw<TAB>vpsctl-shared-ufw-0.8.9.tar.gz<TAB>SHA256
-bundle<TAB>shared-server-test<TAB>vpsctl-shared-server-test-0.8.9.tar.gz<TAB>SHA256
-bundle<TAB>network-bbr<TAB>vpsctl-network-bbr-0.8.9.tar.gz<TAB>SHA256
-bundle<TAB>network-dns<TAB>vpsctl-network-dns-0.8.9.tar.gz<TAB>SHA256
-bundle<TAB>network-ip-policy<TAB>vpsctl-network-ip-policy-0.8.9.tar.gz<TAB>SHA256
-bundle<TAB>network-ufw<TAB>vpsctl-network-ufw-0.8.9.tar.gz<TAB>SHA256
-bundle<TAB>network-rfw<TAB>vpsctl-network-rfw-0.8.9.tar.gz<TAB>SHA256
-bundle<TAB>system-kernel<TAB>vpsctl-system-kernel-0.8.9.tar.gz<TAB>SHA256
-bundle<TAB>system-reinstall<TAB>vpsctl-system-reinstall-0.8.9.tar.gz<TAB>SHA256
-bundle<TAB>security-access<TAB>vpsctl-security-access-0.8.9.tar.gz<TAB>SHA256
-bundle<TAB>security-fail2ban<TAB>vpsctl-security-fail2ban-0.8.9.tar.gz<TAB>SHA256
-bundle<TAB>security-tls<TAB>vpsctl-security-tls-0.8.9.tar.gz<TAB>SHA256
-bundle<TAB>service-proxy<TAB>vpsctl-service-proxy-0.8.9.tar.gz<TAB>SHA256
-bundle<TAB>service-tcping<TAB>vpsctl-service-tcping-0.8.9.tar.gz<TAB>SHA256
-bundle<TAB>test-nodequality<TAB>vpsctl-test-nodequality-0.8.9.tar.gz<TAB>SHA256
-bundle<TAB>test-tcpquality<TAB>vpsctl-test-tcpquality-0.8.9.tar.gz<TAB>SHA256
+bundle<TAB>core<TAB>vpsctl-core-0.8.10.tar.gz<TAB>SHA256
+bundle<TAB>shared-command<TAB>vpsctl-shared-command-0.8.10.tar.gz<TAB>SHA256
+bundle<TAB>shared-ufw<TAB>vpsctl-shared-ufw-0.8.10.tar.gz<TAB>SHA256
+bundle<TAB>shared-server-test<TAB>vpsctl-shared-server-test-0.8.10.tar.gz<TAB>SHA256
+bundle<TAB>network-bbr<TAB>vpsctl-network-bbr-0.8.10.tar.gz<TAB>SHA256
+bundle<TAB>network-dns<TAB>vpsctl-network-dns-0.8.10.tar.gz<TAB>SHA256
+bundle<TAB>network-ip-policy<TAB>vpsctl-network-ip-policy-0.8.10.tar.gz<TAB>SHA256
+bundle<TAB>network-ufw<TAB>vpsctl-network-ufw-0.8.10.tar.gz<TAB>SHA256
+bundle<TAB>network-rfw<TAB>vpsctl-network-rfw-0.8.10.tar.gz<TAB>SHA256
+bundle<TAB>system-kernel<TAB>vpsctl-system-kernel-0.8.10.tar.gz<TAB>SHA256
+bundle<TAB>system-reinstall<TAB>vpsctl-system-reinstall-0.8.10.tar.gz<TAB>SHA256
+bundle<TAB>security-access<TAB>vpsctl-security-access-0.8.10.tar.gz<TAB>SHA256
+bundle<TAB>security-fail2ban<TAB>vpsctl-security-fail2ban-0.8.10.tar.gz<TAB>SHA256
+bundle<TAB>security-tls<TAB>vpsctl-security-tls-0.8.10.tar.gz<TAB>SHA256
+bundle<TAB>service-proxy<TAB>vpsctl-service-proxy-0.8.10.tar.gz<TAB>SHA256
+bundle<TAB>service-tcping<TAB>vpsctl-service-tcping-0.8.10.tar.gz<TAB>SHA256
+bundle<TAB>test-nodequality<TAB>vpsctl-test-nodequality-0.8.10.tar.gz<TAB>SHA256
+bundle<TAB>test-tcpquality<TAB>vpsctl-test-tcpquality-0.8.10.tar.gz<TAB>SHA256
 ```
 
 manifest 的 `version`、tag、文件名、安装目标版本和应用展示版本必须一致。schema 2 不解析旧 schema 1；跨格式迁移须普通卸载管理器后重新安装，保留服务、配置、功能状态和备份。bootstrap 在 core 安装前只验证安全、唯一的 bundle 记录并要求 core，不执行下载的注册表。运行时按本地固定清单验证功能及共享包的精确路径和必需文件，锁内再次检查缓存，成功后才写 marker；失败清除本次临时资产。`current` 在 manifest、core 和安装器完成校验并落盘后切换；提交前失败仍恢复原 current、入口和 self 元数据。
