@@ -75,6 +75,7 @@ test_cli() {
     test_contains "$output" "security access" "access command listing"
     test_contains "$output" "security tls" "tls command listing"
     test_contains "$output" "service proxy" "proxy command listing"
+    test_contains "$output" "service tcping" "tcping command listing"
     test_contains "$output" "test nodequality" "NodeQuality command listing"
     test_contains "$output" "test tcpquality" "TCPQuality command listing"
     test_contains "$output" "self status" "self status command listing"
@@ -237,6 +238,13 @@ EOF
     done
     chmod 0644 "$sandbox/commands/service/proxy.sh"
 
+    cat >"$sandbox/commands/service/tcping.sh" <<'EOF'
+#!/usr/bin/env bash
+printf 'tcping_args=%s\n' "$*"
+[[ -z "${VPSCTL_DISPATCH_MARKER:-}" ]] || printf 'tcping:%s\n' "$*" >>"$VPSCTL_DISPATCH_MARKER"
+EOF
+    chmod 0644 "$sandbox/commands/service/tcping.sh"
+
     cat >"$sandbox/commands/test/nodequality.sh" <<'EOF'
 #!/usr/bin/env bash
 printf 'nodequality_args=%s\n' "$*"
@@ -333,6 +341,11 @@ EOF
     output="$(VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" service proxy time status --json)"
     test_contains "$output" "proxy_args=time status --json" "proxy JSON time status dispatch without service capability"
 
+    output="$(VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" service tcping --help)"
+    test_contains "$output" "tcping_args=--help" "tcping help dispatch without service capability"
+    output="$(VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" service tcping status)"
+    test_contains "$output" "tcping_args=status" "tcping status dispatch without service capability"
+
     output="$(VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" test nodequality help)"
     test_contains "$output" "nodequality_args=help" "NodeQuality help dispatch without root capability"
     output="$(VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" test tcpquality --help)"
@@ -394,6 +407,14 @@ EOF
     VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" service proxy profiles extra >/dev/null 2>&1 || status=$?
     [[ "$status" == "3" ]] || test_fail "proxy malformed profiles without service capability should return 3, got ${status}"
     [[ ! -e "$marker" ]] || test_fail "proxy malformed profiles bypassed the capability gate"
+    status=0
+    VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" service tcping install >/dev/null 2>&1 || status=$?
+    [[ "$status" == "3" ]] || test_fail "tcping install without service capability should return 3, got ${status}"
+    [[ ! -e "$marker" ]] || test_fail "tcping install bypassed the capability gate"
+    status=0
+    VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" service tcping status extra >/dev/null 2>&1 || status=$?
+    [[ "$status" == "3" ]] || test_fail "tcping malformed status without service capability should return 3, got ${status}"
+    [[ ! -e "$marker" ]] || test_fail "tcping malformed status bypassed the capability gate"
 
     rm -rf -- "$sandbox/commands/network"
     mkdir -p "$sandbox/outside"

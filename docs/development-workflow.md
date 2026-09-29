@@ -67,7 +67,7 @@
 
 仓库根 `VERSION` 是项目版本的规范来源，当前源码版本为 `0.8.9`。应用、功能、tag、发布资产、安装目录和命令行展示必须使用同一版本号。当前源码使用 schema 2；旧按领域打包的已发布版本使用 schema 1，跨格式迁移不通过 self update。
 
-schema 2 Release 必须一次性提供安装器、严格 TSV 清单、core、三个共享库 bundle 及十三个功能 bundle。固定清单位于 `lib/registry.sh`，构建和运行时共用。以下是未发布源码的命名示例，借用当前源码版本 `0.8.9`；已发布 `v0.8.9` 仍为 schema 1，未来 schema 2 发布须使用新 tag 和完整资产，禁止覆盖旧 Release：
+schema 2 Release 必须一次性提供安装器、严格 TSV 清单、core、三个共享库 bundle 及十四个功能 bundle。固定清单位于 `lib/registry.sh`，构建和运行时共用。以下是未发布源码的命名示例，借用当前源码版本 `0.8.9`；已发布 `v0.8.9` 仍为 schema 1，未来 schema 2 发布须使用新 tag 和完整资产，禁止覆盖旧 Release：
 
 ```text
 vpsctl.sh
@@ -87,6 +87,7 @@ vpsctl-security-access-0.8.9.tar.gz
 vpsctl-security-fail2ban-0.8.9.tar.gz
 vpsctl-security-tls-0.8.9.tar.gz
 vpsctl-service-proxy-0.8.9.tar.gz
+vpsctl-service-tcping-0.8.9.tar.gz
 vpsctl-test-nodequality-0.8.9.tar.gz
 vpsctl-test-tcpquality-0.8.9.tar.gz
 ```

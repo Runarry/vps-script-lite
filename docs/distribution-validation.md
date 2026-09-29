@@ -130,3 +130,16 @@ VPSCTL_TEST_LEGACY_ASSET_DIR=/var/tmp/vpsctl-lazy-autostart.sj4HrXmQ/legacy \
 真实分发测试退出时恢复 `/usr/local/bin/vpsctl`、`/usr/local/lib/vpsctl` 和 `/var/lib/vpsctl/self`，已核对 current 恢复为原 `0.1.0`。Xray 恢复为 active/enabled、sing-box 为 inactive/disabled、中转刷新服务为 active/enabled。代理的真实安装启动、LKG 和文件恢复证据另见 [代理安装验收](proxy-install-validation.md)。
 
 原始日志保留在专用主机 `/var/tmp/vpsctl-lazy-autostart.sj4HrXmQ/evidence/`：`tests-run.log`、`tests-run.rc`、`distribution-real.log`、`distribution-real.rc`、`static-final.log` 和 `static-final.rc`。旧版发布资产和独立代理验收记录保留在同一工作目录的 `legacy/`、`proxy-real/`，不将主机配置正文或凭据提交仓库。
+
+## 源码入口与已发布清单兼容（2026-09-29）
+
+已在 `host-vps-scripts` 复现：`master` 安装入口要求 schema 2，但最新已发布 `v0.8.9` 的清单仍为 schema 1，首次安装因此报 `unsupported manifest schema`。该场景不需要卸载。源码入口现在校验两种格式共有的安装器元数据，并从清单指定的固定版本下载、校验和运行安装器；该发布版安装器继续严格校验自己的完整清单。当前安装逻辑与 `self update` 仍拒绝直接使用旧格式包。
+
+以下检查均通过 SSH 在专用主机执行并通过：
+
+- 受影响三个脚本的 `bash -n` 和 `shellcheck -x -P SCRIPTDIR --severity=error --extended-analysis=false`。
+- `bash tests/unit/test-distribution.sh`：覆盖两种格式的安装器转交、固定版本下载、参数和退出码传递、临时目录清理，以及错误来源、版本、路径、TSV、摘要和 Bash 语法的拒绝。
+- `bash tests/unit/test-release-build.sh`。
+- `VPSCTL_TEST_LEGACY_ASSET_DIR=/var/tmp/vpsctl-bootstrap-schema.6xaXqa3H/legacy bash tests/integration/test-distribution-real.sh`：使用从 GitHub 下载并逐项校验 SHA-256 的真实 `v0.8.9` 资产，以标准输入执行当前源码入口，成功安装旧格式版本；随后完成源码构建的 schema 2 安装、按需缓存、更新及卸载验收。
+
+真实分发测试在上传到专用主机的源码快照中运行，下载请求由测试映射到已校验的资产目录。测试退出时恢复 `/usr/local/bin/vpsctl`、`/usr/local/lib/vpsctl` 和 `/var/lib/vpsctl/self`；安装入口及 `current` 的前后记录一致，`current` 恢复为原 `0.1.0`。日志保留在专用主机 `/var/tmp/vpsctl-bootstrap-schema.6xaXqa3H/evidence/`，包括 `reproduction.log`、`legacy-sha256.log`、`shellcheck.log`、`distribution-unit.log`、`release-build.log`、`distribution-real.log` 和安装前后记录。源码版本、tag 和已发布资产未改动。

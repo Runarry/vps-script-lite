@@ -501,6 +501,9 @@ vps_cmd_package_for_tool() {
             esac
             ;;
         systemctl | systemd-run) printf 'systemd\n' ;;
+        python3)
+            if [[ "$manager" == pacman ]]; then printf 'python\n'; else printf 'python3\n'; fi
+            ;;
         useradd | userdel | usermod)
             case "$manager" in
                 apt-get) printf 'passwd\n' ;;

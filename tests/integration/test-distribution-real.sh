@@ -22,6 +22,11 @@ ETC_MARKER="/etc/vpsctl/${MARKER_ID}"
 STATE_MARKER="/var/lib/vpsctl/network/${MARKER_ID}"
 LIBEXEC_MARKER="/usr/local/libexec/${MARKER_ID}"
 BACKUP_MARKER="/var/backups/vpsctl/${MARKER_ID}"
+TCPING_UFW_STATE_DIR=/var/lib/vpsctl/network/ufw
+TCPING_UFW_LOCK=/run/vpsctl/network-ufw.lock
+TCPING_UFW_BACKUP="$TEST_TEMP/tcping-ufw-baseline"
+TCPING_UFW_BASELINE_TAKEN=0
+TCPING_UFW_LOCK_PARENT_EXISTED=0
 
 fail() {
     printf 'FAIL: %s\n' "$1" >&2
@@ -44,14 +49,57 @@ restore_path() {
     fi
 }
 
+snapshot_tcping_ufw() {
+    local path
+    for path in /var/lib/vpsctl /var/lib/vpsctl/network /run/vpsctl; do
+        [[ ! -L "$path" ]] || fail "shared UFW parent path is a symlink: $path"
+    done
+    [[ ! -L "$TCPING_UFW_STATE_DIR" && ( ! -e "$TCPING_UFW_STATE_DIR" || -d "$TCPING_UFW_STATE_DIR" ) ]] || fail 'unsafe shared UFW state directory before TCPing cache test'
+    [[ ! -e "$TCPING_UFW_STATE_DIR/pending.json" && ! -L "$TCPING_UFW_STATE_DIR/pending.json" ]] || fail 'shared UFW recovery is pending before TCPing cache test'
+    [[ ! -L "$TCPING_UFW_LOCK" && ( ! -e "$TCPING_UFW_LOCK" || -f "$TCPING_UFW_LOCK" ) ]] || fail 'unsafe shared UFW lock before TCPing cache test'
+    mkdir -p -- "$TCPING_UFW_BACKUP"
+    [[ ! -d "${TCPING_UFW_LOCK%/*}" ]] || TCPING_UFW_LOCK_PARENT_EXISTED=1
+    if [[ -d "$TCPING_UFW_STATE_DIR" ]]; then cp -a -- "$TCPING_UFW_STATE_DIR" "$TCPING_UFW_BACKUP/state"; fi
+    if [[ -f "$TCPING_UFW_LOCK" ]]; then cp -a -- "$TCPING_UFW_LOCK" "$TCPING_UFW_BACKUP/lock"; fi
+    TCPING_UFW_BASELINE_TAKEN=1
+}
+
+restore_tcping_ufw() {
+    [[ "$TCPING_UFW_BASELINE_TAKEN" == 1 ]] || return 0
+    rm -rf -- "$TCPING_UFW_STATE_DIR" || return 1
+    if [[ -d "$TCPING_UFW_BACKUP/state" ]]; then
+        cp -a -- "$TCPING_UFW_BACKUP/state" "$TCPING_UFW_STATE_DIR" || return 1
+    fi
+    rm -f -- "$TCPING_UFW_LOCK" || return 1
+    if [[ -f "$TCPING_UFW_BACKUP/lock" ]]; then
+        mkdir -p -- "${TCPING_UFW_LOCK%/*}" || return 1
+        cp -a -- "$TCPING_UFW_BACKUP/lock" "$TCPING_UFW_LOCK" || return 1
+    elif [[ "$TCPING_UFW_LOCK_PARENT_EXISTED" == 0 && -d "${TCPING_UFW_LOCK%/*}" ]]; then
+        rmdir -- "${TCPING_UFW_LOCK%/*}" || return 1
+    fi
+    TCPING_UFW_BASELINE_TAKEN=0
+}
+
+tcping_release_hashes() (
+    cd -- "$release_root"
+    find . -type f -print0 | sort -z | xargs -0 -r sha256sum
+)
+
 cleanup() {
+    local restore_status=0
+    restore_tcping_ufw || restore_status=1
     rm -f -- "$ENTRY"
     rm -rf -- "$INSTALL_ROOT" "$SELF_ROOT"
     restore_path "$ENTRY"
     restore_path "$INSTALL_ROOT"
     restore_path "$SELF_ROOT"
     rm -f -- "$ETC_MARKER" "$STATE_MARKER" "$LIBEXEC_MARKER" "$BACKUP_MARKER"
-    rm -rf -- "$TEST_TEMP"
+    if [[ "$restore_status" == 0 ]]; then
+        rm -rf -- "$TEST_TEMP"
+    else
+        printf 'FAIL: shared UFW metadata restore failed; baseline retained at %s\n' "$TCPING_UFW_BACKUP" >&2
+        return 1
+    fi
 }
 
 trap cleanup EXIT
@@ -116,7 +164,11 @@ if [[ -n "${VPSCTL_TEST_LEGACY_ASSET_DIR:-}" ]]; then
     awk -F '\t' '$1 == "asset" || $1 == "bundle" {print $NF "  " $(NF-1)}' "$legacy/vpsctl-manifest.tsv" |
         (cd "$legacy" && sha256sum -c -) >/dev/null || fail 'legacy asset digest mismatch'
     export VPSCTL_TEST_ASSET_DIR="$legacy"
-    PATH="$MOCK_BIN:$PATH" bash "$legacy/vpsctl.sh" --verified-manifest "$legacy/vpsctl-manifest.tsv" --version >/dev/null
+    : >"$VPSCTL_TEST_DOWNLOAD_TRACE"
+    legacy_output="$(PATH="$MOCK_BIN:$PATH" bash -s -- --version <"$TEST_ROOT/vpsctl.sh")"
+    [[ "$legacy_output" == 'vpsctl 0.8.9' ]] || fail 'source bootstrap did not enter the published schema-1 CLI'
+    [[ "$(sort "$VPSCTL_TEST_DOWNLOAD_TRACE")" == "$(printf '%s\n' vpsctl.sh vpsctl-manifest.tsv vpsctl-core-0.8.9.tar.gz | sort)" ]] ||
+        fail 'schema-1 bootstrap downloaded more than launcher, manifest and core'
     PATH="$MOCK_BIN:$PATH" "$ENTRY" network bbr --help >/dev/null
     [[ -f "$INSTALL_ROOT/current/.bundles/network.sha256" ]] || fail 'legacy domain cache missing'
     "$ENTRY" --non-interactive self uninstall --confirm-uninstall >/dev/null
@@ -166,11 +218,12 @@ PATH="$MOCK_BIN:$PATH" "$ENTRY" network bbr --help >/dev/null
 [[ "$(sort "$VPSCTL_TEST_DOWNLOAD_TRACE")" == "$(printf '%s\n' vpsctl-shared-command-0.8.9.tar.gz vpsctl-network-bbr-0.8.9.tar.gz | sort)" ]] ||
     fail 'first BBR invocation downloaded unrelated bundles'
 [[ ! -e "$release_root/commands/network/dns.sh" && ! -e "$release_root/lib/ufw.sh" ]] || fail 'BBR cache contains unrelated code'
-features=(network-bbr network-dns network-ip-policy network-ufw network-rfw system-kernel system-reinstall security-access security-fail2ban security-tls service-proxy test-nodequality test-tcpquality)
+features=(network-bbr network-dns network-ip-policy network-ufw network-rfw system-kernel system-reinstall security-access security-fail2ban security-tls service-proxy service-tcping test-nodequality test-tcpquality)
 for feature in "${features[@]}"; do
     PATH="$MOCK_BIN:$PATH" "$ENTRY" "${feature%%-*}" "${feature#*-}" --help >/dev/null
     [[ -f "$release_root/.bundles/${feature}.sha256" ]] || fail "$feature was not cached on demand"
 done
+[[ -f "$release_root/commands/service/tcping/listener.py" ]] || fail 'tcping private listener was not cached'
 for shared in command ufw server-test; do
     [[ "$(grep -Fc "vpsctl-shared-${shared}-0.8.9.tar.gz" "$VPSCTL_TEST_DOWNLOAD_TRACE")" == 1 ]] ||
         fail "shared $shared fetched more than once"
@@ -181,6 +234,68 @@ for feature in "${features[@]}"; do
 done
 VPSCTL_TEST_CURL_FAIL=1 PATH="$MOCK_BIN:$PATH" "$ENTRY" self status >/dev/null
 [[ ! -s "$VPSCTL_TEST_DOWNLOAD_TRACE" ]] || fail 'cached feature contacted the network'
+
+if [[ "${VPSCTL_TEST_TCPING_UNINSTALL:-0}" == 1 ]]; then
+    # This optional path checks self-deletion through the installed CLI. It must
+    # not remove a pre-existing TCPing site or change real firewall rules.
+    tcping_paths=(
+        /etc/systemd/system/vpsctl-tcping.service
+        /etc/init.d/vpsctl-tcping
+        /usr/local/libexec/vpsctl/tcping
+        /usr/local/libexec/vpsctl/tcping/listener.py
+        /var/lib/vpsctl/service/tcping
+        /var/lib/vpsctl/service/tcping/state.json
+        /run/vpsctl/tcping-ready.json
+        /var/log/vpsctl/tcping.log
+        /run/vpsctl-tcping.pid
+    )
+    for path in "${tcping_paths[@]}"; do
+        [[ ! -e "$path" && ! -L "$path" ]] || fail "pre-existing TCPing site blocks cache eviction acceptance: $path"
+    done
+    if command -v systemctl >/dev/null 2>&1 &&
+        { systemctl is-active --quiet vpsctl-tcping.service || systemctl is-enabled --quiet vpsctl-tcping.service; }; then
+        fail 'pre-existing TCPing systemd service blocks cache eviction acceptance'
+    fi
+    snapshot_tcping_ufw
+    cat >"$MOCK_BIN/ufw" <<'MOCK_UFW'
+#!/usr/bin/env bash
+[[ "$#" == 1 && "$1" == status ]] || exit 89
+printf 'Status: inactive\n'
+MOCK_UFW
+    chmod 0755 "$MOCK_BIN/ufw"
+    tcping_release_hashes >"$TEST_TEMP/tcping-release-before.sha256"
+    awk '$2 != "./.bundles/service-tcping.sha256" &&
+         $2 != "./commands/service/tcping.sh" &&
+         $2 != "./commands/service/tcping/listener.py"' \
+        "$TEST_TEMP/tcping-release-before.sha256" >"$TEST_TEMP/tcping-release-expected-after.sha256"
+    : >"$VPSCTL_TEST_DOWNLOAD_TRACE"
+    VPSCTL_TEST_CURL_FAIL=1 PATH="$MOCK_BIN:$PATH" "$ENTRY" --yes --non-interactive service tcping uninstall \
+        >"$TEST_TEMP/tcping-uninstall.log" || fail 'installed TCPing uninstall failed'
+    [[ ! -s "$VPSCTL_TEST_DOWNLOAD_TRACE" ]] || fail 'installed TCPing uninstall contacted the network'
+    [[ ! -e "$release_root/.bundles/service-tcping.sha256" &&
+       ! -e "$release_root/commands/service/tcping.sh" &&
+       ! -e "$release_root/commands/service/tcping/listener.py" &&
+       ! -e "$release_root/commands/service/tcping" &&
+       ! -e "$release_root/.bundles/.service-tcping.lock" ]] || fail 'installed TCPing uninstall retained feature cache'
+    [[ -d "$release_root/commands/service" ]] || fail 'installed TCPing uninstall removed the service domain'
+    for path in "${tcping_paths[@]}"; do
+        [[ ! -e "$path" && ! -L "$path" ]] || fail "installed TCPing uninstall left a runtime artifact: $path"
+    done
+    tcping_release_hashes >"$TEST_TEMP/tcping-release-after.sha256"
+    cmp -s -- "$TEST_TEMP/tcping-release-expected-after.sha256" "$TEST_TEMP/tcping-release-after.sha256" ||
+        fail 'installed TCPing uninstall changed other release files'
+    restore_tcping_ufw || fail 'shared UFW metadata restore failed after TCPing uninstall'
+    rm -- "$MOCK_BIN/ufw"
+
+    : >"$VPSCTL_TEST_DOWNLOAD_TRACE"
+    PATH="$MOCK_BIN:$PATH" "$ENTRY" service tcping help >/dev/null || fail 'TCPing help did not re-download the evicted bundle'
+    [[ "$(<"$VPSCTL_TEST_DOWNLOAD_TRACE")" == vpsctl-service-tcping-0.8.9.tar.gz ]] ||
+        fail 'TCPing help downloaded more than its evicted feature bundle'
+    tcping_release_hashes >"$TEST_TEMP/tcping-release-restored.sha256"
+    cmp -s -- "$TEST_TEMP/tcping-release-before.sha256" "$TEST_TEMP/tcping-release-restored.sha256" ||
+        fail 'TCPing feature cache was not restored exactly after re-download'
+fi
+
 rm -- "$SELF_ROOT/vpsctl.sh"
 printf 'corrupt cache\n' >"$SELF_ROOT/manifest.tsv"
 PATH="$MOCK_BIN:$PATH" "$ENTRY" --yes --non-interactive self update >/dev/null

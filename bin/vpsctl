@@ -242,6 +242,12 @@ vpsctl_invocation_may_omit_requirement() {
                 return 0
             fi
             ;;
+        service:tcping:service:any)
+            (($# == 1)) || return 1
+            case "$1" in
+                help | -h | --help | status) return 0 ;;
+            esac
+            ;;
     esac
     return 1
 }

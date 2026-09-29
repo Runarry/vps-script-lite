@@ -37,7 +37,7 @@ UI 显示以下摘要：
 
 初始化系统、服务管理器、包管理器和会话信息仍会在后台采集，用于后续功能的能力判断，但不在 UI 中展示。BBR 是否启用以当前 `tcp_congestion_control` 是否为 BBR 系列算法为准；对于同样注册为 `bbr` 且未暴露模块版本的内核实现，UI 不猜测它属于 BBRv1、v2 或 v3，而是显示版本未暴露。
 
-检测结果同时转换为能力标识，例如 `linux`、`pkg:any`、`pkg:apt-get`、`init:systemd`、`service:any`、`root`、`ipv4`。注册命令可以声明能力要求，菜单和 `list` 会据此标记可用性，直接分发也会在运行前拦截不兼容命令。入口只对精确匹配的静态只读调用移除其不需要的运行时能力：RFW 的帮助和无参数状态不要求 systemd，代理的帮助、协议矩阵、无参数状态与系统时间状态不要求服务管理器，两项服务器测试的单个帮助参数不要求 root；Linux 等其余要求仍保留。访问管理当前整体要求 systemd，不声明 OpenRC SSH 编排例外。多余参数和任何真实测试或变更动作都不能使用这些例外。
+检测结果同时转换为能力标识，例如 `linux`、`pkg:any`、`pkg:apt-get`、`init:systemd`、`service:any`、`root`、`ipv4`。注册命令可以声明能力要求，菜单和 `list` 会据此标记可用性，直接分发也会在运行前拦截不兼容命令。入口只对精确匹配的静态只读调用移除其不需要的运行时能力：RFW 的帮助和无参数状态不要求 systemd，代理的帮助、协议矩阵、无参数状态与系统时间状态，以及 TCP 探测监听的帮助和无参数状态不要求服务管理器，两项服务器测试的单个帮助参数不要求 root；Linux 等其余要求仍保留。访问管理当前整体要求 systemd，不声明 OpenRC SSH 编排例外。多余参数和任何真实测试或变更动作都不能使用这些例外。
 
 容器、WSL、未知发行版或缺少基础管理器时显示黄色“受限”；非 Linux 显示红色“不支持”；满足基础条件时显示绿色“支持”。该状态只是入口层的快速提示，功能脚本仍必须自行验证它实际需要的全部前置条件。
 
@@ -92,7 +92,7 @@ UI 显示以下摘要：
         └── 卸载受管脚本（uninstall）
 ```
 
-主菜单不会扫描目录或推测功能分类，只显示固定注册表中已经登记的真实功能。业务领域登记 `network`、`system`、`security`、`service` 与 `test`，包含 `bbr`、`dns`、`ip-policy`、`ufw`、`rfw`、`kernel`、`reinstall`、`access`、`fail2ban`、`tls`、`proxy`、`nodequality`、`tcpquality` 十三个入口，另有常驻 `self` 领域。用户选择功能后，入口立即无附加参数分发该公开脚本，由功能脚本进入自己的交互 UI、开始测试，或像轻量入口 `reinstall` 一样显示本地帮助；不再显示命令详情页，也不再要求输入 `r` 才运行。环境详情仍可通过非菜单命令 `vpsctl env` 查看。
+主菜单不会扫描目录或推测功能分类，只显示固定注册表中已经登记的真实功能。业务领域登记 `network`、`system`、`security`、`service` 与 `test`，包含 `bbr`、`dns`、`ip-policy`、`ufw`、`rfw`、`kernel`、`reinstall`、`access`、`fail2ban`、`tls`、`proxy`、`tcping`、`nodequality`、`tcpquality` 十四个入口，另有常驻 `self` 领域。用户选择功能后，入口立即无附加参数分发该公开脚本，由功能脚本进入自己的交互 UI、开始测试，或像轻量入口 `reinstall` 一样显示本地帮助；不再显示命令详情页，也不再要求输入 `r` 才运行。环境详情仍可通过非菜单命令 `vpsctl env` 查看。
 
 `system kernel` 的菜单展示当前运行版本，并以编号选择查看完整状态、安装/更新、固定默认版本或卸载指定版本。状态页按完整 release 汇总内核与启动信息。安装类型默认推荐发行版官方标准内核；Debian 可选 Cloud，Ubuntu LTS 仅在适配 HWE 元包有候选时显示，XanMod 继续提供 auto/main/lts 和 CPU 等级选择。切换与卸载候选由 current、default、next、启动文件完整性和 dpkg 归属状态过滤，用户无需手工输入 release。安装、切换、卸载分别要求 `INSTALL-KERNEL`、`SWITCH-KERNEL`、`REMOVE-KERNEL` 强确认；菜单不会自动重启，流程提示重启核对后再卸载旧版本。
 

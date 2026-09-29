@@ -178,6 +178,27 @@ ufw_cli_forwards_desired() {
     done < <(jq -c '.forwards[]' "$manifest") | jq -s '.'
 }
 
+ufw_cli_tcping_desired() {
+    local state ipv6=false
+    state="$(vps_cmd_system_path /var/lib/vpsctl/service/tcping/state.json)" || return $?
+    vps_cmd_require_no_symlink_components "$state" || return $?
+    if [[ ! -e "$state" ]]; then
+        printf '[]\n'
+        return 0
+    fi
+    [[ -f "$state" && -r "$state" ]] || return 3
+    jq -e '.schema_version == 1 and (.port | type == "number" and floor == . and . >= 1 and . <= 65535) and
+        (.enabled | type == "boolean")' "$state" >/dev/null || {
+        vps_cmd_error 'TCPing 状态损坏，拒绝猜测放行端口'
+        return 10
+    }
+    vps_ufw_ipv6_available && ipv6=true
+    jq --argjson ipv6 "$ipv6" 'if .enabled then .port as $port |
+        (["ipv4"] + if $ipv6 then ["ipv6"] else [] end) |
+        map({owner:"tcping",kind:"input",family:.,proto:"tcp",port:($port|tostring),
+            source:"any",destination:"any",temporary:false,preserve_existing:true}) else [] end' "$state"
+}
+
 ufw_cli_sync_locked() {
     local mode="${1:-0}" temporary='' status=0 cache
     ufw_cli_no_ssh_transaction || return $?
@@ -199,9 +220,10 @@ ufw_cli_sync_locked() {
     if ((status == 0)); then ufw_cli_ssh_desired >"$temporary/ssh.json" || status=$?; fi
     if ((status == 0)); then ufw_cli_nodes_desired "$temporary/nodes.json" >"$temporary/proxy-nodes.json" || status=$?; fi
     if ((status == 0)); then ufw_cli_forwards_desired "$temporary/relay.json" "$temporary/cache.json" >"$temporary/proxy-forwards.json" || status=$?; fi
+    if ((status == 0)); then ufw_cli_tcping_desired >"$temporary/tcping.json" || status=$?; fi
     if ((status == 0)); then
         local scope begun=0
-        for scope in ssh proxy-nodes proxy-forwards; do
+        for scope in ssh proxy-nodes proxy-forwards tcping; do
             vps_ufw_begin "$scope" "$temporary/$scope.json" "$mode" || {
                 status=$?
                 break
@@ -225,6 +247,6 @@ ufw_cli_sync_locked() {
         fi
     fi
     rm -rf -- "$temporary"
-    ((status != 0)) || vps_cmd_success '已同步 SSH、代理节点和代理转发需求；活动 TLS 租约保持不变'
+    ((status != 0)) || vps_cmd_success '已同步 SSH、代理节点、代理转发和 TCPing 需求；活动 TLS 租约保持不变'
     return "$status"
 }

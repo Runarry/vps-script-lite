@@ -67,6 +67,7 @@ vpsctl_validate_manifest() {
     # Keep strict ASCII validation local; upstream commands inherit the caller's locale.
     local LC_ALL=C
     local manifest=$1
+    local scope=${2:-install}
     local -a lines=()
     local index=0
     local line=''
@@ -82,7 +83,8 @@ vpsctl_validate_manifest() {
     for line in "${lines[@]}"; do
         [[ -n "$line" && "$line" != *$'\r'* ]] || vpsctl_bootstrap_die 'manifest contains an invalid record'
     done
-    [[ ${lines[0]} == $'schema_version\t2' ]] || vpsctl_bootstrap_die 'unsupported manifest schema; uninstall normally and reinstall to migrate (feature data is preserved)'
+    [[ ${lines[0]} == $'schema_version\t2' || ( "$scope" == launcher && ${lines[0]} == $'schema_version\t1' ) ]] ||
+        vpsctl_bootstrap_die 'unsupported manifest schema; use the launcher and manifest from the same GitHub Release'
     [[ ${lines[1]} =~ ^version$'\t'([0-9]+\.[0-9]+\.[0-9]+)$ ]] ||
         vpsctl_bootstrap_die 'invalid distribution version in manifest'
     VPSCTL_DISTRIBUTION_VERSION="${BASH_REMATCH[1]}"
@@ -94,11 +96,11 @@ vpsctl_validate_manifest() {
     [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || vpsctl_bootstrap_die 'invalid launcher SHA256'
     [[ ${lines[3]} == $'asset\tlauncher\tvpsctl.sh\t'"$digest" ]] ||
         vpsctl_bootstrap_die 'launcher manifest record is not strict TSV'
-    VPSCTL_MANIFEST_FILES[launcher]=$filename
-    VPSCTL_MANIFEST_HASHES[launcher]=$digest
-
     VPSCTL_MANIFEST_FILES=([launcher]=vpsctl.sh)
     VPSCTL_MANIFEST_HASHES=([launcher]="$digest")
+    # The verified release launcher validates its own bundle schema before installation.
+    [[ "$scope" != launcher ]] || return 0
+
     for ((index = 4; index < ${#lines[@]}; index++)); do
         IFS=$'\t' read -r kind name filename digest extra <<<"${lines[index]}"
         [[ "$kind" == bundle && -z "$extra" ]] ||
@@ -145,7 +147,8 @@ vpsctl_stage_canonical_launcher() {
     manifest="${VPSCTL_TEMP_DIR}/${VPSCTL_MANIFEST_NAME}"
     launcher="${VPSCTL_TEMP_DIR}/vpsctl.sh"
     vpsctl_download "$VPSCTL_MANIFEST_NAME" "$manifest"
-    vpsctl_validate_manifest "$manifest"
+    vpsctl_validate_manifest "$manifest" launcher
+    VPSCTL_RELEASE_BASE_URL="https://github.com/${VPSCTL_RELEASE_REPOSITORY}/releases/download/v${VPSCTL_DISTRIBUTION_VERSION}"
     vpsctl_download "${VPSCTL_MANIFEST_FILES[launcher]}" "$launcher"
     vpsctl_validate_launcher "$launcher"
     chmod 0755 "$launcher"

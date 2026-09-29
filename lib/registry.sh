@@ -26,7 +26,7 @@ declare -ga VPS_BUNDLE_IDS=(
     core shared-command shared-ufw shared-server-test
     network-bbr network-dns network-ip-policy network-ufw network-rfw
     system-kernel system-reinstall security-access security-fail2ban security-tls
-    service-proxy test-nodequality test-tcpquality
+    service-proxy service-tcping test-nodequality test-tcpquality
 )
 
 vps_registry_bundle_files() {
@@ -45,6 +45,7 @@ vps_registry_bundle_files() {
         security-fail2ban) printf '%s\n' commands/security/fail2ban.sh ;;
         security-tls) printf '%s\n' commands/security/tls.sh commands/security/tls/{common,store,issue,timer,ufw}.sh ;;
         service-proxy) printf '%s\n' commands/service/proxy.sh commands/service/proxy/{common,core,address,dns,nodes,protocols-xray,protocols-sing-box,relay,relay-uri,relay-forward,time,ufw}.sh ;;
+        service-tcping) printf '%s\n' commands/service/tcping.sh commands/service/tcping/listener.py ;;
         test-nodequality | test-tcpquality) printf 'commands/test/%s.sh\n' "${1#test-}" ;;
         *) return 2 ;;
     esac
@@ -59,7 +60,7 @@ vps_registry_command_bundles() {
     fi
     printf 'shared-command\n'
     case "$command_key" in
-        network:ufw | security:access | security:tls | service:proxy) printf 'shared-ufw\n' ;;
+        network:ufw | security:access | security:tls | service:proxy | service:tcping) printf 'shared-ufw\n' ;;
         test:nodequality | test:tcpquality) printf 'shared-server-test\n' ;;
     esac
     printf '%s\n' "${command_key/:/-}"
@@ -218,7 +219,7 @@ vps_registry_init() {
         "network" \
         "ufw" \
         "UFW 防火墙" \
-        "安装、管理防火墙规则并联动 SSH、节点、中转与证书端口" \
+        "安装、管理防火墙规则并联动 SSH、节点、中转、TCPing 与证书端口" \
         "commands/network/ufw.sh" \
         "disruptive" \
         "optional-root" \
@@ -305,6 +306,18 @@ vps_registry_init() {
         "平级管理 Xray 与 sing-box 内核、节点、日志和时间同步" \
         "commands/service/proxy.sh" \
         "disruptive" \
+        "optional-root" \
+        "supported" \
+        "linux,service:any" \
+        "experimental"
+
+    vps_registry_register_command \
+        "service" \
+        "tcping" \
+        "TCPing 测试站点" \
+        "安装、配置和管理 TCP 探测监听服务" \
+        "commands/service/tcping.sh" \
+        "change" \
         "optional-root" \
         "supported" \
         "linux,service:any" \

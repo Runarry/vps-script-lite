@@ -43,7 +43,7 @@ vps-script-lite/
 └── docs/                   # 架构、开发和命令登记规范
 ```
 
-尚未实现功能的空目录暂以 `.gitkeep` 保存；`commands/network/` 包含网络功能脚本，`commands/system/kernel.sh` 是系统内核管理的唯一公开入口，并固定加载 `commands/system/kernel/providers.sh`、`inventory.sh` 与 `grub.sh` 私有模块；`commands/security/access.sh` 实现访问管理入口，`commands/security/fail2ban.sh` 及其私有子模块实现 OpenSSH Fail2ban 防护，`commands/security/tls.sh` 及其私有子模块实现域名 TLS 证书管理，`commands/service/proxy.sh` 及其私有子模块实现代理管理入口，`commands/test/nodequality.sh` 与 `commands/test/tcpquality.sh` 实现服务器测试入口。
+尚未实现功能的空目录暂以 `.gitkeep` 保存；`commands/network/` 包含网络功能脚本，`commands/system/kernel.sh` 是系统内核管理的唯一公开入口，并固定加载 `commands/system/kernel/providers.sh`、`inventory.sh` 与 `grub.sh` 私有模块；`commands/security/access.sh` 实现访问管理入口，`commands/security/fail2ban.sh` 及其私有子模块实现 OpenSSH Fail2ban 防护，`commands/security/tls.sh` 及其私有子模块实现域名 TLS 证书管理，`commands/service/proxy.sh` 及其私有子模块实现代理管理入口，`commands/service/tcping.sh` 及其私有监听脚本实现 TCP 探测服务，`commands/test/nodequality.sh` 与 `commands/test/tcpquality.sh` 实现服务器测试入口。
 
 ## 3. 组件职责
 
@@ -90,7 +90,7 @@ vps-script-lite/
 
 `lib/` 仅存放稳定且至少被两个组件复用的基础能力，例如日志格式、平台检测、权限检查、锁和安全的文件替换。
 
-`lib/ufw.sh` 提供网络管理、SSH、代理和 TLS 共用的规则归属、服务需求与事务接口，随 core 常驻。各业务提交声明，UFW 入口通过已知持久数据契约采集存量，不加载其他功能的私有模块。独立 UFW 锁在业务锁之后获取，跨命令同步按访问管理、代理、TLS 的固定顺序获取业务锁。中转后台运行时复制同版本共享库，避免升级或重启后丢失端口联动能力。
+`lib/ufw.sh` 提供网络管理、SSH、代理、TCP 探测监听和 TLS 共用的规则归属、服务需求与事务接口，随 `shared-ufw` 按需下载。各业务提交声明，UFW 入口通过已知持久数据契约采集存量，不加载其他功能的私有模块。独立 UFW 锁在业务锁之后获取，跨命令同步按访问管理、代理、TLS、TCP 探测监听的固定顺序获取业务锁。中转后台运行时复制同版本共享库，避免升级或重启后丢失端口联动能力。
 
 公共库不得：
 
@@ -112,7 +112,7 @@ vps-script-lite/
 /var/lib/vpsctl/self/                        # 安装、自更新、资产缓存元数据
 ```
 
-`core` 常驻，只包含 `bin/vpsctl`、`VERSION`、`environment.sh`、`registry.sh`、`ui.sh`、`distribution.sh` 和三个 self 命令。每个非 self 公开命令独立打包为 `<domain>-<action>`，文件边界和全部私有模块由 `lib/registry.sh` 的固定清单定义。所有功能依赖 `shared-command`；`network ufw`、`security access`、`security tls`、`service proxy` 另依赖 `shared-ufw`；两项测试另依赖 `shared-server-test`。首次执行功能或功能帮助时，按依赖顺序下载、校验、缓存，再分发。全局帮助、版本、环境、清单、菜单浏览和 self 状态保持离线。更新只获取目标版本的 manifest、安装器和 core，不预取旧缓存；不同版本的功能和共享库不得混用。
+`core` 常驻，只包含 `bin/vpsctl`、`VERSION`、`environment.sh`、`registry.sh`、`ui.sh`、`distribution.sh` 和三个 self 命令。每个非 self 公开命令独立打包为 `<domain>-<action>`，文件边界和全部私有模块由 `lib/registry.sh` 的固定清单定义。所有功能依赖 `shared-command`；`network ufw`、`security access`、`security tls`、`service proxy`、`service tcping` 另依赖 `shared-ufw`；两项测试另依赖 `shared-server-test`。首次执行功能或功能帮助时，按依赖顺序下载、校验、缓存，再分发。全局帮助、版本、环境、清单、菜单浏览和 self 状态保持离线。更新只获取目标版本的 manifest、安装器和 core，不预取旧缓存；不同版本的功能和共享库不得混用。功能卸载可在验证当前受管 release 后，持功能包下载锁删除该命令的固定文件和缓存标记；下次调用只重下该功能包。
 
 仓库根 `VERSION` 是项目版本的规范来源。以下是未发布源码的 schema 2 命名示例，借用当前源码版本 `0.8.9`；已发布 `v0.8.9` 仍是 schema 1。未来发布 schema 2 必须使用新版本 tag 和完整资产，不覆盖现有 Release：
 
@@ -134,6 +134,7 @@ vpsctl-security-access-0.8.9.tar.gz
 vpsctl-security-fail2ban-0.8.9.tar.gz
 vpsctl-security-tls-0.8.9.tar.gz
 vpsctl-service-proxy-0.8.9.tar.gz
+vpsctl-service-tcping-0.8.9.tar.gz
 vpsctl-test-nodequality-0.8.9.tar.gz
 vpsctl-test-tcpquality-0.8.9.tar.gz
 ```
@@ -160,6 +161,7 @@ bundle<TAB>security-access<TAB>vpsctl-security-access-0.8.9.tar.gz<TAB>SHA256
 bundle<TAB>security-fail2ban<TAB>vpsctl-security-fail2ban-0.8.9.tar.gz<TAB>SHA256
 bundle<TAB>security-tls<TAB>vpsctl-security-tls-0.8.9.tar.gz<TAB>SHA256
 bundle<TAB>service-proxy<TAB>vpsctl-service-proxy-0.8.9.tar.gz<TAB>SHA256
+bundle<TAB>service-tcping<TAB>vpsctl-service-tcping-0.8.9.tar.gz<TAB>SHA256
 bundle<TAB>test-nodequality<TAB>vpsctl-test-nodequality-0.8.9.tar.gz<TAB>SHA256
 bundle<TAB>test-tcpquality<TAB>vpsctl-test-tcpquality-0.8.9.tar.gz<TAB>SHA256
 ```

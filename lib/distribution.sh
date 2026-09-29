@@ -409,6 +409,91 @@ vps_distribution_ensure_command() {
     done <<<"$bundles"
 }
 
+vps_distribution_remove_command_cache() {
+    local command_key="${1:-}" domain action bundle files release_root marker lock path parent relative status=0
+    local -a bundle_files=() private_dirs=()
+    vps_distribution_is_distributed || return 0
+    (($# == 1)) || return 2
+    # Feature scripts may source distribution.sh without passing through bin/vpsctl.
+    ((${#VPS_COMMAND_KEYS[@]} > 0)) || vps_registry_init
+    vps_registry_has_command "$command_key" && [[ "$command_key" != self:* ]] || return 2
+    domain="${command_key%%:*}"
+    action="${command_key#*:}"
+    bundle="${domain}-${action}"
+    files="$(vps_registry_bundle_files "$bundle")" || return $?
+    mapfile -t bundle_files <<<"$files"
+    vps_distribution_require_self_mutation || return $?
+    vps_distribution_validate_managed_install || return $?
+    release_root="$VPSCTL_PROJECT_ROOT"
+    vps_distribution_require_no_symlink_components "$release_root/.bundles" || return 3
+    [[ -d "$release_root/.bundles" && ! -L "$release_root/.bundles" ]] || return 3
+    marker="${release_root}/.bundles/${bundle}.sha256"
+    lock="${release_root}/.bundles/.${bundle}.lock"
+    vps_distribution_acquire_lock "$lock" || return $?
+
+    # Check every target before unlinking any file; the registry is the only
+    # source of paths, and this operation must never reach shared/core files.
+    for relative in "${bundle_files[@]}"; do
+        if [[ "$relative" != "commands/${domain}/${action}.sh" && "$relative" != "commands/${domain}/${action}/"* ]]; then
+            vps_distribution_error "功能缓存路径超出命令范围：$relative"
+            status=3
+            break
+        fi
+        path="${release_root}/${relative}"
+        if ! vps_distribution_require_no_symlink_components "$path" || [[ -e "$path" && ! -f "$path" ]]; then
+            vps_distribution_error "功能缓存路径不是安全的普通文件：$relative"
+            status=3
+            break
+        fi
+        parent="${path%/*}"
+        while [[ "$parent" != "$release_root" ]]; do
+            if [[ -e "$parent" && ! -d "$parent" ]]; then
+                vps_distribution_error "功能缓存父路径不是目录：$parent"
+                status=3
+                break
+            fi
+            parent="${parent%/*}"
+        done
+        [[ "$status" == 0 ]] || break
+    done
+    for relative in "${bundle_files[@]}"; do
+        parent="${relative%/*}"
+        while [[ "$parent" == "commands/${domain}/${action}" || "$parent" == "commands/${domain}/${action}/"* ]]; do
+            private_dirs+=("${release_root}/${parent}")
+            parent="${parent%/*}"
+        done
+    done
+    if [[ -L "$marker" || ( -e "$marker" && ! -f "$marker" ) ]]; then
+        vps_distribution_error "功能缓存标记不是安全的普通文件：$marker"
+        status=3
+    fi
+    if [[ "$status" == 0 ]]; then
+        if ! rm -f -- "$marker"; then
+            vps_distribution_error "无法清理功能缓存标记：$marker"
+            status=20
+        else
+            for relative in "${bundle_files[@]}"; do
+                path="${release_root}/${relative}"
+                if ! rm -f -- "$path"; then
+                    vps_distribution_error "无法清理功能缓存文件：$relative"
+                    status=20
+                fi
+            done
+            if ((${#private_dirs[@]} > 0)); then
+                while IFS= read -r path; do
+                    [[ -e "$path" || -L "$path" ]] || continue
+                    if [[ ! -d "$path" || -L "$path" ]] || ! rmdir -- "$path"; then
+                        vps_distribution_error "功能缓存私有目录仍有内容或无法清理：${path#"$release_root"/}"
+                        status=20
+                    fi
+                done < <(printf '%s\n' "${private_dirs[@]}" | sort -ur)
+            fi
+        fi
+    fi
+    vps_distribution_release_lock "$lock"
+    return "$status"
+}
+
 vps_distribution_require_self_mutation() {
     local expected_install expected_state expected_entry testing_sandbox=0
     vps_distribution_is_distributed || {

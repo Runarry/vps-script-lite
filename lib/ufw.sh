@@ -438,14 +438,15 @@ _vps_ufw_normalize_desired() {
     local file="$1" scope="$2" rows='' row source destination
     [[ -f "$file" && ! -L "$file" ]] || return 2
     jq -e 'type=="array" and all(.[];
-      (.owner|type)=="string" and (.owner|test("^(ssh|node:[A-Za-z0-9_.-]+|forward:[A-Za-z0-9_.-]+|tls:[A-Za-z0-9_.-]+)$")) and
+      (.owner|type)=="string" and (.owner|test("^(ssh|tcping|node:[A-Za-z0-9_.-]+|forward:[A-Za-z0-9_.-]+|tls:[A-Za-z0-9_.-]+)$")) and
       (.kind=="input" or .kind=="route") and (.family=="ipv4" or .family=="ipv6") and
       (.proto=="tcp" or .proto=="udp") and (.port|type)=="string" and
       (.port|test("^[0-9]{1,5}(:[0-9]{1,5})?$")) and
       ([.port|split(":")[]|tonumber]|all(.>=1 and .<=65535)) and
       ([.port|split(":")[]|tonumber] | .[0] <= .[-1]) and
       ((.source // "any")|type)=="string" and ((.destination // "any")|type)=="string" and
-      ((.temporary // false)|type)=="boolean")' "$file" >/dev/null || {
+      ((.temporary // false)|type)=="boolean" and
+      ((.preserve_existing // false)|type)=="boolean")' "$file" >/dev/null || {
         vps_cmd_error 'UFW 服务规则需求格式无效'
         return 2
     }
@@ -459,7 +460,8 @@ _vps_ufw_normalize_desired() {
         fi
         row="$(jq -c --arg scope "$scope" --arg source "$source" --arg destination "$destination" '
           {scope:$scope,owner,kind,family,proto,port:(.port|split(":")|map(tonumber)|unique|map(tostring)|join(":")),
-           source:$source,destination:$destination,source_port:"any",interfaces:{in:"",out:""},temporary:(.temporary // false)}' <<<"$row")" || return 20
+           source:$source,destination:$destination,source_port:"any",interfaces:{in:"",out:""},temporary:(.temporary // false)} +
+          (if .preserve_existing == true then {preserve_existing:true} else {} end)' <<<"$row")" || return 20
         rows+="$row"$'\n'
     done < <(jq -c '.[]' "$file")
     jq -s 'unique' <<<"$rows"
@@ -670,7 +672,7 @@ _vps_ufw_delete_id() {
 }
 
 _vps_ufw_apply_desired() {
-    local state rules request matches key managed chosen owner scope temporary comment conflicts origin
+    local state rules request matches key managed chosen owner scope borrow comment conflicts origin
     state="$(_vps_ufw_state)" || return $?
     while IFS= read -r request; do
         owner="$(jq -r '.owner' <<<"$request")"
@@ -698,9 +700,10 @@ _vps_ufw_apply_desired() {
             if [[ "$(jq 'length' <<<"$matches")" != 0 ]]; then
                 chosen="$(jq -c '.[0]' <<<"$matches")"
                 origin=adopted
-                temporary="$(jq -r '.temporary' <<<"$request")"
-                # A short-lived lease may borrow a manual rule, but cannot acquire it.
-                if [[ "$temporary" == true ]]; then continue; fi
+                borrow="$(jq -r '.temporary or (.preserve_existing // false)' <<<"$request")"
+                # Leases and services opting to preserve existing rules borrow
+                # an unmanaged rule without acquiring the right to delete it.
+                if [[ "$borrow" == true ]]; then continue; fi
             else
                 comment="vpsctl ufw ${key:0:16}"
                 _vps_ufw_add_rule "$request" "$comment" || return $?
@@ -928,7 +931,7 @@ vps_ufw_rollback() {
 
 vps_ufw_link_set() {
     local owner="${1:-}" mode="${2:-}" state status=0
-    [[ "$owner" =~ ^(ssh|node:[A-Za-z0-9_.-]+|forward:[A-Za-z0-9_.-]+|tls:[A-Za-z0-9_.-]+)$ ]] || return 2
+    [[ "$owner" =~ ^(ssh|tcping|node:[A-Za-z0-9_.-]+|forward:[A-Za-z0-9_.-]+|tls:[A-Za-z0-9_.-]+)$ ]] || return 2
     [[ "$mode" == attached || "$mode" == detached ]] || return 2
     vps_ufw_init || return $?
     vps_ufw_require_tools || return $?

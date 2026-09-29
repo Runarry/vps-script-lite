@@ -79,7 +79,7 @@ make_core_asset() {
 
 make_feature_assets() {
     local version="$1" build="${TEST_TEMP}/build-feature" bundle files path
-    for bundle in shared-command shared-ufw network-bbr network-dns network-ufw system-reinstall; do
+    for bundle in shared-command shared-ufw network-bbr network-dns network-ufw system-reinstall service-tcping; do
         rm -rf -- "$build"
         mkdir -p "$build"
         files="$(vps_registry_bundle_files "$bundle")"
@@ -148,6 +148,66 @@ test_manifest_is_strict() (
             vpsctl_validate_manifest "${manifest}.bad"
         ) >/dev/null 2>&1 || status=$?
         assert_equal 1 "$status" "bootstrap rejects $scenario manifest"
+    done
+)
+
+test_bootstrap_uses_release_launcher() (
+    local fixtures="$TEST_TEMP/bootstrap" scenario digest output status bundle
+    local zero='0000000000000000000000000000000000000000000000000000000000000000'
+    local base='https://github.com/Runarry/vps-script-lite/releases'
+    mkdir -p "$fixtures/tmp"
+    for scenario in schema1 schema2 unknown-schema repository version launcher-path empty-field hash syntax; do
+        cat >"$fixtures/vpsctl.sh" <<'LAUNCHER'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ ${VPSCTL_VERIFIED_STAGE:-} == 1 && -f ${VPSCTL_VERIFIED_MANIFEST:-} ]] || exit 90
+printf 'canonical launcher\n'
+printf '%s\n' "$@"
+exit 17
+LAUNCHER
+        [[ "$scenario" != syntax ]] || printf 'if\n' >"$fixtures/vpsctl.sh"
+        digest="$(sha_file "$fixtures/vpsctl.sh")"
+        write_manifest "$fixtures/vpsctl-manifest.tsv" 0.8.9 "$digest" "$zero"
+        case "$scenario" in
+            schema1)
+                sed -n '1s/2/1/;1,4p' "$fixtures/vpsctl-manifest.tsv" >"$fixtures/legacy.tsv"
+                for bundle in core network system security service test; do
+                    printf 'bundle\t%s\tvpsctl-%s-0.8.9.tar.gz\t%s\n' "$bundle" "$bundle" "$zero" >>"$fixtures/legacy.tsv"
+                done
+                mv "$fixtures/legacy.tsv" "$fixtures/vpsctl-manifest.tsv"
+                ;;
+            unknown-schema) sed -i '1s/2/3/' "$fixtures/vpsctl-manifest.tsv" ;;
+            repository) sed -i '3s/Runarry/other/' "$fixtures/vpsctl-manifest.tsv" ;;
+            version) sed -i '2s/0.8.9/..\/0.8.9/' "$fixtures/vpsctl-manifest.tsv" ;;
+            launcher-path) sed -i '4s/vpsctl.sh/..\/vpsctl.sh/' "$fixtures/vpsctl-manifest.tsv" ;;
+            empty-field) sed -i '4s/asset\t/asset\t\t/' "$fixtures/vpsctl-manifest.tsv" ;;
+            hash) printf '# changed after hashing\n' >>"$fixtures/vpsctl.sh" ;;
+        esac
+        : >"$fixtures/downloads"
+        status=0
+        output="$(
+            exec 2>&1
+            # shellcheck disable=SC1090
+            source <(sed '/^vpsctl_main "\$@"$/d' "$TEST_ROOT/vpsctl.sh")
+            vpsctl_download() {
+                printf '%s/%s\n' "$VPSCTL_RELEASE_BASE_URL" "$1" >>"$fixtures/downloads"
+                cp -- "$fixtures/$1" "$2"
+            }
+            TMPDIR="$fixtures/tmp" vpsctl_stage_canonical_launcher --version 'argument with spaces'
+        )" || status=$?
+        case "$scenario" in
+            schema1 | schema2)
+                assert_equal 17 "$status" "$scenario canonical launcher exit status"
+                assert_equal $'canonical launcher\n--version\nargument with spaces' "$output" "$scenario forwarded arguments"
+                assert_equal "${base}/latest/download/vpsctl-manifest.tsv"$'\n'"${base}/download/v0.8.9/vpsctl.sh" \
+                    "$(<"$fixtures/downloads")" "$scenario pinned launcher download"
+                ;;
+            *)
+                assert_equal 1 "$status" "$scenario bootstrap rejection"
+                [[ "$output" != *'canonical launcher'* ]] || fail "$scenario executed the rejected launcher"
+                ;;
+        esac
+        [[ -z "$(find "$fixtures/tmp" -mindepth 1 -print -quit)" ]] || fail "$scenario left bootstrap temporary files"
     done
 )
 
@@ -242,6 +302,98 @@ test_lazy_feature_install_and_cache() (
     vps_distribution_ensure_command network:dns || fail 'cached DNS failed offline'
     vps_distribution_ensure_command system:reinstall || fail 'cached reinstall wrapper failed offline'
     [[ -z "$(find "$release/.bundles" -mindepth 1 ! -name '*.sha256' -print -quit)" ]] || fail 'lazy download left temporary assets'
+)
+
+test_command_cache_eviction() (
+    local release="${TEST_INSTALL_ROOT}/releases/0.3.0" marker status=0 calls=0
+    local script listener shared other
+    prepare_managed_install "$release" 0.3.0
+    VPSCTL_DISTRIBUTED=1
+    VPSCTL_PROJECT_ROOT="$release"
+    vps_distribution_download() {
+        calls=$((calls + 1))
+        cp -- "${TEST_ASSETS}/${1##*/}" "$2"
+    }
+    vps_distribution_ensure_command service:tcping || fail 'initial tcping feature load failed'
+    vps_distribution_ensure_command network:bbr || fail 'other feature load failed'
+    marker="$release/.bundles/service-tcping.sha256"
+    script="$release/commands/service/tcping.sh"
+    listener="$release/commands/service/tcping/listener.py"
+    shared="$release/lib/ufw.sh"
+    other="$release/commands/network/bbr.sh"
+    [[ -f "$marker" && -f "$script" && -f "$listener" && -f "$shared" && -f "$other" ]] || fail 'cache eviction fixture is incomplete'
+
+    VPSCTL_DISTRIBUTED=0 vps_distribution_remove_command_cache service:tcping || fail 'source mode cache eviction failed'
+    [[ -f "$marker" && -f "$script" && -f "$listener" ]] || fail 'source mode modified installed cache'
+    vps_distribution_remove_command_cache self:status >/dev/null 2>&1 || status=$?
+    assert_equal 2 "$status" 'self bundle eviction refused'
+    status=0
+    vps_distribution_remove_command_cache shared:ufw >/dev/null 2>&1 || status=$?
+    assert_equal 2 "$status" 'shared bundle eviction refused'
+    [[ -f "$marker" && -f "$shared" ]] || fail 'invalid eviction touched cache'
+
+    mv -- "$release/.bundles" "$TEST_TEMP/tcping-bundles-outside"
+    ln -s "$TEST_TEMP/tcping-bundles-outside" "$release/.bundles"
+    status=0
+    vps_distribution_remove_command_cache service:tcping >/dev/null 2>&1 || status=$?
+    assert_equal 3 "$status" 'symlinked bundle directory refused'
+    [[ -f "$TEST_TEMP/tcping-bundles-outside/service-tcping.sha256" && ! -e "$TEST_TEMP/tcping-bundles-outside/.service-tcping.lock" && -f "$script" ]] || fail 'symlinked bundle directory changed outside cache'
+    rm -- "$release/.bundles"
+    mv -- "$TEST_TEMP/tcping-bundles-outside" "$release/.bundles"
+
+    mv -- "$listener" "${listener}.saved"
+    ln -s "$TEST_TEMP/outside" "$listener"
+    status=0
+    vps_distribution_remove_command_cache service:tcping >/dev/null 2>&1 || status=$?
+    assert_equal 3 "$status" 'symlinked feature file refused'
+    [[ -f "$marker" && -f "$script" && -L "$listener" ]] || fail 'symlink refusal removed cache content'
+    rm -- "$listener"
+    mv -- "${listener}.saved" "$listener"
+
+    mv -- "$marker" "${marker}.saved"
+    mkdir -- "$marker"
+    status=0
+    vps_distribution_remove_command_cache service:tcping >/dev/null 2>&1 || status=$?
+    assert_equal 3 "$status" 'directory marker refused'
+    [[ -f "$script" && -f "$listener" ]] || fail 'unsafe marker removed feature files'
+    rmdir -- "$marker"
+    mv -- "${marker}.saved" "$marker"
+
+    # A feature child shell sources distribution.sh without an initialized registry.
+    VPSCTL_DISTRIBUTED=1 VPSCTL_PROJECT_ROOT="$release" bash --noprofile --norc -c \
+        'source "$1"; vps_distribution_remove_command_cache service:tcping' bash "$TEST_ROOT/lib/distribution.sh" || fail 'fresh child could not evict tcping cache'
+    [[ ! -e "$marker" && ! -e "$script" && ! -e "$listener" && ! -e "$release/commands/service/tcping" ]] || fail 'tcping cache eviction was incomplete'
+    [[ -d "$release/commands/service" ]] || fail 'tcping eviction removed the service domain directory'
+    [[ -f "$shared" && -f "$release/lib/command.sh" && -f "$other" && -f "$release/.bundles/core.sha256" ]] || fail 'tcping eviction removed shared, core, or other feature'
+    vps_distribution_remove_command_cache service:tcping || fail 'cache eviction was not retryable'
+    calls=0
+    vps_distribution_ensure_command service:tcping || fail 'evicted tcping feature did not re-download'
+    assert_equal 1 "$calls" 'only the evicted feature re-downloaded'
+
+    rm() {
+        local arg last=""
+        for arg in "$@"; do last="$arg"; done
+        if [[ "$last" == "$listener" ]]; then return 1; fi
+        command rm "$@"
+    }
+    status=0
+    vps_distribution_remove_command_cache service:tcping >/dev/null 2>&1 || status=$?
+    unset -f rm
+    assert_equal 20 "$status" 'partial cache eviction reports failure'
+    [[ ! -e "$marker" && ! -e "$script" && -f "$listener" ]] || fail 'partial eviction retained success marker or removed wrong files'
+    [[ -f "$shared" && -f "$other" ]] || fail 'partial eviction touched shared or other feature'
+    vps_distribution_remove_command_cache service:tcping || fail 'partial eviction could not be retried'
+    [[ ! -e "$listener" && ! -e "$release/commands/service/tcping" ]] || fail 'retry left feature cache behind'
+
+    vps_distribution_ensure_command service:tcping || fail 'tcping feature did not re-download for directory boundary'
+    printf 'keep\n' >"$release/commands/service/tcping/unexpected"
+    status=0
+    vps_distribution_remove_command_cache service:tcping >/dev/null 2>&1 || status=$?
+    assert_equal 20 "$status" 'unexpected private directory content is reported'
+    [[ -f "$release/commands/service/tcping/unexpected" && ! -e "$marker" ]] || fail 'unexpected private content was deleted or retained success marker'
+    rm -- "$release/commands/service/tcping/unexpected"
+    vps_distribution_remove_command_cache service:tcping || fail 'private directory cleanup was not retryable'
+    [[ ! -e "$release/commands/service/tcping" ]] || fail 'private directory remained after retry'
 )
 
 test_status_is_offline() (
@@ -643,7 +795,7 @@ test_system_bundle_requires_kernel_modules() (
 
 test_private_modules_and_shared_boundaries() (
     local bundle tree="$TEST_TEMP/private-modules" path files status archive="$TEST_TEMP/boundary.tar.gz"
-    for bundle in network-ufw security-access security-tls service-proxy; do
+    for bundle in network-ufw security-access security-tls service-proxy service-tcping; do
         rm -rf "$tree"
         mkdir -p "$tree"
         files="$(vps_registry_bundle_files "$bundle")"
@@ -694,7 +846,9 @@ test_private_modules_and_shared_boundaries
 test_system_bundle_requires_kernel_modules
 test_source_mode_is_offline_and_mutations_refuse
 test_manifest_is_strict
+test_bootstrap_uses_release_launcher
 test_lazy_feature_install_and_cache
+test_command_cache_eviction
 test_status_is_offline
 test_failed_downloads_retry_and_lock_recheck
 test_manual_update_is_atomic_and_versioned

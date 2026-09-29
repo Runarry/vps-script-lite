@@ -133,7 +133,7 @@ ufw_cli_business_lock() {
     directory="$(vps_cmd_system_path /run/vpsctl)" || return $?
     vps_cmd_require_no_symlink_components "$directory" || return $?
     mkdir -p -- "$directory" || return 20
-    for feature in security-access proxy security-tls; do
+    for feature in security-access proxy security-tls tcping; do
         vps_cmd_require_no_symlink_components "$directory/$feature.lock" || return $?
         exec {descriptor}>"$directory/$feature.lock" || return 20
         UFW_CLI_BUSINESS_FDS+=("$descriptor")

@@ -230,6 +230,23 @@ test_adoption_and_leases() (
     assert_json "$(vps_ufw_inventory)" 'any(.[]; .port=="9443" and .owners==["node:b"])' 'permanent owner protects formerly temporary rule'
 )
 
+test_preserve_existing() (
+    local original
+    setup preserve-existing
+    seed ipv4 input allow tcp 8443 0.0.0.0/0 0.0.0.0/0 'operator TCP test'
+    original="$(<"$VPSCTL_SYSTEM_ROOT/etc/ufw/user.rules")"
+    apply tcping "$(desired tcping 8443 | jq 'map(. + {preserve_existing:true})')"
+    assert_json "$(cat "$VPS_UFW_STATE_FILE")" '(.managed|length)==0 and (.leases|length)==0 and
+        any(.requirements[]; .owner=="tcping" and .preserve_existing==true and .temporary==false)' 'permanent demand borrows manual rule without a lease'
+    apply tcping "$(desired tcping 9443 | jq 'map(. + {preserve_existing:true})')"
+    assert_json "$(vps_ufw_inventory)" 'length==2 and any(.[];.port=="8443" and .comment=="operator TCP test")' 'port change preserves manual rule'
+    apply proxy-nodes "$(desired node:shared 9443)"
+    apply tcping '[]'
+    assert_json "$(vps_ufw_inventory)" 'any(.[];.port=="9443" and .owners==["node:shared"])' 'other owner preserves the created shared rule'
+    apply proxy-nodes '[]'
+    assert_equal "$original" "$(<"$VPSCTL_SYSTEM_ROOT/etc/ufw/user.rules")" 'last release removes only the created rule and preserves original bytes'
+)
+
 test_rollback_and_nesting() (
     local before status=0
     setup rollback
@@ -421,7 +438,7 @@ test_tampered_rule_and_paths() (
     assert_json "$(cat "$VPS_UFW_STATE_FILE")" '.version==999' 'unsupported state is preserved'
 )
 
-for test in test_disabled test_shared_references test_adoption_and_leases test_rollback_and_nesting \
+for test in test_disabled test_shared_references test_adoption_and_leases test_preserve_existing test_rollback_and_nesting \
     test_commit_cleanup_failure test_conflicts_and_detach test_scoped_ssh_restore test_ipv6_and_inventory \
     test_interruption_and_dead_lease test_scoped_history_isolation test_tampered_rule_and_paths; do
     "$test"
