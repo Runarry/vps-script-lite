@@ -26,7 +26,7 @@ cleanup() {
 }
 
 test_module() {
-    local state unit runtime fw before port occupied_pid='' occupied_port cancel_status=0 signal_status=0
+    local state unit runtime fw before reused_pid='' port occupied_pid='' occupied_port cancel_status=0 signal_status=0
     state="$TEST_SYSTEM_ROOT/var/lib/vpsctl/service/tcping/state.json"
     unit="$TEST_SYSTEM_ROOT/etc/systemd/system/vpsctl-tcping.service"
     runtime="$TEST_SYSTEM_ROOT/usr/local/libexec/vpsctl/tcping/listener.py"
@@ -107,11 +107,21 @@ SH
     assert_status 0 bash "$TEST_COMMAND" start --port "$port"
     [[ -e "$TEST_SYSTEM_ROOT/run/vpsctl/tcping-ready.json" ]] || fail 'same-port start did not recover missing readiness'
     grep -Fq 'stop vpsctl-tcping.service' "$TEST_LOG" || fail 'missing readiness did not restart stale service'
+    printf '\n# Test fixture: retained managed listener differs from project source.\n' >>"$runtime"
+    cmp -s "$runtime" "$TEST_LISTENER" && fail 'same-port fixture did not change managed runtime'
+    head -n 3 "$runtime" | grep -Fxq '# Managed by vpsctl tcping.' || fail 'same-port fixture lost managed runtime marker'
     before="$(sha256sum "$state" "$unit" "$runtime")"
+    reused_pid="$(jq -r '.pid' "$TEST_SYSTEM_ROOT/run/vpsctl/tcping-ready.json")"
     : >"$TEST_LOG"
     assert_status 0 bash "$TEST_COMMAND" start --port "$port"
     [[ "$(sha256sum "$state" "$unit" "$runtime")" == "$before" ]] || fail 'same-port start rewrote configuration'
     ! grep -Eq '^(stop|start) ' "$TEST_LOG" || fail 'same-port start restarted service'
+    ! cmp -s "$runtime" "$TEST_LISTENER" || fail 'same-port start replaced retained managed runtime'
+    [[ "$(jq -r '.pid' "$TEST_SYSTEM_ROOT/run/vpsctl/tcping-ready.json")" == "$reused_pid" ]] || fail 'same-port start replaced listener process'
+    kill -0 "$reused_pid" >/dev/null 2>&1 || fail 'same-port start left listener process unavailable'
+    # Compare the literal command guidance printed by the CLI.
+    # shellcheck disable=SC2016
+    grep -Fq 'TCPing 已在该端口运行，本次未重新部署监听脚本。需要更新脚本时，请先执行 `vpsctl service tcping stop`，再执行 `vpsctl service tcping start`。' "$TEST_TEMP/output" || fail 'same-port start did not explain retained listener script'
 
     occupied_port="$(
         python3 -B - <<'PY'
@@ -160,6 +170,7 @@ PY
 
     assert_status 0 bash "$TEST_COMMAND" start
     jq -e --argjson port "$port" '.port==$port and .enabled==true' "$state" >/dev/null || fail 'portless restart did not reuse saved port'
+    cmp -s "$runtime" "$TEST_LISTENER" || fail 'stop then start did not deploy current listener script'
     if command -v script >/dev/null 2>&1; then
         before="$(sha256sum "$state" "$unit" "$runtime")"
         printf 'n\n' | VPSCTL_NON_INTERACTIVE=0 script -q -e -c "bash $TEST_COMMAND uninstall" /dev/null >"$TEST_TEMP/cancel-output" 2>&1 || cancel_status=$?

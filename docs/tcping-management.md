@@ -14,7 +14,7 @@ vpsctl service tcping start
 vpsctl --yes service tcping uninstall
 ```
 
-无参数且连接终端时显示编号菜单。首次启动必须输入 1–65535 的端口；后续 `start` 默认使用保存的端口。`start --port` 立即切换端口，同端口且服务已经就绪时不重启进程。非交互且无参数时只显示帮助。
+无参数且连接终端时显示编号菜单。首次启动必须输入 1–65535 的端口；后续 `start` 默认使用保存的端口。`start --port` 立即切换端口；同端口且服务已经就绪时保留当前进程和已部署的监听脚本，不重新部署。需要更新监听脚本时，先执行 `vpsctl service tcping stop`，再执行 `vpsctl service tcping start`；后者按保存端口部署当前 `listener.py`。非交互且无参数时只显示帮助。
 
 在另一台机器上使用 TCPing 工具连接本机的 IP 和选定端口。服务监听 `0.0.0.0`，IPv6 可用时同时监听 `::`；IPv6 未提供时继续使用 IPv4，IPv6 端口被占用则报告冲突，不静默降级。启动失败或端口切换失败会恢复原配置、服务和 UFW 需求；不会终止占用该端口的其他程序。
 

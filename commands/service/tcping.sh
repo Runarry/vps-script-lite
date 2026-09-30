@@ -34,6 +34,8 @@ TCPing 测试站点：提供可由其他机器探测的 TCP 监听端口。
 端口为 1–65535；start --port 可切换端口，失败恢复原服务。
 支持 Linux/systemd 和 Alpine/OpenRC，需要 Bash 4.4+。
 启动时按需使用 Python 3 标准库；监听全部 IPv4 接口及可用 IPv6。
+同端口且服务已就绪时不重新部署监听脚本。需要更新时，先执行 `vpsctl service tcping stop`，
+再执行 `vpsctl service tcping start`；后者按保存端口部署当前 listener.py。
 启动会联动已有 UFW，停止和卸载释放本模块需求；不会安装或启用 UFW。
 云安全组和其他防火墙须另行放行所选 TCP 端口。
 
@@ -391,7 +393,7 @@ tcping_remove_runtime() {
 }
 
 tcping_mutate() (
-    local action="$1" port="${2:-}" python='' mode=0644 confirm_status
+    local action="$1" port="${2:-}" python='' mode=0644 confirm_status reused_existing_runtime=0
     TCPING_WORK=''
     TCPING_SNAPSHOT=0
     TCPING_TOUCHED=0
@@ -485,6 +487,8 @@ tcping_mutate() (
             tcping_service reload || return 20
             tcping_service start || return 20
             tcping_wait_ready "$port" || return $?
+        else
+            reused_existing_runtime=1
         fi
         TCPING_TOUCHED=1
         if ! tcping_service_enabled; then tcping_service enable || return 20; fi
@@ -509,6 +513,11 @@ tcping_mutate() (
         vps_cmd_success 'TCPing 已卸载；专属资源和功能缓存已清理'
     elif [[ "$action" == start ]]; then
         vps_cmd_success "TCPing 已启动并启用开机启动，TCP 端口 $port"
+        if [[ "$reused_existing_runtime" == 1 ]]; then
+            # Command names are literal guidance, not command substitutions.
+            # shellcheck disable=SC2016
+            vps_cmd_info 'TCPing 已在该端口运行，本次未重新部署监听脚本。需要更新脚本时，请先执行 `vpsctl service tcping stop`，再执行 `vpsctl service tcping start`。'
+        fi
         vps_cmd_info "可使用本机地址和 TCP $port 探测；云安全组及其他防火墙需另行放行"
     else vps_cmd_success 'TCPing 已停止并取消开机启动；端口配置已保留'; fi
 )

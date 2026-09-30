@@ -558,7 +558,7 @@ vps_dns_collect_options() {
     done <"$file"
 }
 
-vps_dns_write_plain() {
+vps_dns_plain_content() {
     local file line inserted=0 server output=""
     file="$(vps_dns_path /etc/resolv.conf)"
     if [[ -r "$file" ]]; then
@@ -571,23 +571,34 @@ vps_dns_write_plain() {
                 continue
             fi
             output+="$line"$'\n'
-        done <"$file"
+        done <"$file" || return 20
     fi
     if ((inserted == 0)); then
         for server in "${VPS_DNS_SERVERS[@]}"; do output+="nameserver ${server}"$'\n'; done
     fi
-    printf '%s' "$output" | vps_dns_atomic_write /etc/resolv.conf 0644 || return 20
+    printf '%s' "$output"
+}
+
+vps_dns_write_plain() {
+    local content
+    # 末尾标记保留生成内容的换行；生成失败时不进入写入。
+    content="$(vps_dns_plain_content && printf '.')" || return 20
+    printf '%s' "${content%.}" | vps_dns_atomic_write /etc/resolv.conf 0644 || return 20
+}
+
+vps_dns_resolved_content() {
+    local joined
+    joined="$(vps_dns_join_servers)"
+    printf '[Resolve]\nDNS=%s\nFallbackDNS=\nDomains=~.\n' "$joined"
 }
 
 vps_dns_write_resolved() {
-    local joined
-    joined="$(vps_dns_join_servers)"
-    {
-        printf '[Resolve]\nDNS=%s\nFallbackDNS=\nDomains=~.\n' "$joined"
-    } | vps_dns_atomic_write /etc/systemd/resolved.conf.d/90-vpsctl-dns.conf 0644 || return 20
+    local content
+    content="$(vps_dns_resolved_content && printf '.')" || return 20
+    printf '%s' "${content%.}" | vps_dns_atomic_write /etc/systemd/resolved.conf.d/90-vpsctl-dns.conf 0644 || return 20
 }
 
-vps_dns_write_openresolv() {
+vps_dns_openresolv_content() {
     local file line output="" joined
     file="$(vps_dns_path /etc/resolvconf.conf)"
     if [[ -r "$file" ]]; then
@@ -597,28 +608,95 @@ vps_dns_write_openresolv() {
                 'replace="$replace nameserver/*/"' | "replace='\$replace nameserver/*/'") continue ;;
             esac
             output+="$line"$'\n'
-        done <"$file"
+        done <"$file" || return 20
     fi
     joined="$(vps_dns_join_servers)"
     output+="name_servers=\"${joined}\""$'\n'
     output+='replace="$replace nameserver/*/"'$'\n'
-    printf '%s' "$output" | vps_dns_atomic_write /etc/resolvconf.conf 0644 || return 20
+    printf '%s' "$output"
 }
 
-vps_dns_write_nm() {
+vps_dns_write_openresolv() {
+    local content
+    content="$(vps_dns_openresolv_content && printf '.')" || return 20
+    printf '%s' "${content%.}" | vps_dns_atomic_write /etc/resolvconf.conf 0644 || return 20
+}
+
+vps_dns_nm_target_args() {
+    local -n target_args="$1"
     local server search options v4="" v6=""
     for server in "${VPS_DNS_SERVERS[@]}"; do
         if vps_dns_is_ipv4 "$server"; then v4+="${v4:+ }$server"; else v6+="${v6:+ }$server"; fi
     done
-    search="$(vps_dns_collect_search)"
-    options="$(vps_dns_collect_options)"
+    search="$(vps_dns_collect_search)" || return 20
+    options="$(vps_dns_collect_options)" || return 20
     options="${options//$'\t'/ }"
     while [[ "$options" == *"  "* ]]; do options="${options//  / }"; done
     options="${options// /,}"
-    vps_cmd_run nmcli connection modify "$VPS_DNS_NM_CONNECTION" \
-        ipv4.dns "$v4" ipv4.ignore-auto-dns yes ipv6.dns "$v6" ipv6.ignore-auto-dns yes \
-        ipv4.dns-search "$search" ipv6.dns-search "$search" \
-        ipv4.dns-options "$options" ipv6.dns-options "$options" || return 20
+    target_args=(
+        ipv4.dns "$v4" ipv4.ignore-auto-dns yes ipv6.dns "$v6" ipv6.ignore-auto-dns yes
+        ipv4.dns-search "$search" ipv6.dns-search "$search"
+        ipv4.dns-options "$options" ipv6.dns-options "$options"
+    )
+}
+
+vps_dns_write_nm() {
+    local -a nm_args=()
+    vps_dns_nm_target_args nm_args || return 20
+    vps_cmd_run nmcli connection modify "$VPS_DNS_NM_CONNECTION" "${nm_args[@]}" || return 20
+}
+
+vps_dns_nm_normalize_property() {
+    local property="$1" value="$2"
+    local -a values=()
+    case "$property" in
+        *.ignore-auto-dns)
+            case "${value,,}" in
+                yes | true | on) printf 'yes' ;;
+                no | false | off) printf 'no' ;;
+                *) return 1 ;;
+            esac
+            ;;
+        *)
+            value="${value//,/ }"
+            value="${value//$'\n'/ }"
+            IFS=$' \t' read -r -a values <<<"$value"
+            if ((${#values[@]} == 1)) && [[ "${values[0]}" == -- ]]; then values=(); fi
+            local IFS=' '
+            printf '%s' "${values[*]}"
+            ;;
+    esac
+}
+
+vps_dns_nm_config_matches() {
+    local index property actual expected resolv
+    local -a nm_args=()
+    resolv="$(vps_dns_path /etc/resolv.conf)" || return 1
+    [[ -r "$resolv" ]] || return 1
+    vps_dns_nm_target_args nm_args || return 1
+    for ((index = 0; index < ${#nm_args[@]}; index += 2)); do
+        property="${nm_args[$index]}"
+        actual="$(nmcli --escape no -g "$property" connection show "$VPS_DNS_NM_CONNECTION" 2>/dev/null)" || return 1
+        actual="$(vps_dns_nm_normalize_property "$property" "$actual")" || return 1
+        expected="$(vps_dns_nm_normalize_property "$property" "${nm_args[$((index + 1))]}")" || return 1
+        [[ "$actual" == "$expected" ]] || return 1
+    done
+}
+
+vps_dns_config_matches() {
+    local backend="$1" target generator file actual expected
+    case "$backend" in
+        networkmanager) vps_dns_nm_config_matches; return $? ;;
+        systemd-resolved) target=/etc/systemd/resolved.conf.d/90-vpsctl-dns.conf; generator=vps_dns_resolved_content ;;
+        openresolv) target=/etc/resolvconf.conf; generator=vps_dns_openresolv_content ;;
+        plain) target=/etc/resolv.conf; generator=vps_dns_plain_content ;;
+        *) return 1 ;;
+    esac
+    file="$(vps_dns_path "$target")" || return 1
+    [[ -f "$file" && -r "$file" && ! -L "$file" ]] || return 1
+    actual="$(cat -- "$file")" || return 1
+    expected="$("$generator")" || return 1
+    [[ "$actual" == "$expected" ]]
 }
 
 vps_dns_refresh_backend() {
@@ -818,6 +896,10 @@ vps_dns_set() {
         vps_cmd_ensure_tools network-dns flock || return $?
         vps_cmd_lock "network-dns" || return $?
         trap 'vps_cmd_unlock; trap - RETURN' RETURN
+        if vps_dns_config_matches "$backend" && vps_dns_verify >/dev/null 2>&1; then
+            vps_cmd_success "DNS 配置已一致且验证通过，无需重新应用"
+            return 0
+        fi
         vps_dns_backup_current "$backend" || return 20
     fi
     case "$backend" in

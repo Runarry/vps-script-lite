@@ -6,10 +6,19 @@ VPS_SERVER_TEST_RUN_DIR=""
 VPS_SERVER_TEST_RUN_BASE=""
 VPS_SERVER_TEST_RUN_KIND=""
 VPS_SERVER_TEST_CHILD_PID=""
-VPS_SERVER_TEST_CHILD_GROUP=""
+VPS_SERVER_TEST_CHILD_STARTTIME=""
 VPS_SERVER_TEST_SIGNAL_STATUS=0
+VPS_SERVER_TEST_SIGNAL=""
+VPS_SERVER_TEST_PROCESS_CLEANUP_DONE=0
+VPS_SERVER_TEST_PROCESS_CLEANUP_STATUS=0
 VPS_SERVER_TEST_EXIT_CLEANUP_ACTIVE=0
 declare -ga VPS_SERVER_TEST_MOUNTS=()
+declare -gA VPS_SERVER_TEST_PROCESSES=()
+declare -gA VPS_SERVER_TEST_PROCESS_SIGNALLED=()
+declare -ga VPS_SERVER_TEST_REMAINING=()
+VPS_SERVER_TEST_PROC_STATE=""
+VPS_SERVER_TEST_PROC_PPID=""
+VPS_SERVER_TEST_PROC_STARTTIME=""
 
 vps_server_test_require_linux() {
     [[ "${VPSCTL_TESTING:-0}" == "1" || "$(uname -s 2>/dev/null || true)" == "Linux" ]] && return 0
@@ -179,6 +188,7 @@ vps_server_test_unmount_run_dir() {
 vps_server_test_cleanup_run_dir() {
     local run_dir="${VPS_SERVER_TEST_RUN_DIR:-}"
 
+    ((VPS_SERVER_TEST_PROCESS_CLEANUP_STATUS == 0)) || return 30
     [[ -n "$run_dir" ]] || return 0
     if [[ ! -e "$run_dir" && ! -L "$run_dir" ]]; then
         VPS_SERVER_TEST_RUN_DIR=""
@@ -206,61 +216,152 @@ vps_server_test_cleanup_run_dir() {
 
 vps_server_test_handle_signal() {
     local signal="$1" signal_status="$2"
-    local pid="${VPS_SERVER_TEST_CHILD_PID:-}"
-    local group="${VPS_SERVER_TEST_CHILD_GROUP:-}"
 
-    VPS_SERVER_TEST_SIGNAL_STATUS="$signal_status"
-    if [[ "$group" =~ ^[1-9][0-9]*$ ]]; then
-        kill -s "$signal" -- "-$group" 2>/dev/null || true
-    elif [[ "$pid" =~ ^[1-9][0-9]*$ ]]; then
-        kill -s "$signal" -- "$pid" 2>/dev/null || true
+    # A signal can arrive just before wait begins. Finish bounded shutdown here
+    # once the child is registered, so that window cannot leave wait blocked.
+    # Before registration, run_upstream will consume the pending signal.
+    if ((VPS_SERVER_TEST_SIGNAL_STATUS == 0)); then
+        VPS_SERVER_TEST_SIGNAL_STATUS="$signal_status"
+        VPS_SERVER_TEST_SIGNAL="$signal"
+        if [[ -n "$VPS_SERVER_TEST_CHILD_PID" ]] &&
+            [[ -n "${VPS_SERVER_TEST_PROCESSES[$VPS_SERVER_TEST_CHILD_PID]+known}" ]]; then
+            # Failure must leave via EXIT: waiting on an unconfirmed/live child
+            # afterwards would turn the bounded shutdown into an unbounded wait.
+            vps_server_test_wait_for_child_cleanup "$signal" || exit 30
+        fi
     fi
 }
 
-vps_server_test_child_is_running() {
-    local pid="${VPS_SERVER_TEST_CHILD_PID:-}" line
+vps_server_test_read_process() {
+    local pid="$1" stat="" fields_text
+    local -a fields=()
 
-    if [[ "$VPS_SERVER_TEST_CHILD_GROUP" =~ ^[1-9][0-9]*$ ]]; then
-        kill -0 -- "-$VPS_SERVER_TEST_CHILD_GROUP" 2>/dev/null
-        return $?
+    # Return 1 only for a confirmed missing process; unreadable /proc data is
+    # uncertainty (2), never proof that it is safe to remove the run directory.
+    # Use read rather than $(<file): Bash's optimized substitution can exit an
+    # errexit shell on a vanished file even inside a handled conditional.
+    if ! { IFS= read -r -d '' stat <"/proc/${pid}/stat"; } 2>/dev/null; then
+        # read -d '' normally returns nonzero at EOF, with the full stat record.
+        if [[ -z "$stat" ]]; then
+            [[ -r /proc/self/stat && ! -d "/proc/$pid" ]] && return 1
+            return 2
+        fi
     fi
-    [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
-    kill -0 "$pid" 2>/dev/null || return 1
-    if [[ -r "/proc/${pid}/status" ]]; then
-        while IFS= read -r line; do
-            if [[ "$line" == State:* ]]; then
-                [[ "$line" != *$'\tZ'* && "$line" != *' Z '* ]]
-                return $?
-            fi
-        done <"/proc/${pid}/status"
-    fi
+    # comm may contain spaces or ')'; fields after its final ')' start at 3.
+    fields_text="${stat##*) }"
+    IFS=' ' read -r -a fields <<<"$fields_text"
+    [[ "$stat" == "$pid ("* && ${#fields[@]} -ge 20 &&
+        "${fields[1]}" =~ ^[0-9]+$ && "${fields[19]}" =~ ^[0-9]+$ ]] || return 2
+    VPS_SERVER_TEST_PROC_STATE="${fields[0]}"
+    VPS_SERVER_TEST_PROC_PPID="${fields[1]}"
+    VPS_SERVER_TEST_PROC_STARTTIME="${fields[19]}"
+}
+
+vps_server_test_process_is_running() {
+    local pid="$1" starttime="$2" status=0
+
+    vps_server_test_read_process "$pid" || status=$?
+    ((status == 0)) || return "$status"
+    [[ "$VPS_SERVER_TEST_PROC_STATE" != Z && "$VPS_SERVER_TEST_PROC_STATE" != X ]] || return 1
+    [[ -n "$starttime" ]] || return 2
+    [[ "$VPS_SERVER_TEST_PROC_STARTTIME" == "$starttime" ]] || return 1
     return 0
 }
 
-vps_server_test_kill_child() {
-    local signal="$1"
+vps_server_test_collect_processes() {
+    local path pid parent changed=1
+    local -A parents=() starts=()
 
-    if [[ "$VPS_SERVER_TEST_CHILD_GROUP" =~ ^[1-9][0-9]*$ ]]; then
-        kill -s "$signal" -- "-$VPS_SERVER_TEST_CHILD_GROUP" 2>/dev/null || true
-    elif [[ "$VPS_SERVER_TEST_CHILD_PID" =~ ^[1-9][0-9]*$ ]]; then
-        kill -s "$signal" -- "$VPS_SERVER_TEST_CHILD_PID" 2>/dev/null || true
-    fi
+    # Snapshot before signalling any parent, while descendants are still linked
+    # to it. Previously identified descendants remain ours after reparenting.
+    for path in /proc/[0-9]*/stat; do
+        pid="${path#/proc/}"
+        pid="${pid%/stat}"
+        vps_server_test_read_process "$pid" || continue
+        parents["$pid"]="$VPS_SERVER_TEST_PROC_PPID"
+        starts["$pid"]="$VPS_SERVER_TEST_PROC_STARTTIME"
+    done
+    while ((changed)); do
+        changed=0
+        for pid in "${!parents[@]}"; do
+            [[ -z "${VPS_SERVER_TEST_PROCESSES[$pid]+known}" ]] || continue
+            parent="${parents[$pid]}"
+            [[ -n "${VPS_SERVER_TEST_PROCESSES[$parent]:-}" &&
+                "${starts[$parent]:-}" == "${VPS_SERVER_TEST_PROCESSES[$parent]}" ]] || continue
+            VPS_SERVER_TEST_PROCESSES["$pid"]="${starts[$pid]}"
+            changed=1
+        done
+    done
+}
+
+vps_server_test_child_is_running() {
+    local pid status
+
+    VPS_SERVER_TEST_REMAINING=()
+    for pid in "${!VPS_SERVER_TEST_PROCESSES[@]}"; do
+        status=0
+        vps_server_test_process_is_running "$pid" "${VPS_SERVER_TEST_PROCESSES[$pid]}" || status=$?
+        if ((status != 1)); then
+            VPS_SERVER_TEST_REMAINING+=("$pid")
+        fi
+    done
+    ((${#VPS_SERVER_TEST_REMAINING[@]} > 0))
+}
+
+vps_server_test_kill_child() {
+    local signal="$1" pid
+
+    for pid in "${!VPS_SERVER_TEST_PROCESSES[@]}"; do
+        [[ "${VPS_SERVER_TEST_PROCESS_SIGNALLED[$pid]:-}" != "$signal" ]] || continue
+        # A reused PID is not ours. Unknown identities are retained for the
+        # final failure report, but must not receive a signal.
+        vps_server_test_process_is_running "$pid" "${VPS_SERVER_TEST_PROCESSES[$pid]}" || continue
+        if kill -s "$signal" -- "$pid" 2>/dev/null; then
+            VPS_SERVER_TEST_PROCESS_SIGNALLED["$pid"]="$signal"
+        fi
+    done
 }
 
 vps_server_test_wait_for_child_cleanup() {
-    local attempt
+    local signal="${1:-TERM}" duration uptime deadline now delay
 
-    for ((attempt = 0; attempt < 50; attempt++)); do
-        vps_server_test_child_is_running || break
-        sleep 0.1
-    done
-    if vps_server_test_child_is_running; then
-        vps_server_test_kill_child KILL
+    if ((VPS_SERVER_TEST_PROCESS_CLEANUP_DONE)); then
+        return "$VPS_SERVER_TEST_PROCESS_CLEANUP_STATUS"
     fi
     trap '' HUP INT TERM
+    # /proc/uptime supplies a monotonic clock on supported Linux hosts. Include
+    # collection time in the 5s grace and 1s KILL confirmation budgets.
+    for duration in 500 100; do
+        [[ "$duration" != 100 ]] || signal=KILL
+        IFS=' ' read -r uptime _ </proc/uptime || break
+        deadline=$((10#${uptime/./} + duration))
+        while :; do
+            vps_server_test_collect_processes
+            vps_server_test_kill_child "$signal"
+            vps_server_test_child_is_running || break
+            IFS=' ' read -r uptime _ </proc/uptime || break
+            now=$((10#${uptime/./}))
+            ((now < deadline)) || break
+            delay=0.1
+            if ((deadline - now < 10)); then
+                printf -v delay '0.%02d' "$((deadline - now))"
+            fi
+            sleep "$delay"
+        done
+        vps_server_test_child_is_running || break
+    done
+    VPS_SERVER_TEST_PROCESS_CLEANUP_DONE=1
+    if vps_server_test_child_is_running; then
+        VPS_SERVER_TEST_PROCESS_CLEANUP_STATUS=30
+        local IFS=' '
+        vps_cmd_warning "服务器测试进程仍存活或无法确认退出（PID：${VPS_SERVER_TEST_REMAINING[*]}），保留临时目录：${VPS_SERVER_TEST_RUN_DIR:-<未创建>}"
+        return 30
+    fi
+    # Never use an unbounded wait on a process we could not stop.
     if [[ "$VPS_SERVER_TEST_CHILD_PID" =~ ^[1-9][0-9]*$ ]]; then
         wait "$VPS_SERVER_TEST_CHILD_PID" 2>/dev/null || true
     fi
+    return 0
 }
 
 vps_server_test_exit_cleanup() {
@@ -272,12 +373,7 @@ vps_server_test_exit_cleanup() {
     fi
     VPS_SERVER_TEST_EXIT_CLEANUP_ACTIVE=0
     trap '' HUP INT TERM
-    if vps_server_test_child_is_running; then
-        vps_server_test_kill_child TERM
-        vps_server_test_wait_for_child_cleanup
-    fi
-    VPS_SERVER_TEST_CHILD_PID=""
-    VPS_SERVER_TEST_CHILD_GROUP=""
+    vps_server_test_wait_for_child_cleanup "${VPS_SERVER_TEST_SIGNAL:-TERM}" || cleanup_status=30
     vps_server_test_cleanup_run_dir || cleanup_status=30
     if ((cleanup_status != 0)); then
         exit 30
@@ -290,7 +386,7 @@ vps_server_test_run_upstream() {
     local stdin_fd
 
     VPS_SERVER_TEST_CHILD_PID=""
-    VPS_SERVER_TEST_CHILD_GROUP=""
+    VPS_SERVER_TEST_CHILD_STARTTIME=""
     if ! exec {stdin_fd}<&0; then
         vps_cmd_error "无法保留服务器测试的交互输入"
         return 20
@@ -309,21 +405,21 @@ vps_server_test_run_upstream() {
         exec bash "$script"
     ) &
     VPS_SERVER_TEST_CHILD_PID=$!
+    if vps_server_test_read_process "$VPS_SERVER_TEST_CHILD_PID"; then
+        VPS_SERVER_TEST_CHILD_STARTTIME="$VPS_SERVER_TEST_PROC_STARTTIME"
+    fi
+    VPS_SERVER_TEST_PROCESSES["$VPS_SERVER_TEST_CHILD_PID"]="$VPS_SERVER_TEST_CHILD_STARTTIME"
     exec {stdin_fd}<&-
 
-    if wait "$VPS_SERVER_TEST_CHILD_PID"; then
-        status=0
-    else
-        status=$?
+    if ((VPS_SERVER_TEST_SIGNAL_STATUS == 0)); then
+        wait "$VPS_SERVER_TEST_CHILD_PID" || status=$?
     fi
+    trap '' HUP INT TERM
     if ((VPS_SERVER_TEST_SIGNAL_STATUS != 0)); then
-        vps_server_test_wait_for_child_cleanup
         status="$VPS_SERVER_TEST_SIGNAL_STATUS"
+        vps_server_test_wait_for_child_cleanup "$VPS_SERVER_TEST_SIGNAL" || status=30
     fi
 
-    trap '' HUP INT TERM
-    VPS_SERVER_TEST_CHILD_PID=""
-    VPS_SERVER_TEST_CHILD_GROUP=""
     trap 'vps_server_test_handle_signal HUP 129' HUP
     trap 'vps_server_test_handle_signal INT 130' INT
     trap 'vps_server_test_handle_signal TERM 143' TERM
@@ -353,6 +449,13 @@ vps_server_test_run() {
     vps_server_test_require_tools || return $?
 
     VPS_SERVER_TEST_SIGNAL_STATUS=0
+    VPS_SERVER_TEST_SIGNAL=""
+    VPS_SERVER_TEST_CHILD_PID=""
+    VPS_SERVER_TEST_CHILD_STARTTIME=""
+    VPS_SERVER_TEST_PROCESSES=()
+    VPS_SERVER_TEST_PROCESS_SIGNALLED=()
+    VPS_SERVER_TEST_PROCESS_CLEANUP_DONE=0
+    VPS_SERVER_TEST_PROCESS_CLEANUP_STATUS=0
     VPS_SERVER_TEST_EXIT_CLEANUP_ACTIVE=1
     trap vps_server_test_exit_cleanup EXIT
     trap 'vps_server_test_handle_signal HUP 129' HUP
@@ -394,7 +497,7 @@ vps_server_test_run() {
     trap - EXIT
     trap '' HUP INT TERM
     VPS_SERVER_TEST_CHILD_PID=""
-    VPS_SERVER_TEST_CHILD_GROUP=""
+    VPS_SERVER_TEST_CHILD_STARTTIME=""
     trap - HUP INT TERM
 
     if ((cleanup_status != 0)); then

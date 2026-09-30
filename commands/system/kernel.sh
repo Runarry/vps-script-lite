@@ -209,6 +209,9 @@ kernel_take_lock() {
 }
 
 kernel_rollback_new_repository() {
+    if [[ "$KERNEL_REPO_CREATED" != 0 || "$KERNEL_KEY_CREATED" != 0 ]]; then
+        vps_cmd_invalidate_apt_update
+    fi
     [[ "$KERNEL_REPO_CREATED" == 0 ]] || rm -f -- "$KERNEL_REPO_FILE"
     [[ "$KERNEL_KEY_CREATED" == 0 ]] || rm -f -- "$KERNEL_KEY_FILE"
 }
@@ -228,6 +231,7 @@ kernel_cleanup_owned_files() {
     kernel_state_is_managed && state_owned=1
     if [[ -e "$KERNEL_REPO_FILE" ]]; then
         if [[ "$repo_owned" == 1 ]]; then
+            vps_cmd_invalidate_apt_update
             vps_cmd_run rm -f -- "$KERNEL_REPO_FILE" || return 20
         else
             vps_cmd_warning "$KERNEL_REPO_LOGICAL 不属于 vpsctl，已保留"
@@ -236,6 +240,7 @@ kernel_cleanup_owned_files() {
     fi
     if [[ -e "$KERNEL_KEY_FILE" ]]; then
         if [[ "$repo_owned" == 1 || "$state_owned" == 1 ]]; then
+            vps_cmd_invalidate_apt_update
             vps_cmd_run rm -f -- "$KERNEL_KEY_FILE" || return 20
         else
             vps_cmd_warning "$KERNEL_KEY_LOGICAL 的所有权无法证明，已保留"
@@ -728,7 +733,7 @@ kernel_install() (
         kernel_rollback_new_repository
         return "$dependency_status"
     }
-    if ! vps_cmd_run apt-get update; then
+    if ! vps_cmd_apt_update; then
         kernel_rollback_new_repository
         vps_cmd_error 'APT 元数据刷新失败；本次新建的 XanMod 源已撤销'
         return 20

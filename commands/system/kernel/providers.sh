@@ -779,6 +779,7 @@ kernel_prepare_repository() {
         return 20
     }
     vps_cmd_run gpg --batch --yes --dearmor --output "$key_gpg" "$key_asc" || return 20
+    vps_cmd_invalidate_apt_update
     vps_cmd_atomic_write "$KERNEL_KEY_LOGICAL" 0644 <"$key_gpg" || return 20
     _kernel_render_xanmod_repository | vps_cmd_atomic_write "$KERNEL_REPO_LOGICAL" 0644 || return 20
 }

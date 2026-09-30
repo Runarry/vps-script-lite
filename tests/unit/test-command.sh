@@ -248,6 +248,76 @@ test_dependency_installation() (
     test_assert_equal "" "$calls" "--yes must not install dependencies"
 )
 
+test_apt_refresh_reuse() (
+    local calls='' update_status=0 install_status=0 status=0
+    local output_file="${TEST_TEMP}/apt-refresh-dry-run-output"
+    VPSCTL_DRY_RUN=0
+    VPSCTL_VERBOSE=0
+    vps_cmd_init test-command "$TEST_ROOT"
+    # The package-manager mock is invoked indirectly through vps_cmd_run.
+    # shellcheck disable=SC2317
+    apt-get() {
+        local IFS=' '
+        calls+="$*"$'\n'
+        if [[ "${1:-}" == update ]]; then
+            return "$update_status"
+        fi
+        return "$install_status"
+    }
+
+    vps_cmd_install_packages apt-get curl
+    vps_cmd_install_packages apt-get jq
+    test_assert_equal $'update\ninstall -y --no-install-recommends curl\ninstall -y --no-install-recommends jq\n' "$calls" 'successive installs reuse one successful APT refresh'
+
+    calls=''
+    vps_cmd_init test-command "$TEST_ROOT"
+    update_status=100
+    vps_cmd_install_packages apt-get curl >/dev/null 2>&1 || status=$?
+    test_assert_equal 20 "$status" 'APT refresh failure status'
+    test_assert_equal $'update\n' "$calls" 'failed refresh stopped installation'
+    update_status=0
+    vps_cmd_install_packages apt-get jq
+    test_assert_equal $'update\nupdate\ninstall -y --no-install-recommends jq\n' "$calls" 'failed APT refresh is attempted again'
+
+    calls=''
+    status=0
+    vps_cmd_init test-command "$TEST_ROOT"
+    install_status=100
+    vps_cmd_install_packages apt-get curl >/dev/null 2>&1 || status=$?
+    test_assert_equal 20 "$status" 'APT package installation failure status'
+    install_status=0
+    vps_cmd_install_packages apt-get jq
+    test_assert_equal $'update\ninstall -y --no-install-recommends curl\ninstall -y --no-install-recommends jq\n' "$calls" 'installation failure keeps the successful refresh without retrying installation'
+
+    calls=''
+    vps_cmd_init test-command "$TEST_ROOT"
+    vps_cmd_install_packages apt-get curl
+    vps_cmd_init test-command "$TEST_ROOT"
+    vps_cmd_install_packages apt-get jq
+    test_assert_equal $'update\ninstall -y --no-install-recommends curl\nupdate\ninstall -y --no-install-recommends jq\n' "$calls" 'command initialization resets the APT refresh'
+
+    calls=''
+    vps_cmd_init test-command "$TEST_ROOT"
+    VPSCTL_DRY_RUN=1
+    vps_cmd_install_packages apt-get curl >"$output_file" 2>&1
+    vps_cmd_install_packages apt-get jq >>"$output_file" 2>&1
+    test_assert_equal '' "$calls" 'dry-run APT plans do not execute commands'
+    [[ "$(<"$output_file")" == *'apt-get update'* && "$(<"$output_file")" == *'apt-get install -y --no-install-recommends jq'* ]] || test_fail 'dry-run APT refresh and installation plans'
+    VPSCTL_DRY_RUN=0
+    vps_cmd_install_packages apt-get openssl
+    test_assert_equal $'update\ninstall -y --no-install-recommends openssl\n' "$calls" 'dry-run did not mark a real APT refresh successful'
+
+    calls=''
+    VPSCTL_DRY_RUN=1
+    vps_cmd_install_packages apt-get curl >"$output_file" 2>&1
+    vps_cmd_invalidate_apt_update
+    test_assert_equal '' "$calls" 'dry-run with a successful refresh still executes no commands'
+    [[ "$(<"$output_file")" == *'apt-get update'* ]] || test_fail 'dry-run did not show refresh after an earlier real refresh'
+    VPSCTL_DRY_RUN=0
+    vps_cmd_install_packages apt-get jq
+    test_assert_equal $'install -y --no-install-recommends jq\n' "$calls" 'dry-run refresh and invalidation preserve the real success state'
+)
+
 test_prompt_helpers() {
     local selected value status output_file
 
@@ -459,6 +529,7 @@ test_internal_symlink_component_guard() {
 
 test_init_and_paths
 test_dependency_installation
+test_apt_refresh_reuse
 test_prompt_helpers
 test_standard_system_paths
 test_logging_and_run

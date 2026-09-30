@@ -71,7 +71,7 @@ BBR 会按动作检查并在获授权后安装 `sysctl`、`modprobe`、`ip`、`t
 | --- | --- | --- |
 | `show` | 显示当前权威后端、解析器和项目状态 | 无变更选项 |
 | `test` | 在不改系统配置的情况下前测候选解析器 | 可重复 `--server IP`、`--test-domain DOMAIN`、`--install-deps` |
-| `set` | 前测通过后写入检测到的权威后端 | 可重复 `--server IP`、`--test-domain DOMAIN`、`--install-deps` |
+| `set` | 前测通过后按需应用检测到的权威后端配置 | 可重复 `--server IP`、`--test-domain DOMAIN`、`--install-deps` |
 | `refresh` | 请求当前权威后端重新加载其已有配置 | 无服务器参数 |
 | `verify` | 使用当前配置验证解析器和系统解析链路 | 无选项 |
 | `restore` | 从项目备份恢复权威后端配置 | `--backup PATH/ID` |
@@ -100,6 +100,8 @@ Alpine 使用 DHCP 时，udhcpc 或 dhcpcd 会默认覆盖 `/etc/resolv.conf`。
 ### 3.3 写前、写后与失败语义
 
 `set` 在任何写入前先验证服务器地址、依赖和后端，再使用 `test` 同等的探测逻辑对候选解析器执行定向 DNS 查询。先查询 A，无有效 IPv4 答案时再查询 AAAA；任一有效地址即通过。CNAME 本身、空答案、NXDOMAIN、SERVFAIL 和工具输出中的 DNS 服务器地址都不算有效答案。任一必要前测失败时不修改系统。
+
+真实 `set` 保留现有确认、权限、所有权和可写检查，在取得 `network-dns` 锁后、备份前比较目标配置。静态、resolved 和 openresolv 后端比较将写入的完整文件内容（忽略末尾换行）；NetworkManager 比较 IPv4、IPv6 各自的 `dns`、`ignore-auto-dns`、`dns-search`、`dns-options`，规范化工具输出的列表分隔和空值，但不推断不同 IP 写法等价。服务器顺序、额外上游和其他受管属性差异都需要重新应用。只有配置明确一致且现有 `verify` 验证通过时，才提示无需重新应用并成功返回，跳过备份、写入、后端重新加载和缓存刷新；读取或比较无法确认、运行状态漂移、解析验证失败时仍执行原有应用和写后验证流程。`--dry-run` 始终输出原有应用计划。
 
 写入和后端重新加载完成后，命令优先通过 `getent ahosts` 验证系统解析，其失败不会再用定向查询掩盖。只有工具不存在时，才使用 `host` 或 `dig`／`drill`／`nslookup` 的默认 DNS 配置查询，省略显式服务器参数，并提示该检查范围；这些备用工具不等同于完整 libc/NSS 系统解析。单独 `verify` 的解析验证失败返回 `20`。写后验证失败属于部分完成：保留已经写入的新配置，不自动回滚，返回 `30`，输出备份标识、当前后端和明确的 `restore` 命令。这样既保留现场供诊断，也避免未经确认的第二次网络变更掩盖原始失败。
 

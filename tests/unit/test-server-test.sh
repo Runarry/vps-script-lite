@@ -64,6 +64,26 @@ if [[ "${MOCK_SIGNAL_WAIT:-0}" == 1 ]]; then
     : >"$MOCK_READY"
     while :; do sleep 0.1; done
 fi
+if [[ -n "${MOCK_TREE_DIR:-}" ]]; then
+    cat >"$PWD/tree-worker.sh" <<'WORKER'
+#!/usr/bin/env bash
+trap '' HUP INT TERM
+printf '%s\n' "$BASHPID" >"$MOCK_TREE_DIR/$1.pid"
+if [[ "$1" == branch ]]; then
+    trap 'bash "$0" late &' TERM
+    bash "$0" leaf &
+else
+    sleep 120 &
+    printf '%s\n' "$!" >"$MOCK_TREE_DIR/$1-sleep.pid"
+fi
+while :; do wait || true; done
+WORKER
+    trap 'printf "exited\n" >"$MOCK_TREE_DIR/root-exited"; exit 143' TERM
+    printf '%s\n' "$BASHPID" >"$MOCK_TREE_DIR/root.pid"
+    printf '%s\n' "$PWD" >"$MOCK_TREE_DIR/run-dir"
+    bash "$PWD/tree-worker.sh" branch &
+    wait
+fi
 if [[ "$MOCK_KIND" == tcpquality && "${MOCK_CREATE_TCP_ARTIFACTS:-0}" == 1 ]]; then
     : >"${TCPQUALITY_OUTPUT_DIR}/zstatic_nping_fixture.csv"
     : >"${TCPQUALITY_OUTPUT_DIR}/tcpquality-report.tar.gz"
@@ -137,6 +157,7 @@ run_entry() {
         MOCK_CREATE_TCP_ARTIFACTS="${MOCK_CREATE_TCP_ARTIFACTS:-0}" \
         MOCK_TCP_EXTERNAL_FILE="${MOCK_TCP_EXTERNAL_FILE:-}" \
         MOCK_TCP_RELEASE="${MOCK_TCP_RELEASE:-}" \
+        MOCK_TREE_DIR="${MOCK_TREE_DIR:-}" \
         bash "${TEST_ROOT}/commands/test/${kind}.sh" --no-color "$@"
 }
 
@@ -278,6 +299,267 @@ wait_for_fixture_file() {
     return 1
 }
 
+fixture_process_is_running() {
+    local state
+
+    state="$(ps -o stat= -p "$1")" || return 1
+    [[ -n "$state" && "$state" != Z* && "$state" != X* ]]
+}
+
+test_signal_descendant_cleanup() (
+    local tree="${TEST_TEMP}/signal-tree" wrapper="" outsider="" pid path status=0 run_dir
+    local started elapsed
+
+    mkdir -p "$tree"
+    trap '
+        [[ -z "$wrapper" ]] || kill -KILL "$wrapper" 2>/dev/null || true
+        [[ -z "$outsider" ]] || kill -KILL "$outsider" 2>/dev/null || true
+        for path in "$tree"/*.pid; do
+            [[ -f "$path" ]] || continue
+            pid="$(<"$path")"
+            kill -KILL "$pid" 2>/dev/null || true
+        done
+        wait 2>/dev/null || true
+    ' EXIT
+
+    sleep 120 &
+    outsider=$!
+    env PATH="${MOCK_BIN}:$PATH" VPSCTL_TESTING=1 VPSCTL_SYSTEM_ROOT="$SYSTEM_ROOT" \
+        VPS_SERVER_TEST_TMP_BASE="$RUN_BASE" MOCK_LOG="$MOCK_LOG" MOCK_KIND=nodequality \
+        MOCK_CURL_STATUS=0 MOCK_UPSTREAM_STATUS=0 MOCK_TREE_DIR="$tree" \
+        bash "${TEST_ROOT}/commands/test/nodequality.sh" --no-color >"$tree/output" 2>&1 &
+    wrapper=$!
+    wait_for_fixture_file "$tree/leaf-sleep.pid" || fail "multi-level signal fixture did not start"
+    run_dir="$(<"$tree/run-dir")"
+    assert_equal "$(ps -o pgid= -p "$outsider")" "$(ps -o pgid= -p "$wrapper")" "unrelated fixture shares process group"
+    started=$SECONDS
+    kill -TERM "$wrapper"
+    wait_for_fixture_file "$tree/root-exited" || fail "upstream did not exit before stubborn descendants"
+    wait_for_fixture_file "$tree/late-sleep.pid" || fail "TERM handler did not create a late descendant"
+    [[ -d "$run_dir" ]] || fail "run directory removed before descendant shutdown"
+    fixture_process_is_running "$(<"$tree/leaf.pid")" || fail "TERM-ignoring leaf exited before KILL"
+    kill -HUP "$wrapper"
+    kill -TERM "$wrapper"
+    wait "$wrapper" || status=$?
+    wrapper=""
+    elapsed=$((SECONDS - started))
+    assert_equal 143 "$status" "first signal status survives repeated interruption"
+    ((elapsed >= 5 && elapsed <= 15)) || fail "descendant shutdown did not respect bounded grace: ${elapsed}s"
+    for path in "$tree"/*.pid; do
+        pid="$(<"$path")"
+        if fixture_process_is_running "$pid"; then
+            fail "descendant remained active after interrupted cleanup: $pid ($path)"
+        fi
+    done
+    fixture_process_is_running "$outsider" || fail "unrelated process in caller group was signalled"
+    [[ ! -e "$run_dir" ]] || fail "descendant cleanup left run directory"
+)
+
+test_process_identity_checks() (
+    local pid="" status=0 actual_start
+
+    trap '[[ -z "$pid" ]] || kill -KILL "$pid" 2>/dev/null || true; wait 2>/dev/null || true' EXIT
+    sleep 120 &
+    pid=$!
+    vps_server_test_read_process "$pid" || fail "could not read live fixture identity"
+    actual_start="$VPS_SERVER_TEST_PROC_STARTTIME"
+    VPS_SERVER_TEST_PROCESSES=(["$pid"]="$((actual_start + 1))")
+    vps_server_test_kill_child TERM
+    fixture_process_is_running "$pid" || fail "starttime mismatch signalled a reused PID"
+    vps_server_test_child_is_running && fail "starttime mismatch counted as this run's process"
+
+    VPS_SERVER_TEST_PROCESSES=(["$pid"]="")
+    vps_server_test_kill_child KILL
+    fixture_process_is_running "$pid" || fail "unknown starttime was signalled"
+    vps_server_test_child_is_running || fail "unknown live identity treated as exited"
+    vps_server_test_process_is_running "$pid" "" || status=$?
+    assert_equal 2 "$status" "unknown identity status"
+
+    kill -KILL "$pid"
+    wait "$pid" 2>/dev/null || true
+    status=0
+    vps_server_test_read_process "$pid" || status=$?
+    assert_equal 1 "$status" "missing proc entry confirms exit"
+    pid=""
+
+    # A process whose launch identity was unreadable may already be a zombie
+    # when /proc becomes readable again. It cannot keep the run active.
+    # The sourced process-state helper calls this override.
+    # shellcheck disable=SC2317
+    vps_server_test_read_process() {
+        VPS_SERVER_TEST_PROC_STATE=Z
+        VPS_SERVER_TEST_PROC_STARTTIME=fixture-start
+    }
+    status=0
+    vps_server_test_process_is_running 99999999 "" || status=$?
+    assert_equal 1 "$status" "zombie with unknown launch identity is not running"
+)
+
+test_signal_during_identity_registration() (
+    local pid status=0 run_dir="${RUN_BASE}/vpsctl-server-test.nodequality.Start123"
+
+    mkdir -p "$run_dir"
+    printf '#!/usr/bin/env bash\nexec sleep 120\n' >"$run_dir/upstream.sh"
+    VPS_SERVER_TEST_RUN_BASE="$RUN_BASE"
+    VPS_SERVER_TEST_RUN_KIND=nodequality
+    VPS_SERVER_TEST_RUN_DIR="$run_dir"
+    # Interrupt at the exact launch/identity-registration boundary. The real
+    # reader then fills the same identity, and the pending signal skips wait.
+    eval "$(declare -f vps_server_test_read_process | sed '1s/vps_server_test_read_process/fixture_read_process/')"
+    # The sourced upstream runner calls this override during registration.
+    # shellcheck disable=SC2317
+    vps_server_test_read_process() {
+        if [[ -z "$VPS_SERVER_TEST_CHILD_STARTTIME" ]]; then
+            kill -TERM "$BASHPID"
+        fi
+        fixture_read_process "$@"
+    }
+    trap 'vps_server_test_handle_signal TERM 143' TERM
+    vps_server_test_run_upstream nodequality "$run_dir/upstream.sh" || status=$?
+    pid="$VPS_SERVER_TEST_CHILD_PID"
+    assert_equal 143 "$status" "signal during identity registration status"
+    [[ -n "$VPS_SERVER_TEST_CHILD_STARTTIME" ]] || fail "interrupted launch lost child identity"
+    fixture_process_is_running "$pid" && fail "interrupted launch left upstream running"
+    vps_server_test_cleanup_run_dir || fail "interrupted launch did not clean run directory"
+)
+
+test_signal_before_wait() (
+    local scenario="$1" run_dir="${RUN_BASE}/vpsctl-server-test.nodequality.Wait${1}123"
+    local output="${TEST_TEMP}/before-wait-${scenario}.log" pid_file="${TEST_TEMP}/before-wait-${scenario}.pid"
+    local wait_marker="${TEST_TEMP}/before-wait-${scenario}.entered" status=0 pid
+
+    mkdir -p "$run_dir"
+    printf '#!/usr/bin/env bash\nexec sleep 120\n' >"$run_dir/upstream.sh"
+    (
+        local injected=0
+        VPS_SERVER_TEST_RUN_BASE="$RUN_BASE"
+        VPS_SERVER_TEST_RUN_KIND=nodequality
+        VPS_SERVER_TEST_RUN_DIR="$run_dir"
+        VPS_SERVER_TEST_EXIT_CLEANUP_ACTIVE=1
+        # The sourced upstream runner calls wait and the nested reader override.
+        # shellcheck disable=SC2317
+        wait() {
+            if ((injected == 0)); then
+                injected=1
+                printf '%s\n' "$VPS_SERVER_TEST_CHILD_PID" >"$pid_file"
+                if [[ "$scenario" == Failure ]]; then
+                    # Preserve the real launched process, but make its identity
+                    # unconfirmable after registration. The trap must exit 30.
+                    vps_server_test_read_process() { return 2; }
+                fi
+                kill -TERM "$BASHPID"
+                : >"$wait_marker"
+            fi
+            builtin wait "$@"
+        }
+        trap vps_server_test_exit_cleanup EXIT
+        trap 'vps_server_test_handle_signal TERM 143' TERM
+        vps_server_test_run_upstream nodequality "$run_dir/upstream.sh" || status=$?
+        exit "$status"
+    ) >"$output" 2>&1 || status=$?
+    pid="$(<"$pid_file")"
+    if [[ "$scenario" == Failure ]]; then
+        # The wrapper deliberately leaves this fixture alive on uncertainty.
+        kill -KILL "$pid" 2>/dev/null || true
+        assert_equal 30 "$status" "failed shutdown before wait status"
+        [[ ! -e "$wait_marker" ]] || fail "failed signal cleanup proceeded to blocking wait"
+        [[ -d "$run_dir" ]] || fail "failed shutdown before wait removed directory"
+        assert_file_contains "$output" "$run_dir" "failed shutdown before wait directory diagnostic"
+        rm -rf -- "$run_dir"
+    else
+        assert_equal 143 "$status" "signal before wait status"
+        [[ -e "$wait_marker" ]] || fail "successful signal cleanup did not resume wait"
+        fixture_process_is_running "$pid" && fail "signal before wait left upstream running"
+        [[ ! -e "$run_dir" ]] || fail "signal before wait did not clean directory"
+    fi
+)
+
+test_process_cleanup_failure_preserves_directory() (
+    local scenario="$1" run_dir="${RUN_BASE}/vpsctl-server-test.nodequality.Fail${1}123"
+    local output="${TEST_TEMP}/cleanup-failure-${scenario}.log" status=0
+    local pid="$BASHPID" signal_log="${TEST_TEMP}/cleanup-signals-${scenario}.log"
+    local mount_log="${TEST_TEMP}/cleanup-mount-${scenario}.log"
+
+    mkdir -p "$run_dir"
+    (
+        VPS_SERVER_TEST_RUN_BASE="$RUN_BASE"
+        VPS_SERVER_TEST_RUN_KIND=nodequality
+        VPS_SERVER_TEST_RUN_DIR="$run_dir"
+        VPS_SERVER_TEST_PROCESSES=(["$pid"]="fixture-start")
+        VPS_SERVER_TEST_EXIT_CLEANUP_ACTIVE=1
+        # The sourced cleanup functions call these test doubles indirectly.
+        # shellcheck disable=SC2317
+        vps_server_test_collect_processes() { :; }
+        # shellcheck disable=SC2317
+        vps_server_test_read_process() {
+            [[ "$scenario" != Unknown ]] || return 2
+            # The sourced state checker consumes these values in this subshell.
+            # shellcheck disable=SC2034
+            VPS_SERVER_TEST_PROC_STATE=S
+            # shellcheck disable=SC2030
+            VPS_SERVER_TEST_PROC_STARTTIME=fixture-start
+        }
+        # shellcheck disable=SC2317
+        kill() {
+            local IFS=' '
+            printf '%s\n' "$*" >>"$signal_log"
+        }
+        # shellcheck disable=SC2317
+        vps_server_test_unmount_run_dir() { : >"$mount_log"; }
+        trap vps_server_test_exit_cleanup EXIT
+        vps_server_test_wait_for_child_cleanup TERM || status=$?
+        assert_equal 30 "$status" "${scenario} shutdown failure status"
+        status=0
+        vps_server_test_cleanup_run_dir || status=$?
+        assert_equal 30 "$status" "${scenario} explicit cleanup failure status"
+        # EXIT must reuse the failed outcome instead of trying to remove again.
+        exit 17
+    ) >"$output" 2>&1 || status=$?
+    assert_equal 30 "$status" "${scenario} EXIT cleanup failure overrides original status"
+    [[ -d "$run_dir" ]] || fail "${scenario} shutdown failure removed directory"
+    [[ ! -e "$mount_log" ]] || fail "${scenario} shutdown failure attempted unmount"
+    assert_file_contains "$output" "PID：$pid" "${scenario} shutdown failure PID diagnostic"
+    assert_file_contains "$output" "$run_dir" "${scenario} shutdown failure directory diagnostic"
+    assert_equal 1 "$(grep -c '无法确认退出' "$output")" "${scenario} cleanup result reused by EXIT"
+    if [[ "$scenario" == Alive ]]; then
+        assert_equal 2 "$(wc -l <"$signal_log")" "TERM and KILL sent only once"
+    else
+        [[ ! -e "$signal_log" ]] || fail "unknown process identity received a signal"
+    fi
+    rm -rf -- "$run_dir"
+)
+
+test_abnormal_exit_process_cleanup() (
+    local run_dir="${RUN_BASE}/vpsctl-server-test.nodequality.Exit123" status=0 pid
+    local ready="${TEST_TEMP}/exit-process.pid"
+
+    mkdir -p "$run_dir"
+    (
+        VPS_SERVER_TEST_RUN_BASE="$RUN_BASE"
+        VPS_SERVER_TEST_RUN_KIND=nodequality
+        VPS_SERVER_TEST_RUN_DIR="$run_dir"
+        # The sourced EXIT handler consumes this flag.
+        # shellcheck disable=SC2034
+        VPS_SERVER_TEST_EXIT_CLEANUP_ACTIVE=1
+        sleep 120 &
+        VPS_SERVER_TEST_CHILD_PID=$!
+        printf '%s\n' "$VPS_SERVER_TEST_CHILD_PID" >"$ready"
+        vps_server_test_read_process "$VPS_SERVER_TEST_CHILD_PID"
+        # The reader above sets a fresh value in this test's own subshell.
+        # shellcheck disable=SC2031
+        VPS_SERVER_TEST_CHILD_STARTTIME="$VPS_SERVER_TEST_PROC_STARTTIME"
+        # The sourced EXIT handler consumes this process identity map.
+        # shellcheck disable=SC2034
+        VPS_SERVER_TEST_PROCESSES=(["$VPS_SERVER_TEST_CHILD_PID"]="$VPS_SERVER_TEST_CHILD_STARTTIME")
+        trap vps_server_test_exit_cleanup EXIT
+        exit 17
+    ) >/dev/null 2>&1 || status=$?
+    pid="$(<"$ready")"
+    assert_equal 17 "$status" "successful abnormal EXIT cleanup preserves original status"
+    fixture_process_is_running "$pid" && fail "abnormal EXIT left upstream running"
+    [[ ! -e "$run_dir" ]] || fail "abnormal EXIT did not clean run directory"
+)
+
 test_tcp_overlapping_cleanup() (
     local barrier="${TEST_TEMP}/tcp-overlap" pid_a="" pid_b="" status=0 run_dir_a run_dir_b
 
@@ -353,6 +635,14 @@ test_download_failure_cleanup
 test_official_download_and_exit_contract
 test_upstream_interactive_input
 test_signal_forwarding_and_cleanup
+test_signal_descendant_cleanup
+test_process_identity_checks
+test_signal_during_identity_registration
+test_signal_before_wait Success
+test_signal_before_wait Failure
+test_process_cleanup_failure_preserves_directory Alive
+test_process_cleanup_failure_preserves_directory Unknown
+test_abnormal_exit_process_cleanup
 test_tcp_output_cleanup_ownership
 test_tcp_overlapping_cleanup
 test_mount_residue_blocks_removal

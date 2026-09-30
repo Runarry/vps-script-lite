@@ -8,6 +8,7 @@ if [[ -z "${VPS_UI_LOADED:-}" ]]; then
 fi
 
 VPS_CMD_DEPENDENCIES_PLANNED=0
+_VPS_CMD_APT_REFRESHED=0
 
 _vps_cmd_normalize_boolean() {
     local value
@@ -131,6 +132,7 @@ vps_cmd_init() {
     local project_root="${2:-}"
     local normalized
 
+    _VPS_CMD_APT_REFRESHED=0
     command_name="$(vps_cmd_trim "$command_name")"
     [[ -n "$command_name" ]] || {
         _vps_cmd_log_named vpsctl "错误" error "命令名称不能为空"
@@ -555,6 +557,21 @@ vps_cmd_package_for_tool() {
     esac
 }
 
+vps_cmd_apt_update() {
+    if [[ "${VPSCTL_DRY_RUN:-0}" == 1 ]]; then
+        vps_cmd_run apt-get update || return 20
+        return 0
+    fi
+    [[ "${_VPS_CMD_APT_REFRESHED:-0}" == 1 ]] && return 0
+    vps_cmd_run apt-get update || return 20
+    _VPS_CMD_APT_REFRESHED=1
+}
+
+vps_cmd_invalidate_apt_update() {
+    [[ "${VPSCTL_DRY_RUN:-0}" == 1 ]] && return 0
+    _VPS_CMD_APT_REFRESHED=0
+}
+
 vps_cmd_install_packages() {
     local manager="${1:-}"
     local package
@@ -586,7 +603,7 @@ vps_cmd_install_packages() {
     vps_cmd_require_root || return $?
     case "$manager" in
         apt-get)
-            vps_cmd_run apt-get update || return 20
+            vps_cmd_apt_update || return 20
             vps_cmd_run apt-get install -y --no-install-recommends "${packages[@]}" || return 20
             ;;
         dnf5 | dnf | yum)

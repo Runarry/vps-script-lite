@@ -300,3 +300,36 @@
 所有执行均通过 `ssh host-vps-scripts`，本轮证据位于 `/var/tmp/vpsctl-release-retry.ORKikD/`。`evidence/workflow-baseline.log`、`workflow.log`、`yaml.log`、`static-final.log` 分别记录旧流程失败、21 次回归、YAML 和最终静态检查；三个改动的工作流／脚本与远端已测副本 SHA-256 一致，见 `evidence/tested-sources.sha256`。
 
 构建脚本未改动，复用上一轮构建验收结果。未运行完整默认套件，未执行真实 GitHub 查询、创建、上传或发布；服务端行为未作真实验收。同一 tag 仍按串行重跑处理，上传期间不手动发布或修改草稿。#10、#41、#15 继续排除。
+
+## 进程收尾、重复应用与 TCPing 提示验收（2026-09-30）
+
+以 `020a9b0` 为基线完成 **#10、#26、#16、#7**，保留公开命令、参数、JSON 字段和原有权限、锁、备份及受管路径检查。
+
+| 编号 | 本轮结果 |
+|---|---|
+| #10 | 保留原有子进程启动、stdin 和控制终端。以 PID 与启动时间识别中断时的上游及后代，使用 `/proc/uptime` 将扫描耗时计入 5 秒宽限与 1 秒 KILL 确认；补充仍可识别的后代，保留首次中断状态。已登记进程的信号处理直接调用有界收尾，避免检查状态后、进入 wait 前丢失中断；未登记时记录待处理信号。进程仍活跃或状态无法确认返回 30、报告 PID 和目录并禁止卸载／删除；EXIT 复用收尾结果。 |
+| #26 | DNS 在现有锁内、备份前比较完整目标配置，并通过现有运行验证后才跳过应用。三个文件后端复用内容生成逻辑，NetworkManager 比较八个受管属性；配置不同、运行漂移或读取无法确认时保留原流程。生成内容先完整取得并检查成功，再调用原子写入，保留尾随换行；生成失败不会把空内容或片段写入目标。 |
+| #16 | 公共依赖安装与内核安装共用进程内 APT 刷新状态，仅成功刷新后复用，命令初始化重置，演练不读写真实状态。XanMod 写入、回滚和清理源／密钥前使状态失效；官方内核可复用依赖准备的刷新，各次安装仍独立执行。 |
+| #7 | 同端口且已就绪时保留当前进程与监听脚本，仅在操作提交成功后提示先 stop、再 start 更新；后者使用保存的端口部署当前脚本。未增加版本检测、摘要缓存、刷新参数或自动重启。 |
+
+所有项目执行均通过 `ssh host-vps-scripts`，证据保留在 `/var/tmp/vpsctl-four-fixes.lAl8Ya/`。12 个改动脚本的本地 SHA-256 与远端最终副本一致，见 `evidence/tested-sources.sha256`。
+
+### 相关回归
+
+| 测试 | 结果与日志 |
+|---|---|
+| 公共命令库 | PASS：连续安装复用刷新、失败后再试、安装失败不追加刷新、初始化重置及演练隔离。`evidence/command.log`。 |
+| 内核安装 | PASS：官方内核复用依赖刷新，预检拒绝仍阻止实际内核安装，源／密钥回滚和受管清理使状态失效。`evidence/system-kernel-final.log`。 |
+| 内核提供者 | PASS：XanMod 实际写入隔离目录中的受管源／密钥后必须再次刷新。`evidence/system-kernel-providers.log`。 |
+| DNS | PASS：四后端重复设置零备份／写入／刷新，顺序及额外字段差异、NM 八属性与空值、运行漂移、读取失败、演练、恢复及 20／30 传播。三个内容生成器输出片段后失败均返回 20，原子写入零调用，旧文件逐字节不变。`evidence/network-dns-final-generation.log`。 |
+| 服务器测试 | PASS：多层及晚生后代、根先退出、重复中断、同组旁支保留、身份不符／未知、登记和 wait 前信号窗口、失败保目录及 EXIT 结果复用。包含 NodeQuality 1→0、stdin、并发输出目录及挂载残留的原有用例。`evidence/server-test-final.log`。 |
+| TCPing | PASS：同端口重复 start 保留内容不同的受管运行脚本及进程，并说明更新方式；stop 后无端口 start 部署当前 listener。`evidence/service-tcping.log`。 |
+
+### 独立 PTY 与静态检查
+
+- **旧故障再次复现：** 保持父终端会话存活，仅向旧包装器发送 TERM；包装器返回 143 并删除目录后，三层后代仍在运行。证据为 `pty-acceptance/baseline-ready-term/`。
+- **真实 PTY 六项通过：** PID-only TERM／HUP／INT 分别返回 143／129／130，真实 Ctrl-C 返回 130；忽略 TERM 和重复 TERM→HUP 均返回 143，约 5.2 秒完成收尾。三层后代停止，目录没有提前删除，父菜单可继续读写，同 TTY／进程组的无关旁支保留；stdin 与 `/dev/tty` 输入均正确。证据为 `pty-acceptance/accept-v2-summary.json` 及各场景目录，所有夹具进程已清理，见 `pty-acceptance/cleanup.json`。随后仅补齐“启动身份未知但已确认 Z／X 状态”的判断顺序及测试说明，该边界由最终单测覆盖，未重复不受影响的 PTY 场景。
+- **已修复验收发现的问题：** 首次 PTY 暴露 Bash 5.2 在受保护条件内通过 `$(<file)` 读取消失的 proc 文件仍可能提前退出；改为内建 `read` 后六项重验通过。单测夹具的 stderr 捕获、信号日志分隔符及依赖安装断言分别修正后，仅重跑对应套件。
+- **语法检查通过，静态无新增诊断：** 12 个改动脚本的 `bash -n` 通过。`shellcheck -x -P SCRIPTDIR` 保留与基线相同的 47 项诊断（6 项 warning、41 项 info），新增为 0；并非零诊断通过。新增间接调用替身和字面命令提示使用局部说明及指令，不关闭全文件分析、不清理无关既有诊断。证据为 `evidence/syntax-final.log`、`shellcheck-baseline.json`、`shellcheck-final.json` 和 `static-comparison-final.json`。
+
+本轮未运行完整默认套件、未修改主机默认 DNS、未安装真实内核，也未执行外网质量测试。APT 复用只覆盖同次功能进程及项目内已知的源变更路径；进程收尾不持续监控、不接管扫描前已脱离的守护进程，不承诺 SIGKILL／掉电恢复。未增加依赖、配置项、确认步骤或通用管理框架。

@@ -553,7 +553,7 @@ test_install_meta_release_verification() (
     KERNEL_OS_ID=debian
     KERNEL_CONFIRM_INSTALL=INSTALL-KERNEL
     kernel_require_install_platform() { return 0; }
-    kernel_ensure_install_dependencies() { return 0; }
+    kernel_ensure_install_dependencies() { vps_cmd_install_packages apt-get gawk; }
     vps_cmd_require_root() { return 0; }
     kernel_take_lock() { return 0; }
     kernel_confirm_install_action() { return 0; }
@@ -591,6 +591,8 @@ test_install_meta_release_verification() (
     kernel_write_state() { printf 'state:%s:%s\n' "$1" "$2" >>"$log"; }
 
     output="$(kernel_install 2>&1)"
+    test_assert_equal 1 "$(grep -Fxc 'run:apt-get, update' "$log")" 'official kernel install reuses the dependency APT refresh'
+    test_assert_contains "$(<"$log")" 'run:apt-get, install, -y, --no-install-recommends, gawk' 'dependency installation still runs'
     test_assert_contains "$(<"$log")" $'preflight:linux-image-amd64:6.8.12-1\nrun:env, DEBIAN_FRONTEND=noninteractive, apt-get' 'preflight runs before actual install'
     test_assert_contains "$(<"$log")" 'linux-image-amd64=6.8.12-1' 'install pins selected meta candidate'
     test_assert_contains "$(<"$log")" 'state:linux-image-amd64:6.8.12-1' 'state written after release verification'
@@ -605,7 +607,7 @@ test_install_meta_release_verification() (
     kernel_install >/dev/null 2>&1 || status=$?
     test_assert_equal 30 "$status" 'install preflight rejection propagated'
     test_assert_contains "$(<"$log")" 'preflight-rejected' 'preflight rejection reached'
-    test_assert_not_contains "$(<"$log")" 'install, -y' 'preflight rejection stopped actual install'
+    test_assert_not_contains "$(<"$log")" 'run:env, DEBIAN_FRONTEND=noninteractive, apt-get' 'preflight rejection stopped actual kernel install'
 
     : >"$log"
     kernel_validate_install_plan() {
@@ -976,14 +978,64 @@ test_uninstall_modules_residue() (
     [[ -f "$module_dir/kernel/drivers/local.ko" ]] || test_fail 'uninstall removed unowned residual module file'
 )
 
+test_repository_rollback_apt_refresh() (
+    local created calls expected
+    KERNEL_REPO_FILE="$TEST_TEMP/rollback-apt-source"
+    KERNEL_KEY_FILE="$TEST_TEMP/rollback-apt-key"
+    VPSCTL_DRY_RUN=0
+    apt-get() {
+        [[ "${1:-}" == update ]] || return 2
+        calls+=$'update\n'
+    }
+    for created in repo key both none; do
+        vps_cmd_init system-kernel "$TEST_ROOT"
+        calls=''
+        KERNEL_REPO_CREATED=0
+        KERNEL_KEY_CREATED=0
+        case "$created" in
+            repo) KERNEL_REPO_CREATED=1 ;;
+            key) KERNEL_KEY_CREATED=1 ;;
+            both)
+                KERNEL_REPO_CREATED=1
+                KERNEL_KEY_CREATED=1
+                ;;
+        esac
+        printf 'source\n' >"$KERNEL_REPO_FILE"
+        printf 'key\n' >"$KERNEL_KEY_FILE"
+        vps_cmd_apt_update
+        kernel_rollback_new_repository
+        vps_cmd_apt_update
+        expected=$'update\nupdate\n'
+        [[ "$created" != none ]] || expected=$'update\n'
+        test_assert_equal "$expected" "$calls" "$created repository rollback APT refresh"
+        [[ "$KERNEL_REPO_CREATED" == 0 ]] || test_assert_file_absent "$KERNEL_REPO_FILE" 'rollback removed newly created source'
+        [[ "$KERNEL_KEY_CREATED" == 0 ]] || test_assert_file_absent "$KERNEL_KEY_FILE" 'rollback removed newly created key'
+    done
+)
+
 test_owned_cleanup_and_drift() (
-    local status=0
+    local status=0 refreshes=0
+    VPSCTL_DRY_RUN=0
+    vps_cmd_init system-kernel "$TEST_ROOT"
+    apt-get() {
+        [[ "${1:-}" == update ]] || return 2
+        refreshes=$((refreshes + 1))
+    }
     printf '%s\nTypes: deb\n' "$KERNEL_MANAGED_MARKER" >"$KERNEL_REPO_FILE"
     printf 'key\n' >"$KERNEL_KEY_FILE"
     printf '%s\nschema=1\n' "$KERNEL_MANAGED_MARKER" >"$KERNEL_STATE_FILE"
     vps_cmd_run() { "$@"; }
+    vps_cmd_apt_update
     kernel_cleanup_owned_files
     [[ ! -e "$KERNEL_REPO_FILE" && ! -e "$KERNEL_KEY_FILE" && ! -e "$KERNEL_STATE_FILE" ]] || test_fail 'owned XanMod files were not removed'
+    vps_cmd_apt_update
+    test_assert_equal 2 "$refreshes" 'owned source cleanup invalidated the APT refresh'
+
+    printf 'key\n' >"$KERNEL_KEY_FILE"
+    printf '%s\nschema=1\n' "$KERNEL_MANAGED_MARKER" >"$KERNEL_STATE_FILE"
+    kernel_cleanup_owned_files
+    vps_cmd_apt_update
+    test_assert_equal 3 "$refreshes" 'owned key-only cleanup invalidated the APT refresh'
 
     printf 'Types: deb\n' >"$KERNEL_REPO_FILE"
     status=0
@@ -1014,5 +1066,6 @@ test_uninstall_target_change_guard
 test_dry_run_exact_package_array
 test_purge_failure_preserves_xanmod_source
 test_uninstall_modules_residue
+test_repository_rollback_apt_refresh
 test_owned_cleanup_and_drift
 printf 'PASS: system kernel tests\n'

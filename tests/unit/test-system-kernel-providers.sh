@@ -775,6 +775,50 @@ test_uninstall_uses_common_gate_only() (
     test_assert_equal 0 "$status" 'uninstall ignores provider suite gate'
 )
 
+test_repository_apt_refresh() (
+    local refreshes=0
+    VPSCTL_DRY_RUN=0
+    VPSCTL_SYSTEM_ROOT="$TEST_TEMP/apt-refresh-system"
+    TMPDIR="$TEST_TEMP"
+    mkdir -p -- "$VPSCTL_SYSTEM_ROOT"
+    vps_cmd_init system-kernel-providers "$TEST_ROOT"
+    test_reset_platform
+    KERNEL_REPO_FILE="$VPSCTL_SYSTEM_ROOT$KERNEL_REPO_LOGICAL"
+    KERNEL_KEY_FILE="$VPSCTL_SYSTEM_ROOT$KERNEL_KEY_LOGICAL"
+    KERNEL_STATE_FILE="$VPSCTL_SYSTEM_ROOT$KERNEL_STATE_LOGICAL"
+    apt-get() {
+        [[ "${1:-}" == update ]] || return 2
+        refreshes=$((refreshes + 1))
+    }
+    curl() {
+        while (($# > 1)); do
+            if [[ "$1" == -o ]]; then
+                printf 'archive-key\n' >"$2"
+                return 0
+            fi
+            shift
+        done
+        return 2
+    }
+    gpg() {
+        [[ "${4:-}" == --output && -n "${5:-}" ]] || return 2
+        printf 'keyring\n' >"$5"
+    }
+    kernel_primary_key_fingerprint() { printf '%s\n' "$KERNEL_XANMOD_KEY_FINGERPRINT"; }
+
+    vps_cmd_apt_update
+    KERNEL_TYPE=official
+    kernel_prepare_repository
+    vps_cmd_apt_update
+    test_assert_equal 1 "$refreshes" 'official repository preparation keeps the earlier APT refresh'
+
+    KERNEL_TYPE=xanmod
+    kernel_prepare_repository
+    [[ -f "$KERNEL_REPO_FILE" && -f "$KERNEL_KEY_FILE" ]] || test_fail 'XanMod preparation did not write its managed source and key'
+    vps_cmd_apt_update
+    test_assert_equal 2 "$refreshes" 'XanMod source and key writes require another APT refresh'
+)
+
 test_state_locations() (
     local official_state="$TEST_SYSTEM_ROOT$KERNEL_OFFICIAL_STATE_LOGICAL"
     local xanmod_state="$TEST_SYSTEM_ROOT$KERNEL_STATE_LOGICAL"
@@ -841,6 +885,7 @@ test_xanmod_repository_configuration
 test_xanmod_install_plan_distribution_dependency
 test_secure_boot_provider_gate
 test_uninstall_uses_common_gate_only
+test_repository_apt_refresh
 test_state_locations
 test_load_os_version_fields
 printf 'PASS: system kernel provider tests\n'
