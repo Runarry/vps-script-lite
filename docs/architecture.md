@@ -118,7 +118,7 @@ vps-script-lite/
 
 `core` 常驻，只包含 `bin/vpsctl`、`VERSION`、`environment.sh`、`registry.sh`、`ui.sh`、`distribution.sh` 和三个 self 命令。每个非 self 公开命令独立打包为 `<domain>-<action>`，文件边界和全部私有模块由 `lib/registry.sh` 的固定清单定义。所有功能依赖 `shared-command`；`network ufw`、`security access`、`security tls`、`service proxy`、`service tcping` 另依赖 `shared-ufw`；两项测试另依赖 `shared-server-test`。首次执行功能或功能帮助时，按依赖顺序下载、校验、缓存，再分发。全局帮助、版本、环境、清单、菜单浏览和 self 状态保持离线。更新只获取目标版本的 manifest、安装器和 core，不预取旧缓存；不同版本的功能和共享库不得混用。功能卸载可在验证当前受管 release 后，持功能包下载锁删除该命令的固定文件和缓存标记；下次调用只重下该功能包。
 
-仓库根 `VERSION` 是项目版本的规范来源。v0.8.10 使用 schema 2，上一版 v0.8.9 使用 schema 1，不能用新格式覆盖旧 Release。资产由固定注册表生成，命名与交付约定见[Release 资产与发布流程](development-workflow.md#4-release-资产与发布流程)，此处不再维护一份逐包清单。
+仓库根 `VERSION` 是项目版本的规范来源。自 v0.8.10 起使用 schema 2，v0.8.9 使用 schema 1，不能用新格式覆盖旧 Release。资产由固定注册表生成，命名与交付约定见[Release 资产与发布流程](development-workflow.md#4-release-资产与发布流程)，此处不再维护一份逐包清单。
 
 bundle 内部使用项目根相对路径，不能再包一层顶级目录。core 允许 `lib/` 及其子路径内的公共库，构建脚本仍显式选择发布文件；保留必需入口、哈希、路径越界及链接/特殊文件检查。`vpsctl-manifest.tsv` 是严格 TSV；以下为字段顺序示意，`VERSION`、`NAME` 和 `SHA256` 是占位符，bundle 行须按注册表完整生成，摘要使用 64 位小写十六进制：
 
