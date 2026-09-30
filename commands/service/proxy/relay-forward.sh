@@ -441,20 +441,40 @@ _proxy_relay_forward_first_valid_address() {
 
 proxy_relay_forward_refresh_cache() {
     local manifest="${1:-}" old_cache="${2:-}" output="${3:-}"
-    local cache='{"schema_version":1,"exits":{}}' degraded='[]' resolved_list exit id host family resolved old_address now entry retained literal_family="" required_families
-    local query_key
+    local cache='{"schema_version":1,"exits":{}}' degraded='[]' resolved_list id host family resolved old_address now entry retained literal_family="" required_families
+    local query_key fields_fd fields_pid offset status=0
+    local -a fields=()
     local -A query_results=()
     [[ -f "$manifest" && ! -L "$manifest" && -n "$output" ]] || return 2
     now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    while IFS= read -r exit; do
-        [[ -n "$exit" ]] || continue
-        id="$(jq -r '.id' <<<"$exit")"
-        host="$(jq -r '.endpoint.host' <<<"$exit")"
+    # Select raw IDs first, then normalize fields as command substitution did.
+    if ! exec {fields_fd}< <(jq -je '
+        . as $root |
+        (.exits[] as $exit |
+         select(any($root.forwards[]; .exit_id == $exit.id)) |
+         ($exit.id | tostring | gsub("\u0000"; "") | sub("\n+$"; "")) as $id |
+         ($exit.id, $exit.endpoint.host,
+          ([$root.forwards[] | select(.exit_id == $id) | (.family // "dual") |
+             if . == "dual" then "ipv4", "ipv6" else . end] | unique | join("\n"))) |
+         (if type == "string" then gsub("\u0000"; "") | sub("\n+$"; "") else . end), "\u0000"),
+        ""
+    ' "$manifest"); then
+        return 20
+    fi
+    fields_pid=$!
+    mapfile -d '' -t fields <&"$fields_fd" || status=$?
+    exec {fields_fd}<&-
+    wait "$fields_pid" || return 20
+    ((status == 0 && ${#fields[@]} % 3 == 0)) || return 20
+
+    for ((offset = 0; offset < ${#fields[@]}; offset += 3)); do
+        id="${fields[offset]}"
+        host="${fields[offset + 1]}"
+        required_families="${fields[offset + 2]}"
         literal_family=""
         if _proxy_relay_forward_valid_ipv4 "$host"; then literal_family=ipv4
         elif _proxy_relay_forward_valid_ipv6 "$host"; then literal_family=ipv6
         fi
-        required_families="$(jq -r --arg id "$id" '[.forwards[] | select(.exit_id == $id) | (.family // "dual") | if . == "dual" then "ipv4", "ipv6" else . end] | unique[]' "$manifest")" || return 20
         entry='{}'
         for family in ipv4 ipv6; do
             grep -Fxq "$family" <<<"$required_families" || continue
@@ -488,8 +508,7 @@ proxy_relay_forward_refresh_cache() {
         done
         entry="$(jq -cn --argjson current "$entry" --arg host "$host" --arg updated "$now" '$current + {host:$host,updated_at:$updated}')" || return 20
         cache="$(jq -cn --argjson current "$cache" --arg id "$id" --argjson entry "$entry" '$current | .exits[$id]=$entry')" || return 20
-    done < <(jq -c '. as $root | .exits[] as $exit |
-        select(any($root.forwards[]; .exit_id == $exit.id)) | $exit' "$manifest")
+    done
 
     resolved_list="$(jq -c '[.exits | to_entries[] | {exit_id:.key,host:.value.host,ipv4:(.value.ipv4 // null),ipv6:(.value.ipv6 // null)}]' <<<"$cache")" || return 20
     jq -n --argjson cache "$cache" --argjson resolved "$resolved_list" --argjson degraded "$degraded" --arg generated "$now" '$cache + {resolved:$resolved,degraded:$degraded,updated_at:$generated,generated_at:$generated}' >"$output" || return 20

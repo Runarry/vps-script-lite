@@ -14,6 +14,8 @@ readonly TEST_BASH="$(command -v bash)"
 readonly TEST_CAT="$(command -v cat)"
 readonly TEST_DIRNAME="$(command -v dirname)"
 readonly TEST_BASE64="$(command -v base64)"
+TEST_MV="$(command -v mv)"
+readonly TEST_MV
 trap 'rm -rf -- "$TEST_TEMP"' EXIT
 
 test_fail() {
@@ -66,6 +68,7 @@ if [[ "$1" == "-n" ]]; then
 fi
 if [[ "$1" == "-w" ]]; then
     assignment="$2"
+    printf '%s\n' "$*" >>"${VPSCTL_SYSTEM_ROOT}/sysctl.log"
     key="${assignment%%=*}"
     value="${assignment#*=}"
     path="${VPSCTL_SYSTEM_ROOT}/proc/sys/${key//./\/}"
@@ -89,6 +92,7 @@ EOF
 cat >"${TEST_FAKE_BIN}/ip" <<'EOF'
 #!/usr/bin/env bash
 set -Eeuo pipefail
+printf '%s\n' "$*" >>"${VPSCTL_SYSTEM_ROOT}/ip.log"
 if [[ "$1" == "route" ]]; then
     printf 'default via 192.0.2.1 dev eth0 proto static\n'
     exit 0
@@ -105,7 +109,12 @@ cat >"${TEST_FAKE_BIN}/tc" <<'EOF'
 #!/usr/bin/env bash
 set -Eeuo pipefail
 if [[ "$*" == "qdisc show dev eth0" ]]; then
+    printf '%s\n' "$*" >>"${VPSCTL_SYSTEM_ROOT}/tc-query.log"
     printf 'qdisc %s 0: root refcnt 2\n' "$(<"${VPSCTL_SYSTEM_ROOT}/tc-root-qdisc")"
+    if [[ -f "${VPSCTL_SYSTEM_ROOT}/fail-live-qdisc-read" ]]; then
+        rm -f -- "${VPSCTL_SYSTEM_ROOT}/fail-live-qdisc-read"
+        exit 20
+    fi
     exit 0
 fi
 printf '%s\n' "$*" >>"${VPSCTL_SYSTEM_ROOT}/tc.log"
@@ -119,14 +128,31 @@ EOF
 
 cat >"${TEST_FAKE_BIN}/flock" <<'EOF'
 #!/usr/bin/env bash
+printf '%s\n' "$*" >>"${VPSCTL_SYSTEM_ROOT}/flock.log"
 exit 0
+EOF
+cat >"${TEST_FAKE_BIN}/mv" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"${VPSCTL_SYSTEM_ROOT}/writes.log"
+exec "$VPSCTL_TEST_REAL_MV" "$@"
+EOF
+cat >"${TEST_FAKE_BIN}/base64" <<'EOF'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+if [[ "${1:-}" == "${VPSCTL_SYSTEM_ROOT}/etc/sysctl.d/90-vpsctl-bbr.conf" && -f "${VPSCTL_SYSTEM_ROOT}/fail-comparison-read" ]]; then
+    rm -f -- "${VPSCTL_SYSTEM_ROOT}/fail-comparison-read"
+    exit 1
+fi
+exec "$VPSCTL_TEST_REAL_BASE64" "$@"
 EOF
 chmod +x \
     "${TEST_FAKE_BIN}/sysctl" \
     "${TEST_FAKE_BIN}/modprobe" \
     "${TEST_FAKE_BIN}/ip" \
     "${TEST_FAKE_BIN}/tc" \
-    "${TEST_FAKE_BIN}/flock"
+    "${TEST_FAKE_BIN}/flock" \
+    "${TEST_FAKE_BIN}/mv" \
+    "${TEST_FAKE_BIN}/base64"
 ln -s "$TEST_BASH" "${TEST_NO_MODPROBE_BIN}/bash"
 ln -s "$TEST_CAT" "${TEST_NO_MODPROBE_BIN}/cat"
 ln -s "$TEST_DIRNAME" "${TEST_NO_MODPROBE_BIN}/dirname"
@@ -140,6 +166,8 @@ chmod +x "${TEST_NO_MODPROBE_BIN}/apt-get"
 
 export VPSCTL_TESTING=1
 export VPSCTL_SYSTEM_ROOT="$TEST_SYSTEM_ROOT"
+export VPSCTL_TEST_REAL_MV="$TEST_MV"
+export VPSCTL_TEST_REAL_BASE64="$TEST_BASE64"
 export VPSCTL_DRY_RUN=0
 export VPSCTL_ASSUME_YES=0
 export VPSCTL_NON_INTERACTIVE=1
@@ -156,6 +184,33 @@ run_bbr() {
     else
         RUN_STATUS=$?
     fi
+}
+
+reset_bbr_effect_logs() {
+    local log
+    for log in writes sysctl modprobe tc ip tc-query flock; do
+        : >"${TEST_SYSTEM_ROOT}/${log}.log"
+    done
+}
+
+test_assert_no_bbr_effects() {
+    local message="$1" log
+    for log in writes sysctl modprobe tc; do
+        [[ ! -s "${TEST_SYSTEM_ROOT}/${log}.log" ]] || test_fail "${message}: unexpected ${log} command"
+    done
+}
+
+test_assert_bbr_applied() {
+    local algorithm="$1" qdisc="$2" message="$3"
+    test_assert_equal 0 "$RUN_STATUS" "${message} exit code"
+    test_assert_contains "$RUN_OUTPUT" "已应用 TCP 算法" "${message} apply message"
+    test_assert_not_contains "$RUN_OUTPUT" "无需重复应用" "${message} did not short-circuit"
+    [[ -s "${TEST_SYSTEM_ROOT}/writes.log" ]] || test_fail "${message}: no persistence writes"
+    test_assert_contains "$(<"${TEST_SYSTEM_ROOT}/modprobe.log")" "sch_${qdisc}" "${message} qdisc module"
+    test_assert_contains "$(<"${TEST_SYSTEM_ROOT}/sysctl.log")" "net.ipv4.tcp_congestion_control=${algorithm}" "${message} runtime algorithm command"
+    test_assert_contains "$(<"${TEST_SYSTEM_ROOT}/sysctl.log")" "net.core.default_qdisc=${qdisc}" "${message} runtime qdisc command"
+    test_assert_equal "$algorithm" "$(<"${TEST_SYSTEM_ROOT}/proc/sys/net/ipv4/tcp_congestion_control")" "${message} runtime algorithm"
+    test_assert_equal "$qdisc" "$(<"${TEST_SYSTEM_ROOT}/proc/sys/net/core/default_qdisc")" "${message} runtime qdisc"
 }
 
 test_status_and_arguments() {
@@ -497,6 +552,146 @@ EOF
     rm -f -- "$original_path"
 }
 
+test_repeated_apply() {
+    local sysctl_path="${TEST_SYSTEM_ROOT}/etc/sysctl.d/90-vpsctl-bbr.conf"
+    local modules_path="${TEST_SYSTEM_ROOT}/etc/modules-load.d/90-vpsctl-bbr.conf"
+    local original_path="${TEST_SYSTEM_ROOT}/var/lib/vpsctl/network/bbr/original.conf"
+    local path before_metadata first_original
+
+    reset_bbr_effect_logs
+    run_bbr --yes enable
+    test_assert_bbr_applied bbr fq "initial enable"
+    first_original="$(<"$original_path")"
+    before_metadata="$(stat -c '%d:%i:%a:%s:%y:%z' -- "$sysctl_path" "$modules_path" "$original_path")"
+
+    reset_bbr_effect_logs
+    run_bbr --yes enable
+    test_assert_equal 0 "$RUN_STATUS" "repeated enable exit code"
+    test_assert_contains "$RUN_OUTPUT" "已处于请求状态，无需重复应用" "repeated enable message"
+    test_assert_no_bbr_effects "repeated enable"
+    test_assert_equal "$before_metadata" "$(stat -c '%d:%i:%a:%s:%y:%z' -- "$sysctl_path" "$modules_path" "$original_path")" "repeated enable file metadata"
+    test_assert_contains "$(<"${TEST_SYSTEM_ROOT}/flock.log")" "-n " "repeated enable acquires lock"
+    test_assert_contains "$(<"${TEST_SYSTEM_ROOT}/flock.log")" "-u " "repeated enable releases lock"
+
+    reset_bbr_effect_logs
+    run_bbr --yes set --algorithm bbr --qdisc fq
+    test_assert_equal 0 "$RUN_STATUS" "repeated set exit code"
+    test_assert_contains "$RUN_OUTPUT" "无需重复应用" "repeated set message"
+    test_assert_no_bbr_effects "repeated set"
+    test_assert_equal "$before_metadata" "$(stat -c '%d:%i:%a:%s:%y:%z' -- "$sysctl_path" "$modules_path" "$original_path")" "repeated set file metadata"
+
+    for path in "$sysctl_path" "$modules_path"; do
+        rm -f -- "$path"
+        reset_bbr_effect_logs
+        run_bbr --yes enable
+        test_assert_bbr_applied bbr fq "missing ${path##*/}"
+        [[ -f "$path" ]] || test_fail "missing persistence file was not recreated"
+
+        printf '# extra managed-file content\n' >>"$path"
+        reset_bbr_effect_logs
+        run_bbr --yes enable
+        test_assert_bbr_applied bbr fq "modified ${path##*/}"
+        test_assert_not_contains "$(<"$path")" "extra managed-file content" "complete persistence content comparison"
+    done
+
+    printf 'cubic\n' >"${TEST_SYSTEM_ROOT}/proc/sys/net/ipv4/tcp_congestion_control"
+    reset_bbr_effect_logs
+    run_bbr --yes enable
+    test_assert_bbr_applied bbr fq "runtime algorithm drift"
+    printf 'fq_codel\n' >"${TEST_SYSTEM_ROOT}/proc/sys/net/core/default_qdisc"
+    reset_bbr_effect_logs
+    run_bbr --yes enable
+    test_assert_bbr_applied bbr fq "runtime default qdisc drift"
+    test_assert_equal "$first_original" "$(<"$original_path")" "reapply preserves first original record"
+
+    reset_bbr_effect_logs
+    run_bbr --yes set --algorithm cubic --qdisc fq_codel
+    test_assert_bbr_applied cubic fq_codel "different requested target"
+    test_assert_not_contains "$(<"$modules_path")" "tcp_bbr" "non-BBR module content"
+    reset_bbr_effect_logs
+    run_bbr --yes set --algorithm cubic --qdisc fq_codel
+    test_assert_equal 0 "$RUN_STATUS" "repeated non-BBR set exit code"
+    test_assert_contains "$RUN_OUTPUT" "无需重复应用" "repeated non-BBR set message"
+    test_assert_no_bbr_effects "repeated non-BBR set"
+    reset_bbr_effect_logs
+    run_bbr --yes enable
+    test_assert_bbr_applied bbr fq "return to BBR target"
+
+    printf 'fq\n' >"${TEST_SYSTEM_ROOT}/tc-root-qdisc"
+    reset_bbr_effect_logs
+    run_bbr --yes enable --apply-live-qdisc
+    test_assert_bbr_applied bbr fq "first matching live snapshot"
+    test_assert_contains "$(<"$original_path")" "live_present=1" "first matching live snapshot saved"
+    test_assert_contains "$(<"$original_path")" "live_qdisc=fq" "first matching live qdisc saved"
+    test_assert_contains "$(<"${TEST_SYSTEM_ROOT}/tc.log")" "qdisc replace dev eth0 root fq" "first live snapshot follows full apply"
+    before_metadata="$(stat -c '%d:%i:%a:%s:%y:%z' -- "$sysctl_path" "$modules_path" "$original_path")"
+
+    reset_bbr_effect_logs
+    run_bbr --yes enable --apply-live-qdisc
+    test_assert_equal 0 "$RUN_STATUS" "repeated live enable exit code"
+    test_assert_contains "$RUN_OUTPUT" "无需重复应用" "repeated live enable message"
+    test_assert_no_bbr_effects "repeated live enable"
+    test_assert_equal "$before_metadata" "$(stat -c '%d:%i:%a:%s:%y:%z' -- "$sysctl_path" "$modules_path" "$original_path")" "repeated live enable file metadata"
+    reset_bbr_effect_logs
+    run_bbr --yes set --algorithm bbr --qdisc fq --apply-live-qdisc
+    test_assert_equal 0 "$RUN_STATUS" "repeated live set exit code"
+    test_assert_contains "$RUN_OUTPUT" "无需重复应用" "repeated live set message"
+    test_assert_no_bbr_effects "repeated live set"
+
+    printf 'fq_codel\n' >"${TEST_SYSTEM_ROOT}/tc-root-qdisc"
+    reset_bbr_effect_logs
+    run_bbr --yes enable
+    test_assert_equal 0 "$RUN_STATUS" "non-live enable ignores root qdisc drift exit code"
+    test_assert_contains "$RUN_OUTPUT" "无需重复应用" "non-live enable ignores root qdisc drift message"
+    test_assert_no_bbr_effects "non-live root qdisc drift"
+    [[ ! -s "${TEST_SYSTEM_ROOT}/ip.log" && ! -s "${TEST_SYSTEM_ROOT}/tc-query.log" ]] || test_fail "non-live no-op queried live state"
+    test_assert_equal fq_codel "$(<"${TEST_SYSTEM_ROOT}/tc-root-qdisc")" "non-live no-op preserves root qdisc"
+    reset_bbr_effect_logs
+    run_bbr --yes enable --apply-live-qdisc
+    test_assert_bbr_applied bbr fq "live root qdisc drift"
+    test_assert_equal fq "$(<"${TEST_SYSTEM_ROOT}/tc-root-qdisc")" "live root qdisc drift corrected"
+
+    : >"${TEST_SYSTEM_ROOT}/fail-comparison-read"
+    reset_bbr_effect_logs
+    run_bbr --yes enable
+    test_assert_bbr_applied bbr fq "unconfirmed persistence read"
+    : >"${TEST_SYSTEM_ROOT}/fail-live-qdisc-read"
+    reset_bbr_effect_logs
+    run_bbr --yes enable --apply-live-qdisc
+    test_assert_bbr_applied bbr fq "unconfirmed live read with matching output"
+
+    before_metadata="$(stat -c '%d:%i:%a:%s:%y:%z' -- "$sysctl_path" "$modules_path" "$original_path")"
+    reset_bbr_effect_logs
+    run_bbr --dry-run --yes enable --apply-live-qdisc
+    test_assert_equal 0 "$RUN_STATUS" "matching-state dry-run exit code"
+    test_assert_contains "$RUN_OUTPUT" "演练" "matching-state dry-run plan"
+    test_assert_contains "$RUN_OUTPUT" "modprobe sch_fq" "matching-state dry-run module plan"
+    test_assert_contains "$RUN_OUTPUT" "sysctl -w net.ipv4.tcp_congestion_control=bbr" "matching-state dry-run runtime plan"
+    test_assert_contains "$RUN_OUTPUT" "tc qdisc replace dev eth0 root fq" "matching-state dry-run live plan"
+    test_assert_not_contains "$RUN_OUTPUT" "无需重复应用" "matching-state dry-run does not short-circuit"
+    test_assert_no_bbr_effects "matching-state dry-run"
+    test_assert_equal "$before_metadata" "$(stat -c '%d:%i:%a:%s:%y:%z' -- "$sysctl_path" "$modules_path" "$original_path")" "matching-state dry-run file metadata"
+
+    rm -f -- "$original_path"
+    reset_bbr_effect_logs
+    run_bbr --yes enable
+    test_assert_bbr_applied bbr fq "matching state without original record"
+    test_assert_contains "$(<"$original_path")" "algorithm=bbr" "matching state saved original algorithm"
+    test_assert_contains "$(<"$original_path")" "sysctl_present=1" "matching state saved original persistence"
+    printf 'unknown_key=value\n' >>"$original_path"
+    reset_bbr_effect_logs
+    run_bbr --yes enable
+    test_assert_equal 10 "$RUN_STATUS" "matching state with damaged original exit code"
+    test_assert_contains "$RUN_OUTPUT" "未知键" "matching state with damaged original message"
+    test_assert_not_contains "$RUN_OUTPUT" "无需重复应用" "damaged original is not masked by no-op"
+    test_assert_no_bbr_effects "damaged original"
+
+    rm -f -- "$sysctl_path" "$modules_path" "$original_path"
+    printf 'cubic\n' >"${TEST_SYSTEM_ROOT}/proc/sys/net/ipv4/tcp_congestion_control"
+    printf 'fq_codel\n' >"${TEST_SYSTEM_ROOT}/proc/sys/net/core/default_qdisc"
+    printf 'fq_codel\n' >"${TEST_SYSTEM_ROOT}/tc-root-qdisc"
+}
+
 test_persistence_and_restore() {
     local original_path="${TEST_SYSTEM_ROOT}/var/lib/vpsctl/network/bbr/original.conf"
     local sysctl_path="${TEST_SYSTEM_ROOT}/etc/sysctl.d/90-vpsctl-bbr.conf"
@@ -586,5 +781,6 @@ test_transaction_rollback
 test_live_qdisc_rollback
 test_non_live_then_first_live_snapshot
 test_original_state_validation
+test_repeated_apply
 test_persistence_and_restore
 printf 'PASS: network bbr tests\n'

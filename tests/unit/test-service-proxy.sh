@@ -2422,9 +2422,32 @@ test_relay_forward_refresh_cache() (
     local manifest="${TEST_TEMP}/cache-relay.json" old_cache="${TEST_TEMP}/cache-old.json"
     local output="${TEST_TEMP}/cache-actual.json" calls="${TEST_TEMP}/cache-getent.log"
     local errors="${TEST_TEMP}/cache-errors.log" dns="${TEST_TEMP}/cache-dns"
+    local jq_calls="${TEST_TEMP}/cache-jq.log" sentinel="${TEST_TEMP}/cache-sentinel.json" failure=''
     source "${TEST_ROOT}/commands/service/proxy/relay-forward.sh"
     mkdir -p "$dns"
     vps_cmd_warning() { printf '%s\n' "$*" >&2; }
+    date() { printf '2026-09-30T01:02:03Z\n'; }
+    jq() {
+        local file="${*: -1}"
+        if [[ "$file" == "$manifest" ]]; then
+            printf 'manifest\n' >>"$jq_calls"
+            case "$failure" in
+                short) printf 'incomplete\0'; return 0 ;;
+                partial) printf 'ready\0batch.example\0ipv4\0'; return 42 ;;
+                empty) return 42 ;;
+            esac
+        else
+            printf 'jq\n' >>"$jq_calls"
+        fi
+        "$REAL_JQ" "$@" || return $?
+        # Complete records must not hide a nonzero producer exit status.
+        if [[ "$file" == "$manifest" && "$failure" == stream ]]; then return 42; fi
+        return 0
+    }
+    mapfile() {
+        builtin mapfile "$@" || return $?
+        [[ "$failure" != read ]]
+    }
     getent() {
         local database="$1" host="$2" address file="${dns}/$1-$2"
         printf '%s %s\n' "$database" "$host" >>"$calls"
@@ -2435,19 +2458,48 @@ test_relay_forward_refresh_cache() (
         return 0
     }
     check_cache() {
-        local expected_queries="$1" description="$2"
+        local expected_queries="$1" description="$2" expected_jq_calls="${3:-}"
         : >"$calls"
+        : >"$jq_calls"
         # Call in the same shell so a cache leaking across invocations is observable.
         if proxy_relay_forward_refresh_cache "$manifest" "$old_cache" "$output" >"$errors" 2>&1; then RUN_STATUS=0; else RUN_STATUS=$?; fi
         RUN_OUTPUT="$(<"$errors")"
         assert_equal 0 "$RUN_STATUS" "$description status"
         assert_equal "$expected_queries" "$(LC_ALL=C sort "$calls")" "$description getent requests"
-        jq -e '
+        assert_equal 1 "$(grep -c '^manifest$' "$jq_calls")" "$description manifest reads"
+        [[ -z "$expected_jq_calls" ]] || assert_equal "$expected_jq_calls" "$(wc -l <"$jq_calls")" "$description jq count"
+        assert_equal 600 "$(stat -c '%a' "$output")" "$description cache permissions"
+        "$REAL_JQ" -e '
             .schema_version == 1 and (.resolved | type) == "array" and (.degraded | type) == "array" and
-            (.updated_at | type) == "string" and .updated_at == .generated_at and
-            all(.exits[]; (.host | type) == "string" and .updated_at != null)
+            .updated_at == "2026-09-30T01:02:03Z" and .updated_at == .generated_at and
+            keys_unsorted == ["schema_version","exits","resolved","degraded","updated_at","generated_at"] and
+            all(.exits[]; (.host | type) == "string" and .updated_at == "2026-09-30T01:02:03Z")
         ' "$output" >/dev/null || fail "$description cache schema"
     }
+    check_cache_failure() {
+        local expected_status="$1" description="$2" expected_jq_calls="${3:-1}" had_output=false
+        [[ ! -e "$output" ]] || had_output=true
+        : >"$calls"
+        : >"$jq_calls"
+        if proxy_relay_forward_refresh_cache "$manifest" "$old_cache" "$output" >"$errors" 2>&1; then RUN_STATUS=0; else RUN_STATUS=$?; fi
+        RUN_OUTPUT="$(<"$errors")"
+        assert_equal "$expected_status" "$RUN_STATUS" "$description status"
+        assert_equal '' "$(<"$calls")" "$description skips DNS"
+        assert_equal "$expected_jq_calls" "$(wc -l <"$jq_calls")" "$description jq count"
+        if [[ "$had_output" == true ]]; then
+            cmp -s "$sentinel" "$output" || fail "$description overwrote existing output"
+            assert_equal 640 "$(stat -c '%a' "$output")" "$description output permissions unchanged"
+        else
+            [[ ! -e "$output" ]] || fail "$description created output"
+        fi
+    }
+
+    printf '{"exits":[],"forwards":[]}\n' >"$manifest"
+    check_cache '' 'empty exits' 3
+    "$REAL_JQ" -e '.exits == {} and .resolved == [] and .degraded == []' "$output" >/dev/null || fail 'empty exits retain empty cache lists'
+    printf '{"exits":[{"id":"unused","endpoint":{"host":"unused.example"}}],"forwards":[]}\n' >"$manifest"
+    check_cache '' 'unreferenced exits' 3
+    "$REAL_JQ" -e '.exits == {} and .resolved == [] and .degraded == []' "$output" >/dev/null || fail 'unreferenced exits are omitted'
 
     cat >"$manifest" <<'JSON'
 {"exits":[
@@ -2471,7 +2523,9 @@ JSON
         .exits.a.ipv6 == "2001:db8::10" and .exits.b.ipv6 == "2001:db8::10" and
         .exits.other.ipv4 == "198.51.100.30" and .exits.case.ipv4 == "198.51.100.40" and
         .exits.dot.ipv4 == "198.51.100.50" and (.exits | has("unused") | not) and
-        (.resolved | length) == 5 and .degraded == []
+        (.resolved | map(.exit_id)) == ["a","b","other","case","dot"] and
+        (.exits | keys_unsorted) == ["a","b","other","case","dot"] and
+        (.exits.a | keys_unsorted) == ["ipv4","ipv6","host","updated_at"] and .degraded == []
     ' "$output" >/dev/null || fail 'shared DNS selects sorted valid addresses and keeps hosts distinct'
     printf '%s\n' '198.51.100.60' >"${dns}/ahostsv4-shared.example"
     printf '%s\n' '2001:db8::60' >"${dns}/ahostsv6-shared.example"
@@ -2547,6 +2601,77 @@ JSON
             [["literal4","ipv6","family-unavailable",false],["literal6","ipv4","family-unavailable",false],
              ["partial-a","ipv6","dns-failed",false],["partial-b","ipv6","dns-failed",false]]
     ' "$output" >/dev/null || fail 'address-family modes and IP literal degradation stay unchanged'
+
+    (
+        local id=$'edge |"\t中\r\ninner' host=$'host |"\t中\r\ninner'
+        local resolver_args="${TEST_TEMP}/cache-resolver.args"
+        local -a captured=()
+        proxy_relay_forward_resolve_family() {
+            printf '%s\0%s\0' "$1" "$2" >>"$resolver_args"
+            if [[ "$2" == ipv4 ]]; then printf '198.51.100.42\n'; else printf '2001:db8::42\n'; fi
+        }
+        # $id and $host in the filter are jq variables supplied by --arg.
+        # shellcheck disable=SC2016
+        "$REAL_JQ" -n --arg id "$id" --arg host "$host" '{exits:[
+            {id:($id + "\u0000\n\n"),endpoint:{host:($host + "\u0000\n\n")}},
+            {id:"",endpoint:{host:""}},
+            {id:"raw\u0000\n\n",endpoint:{host:"unqueried.example"}},
+            {id:"legacy-null",endpoint:{host:"shared.example"}},
+            {id:"unreferenced",endpoint:{host:"unused.example"}}],forwards:[
+            {exit_id:($id + "\u0000\n\n"),family:"ipv6"},{exit_id:$id,family:"ipv4\u0000\n\n"},
+            {exit_id:"",family:"ipv4"},{exit_id:"raw\u0000\n\n"},
+            {exit_id:"legacy-null",family:null},{exit_id:"unreferenced\u0000\n\n",family:"dual"}]}' >"$manifest"
+        : >"$resolver_args"
+        check_cache '' 'field characters, empty fields and original reference matching'
+        builtin mapfile -d '' -t captured <"$resolver_args"
+        assert_equal 8 "${#captured[@]}" 'field semantics resolver argument count'
+        assert_equal "$host" "${captured[0]}" 'host preserves internal characters and strips NUL/trailing LF'
+        assert_equal ipv4 "${captured[1]}" 'family lookup uses normalized ID'
+        assert_equal '' "${captured[2]}" 'empty host retains field alignment'
+        assert_equal ipv4 "${captured[3]}" 'empty ID family lookup'
+        assert_equal shared.example "${captured[4]}" 'null family defaults to dual host'
+        assert_equal ipv4 "${captured[5]}" 'null family includes IPv4'
+        assert_equal shared.example "${captured[6]}" 'dual host is unchanged'
+        assert_equal ipv6 "${captured[7]}" 'null family includes IPv6'
+        # $id and $host in the filter are jq variables supplied by --arg.
+        # shellcheck disable=SC2016
+        "$REAL_JQ" -e --arg id "$id" --arg host "$host" '
+            .exits[$id].host == $host and .exits[$id].ipv4 == "198.51.100.42" and
+            (.exits[$id] | has("ipv6") | not) and .exits[""].host == "" and
+            .exits[""].ipv4 == "198.51.100.42" and
+            (.exits.raw | keys_unsorted) == ["host","updated_at"] and
+            .exits["legacy-null"].ipv4 == "198.51.100.42" and .exits["legacy-null"].ipv6 == "2001:db8::42" and
+            (.resolved | map(.exit_id)) == [$id,"","raw","legacy-null"] and .degraded == []
+        ' "$output" >/dev/null || fail 'ID/host normalization, reference filtering and empty fields remain unchanged'
+    )
+
+    "$REAL_JQ" -n '{exits:[range(20) | {id:("E" + tostring),endpoint:{host:"batch.example"}}],
+        forwards:[range(20) | {exit_id:("E" + tostring)}]}' >"$manifest"
+    printf '198.51.100.42\n' >"${dns}/ahostsv4-batch.example"
+    printf '2001:db8::42\n' >"${dns}/ahostsv6-batch.example"
+    check_cache $'ahostsv4 batch.example\nahostsv6 batch.example' 'twenty dual-stack exits batch field reads' 83
+
+    printf 'existing output\n' >"$sentinel"
+    cp "$sentinel" "$output"
+    chmod 0640 "$output"
+    for failure in short partial empty stream read; do
+        check_cache_failure 20 "$failure extraction failure preserves output"
+    done
+    failure=''
+    : >"$manifest"
+    check_cache_failure 20 'empty manifest preserves output'
+    printf '{"exits":[{"id":"ready","endpoint":{"host":"batch.example"}}],"forwards":[{"exit_id":"ready"}]}\n{invalid\n' >"$manifest"
+    check_cache_failure 20 'JSON parse failure after a valid document preserves output'
+    rm -f -- "$output"
+    check_cache_failure 20 'JSON parse failure creates no output'
+    rm -f -- "$manifest"
+    check_cache_failure 2 'missing manifest retains file-type failure' 0
+    ln -s "$sentinel" "$manifest"
+    check_cache_failure 2 'manifest symlink retains file-type failure' 0
+    rm -f -- "$manifest"
+    printf '{"exits":[],"forwards":[]}\n' >"$manifest"
+    output=''
+    check_cache_failure 2 'empty output path retains argument failure' 0
 )
 
 test_relay_forwarding_subscription_and_rollback() {

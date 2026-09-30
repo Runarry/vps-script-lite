@@ -435,7 +435,8 @@ vps_ufw_rule_protected() {
 }
 
 _vps_ufw_normalize_desired() {
-    local file="$1" scope="$2" rows='' row source destination
+    local file="$1" scope="$2" rows='' row source destination family index producer read_status=0
+    local -a fields=()
     [[ -f "$file" && ! -L "$file" ]] || return 2
     jq -e 'type=="array" and all(.[];
       (.owner|type)=="string" and (.owner|test("^(ssh|tcping|node:[A-Za-z0-9_.-]+|forward:[A-Za-z0-9_.-]+|tls:[A-Za-z0-9_.-]+)$")) and
@@ -450,21 +451,31 @@ _vps_ufw_normalize_desired() {
         vps_cmd_error 'UFW 服务规则需求格式无效'
         return 2
     }
-    while IFS= read -r row; do
-        source="$(_vps_ufw_address "$(jq -r '.source // "any"' <<<"$row")")" || return 2
-        destination="$(_vps_ufw_address "$(jq -r '.destination // "any"' <<<"$row")")" || return 2
-        if [[ "$(jq -r '.family' <<<"$row")" == ipv4 ]]; then
+    # Match command substitution's NUL removal and trailing-newline trimming.
+    mapfile -d '' -t fields < <(jq -je '
+      def shell_value: tostring | gsub("\u0000"; "") | sub("\n+$"; "");
+      (.[] | [tojson, (.source // "any" | shell_value), (.destination // "any" | shell_value),
+        (.family | shell_value)] | .[] + "\u0000"), ""' "$file") || read_status=$?
+    producer=$!
+    wait "$producer" || return 20
+    ((read_status == 0 && ${#fields[@]} % 4 == 0)) || return 20
+    for ((index = 0; index < ${#fields[@]}; index += 4)); do
+        row="${fields[index]}"
+        source="$(_vps_ufw_address "${fields[index + 1]}")" || return 2
+        destination="$(_vps_ufw_address "${fields[index + 2]}")" || return 2
+        family="${fields[index + 3]}"
+        if [[ "$family" == ipv4 ]]; then
             [[ "$source$destination" != *:* ]] || return 2
         else
             [[ "$source$destination" != *.* ]] || return 2
         fi
-        row="$(jq -c --arg scope "$scope" --arg source "$source" --arg destination "$destination" '
+        row="$(jq -ce --arg scope "$scope" --arg source "$source" --arg destination "$destination" '
           {scope:$scope,owner,kind,family,proto,port:(.port|split(":")|map(tonumber)|unique|map(tostring)|join(":")),
            source:$source,destination:$destination,source_port:"any",interfaces:{in:"",out:""},temporary:(.temporary // false)} +
           (if .preserve_existing == true then {preserve_existing:true} else {} end)' <<<"$row")" || return 20
         rows+="$row"$'\n'
-    done < <(jq -c '.[]' "$file")
-    jq -s 'unique' <<<"$rows"
+    done
+    jq -es 'unique' <<<"$rows" || return 20
 }
 
 vps_ufw_lease_metadata() {
@@ -484,11 +495,20 @@ vps_ufw_lease_metadata() {
 }
 
 _vps_ufw_prune_leases() {
-    local state="$1" owner pid boot start stat actual
-    while IFS= read -r owner; do
-        pid="$(jq -r --arg owner "$owner" '.leases[$owner].pid' <<<"$state")"
-        boot="$(jq -r --arg owner "$owner" '.leases[$owner].boot_id' <<<"$state")"
-        start="$(jq -r --arg owner "$owner" '.leases[$owner].start_time' <<<"$state")"
+    local state="$1" owner pid boot start stat actual index producer read_status=0
+    local -a fields=() expired=()
+    mapfile -d '' -t fields < <(jq -je '
+      def shell_value: tostring | gsub("\u0000"; "") | sub("\n+$"; "");
+      (.leases | to_entries | sort_by(.key)[] | [.key, .value.pid, .value.boot_id, .value.start_time]
+        | .[] | (shell_value + "\u0000")), ""' <<<"$state") || read_status=$?
+    producer=$!
+    wait "$producer" || return 20
+    ((read_status == 0 && ${#fields[@]} % 4 == 0)) || return 20
+    for ((index = 0; index < ${#fields[@]}; index += 4)); do
+        owner="${fields[index]}"
+        pid="${fields[index + 1]}"
+        boot="${fields[index + 2]}"
+        start="${fields[index + 3]}"
         actual=''
         if [[ "$pid" =~ ^[0-9]+$ && -r "/proc/$pid/stat" && -r /proc/sys/kernel/random/boot_id &&
             "$boot" == "$(</proc/sys/kernel/random/boot_id)" ]]; then
@@ -496,10 +516,17 @@ _vps_ufw_prune_leases() {
             actual="$(awk '{print $20}' <<<"${stat##*) }")"
         fi
         [[ -z "$actual" || "$actual" != "$start" ]] || continue
-        state="$(jq --arg owner "$owner" '.requirements |= map(select(.owner!=$owner or .temporary!=true)) |
-          del(.leases[$owner])' <<<"$state")" || return 20
-    done < <(jq -r '.leases|keys[]' <<<"$state")
-    printf '%s\n' "$state"
+        expired+=("$owner")
+    done
+    if ((${#expired[@]} == 0)); then
+        printf '%s\n' "$state"
+        return 0
+    fi
+    jq -e --args '(reduce $ARGS.positional[] as $owner ({}; .[$owner]=true)) as $expired |
+      .leases |= with_entries(select($expired[.key] != true)) |
+      .requirements |= map(select(.temporary != true or
+        (if (.owner|type)=="string" then $expired[.owner] != true else true end)))' \
+        -- "${expired[@]}" <<<"$state" || return 20
 }
 
 # Config snapshots are private, explicit files; never source a recovery file.
@@ -630,14 +657,20 @@ _vps_ufw_recover() {
 }
 
 _vps_ufw_add_rule() {
-    local rule="$1" comment="$2" position="${3:-}" kind family source destination proto port
-    local -a arguments=()
-    kind="$(jq -r '.kind' <<<"$rule")"
-    family="$(jq -r '.family' <<<"$rule")"
-    source="$(jq -r '.source' <<<"$rule")"
-    destination="$(jq -r '.destination' <<<"$rule")"
-    proto="$(jq -r '.proto' <<<"$rule")"
-    port="$(jq -r '.port' <<<"$rule")"
+    local rule="$1" comment="$2" position="${3:-}" kind family source destination proto port producer read_status=0
+    local -a arguments=() fields=()
+    mapfile -d '' -t fields < <(jq -je '
+      [.kind,.family,.source,.destination,.proto,.port][] |
+      (tostring | gsub("\u0000"; "") | sub("\n+$"; "")) + "\u0000"' <<<"$rule") || read_status=$?
+    producer=$!
+    wait "$producer" || return 20
+    ((read_status == 0 && ${#fields[@]} == 6)) || return 20
+    kind="${fields[0]}"
+    family="${fields[1]}"
+    source="${fields[2]}"
+    destination="${fields[3]}"
+    proto="${fields[4]}"
+    port="${fields[5]}"
     if [[ "$source" == any ]]; then
         if [[ "$family" == ipv6 ]]; then source='::/0'; else source='0.0.0.0/0'; fi
     fi
@@ -655,7 +688,12 @@ _vps_ufw_delete_id() {
     local id="$1" rules number fresh
     rules="$(_vps_ufw_inventory_raw)" || return $?
     number="$(jq -r --arg id "$id" '[.[]|select(.id==$id)] | if length==0 then "absent" elif length==1 then .[0].number else "ambiguous" end' <<<"$rules")" || return 20
-    [[ "$number" != absent ]] || return 0
+    if [[ "$number" == absent ]]; then
+        # A changed comment/content denotes an administrator edit. Do not
+        # substitute a matching port or a stale display number for its ID.
+        vps_cmd_verbose "UFW 管理规则已不存在或被人工修改，释放记录: $id"
+        return 0
+    fi
     [[ "$number" =~ ^[1-9][0-9]*$ ]] || {
         vps_cmd_error 'UFW 规则内容重复，不能安全定位删除'
         return 3
@@ -727,22 +765,14 @@ _vps_ufw_apply_desired() {
 }
 
 _vps_ufw_sweep() {
-    local state entry key id preserve rules actual
+    local state entry key id preserve
     state="$(_vps_ufw_state)" || return $?
     while IFS= read -r entry; do
         key="$(jq -r '.key' <<<"$entry")"
         id="$(jq -r '.value.rule.id' <<<"$entry")"
         preserve="$(jq -r '.value.preserve // false' <<<"$entry")"
         if [[ "$preserve" != true ]]; then
-            rules="$(_vps_ufw_inventory_raw)" || return $?
-            actual="$(jq -c --arg id "$id" '.[]|select(.id==$id)' <<<"$rules")"
-            if [[ -n "$actual" ]]; then
-                _vps_ufw_delete_id "$id" || return $?
-            else
-                # A changed comment/content denotes an administrator edit. Do not
-                # substitute a matching port or a stale display number for its ID.
-                vps_cmd_verbose "UFW 管理规则已不存在或被人工修改，释放记录: $id"
-            fi
+            _vps_ufw_delete_id "$id" || return $?
         fi
         state="$(jq --arg key "$key" 'del(.managed[$key])' <<<"$state")" || return 20
         printf '%s\n' "$state" | _vps_ufw_save || return $?

@@ -751,21 +751,60 @@ bbr_prepare_qdisc() {
     fi
 }
 
+bbr_sysctl_content() {
+    local algorithm="$1"
+    local qdisc="$2"
+
+    printf '%s\n' "$BBR_MANAGED_MARKER" || return $?
+    printf 'net.ipv4.tcp_congestion_control = %s\n' "$algorithm" || return $?
+    printf 'net.core.default_qdisc = %s\n' "$qdisc"
+}
+
+bbr_modules_content() {
+    local algorithm="$1"
+    local qdisc="$2"
+
+    printf '%s\n' "$BBR_MANAGED_MARKER" || return $?
+    if [[ "$algorithm" == "bbr" ]]; then
+        printf 'tcp_bbr\n' || return $?
+    fi
+    printf 'sch_%s\n' "$qdisc"
+}
+
 bbr_write_managed_files() {
     local algorithm="$1"
     local qdisc="$2"
 
-    {
-        printf '%s\n' "$BBR_MANAGED_MARKER"
-        printf 'net.ipv4.tcp_congestion_control = %s\n' "$algorithm"
-        printf 'net.core.default_qdisc = %s\n' "$qdisc"
-    } | bbr_atomic_write_path "$BBR_SYSCTL_FILE" 0644 || return $?
+    bbr_sysctl_content "$algorithm" "$qdisc" | bbr_atomic_write_path "$BBR_SYSCTL_FILE" 0644 || return $?
+    bbr_modules_content "$algorithm" "$qdisc" | bbr_atomic_write_path "$BBR_MODULES_FILE" 0644
+}
 
-    {
-        printf '%s\n' "$BBR_MANAGED_MARKER"
-        [[ "$algorithm" == "bbr" ]] && printf 'tcp_bbr\n'
-        printf 'sch_%s\n' "$qdisc"
-    } | bbr_atomic_write_path "$BBR_MODULES_FILE" 0644
+bbr_requested_state_matches() {
+    local algorithm="$1"
+    local qdisc="$2"
+    local path expected actual current_algorithm current_qdisc interface live_qdisc
+
+    [[ "$BBR_ORIGINAL_LOADED" == "1" ]] || return 1
+    for path in "$BBR_SYSCTL_FILE" "$BBR_MODULES_FILE"; do
+        [[ -f "$path" && ! -L "$path" ]] || return 1
+        if [[ "$path" == "$BBR_SYSCTL_FILE" ]]; then
+            expected="$(bbr_sysctl_content "$algorithm" "$qdisc" | base64)" || return 1
+        else
+            expected="$(bbr_modules_content "$algorithm" "$qdisc" | base64)" || return 1
+        fi
+        actual="$(bbr_encode_file "$path")" || return 1
+        [[ "$actual" == "${expected//$'\n'/}" ]] || return 1
+    done
+    current_algorithm="$(bbr_current_algorithm)" || return 1
+    current_qdisc="$(bbr_current_qdisc)" || return 1
+    [[ "$current_algorithm" == "$algorithm" && "$current_qdisc" == "$qdisc" ]] || return 1
+    if [[ "$BBR_APPLY_LIVE_QDISC" == "1" ]]; then
+        [[ "$BBR_ORIGINAL_LIVE_PRESENT" == "1" ]] || return 1
+        interface="$(bbr_default_interface)" || return 1
+        live_qdisc="$(bbr_interface_root_qdisc "$interface")" || return 1
+        [[ "$live_qdisc" == "$qdisc" ]] || return 1
+    fi
+    return 0
 }
 
 bbr_prepare_directories() {
@@ -834,9 +873,10 @@ bbr_default_interface() {
 
 bbr_interface_root_qdisc() {
     local interface="$1"
-    local line token previous qdisc_name is_root
+    local output line token previous qdisc_name is_root
     local -a tokens=()
 
+    output="$(tc qdisc show dev "$interface" 2>/dev/null)" || return 1
     while IFS= read -r line; do
         previous=""
         qdisc_name=""
@@ -851,7 +891,7 @@ bbr_interface_root_qdisc() {
             printf '%s\n' "$qdisc_name"
             return 0
         fi
-    done < <(tc qdisc show dev "$interface" 2>/dev/null)
+    done <<<"$output"
     return 1
 }
 
@@ -968,6 +1008,11 @@ bbr_apply_settings() {
         else
             bbr_backup_unmanaged_persistence || status=$?
         fi
+    fi
+    if ((status == 0 && locked == 1)) && bbr_requested_state_matches "$algorithm" "$qdisc"; then
+        vps_cmd_unlock || return $?
+        vps_cmd_success "已处于请求状态，无需重复应用"
+        return 0
     fi
     ((status != 0)) || bbr_begin_transaction || status=$?
     ((status != 0)) || bbr_load_algorithm_module "$algorithm" || status=$?

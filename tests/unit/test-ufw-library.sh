@@ -184,6 +184,287 @@ apply() {
     vps_ufw_commit
 }
 
+# The counter lives in a file because jq also runs in command/process substitutions.
+track_jq() {
+    printf '0\n' >"$VPSCTL_SYSTEM_ROOT/run/jq-count"
+    # shellcheck disable=SC2317
+    jq() {
+        local count
+        count="$(<"$VPSCTL_SYSTEM_ROOT/run/jq-count")"
+        count=$((count + 1))
+        printf '%s\n' "$count" >"$VPSCTL_SYSTEM_ROOT/run/jq-count"
+        if [[ "$count" == "${jq_fail_at:-0}" && "${jq_fail_mode:-before}" == before ]]; then return 5; fi
+        command jq "$@" || return $?
+        [[ "$count" != "${jq_fail_at:-0}" ]] || return 5
+    }
+}
+
+assert_command() {
+    local index
+    local -a actual=() expected=("$@")
+    mapfile -d '' -t actual <"$VPSCTL_SYSTEM_ROOT/run/command-args"
+    assert_equal "${#expected[@]}" "${#actual[@]}" 'command argument count'
+    for ((index = 0; index < ${#expected[@]}; index++)); do
+        assert_equal "${expected[index]}" "${actual[index]}" "command argument $index"
+    done
+}
+
+test_normalize_batches() (
+    local file result filter status
+    setup normalize-batches
+    file="$VPSCTL_SYSTEM_ROOT/run/desired.json"
+    cat >"$file" <<'EOF'
+[
+  {"owner":"node:a","kind":"input","family":"ipv4","proto":"tcp","port":"00080:00080","destination":null,"temporary":null,"preserve_existing":false},
+  {"owner":"node:a","kind":"input","family":"ipv4","proto":"tcp","port":"80","source":"any","destination":"any"},
+  {"owner":"forward:a","kind":"route","family":"ipv6","proto":"udp","port":"00900:01000","source":"2001:DB8::/64","destination":"::ffff:192.0.2.1","temporary":true},
+  {"owner":"tcping","kind":"input","family":"ipv4","proto":"tcp","port":"65535","source":"192.000.002.010/32\u0000\n\n","destination":"0.0.0.0/0","preserve_existing":true,"ignored":"extra"}
+]
+EOF
+    result="$(_vps_ufw_normalize_desired "$file" fixture)"
+    assert_json "$result" '. == ([
+      {scope:"fixture",owner:"node:a",kind:"input",family:"ipv4",proto:"tcp",port:"80",source:"any",destination:"any",source_port:"any",interfaces:{in:"",out:""},temporary:false},
+      {scope:"fixture",owner:"forward:a",kind:"route",family:"ipv6",proto:"udp",port:"900:1000",source:"2001:0db8:0000:0000:0000:0000:0000:0000/64",destination:"0000:0000:0000:0000:0000:ffff:c000:0201",source_port:"any",interfaces:{in:"",out:""},temporary:true},
+      {scope:"fixture",owner:"tcping",kind:"input",family:"ipv4",proto:"tcp",port:"65535",source:"192.0.2.10",destination:"any",source_port:"any",interfaces:{in:"",out:""},temporary:false,preserve_existing:true}
+    ] | sort)' 'normalization preserves defaults, IPv6, ranges, deduplication and preserve_existing'
+    printf '[]\n' >"$file"
+    assert_equal '[]' "$(_vps_ufw_normalize_desired "$file" fixture)" 'empty desired remains an empty array'
+    for filter in '.[0].source=""' '.[0].destination=""' '.[0].source="::1"' \
+        '.[0].family="ipv6" | .[0].destination="192.0.2.1"' '.[0].port="900:80"' '.[0].port="65536"'; do
+        desired node:a 80 | jq "$filter" >"$file"
+        status=0
+        _vps_ufw_normalize_desired "$file" fixture >/dev/null 2>&1 || status=$?
+        assert_equal 2 "$status" "invalid requirement: $filter"
+    done
+    jq -n '[range(20) | {owner:("node:"+tostring),kind:"input",family:"ipv4",proto:"tcp",port:"80"}]' >"$file"
+    track_jq
+    result="$(_vps_ufw_normalize_desired "$file" fixture)"
+    assert_equal 23 "$(<"$VPSCTL_SYSTEM_ROOT/run/jq-count")" '20 requirements use 23 jq calls'
+    unset -f jq
+    assert_json "$result" 'length==20' 'batch includes every requirement'
+)
+
+test_normalize_read_failures() (
+    local file jq_fail_at jq_fail_mode status result expected
+    setup normalize-failures
+    file="$VPSCTL_SYSTEM_ROOT/run/desired.json"
+    desired node:a 80 >"$file"
+    for jq_fail_at in 1 2 3 4; do
+        for jq_fail_mode in before after; do
+            track_jq
+            status=0
+            result="$(_vps_ufw_normalize_desired "$file" fixture 2>/dev/null)" || status=$?
+            expected=20
+            [[ "$jq_fail_at" != 1 ]] || expected=2
+            assert_equal "$expected" "$status" "normalize jq $jq_fail_at $jq_fail_mode failure"
+            if [[ "$jq_fail_at" == 2 ]]; then assert_equal '' "$result" 'failed producer cannot emit normalized requirements'; fi
+            unset -f jq
+        done
+    done
+)
+
+test_prune_batches() (
+    local state result mode
+    setup prune-batches
+    vps_ufw_lease_metadata
+    state="$(jq --argjson live "$VPS_UFW_LEASE_JSON" '
+      .leases={"tls:live":$live,"tls:trimmed":($live | map_values(tostring+"\u0000\n\n")),
+        "tls:dead":($live+{pid:2147483647}),"tls:boot":($live+{boot_id:"wrong"}),
+        "tls:start":($live+{start_time:"wrong"}),"tls:missing":{},"tls:empty":{pid:"",boot_id:"",start_time:""}} |
+      .requirements=[
+        {owner:"tls:live",temporary:true,tag:"live"},{owner:"tls:trimmed",temporary:true,tag:"trimmed"},
+        {owner:"tls:dead",temporary:true,tag:"dead"},{owner:"tls:boot",temporary:true,tag:"boot"},
+        {owner:"tls:start",temporary:true,tag:"start"},{owner:"tls:missing",temporary:true,tag:"missing"},
+        {owner:"tls:empty",temporary:true,tag:"empty"},{owner:"tls:dead",temporary:false,tag:"permanent"},
+        {owner:"tls:dead",tag:"default"},{owner:"tls:dead",temporary:"true",tag:"nonboolean"},
+        {owner:"node:other",temporary:true,tag:"other"},{temporary:true,tag:"ownerless"},
+        {owner:7,temporary:true,tag:"numeric"},{owner:["tls:dead"],temporary:true,tag:"array"}] |
+      .marker={keep:[1,2]}' <<<"$(_vps_ufw_state)")"
+    track_jq
+    result="$(_vps_ufw_prune_leases "$state")"
+    assert_equal 2 "$(<"$VPSCTL_SYSTEM_ROOT/run/jq-count")" 'mixed leases use two jq calls'
+    unset -f jq
+    assert_json "$result" '(.leases|keys)==["tls:live","tls:trimmed"] and
+      [.requirements[].tag]==["live","trimmed","permanent","default","nonboolean","other","ownerless","numeric","array"] and
+      .marker=={keep:[1,2]} and .version==1 and .revision==0' 'expired owners lose only their temporary requirements'
+    state="$result"
+    track_jq
+    result="$(_vps_ufw_prune_leases "$state")"
+    assert_equal 1 "$(<"$VPSCTL_SYSTEM_ROOT/run/jq-count")" 'live leases use one jq call'
+    unset -f jq
+    assert_equal "$state" "$result" 'no expired leases return the original state bytes'
+    for mode in live dead; do
+        state="$(jq --arg mode "$mode" --argjson live "$VPS_UFW_LEASE_JSON" '
+          .leases=(reduce range(20) as $i ({}; .["tls:"+($i|tostring)]=
+            (if $mode=="live" then $live else $live+{pid:2147483647} end)))' <<<"$(_vps_ufw_state)")"
+        track_jq
+        result="$(_vps_ufw_prune_leases "$state")"
+        if [[ "$mode" == live ]]; then
+            assert_equal 1 "$(<"$VPSCTL_SYSTEM_ROOT/run/jq-count")" '20 live leases use one jq call'
+            assert_equal "$state" "$result" '20 live leases are unchanged'
+        else
+            assert_equal 2 "$(<"$VPSCTL_SYSTEM_ROOT/run/jq-count")" '20 expired leases use two jq calls'
+        fi
+        unset -f jq
+        if [[ "$mode" == dead ]]; then assert_json "$result" '.leases=={}' 'all expired leases removed together'; fi
+    done
+)
+
+test_prune_read_failures() (
+    local state result status jq_fail_at jq_fail_mode
+    setup prune-failures
+    state='{"leases":{"tls:dead":{}},"requirements":[{"owner":"tls:dead","temporary":true}]}'
+    for jq_fail_at in 1 2; do
+        for jq_fail_mode in before after; do
+            track_jq
+            status=0
+            result="$(_vps_ufw_prune_leases "$state" 2>/dev/null)" || status=$?
+            assert_equal 20 "$status" "prune jq $jq_fail_at $jq_fail_mode failure"
+            if [[ "$jq_fail_at" == 1 ]]; then assert_equal '' "$result" 'failed producer cannot emit a pruned state'; fi
+            unset -f jq
+        done
+    done
+    for state in '' '{' '{"leases":{"tls:dead":{},"tls:invalid":[]},"requirements":[]}'; do
+        status=0
+        result="$(_vps_ufw_prune_leases "$state" 2>/dev/null)" || status=$?
+        assert_equal 20 "$status" 'empty or malformed lease input fails'
+        assert_equal '' "$result" 'invalid lease input cannot emit a successful state'
+    done
+)
+
+test_add_rule_batches() (
+    local rule status jq_fail_at=0 jq_fail_mode
+    setup add-batches
+    # shellcheck disable=SC2317
+    vps_cmd_run() { printf '%s\0' "$@" >"$VPSCTL_SYSTEM_ROOT/run/command-args"; }
+    rule='{"kind":"input","family":"ipv4","source":"any","destination":"any","proto":"tcp","port":"443"}'
+    track_jq
+    _vps_ufw_add_rule "$rule" ''
+    assert_equal 1 "$(<"$VPSCTL_SYSTEM_ROOT/run/jq-count")" 'add rule reads all six fields with one jq'
+    unset -f jq
+    assert_command ufw allow proto tcp from 0.0.0.0/0 to 0.0.0.0/0 port 443
+    _vps_ufw_add_rule '{"kind":"route","family":"ipv6","source":"any","destination":"any","proto":"udp","port":"900:1000"}' $'operator \tcomment\n' 2
+    assert_command ufw route insert 2 allow proto udp from ::/0 to ::/0 port 900:1000 comment $'operator \tcomment\n'
+    _vps_ufw_add_rule '{"kind":"output","family":"ipv4","source":"192.0.2.1","destination":"any","proto":"tcp","port":"22"}' '' 3
+    assert_command ufw insert 3 allow out proto tcp from 192.0.2.1 to 0.0.0.0/0 port 22
+    _vps_ufw_add_rule '{"kind":"","family":"","source":"","destination":"","proto":"","port":""}' ''
+    assert_command ufw allow proto '' from '' to '' port ''
+    _vps_ufw_add_rule '{"kind":"input\u0000\n","family":"ipv6\n\n","source":"any\u0000\n","destination":"2001:db8::1\n","proto":"t\u0000cp\n","port":"443\n"}' 'comment with spaces'
+    assert_command ufw allow proto tcp from ::/0 to 2001:db8::1 port 443 comment 'comment with spaces'
+    for jq_fail_mode in before after; do
+        jq_fail_at=1
+        track_jq
+        rm -f "$VPSCTL_SYSTEM_ROOT/run/command-args"
+        status=0
+        _vps_ufw_add_rule "$rule" '' 2>/dev/null || status=$?
+        assert_equal 20 "$status" "add producer $jq_fail_mode failure"
+        [[ ! -e "$VPSCTL_SYSTEM_ROOT/run/command-args" ]] || fail 'failed producer ran ufw'
+        unset -f jq
+    done
+    for rule in '' '{'; do
+        status=0
+        _vps_ufw_add_rule "$rule" '' 2>/dev/null || status=$?
+        assert_equal 20 "$status" 'invalid rule JSON fails before ufw'
+        [[ ! -e "$VPSCTL_SYSTEM_ROOT/run/command-args" ]] || fail 'invalid rule ran ufw'
+    done
+)
+
+test_sweep_delete_safety() (
+    local scenario status before expected_status expected_reads expected_command inventory_failure=0
+    # shellcheck disable=SC2317
+    _vps_ufw_inventory_raw() {
+        local count
+        count="$(<"$VPSCTL_SYSTEM_ROOT/run/inventory-count")"
+        count=$((count + 1))
+        printf '%s\n' "$count" >"$VPSCTL_SYSTEM_ROOT/run/inventory-count"
+        [[ "$count" != "$inventory_failure" ]] || return 20
+        cat "$VPSCTL_SYSTEM_ROOT/run/inventory-$count"
+    }
+    # shellcheck disable=SC2317
+    vps_cmd_run() {
+        printf '%s\0' "$@" >"$VPSCTL_SYSTEM_ROOT/run/command-args"
+        [[ "$scenario" != command-failure ]]
+    }
+    for scenario in present absent preserve duplicate drift command-failure false-success \
+        initial-failure fresh-failure post-failure initial-json fresh-json post-json; do
+        setup "delete-$scenario"
+        mkdir -p "$VPS_UFW_STATE_DIR"
+        printf '%s\n' '{"version":1,"revision":0,"requirements":[],"links":{},"leases":{},"history":[],"managed":{"key":{"rule":{"id":"target"},"preserve":false}}}' >"$VPS_UFW_STATE_FILE"
+        printf '0\n' >"$VPSCTL_SYSTEM_ROOT/run/inventory-count"
+        printf '%s\n' '[{"id":"target","number":2}]' >"$VPSCTL_SYSTEM_ROOT/run/inventory-1"
+        cp "$VPSCTL_SYSTEM_ROOT/run/inventory-1" "$VPSCTL_SYSTEM_ROOT/run/inventory-2"
+        printf '[]\n' >"$VPSCTL_SYSTEM_ROOT/run/inventory-3"
+        expected_status=0
+        expected_reads=3
+        expected_command=1
+        inventory_failure=0
+        case "$scenario" in
+            absent)
+                printf '[]\n' >"$VPSCTL_SYSTEM_ROOT/run/inventory-1"
+                expected_reads=1
+                expected_command=0
+                ;;
+            preserve)
+                jq '.managed.key.preserve=true' "$VPS_UFW_STATE_FILE" >"$VPS_UFW_STATE_FILE.next"
+                mv "$VPS_UFW_STATE_FILE.next" "$VPS_UFW_STATE_FILE"
+                expected_reads=0
+                expected_command=0
+                ;;
+            duplicate)
+                printf '%s\n' '[{"id":"target","number":2},{"id":"target","number":3}]' >"$VPSCTL_SYSTEM_ROOT/run/inventory-1"
+                expected_status=3
+                expected_reads=1
+                expected_command=0
+                ;;
+            drift)
+                printf '%s\n' '[{"id":"target","number":1},{"id":"other","number":2}]' >"$VPSCTL_SYSTEM_ROOT/run/inventory-2"
+                expected_status=3
+                expected_reads=2
+                expected_command=0
+                ;;
+            command-failure)
+                expected_status=20
+                expected_reads=2
+                ;;
+            false-success)
+                cp "$VPSCTL_SYSTEM_ROOT/run/inventory-1" "$VPSCTL_SYSTEM_ROOT/run/inventory-3"
+                expected_status=20
+                ;;
+            initial-failure | initial-json)
+                expected_status=20
+                expected_reads=1
+                expected_command=0
+                ;;
+            fresh-failure | fresh-json)
+                expected_status=20
+                [[ "$scenario" != fresh-json ]] || expected_status=3
+                expected_reads=2
+                expected_command=0
+                ;;
+            post-failure | post-json) expected_status=20 ;;
+        esac
+        case "$scenario" in
+            *-failure) [[ "$scenario" == command-failure ]] || inventory_failure="$expected_reads" ;;
+            *-json) printf '{\n' >"$VPSCTL_SYSTEM_ROOT/run/inventory-$expected_reads" ;;
+        esac
+        before="$(<"$VPS_UFW_STATE_FILE")"
+        status=0
+        _vps_ufw_sweep 2>/dev/null || status=$?
+        assert_equal "$expected_status" "$status" "$scenario deletion status"
+        assert_equal "$expected_reads" "$(<"$VPSCTL_SYSTEM_ROOT/run/inventory-count")" "$scenario inventory reads"
+        if [[ "$expected_command" == 1 ]]; then
+            assert_command ufw --force delete 2
+        else
+            [[ ! -e "$VPSCTL_SYSTEM_ROOT/run/command-args" ]] || fail "$scenario executed an unsafe deletion"
+        fi
+        if [[ "$expected_status" == 0 ]]; then
+            assert_json "$(<"$VPS_UFW_STATE_FILE")" '.managed=={}' "$scenario releases the managed record"
+        else
+            assert_equal "$before" "$(<"$VPS_UFW_STATE_FILE")" "$scenario retains the managed record for retry"
+        fi
+    done
+)
+
 test_disabled() (
     setup disabled
     rm "$VPSCTL_SYSTEM_ROOT/run/ufw-active"
@@ -438,7 +719,8 @@ test_tampered_rule_and_paths() (
     assert_json "$(cat "$VPS_UFW_STATE_FILE")" '.version==999' 'unsupported state is preserved'
 )
 
-for test in test_disabled test_shared_references test_adoption_and_leases test_preserve_existing test_rollback_and_nesting \
+for test in test_normalize_batches test_normalize_read_failures test_prune_batches test_prune_read_failures \
+    test_add_rule_batches test_sweep_delete_safety test_disabled test_shared_references test_adoption_and_leases test_preserve_existing test_rollback_and_nesting \
     test_commit_cleanup_failure test_conflicts_and_detach test_scoped_ssh_restore test_ipv6_and_inventory \
     test_interruption_and_dead_lease test_scoped_history_isolation test_tampered_rule_and_paths; do
     "$test"
