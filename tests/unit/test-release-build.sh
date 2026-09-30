@@ -32,8 +32,184 @@ assert_archive_has() {
 
 trap cleanup EXIT
 
+test_release_delivery() (
+    local area="${TEST_TEMP}/delivery" target seed snapshot_before scenario entry previous builder
+    local run_status run_output marker hook snapshot_expected
+    local -a work=()
+    mkdir -p -- "$area"
+    marker="${area}/injection.log"
+    hook="${area}/fault-hook.sh"
+    seed="${area}/old-release"
+    cp -a -- "$RELEASE_DIR" "$seed"
+    cp -- "${seed}/vpsctl-core-${RELEASE_VERSION}.tar.gz" "${seed}/vpsctl-retired-0.0.0.tar.gz"
+    printf '#!/usr/bin/env bash\nprintf "old release\\n"\n' >"${seed}/vpsctl.sh"
+
+    # These functions exist only in the builder subprocess. Unmatched calls use
+    # the real tools; markers prove the intended failure was actually injected.
+    cat >"$hook" <<'BASH'
+gzip() {
+    local count=0
+    if [[ "$RELEASE_TEST_SCENARIO" == gzip ]]; then
+        [[ ! -f "$RELEASE_TEST_MARKER" ]] || read -r count <"$RELEASE_TEST_MARKER"
+        count=$((count + 1))
+        command printf '%s\n' "$count" >"$RELEASE_TEST_MARKER"
+        if ((count == 3)); then command printf 'hit\n' >>"$RELEASE_TEST_MARKER"; return 71; fi
+    fi
+    command gzip "$@"
+}
+sha256sum() {
+    local count=0
+    if [[ "$RELEASE_TEST_SCENARIO" == digest ]]; then
+        [[ ! -f "$RELEASE_TEST_MARKER" ]] || read -r count <"$RELEASE_TEST_MARKER"
+        count=$((count + 1))
+        command printf '%s\n' "$count" >"$RELEASE_TEST_MARKER"
+        if ((count == 3)); then command printf 'hit\n' >>"$RELEASE_TEST_MARKER"; return 72; fi
+    fi
+    command sha256sum "$@"
+}
+printf() {
+    if [[ "$RELEASE_TEST_SCENARIO" == manifest && "${1:-}" == 'bundle\t'* ]]; then
+        command printf 'hit\n' >>"$RELEASE_TEST_MARKER"
+        return 73
+    fi
+    command printf "$@"
+}
+mv() {
+    local source="${@: -2:1}" destination="${@: -1}"
+    if [[ "$source" == */assets && "$destination" == "$RELEASE_TEST_OUTPUT" &&
+          ( "$RELEASE_TEST_SCENARIO" == publish || "$RELEASE_TEST_SCENARIO" == restore ) ]]; then
+        command printf 'hit\n' >>"$RELEASE_TEST_MARKER"
+        return 74
+    fi
+    if [[ "$source" == */previous && "$destination" == "$RELEASE_TEST_OUTPUT" && "$RELEASE_TEST_SCENARIO" == restore ]]; then
+        command printf 'restore-hit\n' >>"$RELEASE_TEST_MARKER"
+        return 75
+    fi
+    command mv "$@" || return $?
+    if [[ "$source" == "$RELEASE_TEST_OUTPUT" && "$destination" == */previous && "$RELEASE_TEST_SCENARIO" == term ]]; then
+        command printf 'hit\n' >>"$RELEASE_TEST_MARKER"
+        kill -TERM "$BASHPID"
+    fi
+}
+rm() {
+    local last="${*: -1}"
+    if [[ "$RELEASE_TEST_SCENARIO" == cleanup && "${last##*/}" == .vpsctl-release.* ]]; then
+        command printf 'hit\n' >>"$RELEASE_TEST_MARKER"
+        return 76
+    fi
+    command rm "$@"
+}
+BASH
+    snapshot() {
+        (
+            cd -- "$1"
+            find . -mindepth 1 -printf '%y %m %p %l\n' | LC_ALL=C sort
+            find . -type f -print0 | LC_ALL=C sort -z | xargs -0 -r sha256sum --
+        )
+    }
+    run_build() {
+        local fault="$1" destination="$2" script="${3:-${TEST_ROOT}/scripts/build-release.sh}"
+        printf '0\n' >"$marker"
+        if run_output="$(BASH_ENV="$hook" RELEASE_TEST_SCENARIO="$fault" RELEASE_TEST_OUTPUT="$destination" \
+            RELEASE_TEST_MARKER="$marker" bash "$script" "$destination" 2>&1)"; then run_status=0; else run_status=$?; fi
+    }
+    assert_injected() { grep -Fxq hit "$marker" || fail "$1 injection did not run: $run_output"; }
+    assert_unchanged() {
+        [[ -d "$target" ]] || fail "$1 removed the old output: $run_output"
+        [[ "$(snapshot "$target")" == "$snapshot_before" ]] || fail "$1 changed the old release"
+    }
+    assert_no_work() {
+        [[ -z "$(find "$1" -mindepth 1 -maxdepth 1 -name '.vpsctl-release.*' -print)" ]] || fail "$2 leaked a work directory"
+    }
+    reset_target() {
+        target="${area}/$1/release with spaces"
+        mkdir -p -- "${target%/*}"
+        cp -a -- "$seed" "$target"
+        snapshot_before="$(snapshot "$target")"
+    }
+    snapshot_expected="$(snapshot "$RELEASE_DIR")"
+
+    reset_target normal
+    run_build none "$target"
+    [[ "$run_status" == 0 && "$(snapshot "$target")" == "$snapshot_expected" ]] || fail "normal publication or old-version cleanup failed: $run_output"
+    run_build none "$target"
+    [[ "$run_status" == 0 && "$(snapshot "$target")" == "$snapshot_expected" ]] || fail "repeat publication changed the release: $run_output"
+    assert_no_work "${target%/*}" 'normal publication'
+
+    for scenario in gzip digest manifest publish term; do
+        reset_target "$scenario"
+        run_build "$scenario" "$target"
+        assert_injected "$scenario"
+        [[ "$run_status" != 0 ]] || fail "$scenario failure returned success"
+        [[ "$scenario" != term || "$run_status" == 143 ]] || fail "TERM returned $run_status rather than 143"
+        assert_unchanged "$scenario"
+        assert_no_work "${target%/*}" "$scenario failure"
+    done
+
+    reset_target restore
+    run_build restore "$target"
+    assert_injected restore
+    grep -Fxq restore-hit "$marker" || fail 'restore failure injection did not run'
+    [[ "$run_status" != 0 && ! -e "$target" ]] || fail 'failed restore should leave old output in its recovery location'
+    mapfile -t work < <(find "${target%/*}" -mindepth 1 -maxdepth 1 -type d -name '.vpsctl-release.*')
+    [[ ${#work[@]} == 1 ]] || fail 'failed restore must preserve exactly one work directory'
+    previous="${work[0]}/previous"
+    [[ -d "$previous" && "$(snapshot "$previous")" == "$snapshot_before" ]] || fail 'failed restore lost or changed previous release'
+    [[ -d "${work[0]}/assets" && "$(snapshot "${work[0]}/assets")" == "$snapshot_expected" ]] || fail 'failed restore lost the complete candidate'
+    [[ "$run_output" == *"$previous"* ]] || fail 'failed restore did not report the old release recovery path'
+
+    reset_target cleanup
+    run_build cleanup "$target"
+    assert_injected cleanup
+    [[ "$run_status" != 0 && "$(snapshot "$target")" == "$snapshot_expected" ]] || fail 'cleanup failure must retain the published release and fail'
+    mapfile -t work < <(find "${target%/*}" -mindepth 1 -maxdepth 1 -type d -name '.vpsctl-release.*')
+    [[ ${#work[@]} == 1 && "$run_output" == *"${work[0]}"* ]] || fail 'cleanup failure did not preserve and report its work directory'
+    [[ -d "${work[0]}/previous" && "$(snapshot "${work[0]}/previous")" == "$snapshot_before" ]] || fail 'cleanup failure lost the old release backup'
+
+    for scenario in gzip publish; do
+        target="${area}/first-${scenario}/release with spaces"
+        mkdir -p -- "${target%/*}"
+        run_build "$scenario" "$target"
+        assert_injected "first $scenario"
+        [[ "$run_status" != 0 && ! -e "$target" ]] || fail "first $scenario failure left a partial output"
+        assert_no_work "${target%/*}" "first $scenario failure"
+    done
+
+    for entry in unrelated directory symlink hidden invalid-name; do
+        reset_target "reject-${entry}"
+        case "$entry" in
+            unrelated) printf 'keep me\n' >"${target}/notes.txt" ;;
+            directory) mkdir "${target}/vpsctl-extra-0.0.0.tar.gz"; printf 'keep me\n' >"${target}/vpsctl-extra-0.0.0.tar.gz/nested" ;;
+            symlink) ln -s vpsctl.sh "${target}/vpsctl-link-0.0.0.tar.gz" ;;
+            hidden) printf 'keep me\n' >"${target}/.private" ;;
+            invalid-name) cp "${target}/vpsctl-retired-0.0.0.tar.gz" "${target}/vpsctl-UPPER-0.0.0.tar.gz" ;;
+        esac
+        snapshot_before="$(snapshot "$target")"
+        run_build none "$target"
+        [[ "$run_status" != 0 ]] || fail "$entry entry was accepted in a release directory"
+        assert_unchanged "$entry rejection"
+        assert_no_work "${target%/*}" "$entry rejection"
+    done
+
+    mkdir -p -- "${area}/protected/source"
+    cp -R -- "${TEST_ROOT}/scripts" "${TEST_ROOT}/bin" "${TEST_ROOT}/lib" "${TEST_ROOT}/commands" "${area}/protected/source/"
+    cp -- "${TEST_ROOT}/VERSION" "${TEST_ROOT}/vpsctl.sh" "${area}/protected/source/"
+    builder="${area}/protected/source/scripts/build-release.sh"
+    snapshot_before="$(snapshot "${area}/protected")"
+    for target in / "${area}/protected/source" "${area}/protected"; do
+        run_build none "$target" "$builder"
+        [[ "$run_status" != 0 ]] || fail "unsafe output path was accepted: $target"
+        [[ "$(snapshot "${area}/protected")" == "$snapshot_before" ]] || fail "unsafe path rejection changed the source tree: $target"
+    done
+    printf 'release delivery tests passed\n'
+)
+
 [[ "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail 'distribution VERSION must use X.Y.Z format'
 bash "${TEST_ROOT}/scripts/build-release.sh" "$RELEASE_DIR"
+if [[ "${VPSCTL_TEST_ONLY:-}" == release-delivery ]]; then
+    test_release_delivery
+    exit 0
+fi
 
 expected_bundles=(
     core shared-command shared-ufw shared-server-test
@@ -143,4 +319,5 @@ done < <(find "$extracted" -mindepth 1 -print0)
 "${extracted}/bin/vpsctl" --help >"${TEST_TEMP}/help.txt" || fail 'archived core entry point cannot run directly'
 grep -F 'VPS Script Lite' "${TEST_TEMP}/help.txt" >/dev/null || fail 'archived core entry point did not show help'
 
+test_release_delivery
 printf 'release build tests passed\n'

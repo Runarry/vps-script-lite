@@ -13,6 +13,7 @@ PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd -P)"
 source "${PROJECT_ROOT}/lib/registry.sh"
 OUTPUT_DIR="${1:-${PROJECT_ROOT}/dist/release}"
 BUILD_TEMP=''
+ASSET_DIR=''
 
 release_die() {
     printf 'build-release: %s\n' "$*" >&2
@@ -20,12 +21,32 @@ release_die() {
 }
 
 release_cleanup() {
+    local status=$?
+
+    trap - EXIT
+    trap '' HUP INT TERM
     if [[ -n "$BUILD_TEMP" && -d "$BUILD_TEMP" ]]; then
-        rm -rf -- "$BUILD_TEMP"
+        # A remaining candidate plus the old directory means publication did
+        # not finish, even if a signal arrived immediately after either mv.
+        if [[ -d "${BUILD_TEMP}/previous" && -d "${BUILD_TEMP}/assets" ]]; then
+            if [[ -e "$OUTPUT_DIR" || -L "$OUTPUT_DIR" ]] ||
+                ! mv -T -- "${BUILD_TEMP}/previous" "$OUTPUT_DIR"; then
+                printf 'build-release: cannot restore output; previous assets retained at %s\n' "${BUILD_TEMP}/previous" >&2
+                exit 1
+            fi
+        fi
+        if ! rm -rf -- "$BUILD_TEMP"; then
+            printf 'build-release: cannot clean build directory; retained at %s\n' "$BUILD_TEMP" >&2
+            ((status != 0)) || status=1
+        fi
     fi
+    exit "$status"
 }
 
 trap release_cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 release_require_tool() {
     command -v "$1" >/dev/null 2>&1 || release_die "required tool not found: $1"
@@ -48,6 +69,25 @@ release_require_tree() {
         [[ -f "$entry" || -d "$entry" ]] || release_die "unsupported release input: ${entry#"${PROJECT_ROOT}/"}"
     done < <(find "${PROJECT_ROOT}/${relative_path}" -mindepth 1 -print0)
 }
+
+release_require_output_directory() (
+    local entry filename
+
+    [[ -d "$OUTPUT_DIR" ]] || return 0
+    [[ -r "$OUTPUT_DIR" && -x "$OUTPUT_DIR" ]] || release_die "cannot inspect output directory: $OUTPUT_DIR"
+    shopt -s nullglob dotglob
+    for entry in "$OUTPUT_DIR"/*; do
+        filename="${entry##*/}"
+        [[ -f "$entry" && ! -L "$entry" ]] || release_die "output contains a non-release entry: $entry"
+        case "$filename" in
+            vpsctl.sh | vpsctl-manifest.tsv) ;;
+            *)
+                [[ "$filename" =~ ^vpsctl-[a-z0-9]+(-[a-z0-9]+)*-[0-9]+\.[0-9]+\.[0-9]+\.tar\.gz$ ]] ||
+                    release_die "output contains a non-release entry: $entry"
+                ;;
+        esac
+    done
+)
 
 release_sha256() {
     sha256sum -- "$1" | awk '{print $1}'
@@ -93,7 +133,7 @@ release_create_bundle() {
     tar --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner \
         -C "$staging_dir" -cf "$tar_path" -- "${archive_roots[@]}"
     gzip -n "$tar_path"
-    mv -- "${tar_path}.gz" "${OUTPUT_DIR}/${filename}"
+    mv -- "${tar_path}.gz" "${ASSET_DIR}/${filename}"
 }
 
 release_require_tool awk
@@ -127,17 +167,22 @@ release_require_regular 'commands/self/status.sh'
 release_require_regular 'commands/self/update.sh'
 release_require_regular 'commands/self/uninstall.sh'
 
-mkdir -p -- "$OUTPUT_DIR"
-OUTPUT_DIR="$(cd -- "$OUTPUT_DIR" && pwd -P)"
-[[ "$OUTPUT_DIR" != "$PROJECT_ROOT" ]] || release_die 'output directory may not be the project root'
-BUILD_TEMP="$(mktemp -d "${TMPDIR:-/tmp}/vpsctl-release.XXXXXXXX")"
+mkdir -p -- "$(dirname -- "$OUTPUT_DIR")"
+if [[ -d "$OUTPUT_DIR" ]]; then
+    OUTPUT_DIR="$(cd -- "$OUTPUT_DIR" && pwd -P)"
+else
+    [[ ! -e "$OUTPUT_DIR" && ! -L "$OUTPUT_DIR" ]] || release_die "output path is not a directory: $OUTPUT_DIR"
+    output_parent="$(cd -- "$(dirname -- "$OUTPUT_DIR")" && pwd -P)"
+    OUTPUT_DIR="${output_parent%/}/$(basename -- "$OUTPUT_DIR")"
+fi
+[[ "$OUTPUT_DIR" != / && "$OUTPUT_DIR" != "$PROJECT_ROOT" && "$PROJECT_ROOT" != "$OUTPUT_DIR/"* ]] ||
+    release_die 'output directory may not be the filesystem root, project root, or an ancestor of the project'
+release_require_output_directory
+BUILD_TEMP="$(mktemp -d "$(dirname -- "$OUTPUT_DIR")/.vpsctl-release.XXXXXXXX")"
+ASSET_DIR="${BUILD_TEMP}/assets"
+mkdir -- "$ASSET_DIR"
 
-rm -f -- \
-    "${OUTPUT_DIR}/vpsctl.sh" \
-    "${OUTPUT_DIR}/vpsctl-manifest.tsv" \
-    "${OUTPUT_DIR}"/vpsctl-*-"${RELEASE_VERSION}".tar.gz
-
-install -m 0755 -- "${PROJECT_ROOT}/vpsctl.sh" "${OUTPUT_DIR}/vpsctl.sh"
+install -m 0755 -- "${PROJECT_ROOT}/vpsctl.sh" "${ASSET_DIR}/vpsctl.sh"
 
 for name in "${VPS_BUNDLE_IDS[@]}"; do
     bundle_files="$(vps_registry_bundle_files "$name")" || release_die "unknown bundle: $name"
@@ -145,16 +190,24 @@ for name in "${VPS_BUNDLE_IDS[@]}"; do
     release_create_bundle "$name" "${bundle_paths[@]}"
 done
 
-MANIFEST_PATH="${OUTPUT_DIR}/vpsctl-manifest.tsv"
+MANIFEST_PATH="${ASSET_DIR}/vpsctl-manifest.tsv"
 {
     printf 'schema_version\t%s\n' "$RELEASE_SCHEMA_VERSION"
     printf 'version\t%s\n' "$RELEASE_VERSION"
     printf 'repository\t%s\n' "$RELEASE_REPOSITORY"
-    printf 'asset\tlauncher\tvpsctl.sh\t%s\n' "$(release_sha256 "${OUTPUT_DIR}/vpsctl.sh")"
+    digest="$(release_sha256 "${ASSET_DIR}/vpsctl.sh")" || release_die 'cannot compute launcher SHA-256'
+    printf 'asset\tlauncher\tvpsctl.sh\t%s\n' "$digest"
     for name in "${VPS_BUNDLE_IDS[@]}"; do
         filename="vpsctl-${name}-${RELEASE_VERSION}.tar.gz"
-        printf 'bundle\t%s\t%s\t%s\n' "$name" "$filename" "$(release_sha256 "${OUTPUT_DIR}/${filename}")"
+        digest="$(release_sha256 "${ASSET_DIR}/${filename}")" || release_die "cannot compute bundle SHA-256: $name"
+        printf 'bundle\t%s\t%s\t%s\n' "$name" "$filename" "$digest"
     done
 } >"$MANIFEST_PATH"
+
+if [[ -d "$OUTPUT_DIR" ]]; then
+    chmod --reference="$OUTPUT_DIR" "$ASSET_DIR"
+    mv -T -- "$OUTPUT_DIR" "${BUILD_TEMP}/previous"
+fi
+mv -T -- "$ASSET_DIR" "$OUTPUT_DIR"
 
 printf 'Release assets written to %s\n' "$OUTPUT_DIR"

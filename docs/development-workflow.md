@@ -94,6 +94,12 @@ vpsctl-test-tcpquality-0.8.10.tar.gz
 
 每个 tar 包内使用项目根相对路径，不包含额外顶级包目录。`vpsctl-manifest.tsv` 依次包含 `schema_version<TAB>2`、`version<TAB>VERSION`、`repository<TAB>Runarry/vps-script-lite`、`asset<TAB>launcher<TAB>vpsctl.sh<TAB>SHA256`，以及各 bundle 的 `bundle<TAB>NAME<TAB>vpsctl-NAME-VERSION.tar.gz<TAB>SHA256`。名称唯一，文件名和版本精确对应，摘要是 64 位小写十六进制，core 必须存在；功能和共享包内容必须符合注册表固定清单。新增功能或私有模块时同步更新该清单和依赖映射。
 
+`bash scripts/build-release.sh [输出目录]` 默认输出到 `dist/release`。输出目录专用于发布资产：只接受 `vpsctl.sh`、`vpsctl-manifest.tsv` 和 `vpsctl-<包名>-<X.Y.Z>.tar.gz` 普通文件；包名由小写字母、数字和分隔它们的连字符组成。目录内有其他文件、隐藏条目、子目录或符号链接时，构建报错并保留原内容。不能将文件系统根、源码根或源码祖先目录作为输出目录。
+
+构建先在输出目录的同一父目录准备完整候选资产，归档、摘要和 manifest 写入成功后才整体切换；成功构建会移除该输出中的旧版本资产。构建失败保留旧输出；交付失败会尝试恢复旧目录，恢复失败则保留并报告旧资产路径。交付完成后的临时目录清理失败返回非零、报告残留路径，并保留已经生成的新输出。
+
+同一输出目录应串行构建。切换期间该路径可能短暂不存在；可捕获的 HUP／INT／TERM 会进入相同清理与恢复流程，SIGKILL 或掉电后的自动恢复不在保证范围内。此步骤只生成本地发布资产，不创建或上传 GitHub Release。
+
 发布按以下顺序进行：
 
 1. 固定仓库根 `VERSION`，并确认应用展示、tag、manifest 版本和资产文件名完全一致。
