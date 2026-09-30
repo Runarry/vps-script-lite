@@ -40,6 +40,7 @@ for syntax_file in \
     "${TEST_ROOT}/tests/unit/test-command.sh" \
     "${TEST_ROOT}/tests/unit/test-distribution.sh" \
     "${TEST_ROOT}/tests/unit/test-release-build.sh" \
+    "${TEST_ROOT}/tests/unit/test-release-workflow.sh" \
     "${TEST_ROOT}/tests/unit/test-network-bbr.sh" \
     "${TEST_ROOT}/tests/unit/test-network-dns.sh" \
     "${TEST_ROOT}/tests/unit/test-network-ip-policy.sh" \
@@ -93,6 +94,7 @@ bash "${TEST_ROOT}/tests/unit/test-libraries.sh"
 bash "${TEST_ROOT}/tests/unit/test-command.sh"
 bash "${TEST_ROOT}/tests/unit/test-distribution.sh"
 bash "${TEST_ROOT}/tests/unit/test-release-build.sh"
+bash "${TEST_ROOT}/tests/unit/test-release-workflow.sh"
 bash "${TEST_ROOT}/tests/unit/test-network-bbr.sh"
 bash "${TEST_ROOT}/tests/unit/test-network-dns.sh"
 bash "${TEST_ROOT}/tests/unit/test-network-ip-policy.sh"

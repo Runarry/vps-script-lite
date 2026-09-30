@@ -9,8 +9,6 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 umask 022
 
-readonly VPSCTL_VERSION="0.8.10"
-
 VPSCTL_DRY_RUN=0
 VPSCTL_INSTALL_DEPS=0
 VPSCTL_ASSUME_YES=0
@@ -30,6 +28,17 @@ vpsctl_resolve_project_root() {
 
 VPSCTL_PROJECT_ROOT="$(vpsctl_resolve_project_root)"
 readonly VPSCTL_PROJECT_ROOT
+
+if [[ ! -f "${VPSCTL_PROJECT_ROOT}/VERSION" || ! -r "${VPSCTL_PROJECT_ROOT}/VERSION" ]] ||
+    ! VPSCTL_VERSION="$(<"${VPSCTL_PROJECT_ROOT}/VERSION")"; then
+    printf 'vpsctl：无法读取版本文件：%s\n' "${VPSCTL_PROJECT_ROOT}/VERSION" >&2
+    exit 3
+fi
+if [[ ! "$VPSCTL_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    printf 'vpsctl：版本文件必须使用 X.Y.Z 格式：%s\n' "${VPSCTL_PROJECT_ROOT}/VERSION" >&2
+    exit 3
+fi
+readonly VPSCTL_VERSION
 
 vpsctl_load_library() {
     local library_path="$1"
@@ -423,6 +432,7 @@ vpsctl_run_domain_menu() {
 
     while true; do
         vps_registry_commands_for_domain "$domain"
+        vps_ui_init
         vps_ui_clear_screen
         vps_ui_header "主菜单 / ${VPS_DOMAIN_LABEL[$domain]}"
         vps_ui_domain_commands "$domain"
@@ -503,6 +513,7 @@ vpsctl_run_menu() {
     vps_env_detect
 
     while true; do
+        vps_ui_init
         vps_ui_clear_screen
         vps_ui_dashboard "$VPSCTL_VERSION"
         vps_ui_main_menu

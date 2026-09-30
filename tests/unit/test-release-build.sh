@@ -319,5 +319,13 @@ done < <(find "$extracted" -mindepth 1 -print0)
 "${extracted}/bin/vpsctl" --help >"${TEST_TEMP}/help.txt" || fail 'archived core entry point cannot run directly'
 grep -F 'VPS Script Lite' "${TEST_TEMP}/help.txt" >/dev/null || fail 'archived core entry point did not show help'
 
+# Changing only VERSION must change the entry point in the resulting core too.
+printf '9.8.7\n' >"${fixture}/VERSION"
+bash "${fixture}/scripts/build-release.sh" "${TEST_TEMP}/alternate-release"
+mkdir -- "${TEST_TEMP}/alternate-core"
+tar --same-permissions -xzf "${TEST_TEMP}/alternate-release/vpsctl-core-9.8.7.tar.gz" -C "${TEST_TEMP}/alternate-core"
+[[ "$("${TEST_TEMP}/alternate-core/bin/vpsctl" --version)" == 'vpsctl 9.8.7' ]] ||
+    fail 'archived core entry point did not use its VERSION file'
+
 test_release_delivery
 printf 'release build tests passed\n'

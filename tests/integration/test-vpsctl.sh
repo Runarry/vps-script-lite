@@ -36,7 +36,7 @@ test_cli() {
     local output status option
 
     output="$("${VPSCTL[@]}" --version)"
-    test_contains "$output" "vpsctl 0.8.10" "version output"
+    test_contains "$output" "vpsctl $(<"${TEST_ROOT}/VERSION")" "version output"
 
     output="$("${VPSCTL[@]}" --help)"
     test_contains "$output" "<domain> <action>" "help command model"
@@ -109,6 +109,69 @@ test_cli() {
     test_no_ansi "$output" "--no-color unknown-option error"
 }
 
+test_entry_version() (
+    local sandbox output status value marker menu_command
+    local -a reader=(bash)
+    sandbox="$(mktemp -d)"
+    trap 'rm -rf -- "$sandbox"' EXIT
+    mkdir -p "$sandbox/bin" "$sandbox/lib"
+    cp "$TEST_ROOT/bin/vpsctl" "$sandbox/bin/vpsctl"
+    cp "$TEST_ROOT"/lib/*.sh "$sandbox/lib/"
+    printf '9.8.7\n' >"$sandbox/VERSION"
+    output="$(bash "$sandbox/bin/vpsctl" --no-color --version)"
+    [[ "$output" == 'vpsctl 9.8.7' ]] || test_fail "temporary VERSION did not control CLI: $output"
+    output="$(bash "$sandbox/bin/vpsctl" --no-color env)"
+    test_contains "$output" 'v9.8.7' 'temporary VERSION controls environment panel'
+    if command -v script >/dev/null 2>&1; then
+        printf -v menu_command 'TERM=xterm bash %q --no-color --no-clear menu' "$sandbox/bin/vpsctl"
+        output="$(printf 'q\n' | script -q -e -f -c "$menu_command" /dev/null 2>&1)"
+        test_contains "$output" 'v9.8.7' 'temporary VERSION controls TTY menu'
+    else
+        printf 'SKIP: version menu test requires script\n'
+    fi
+    printf '9.8.7' >"$sandbox/VERSION"
+    output="$(bash "$sandbox/bin/vpsctl" --version)"
+    [[ "$output" == 'vpsctl 9.8.7' ]] || test_fail 'valid VERSION without a final newline was rejected'
+
+    # If startup reaches even its first library, record it and fail differently.
+    marker="$sandbox/library-loaded"
+    printf 'printf loaded >%q\nexit 99\n' "$marker" >"$sandbox/lib/environment.sh"
+    assert_version_rejected() {
+        local description="$1" option
+        local -a command_args=()
+        for option in --version env dispatch; do
+            command_args=("$option")
+            [[ "$option" != dispatch ]] || command_args=(network bbr status)
+            status=0
+            output="$("${reader[@]}" "$sandbox/bin/vpsctl" "${command_args[@]}" 2>&1)" || status=$?
+            [[ "$status" == 3 ]] || test_fail "$description should return 3, got $status: $output"
+            [[ ! -e "$marker" ]] || test_fail "$description loaded libraries before rejecting VERSION"
+            test_contains "$output" VERSION "$description diagnostic identifies VERSION"
+        done
+    }
+    rm -- "$sandbox/VERSION"
+    assert_version_rejected 'missing VERSION'
+    for value in '' '9.8' 'v9.8.7' '9.8.7-beta' ' 9.8.7' $'9.8.7\n1.2.3'; do
+        printf '%s' "$value" >"$sandbox/VERSION"
+        assert_version_rejected "empty or malformed VERSION <$value>"
+    done
+    rm -- "$sandbox/VERSION"
+    mkdir "$sandbox/VERSION"
+    assert_version_rejected 'non-regular VERSION'
+    rmdir "$sandbox/VERSION"
+    printf '9.8.7\n' >"$sandbox/VERSION"
+    chmod 0000 "$sandbox/VERSION"
+    if ((EUID != 0)); then
+        assert_version_rejected 'unreadable VERSION'
+    elif command -v setpriv >/dev/null 2>&1; then
+        reader=(setpriv '--bounding-set=-dac_override,-dac_read_search' bash)
+        assert_version_rejected 'unreadable VERSION without DAC override'
+    else
+        printf 'SKIP: unreadable VERSION as root requires setpriv\n'
+    fi
+    chmod 0600 "$sandbox/VERSION"
+)
+
 test_dispatch_security() {
     local sandbox output status marker menu_command download_marker core invalid
     local -a invalid_args=()
@@ -118,6 +181,7 @@ test_dispatch_security() {
     mkdir -p "$sandbox/bin" "$sandbox/lib" "$sandbox/commands/network" "$sandbox/commands/system" "$sandbox/commands/security" "$sandbox/commands/service/proxy" "$sandbox/commands/test"
     cp "$TEST_ROOT/bin/vpsctl" "$sandbox/bin/vpsctl"
     cp "$TEST_ROOT"/lib/*.sh "$sandbox/lib/"
+    cp "$TEST_ROOT/VERSION" "$sandbox/VERSION"
     cat >>"$sandbox/lib/distribution.sh" <<'EOF'
 
 vps_distribution_ensure_command() {
@@ -473,6 +537,7 @@ test_menu_self_lifecycle() (
     mkdir -p "$template/bin" "$template/lib" "$template/commands/self"
     cp "$TEST_ROOT/bin/vpsctl" "$template/bin/vpsctl"
     cp "$TEST_ROOT"/lib/*.sh "$template/lib/"
+    cp "$TEST_ROOT/VERSION" "$template/VERSION"
     cat >>"$template/lib/distribution.sh" <<'EOF'
 
 # Exercise the real menu and dispatch with lifecycle operations isolated to
@@ -568,7 +633,14 @@ EOF
     done
 )
 
+if [[ "${VPSCTL_TEST_ONLY:-}" == entry-version ]]; then
+    test_entry_version
+    printf 'PASS: vpsctl entry version tests\n'
+    exit 0
+fi
+
 test_cli
+test_entry_version
 test_dispatch_security
 test_menu_self_lifecycle
 printf 'PASS: vpsctl integration tests\n'
