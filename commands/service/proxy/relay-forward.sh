@@ -166,27 +166,54 @@ _proxy_relay_forward_address_family() {
 proxy_relay_forward_validate_conflicts() {
     local manifest="${1:-}" nodes="${2:-${PROXY_MANIFEST:-}}"
     local count index other start end other_start other_end network hint effective mask other_network other_hint other_effective other_mask
-    local id other_id node port node_hint node_mask guard_port
+    local id other_id node port node_hint node_mask guard_port offset other_offset fields_fd fields_pid status=0 nodes_loaded=0
+    local -a forward_fields=() forward_masks=() node_fields=() node_hints=() node_masks=()
 
     [[ -f "$manifest" && ! -L "$manifest" ]] || return 3
-    count="$(jq -r '.forwards | length' "$manifest")" || return 10
+    # NUL delimiters retain whitespace; normalize strings as command substitution did.
+    if ! exec {fields_fd}< <(jq -j '
+        . as $root | .forwards[]? |
+        (.exit_id | tostring | gsub("\u0000"; "") | sub("\n+$"; "")) as $exit_id |
+        (.id, .listen_port_start, .listen_port_end, .network,
+         ([$root.exits[] | select(.id == $exit_id) |
+            (.protocol.network_hint // .network_hint // empty)] | join("\n"))) |
+        (if type == "string" then gsub("\u0000"; "") | sub("\n+$"; "") else . end), "\u0000"
+    ' "$manifest"); then
+        return 10
+    fi
+    fields_pid=$!
+    mapfile -d '' -t forward_fields <&"$fields_fd" || status=$?
+    exec {fields_fd}<&-
+    wait "$fields_pid" || return 10
+    ((status == 0 && ${#forward_fields[@]} % 5 == 0)) || return 10
+    count=$((${#forward_fields[@]} / 5))
+    ((count > 0)) || return 0
+
     for ((index = 0; index < count; index++)); do
-        id="$(jq -r ".forwards[$index].id" "$manifest")"
-        start="$(jq -r ".forwards[$index].listen_port_start" "$manifest")"
-        end="$(jq -r ".forwards[$index].listen_port_end" "$manifest")"
-        network="$(jq -r ".forwards[$index].network" "$manifest")"
-        hint="$(_proxy_relay_forward_exit_hint "$manifest" "$(jq -r ".forwards[$index].exit_id" "$manifest")")"
-        effective="$(proxy_relay_forward_effective_network "$network" "$hint")" || return $?
-        mask="$(_proxy_relay_forward_network_mask "$effective")" || return 10
+        offset=$((index * 5))
+        id="${forward_fields[offset]}"
+        start="${forward_fields[offset + 1]}"
+        end="${forward_fields[offset + 2]}"
+        if [[ -z "${forward_masks[index]:-}" ]]; then
+            network="${forward_fields[offset + 3]}"
+            hint="${forward_fields[offset + 4]}"
+            effective="$(proxy_relay_forward_effective_network "$network" "$hint")" || return $?
+            forward_masks[index]="$(_proxy_relay_forward_network_mask "$effective")" || return 10
+        fi
+        mask="${forward_masks[index]}"
 
         for ((other = index + 1; other < count; other++)); do
-            other_id="$(jq -r ".forwards[$other].id" "$manifest")"
-            other_start="$(jq -r ".forwards[$other].listen_port_start" "$manifest")"
-            other_end="$(jq -r ".forwards[$other].listen_port_end" "$manifest")"
-            other_network="$(jq -r ".forwards[$other].network" "$manifest")"
-            other_hint="$(_proxy_relay_forward_exit_hint "$manifest" "$(jq -r ".forwards[$other].exit_id" "$manifest")")"
-            other_effective="$(proxy_relay_forward_effective_network "$other_network" "$other_hint")" || return $?
-            other_mask="$(_proxy_relay_forward_network_mask "$other_effective")" || return 10
+            other_offset=$((other * 5))
+            other_id="${forward_fields[other_offset]}"
+            other_start="${forward_fields[other_offset + 1]}"
+            other_end="${forward_fields[other_offset + 2]}"
+            if [[ -z "${forward_masks[other]:-}" ]]; then
+                other_network="${forward_fields[other_offset + 3]}"
+                other_hint="${forward_fields[other_offset + 4]}"
+                other_effective="$(proxy_relay_forward_effective_network "$other_network" "$other_hint")" || return $?
+                forward_masks[other]="$(_proxy_relay_forward_network_mask "$other_effective")" || return 10
+            fi
+            other_mask="${forward_masks[other]}"
             if ((start <= other_end && other_start <= end && (mask & other_mask) != 0)); then
                 vps_cmd_error "转发 ${id} 与 ${other_id} 的端口区间及网络相交"
                 return 10
@@ -194,23 +221,43 @@ proxy_relay_forward_validate_conflicts() {
         done
 
         if [[ -n "$nodes" && -f "$nodes" && ! -L "$nodes" ]]; then
-            while IFS= read -r node; do
-                [[ -n "$node" ]] || continue
-                port="$(jq -r '.port' <<<"$node")"
-                node_hint="$(_proxy_relay_forward_node_network_hint "$(jq -r '.profile' <<<"$node")")"
-                node_mask="$(_proxy_relay_forward_network_mask "$node_hint")" || return 10
+            if ((nodes_loaded == 0)); then
+                if ! exec {fields_fd}< <(jq -j '
+                    .nodes[]? |
+                    (.id, .port, .profile,
+                     (if .tls.reality_guard.enabled == true then .tls.reality_guard.listen_port else "" end)) |
+                    (if type == "string" then gsub("\u0000"; "") | sub("\n+$"; "") else . end), "\u0000"
+                ' "$nodes"); then
+                    return 10
+                fi
+                fields_pid=$!
+                mapfile -d '' -t node_fields <&"$fields_fd" || status=$?
+                exec {fields_fd}<&-
+                wait "$fields_pid" || return 10
+                ((status == 0 && ${#node_fields[@]} % 4 == 0)) || return 10
+                for ((node = 0; node < ${#node_fields[@]} / 4; node++)); do
+                    node_hints[node]="$(_proxy_relay_forward_node_network_hint "${node_fields[node * 4 + 2]}")"
+                    node_masks[node]="$(_proxy_relay_forward_network_mask "${node_hints[node]}")" || return 10
+                done
+                nodes_loaded=1
+            fi
+            for ((node = 0; node < ${#node_fields[@]} / 4; node++)); do
+                port="${node_fields[node * 4 + 1]}"
+                node_hint="${node_hints[node]}"
+                node_mask="${node_masks[node]}"
                 if ((port >= start && port <= end && (mask & node_mask) != 0)); then
-                    vps_cmd_error "转发 ${id} 与受管节点 $(jq -r '.id' <<<"$node") 的端口及网络相交（${port}/${node_hint}）"
+                    vps_cmd_error "转发 ${id} 与受管节点 ${node_fields[node * 4]} 的端口及网络相交（${port}/${node_hint}）"
                     return 10
                 fi
-                guard_port="$(jq -r 'if .tls.reality_guard.enabled == true then .tls.reality_guard.listen_port else empty end' <<<"$node")"
+                guard_port="${node_fields[node * 4 + 3]}"
                 if [[ -n "$guard_port" ]] && ((guard_port >= start && guard_port <= end && (mask & 1) != 0)); then
-                    vps_cmd_error "转发 ${id} 与受管节点 $(jq -r '.id' <<<"$node") 的 REALITY 防偷辅助端口及网络相交（${guard_port}/tcp）"
+                    vps_cmd_error "转发 ${id} 与受管节点 ${node_fields[node * 4]} 的 REALITY 防偷辅助端口及网络相交（${guard_port}/tcp）"
                     return 10
                 fi
-            done < <(jq -c '.nodes[]?' "$nodes")
+            done
         fi
     done
+    return 0
 }
 
 proxy_relay_forward_manifest_validate() {

@@ -14,20 +14,18 @@ readonly MOCK_LOG="${TEST_TEMP}/mock.log"
 readonly SYSTEM_ROOT="${TEST_TEMP}/system-root"
 readonly RUN_BASE="${TEST_TEMP}/run-base"
 readonly TCP_TOKEN="vpsctl-server-test-${BASHPID}"
-readonly TCP_EXISTING="/tmp/zstatic_nping_${TCP_TOKEN}-existing.csv"
-readonly TCP_NEW_FILE="/tmp/zstatic_nping_${TCP_TOKEN}-new.csv"
-readonly TCP_NEW_DIR="/tmp/zstatic_nping_${TCP_TOKEN}-directory.csv"
-readonly TCP_NEW_LINK="/tmp/zstatic_nping_${TCP_TOKEN}-link.csv"
-readonly TCP_LINK_TARGET="${TEST_TEMP}/tcp-link-target"
+readonly TCP_EXTERNAL_EXISTING="/tmp/zstatic_nping_${TCP_TOKEN}-existing.csv"
+readonly TCP_EXTERNAL_NEW="/tmp/zstatic_nping_${TCP_TOKEN}-new.csv"
+readonly TCP_EXTERNAL_OVERLAP="/tmp/zstatic_nping_${TCP_TOKEN}-overlap.csv"
 
 cleanup() {
-    rm -rf -- "$TCP_EXISTING" "$TCP_NEW_FILE" "$TCP_NEW_DIR" "$TCP_NEW_LINK" "$TEST_TEMP"
+    rm -f -- "$TCP_EXTERNAL_EXISTING" "$TCP_EXTERNAL_NEW" "$TCP_EXTERNAL_OVERLAP"
+    rm -rf -- "$TEST_TEMP"
 }
 trap cleanup EXIT
 
 mkdir -p "$MOCK_BIN" "$SYSTEM_ROOT" "$RUN_BASE"
 : >"$MOCK_LOG"
-: >"$TCP_LINK_TARGET"
 
 cat >"${MOCK_BIN}/curl" <<'EOF'
 #!/usr/bin/env bash
@@ -49,8 +47,14 @@ fi
 [[ -n "$output" ]] || exit 98
 cat >"$output" <<'UPSTREAM'
 #!/usr/bin/env bash
-printf 'upstream-kind=%s args=%s cwd=%s tmpdir=%s rootfs-tmp=%s\n' \
-    "$MOCK_KIND" "$#" "$PWD" "${TMPDIR:-}" "${TCPQUALITY_ROOTFS_TMPDIR:-}" >>"$MOCK_LOG"
+set -Eeuo pipefail
+printf 'upstream-kind=%s args=%s cwd=%s tmpdir=%s rootfs-tmp=%s output-dir=%s\n' \
+    "$MOCK_KIND" "$#" "$PWD" "${TMPDIR:-}" "${TCPQUALITY_ROOTFS_TMPDIR:-}" \
+    "${TCPQUALITY_OUTPUT_DIR:-}" >>"$MOCK_LOG"
+if [[ "$MOCK_KIND" == tcpquality ]]; then
+    [[ "${TMPDIR:-}" == "$PWD" && "${TCPQUALITY_ROOTFS_TMPDIR:-}" == "$PWD" && \
+        "${TCPQUALITY_OUTPUT_DIR:-}" == "$PWD" ]] || exit 99
+fi
 if [[ "${MOCK_READ_STDIN:-0}" == 1 ]]; then
     IFS= read -r upstream_input
     printf 'upstream-input=%s\n' "$upstream_input" >>"$MOCK_LOG"
@@ -61,9 +65,25 @@ if [[ "${MOCK_SIGNAL_WAIT:-0}" == 1 ]]; then
     while :; do sleep 0.1; done
 fi
 if [[ "$MOCK_KIND" == tcpquality && "${MOCK_CREATE_TCP_ARTIFACTS:-0}" == 1 ]]; then
-    : >"$MOCK_TCP_NEW_FILE"
-    mkdir -p "$MOCK_TCP_NEW_DIR"
-    ln -s "$MOCK_TCP_LINK_TARGET" "$MOCK_TCP_NEW_LINK"
+    : >"${TCPQUALITY_OUTPUT_DIR}/zstatic_nping_fixture.csv"
+    : >"${TCPQUALITY_OUTPUT_DIR}/tcpquality-report.tar.gz"
+    : >"${TCPQUALITY_OUTPUT_DIR}/tcpquality.log"
+    if [[ -n "${MOCK_TCP_EXTERNAL_FILE:-}" ]]; then
+        : >"$MOCK_TCP_EXTERNAL_FILE"
+    fi
+    printf '%s\n' "$TCPQUALITY_OUTPUT_DIR" >"$MOCK_READY"
+    if [[ -n "${MOCK_TCP_RELEASE:-}" ]]; then
+        for ((attempt = 0; attempt < 200; attempt++)); do
+            [[ -e "$MOCK_TCP_RELEASE" ]] && break
+            sleep 0.05
+        done
+        [[ -e "$MOCK_TCP_RELEASE" ]] || exit 98
+        [[ -f "${TCPQUALITY_OUTPUT_DIR}/zstatic_nping_fixture.csv" && \
+            -f "${TCPQUALITY_OUTPUT_DIR}/tcpquality-report.tar.gz" && \
+            -f "${TCPQUALITY_OUTPUT_DIR}/tcpquality.log" ]] || exit 97
+        [[ -z "${MOCK_TCP_EXTERNAL_FILE:-}" || -f "$MOCK_TCP_EXTERNAL_FILE" ]] || exit 96
+        : >"${MOCK_READY}.checked"
+    fi
 fi
 exit "$MOCK_UPSTREAM_STATUS"
 UPSTREAM
@@ -115,10 +135,8 @@ run_entry() {
         MOCK_READ_STDIN="${MOCK_READ_STDIN:-0}" \
         MOCK_READY="${MOCK_READY:-${TEST_TEMP}/unused-ready}" \
         MOCK_CREATE_TCP_ARTIFACTS="${MOCK_CREATE_TCP_ARTIFACTS:-0}" \
-        MOCK_TCP_NEW_FILE="$TCP_NEW_FILE" \
-        MOCK_TCP_NEW_DIR="$TCP_NEW_DIR" \
-        MOCK_TCP_NEW_LINK="$TCP_NEW_LINK" \
-        MOCK_TCP_LINK_TARGET="$TCP_LINK_TARGET" \
+        MOCK_TCP_EXTERNAL_FILE="${MOCK_TCP_EXTERNAL_FILE:-}" \
+        MOCK_TCP_RELEASE="${MOCK_TCP_RELEASE:-}" \
         bash "${TEST_ROOT}/commands/test/${kind}.sh" --no-color "$@"
 }
 
@@ -147,10 +165,6 @@ test_signal_forwarding_and_cleanup() {
         MOCK_SIGNAL_WAIT=1 \
         MOCK_READY="$ready" \
         MOCK_CREATE_TCP_ARTIFACTS=0 \
-        MOCK_TCP_NEW_FILE="$TCP_NEW_FILE" \
-        MOCK_TCP_NEW_DIR="$TCP_NEW_DIR" \
-        MOCK_TCP_NEW_LINK="$TCP_NEW_LINK" \
-        MOCK_TCP_LINK_TARGET="$TCP_LINK_TARGET" \
         bash "${TEST_ROOT}/commands/test/nodequality.sh" --no-color >"$output" 2>&1 &
     pid=$!
     for ((attempt = 0; attempt < 100; attempt++)); do
@@ -234,25 +248,80 @@ test_official_download_and_exit_contract() {
     assert_file_contains "$MOCK_LOG" "upstream-kind=tcpquality args=0" "TCPQuality receives no upstream args"
     assert_file_contains "$MOCK_LOG" "tmpdir=${RUN_BASE}/vpsctl-server-test.tcpquality." "TCPQuality controlled TMPDIR"
     assert_file_contains "$MOCK_LOG" "rootfs-tmp=${RUN_BASE}/vpsctl-server-test.tcpquality." "TCPQuality controlled rootfs temp"
+    assert_file_contains "$MOCK_LOG" "output-dir=${RUN_BASE}/vpsctl-server-test.tcpquality." "TCPQuality controlled output directory"
     [[ -z "$(find "$RUN_BASE" -mindepth 1 -maxdepth 1 -print -quit)" ]] || fail "TCPQuality run directory was not cleaned"
 }
 
-test_tcp_csv_cleanup_ownership() {
-    local status=0
+test_tcp_output_cleanup_ownership() {
+    local status=0 run_dir ready="${TEST_TEMP}/tcp-output-ready"
 
-    : >"$TCP_EXISTING"
-    vps_server_test_snapshot_tcp_files
-    : >"$TCP_NEW_FILE"
-    mkdir -p "$TCP_NEW_DIR"
-    ln -s "$TCP_LINK_TARGET" "$TCP_NEW_LINK"
+    : >"$TCP_EXTERNAL_EXISTING"
+    MOCK_CREATE_TCP_ARTIFACTS=1 MOCK_READY="$ready" MOCK_TCP_EXTERNAL_FILE="$TCP_EXTERNAL_NEW" \
+        run_entry tcpquality 0 >/dev/null 2>&1 || status=$?
 
-    vps_server_test_cleanup_tcp_files >/dev/null 2>&1 || status=$?
-    assert_equal 30 "$status" "unsafe new TCP CSV cleanup status"
-    [[ -f "$TCP_EXISTING" && ! -L "$TCP_EXISTING" ]] || fail "pre-existing TCP CSV was removed"
-    [[ ! -e "$TCP_NEW_FILE" ]] || fail "new ordinary TCP CSV was not removed"
-    [[ -d "$TCP_NEW_DIR" ]] || fail "new TCP CSV-named directory was removed"
-    [[ -L "$TCP_NEW_LINK" ]] || fail "new TCP CSV-named symlink was removed"
+    assert_equal 0 "$status" "TCPQuality output cleanup status"
+    [[ -f "$ready" ]] || fail "TCPQuality output artifacts were not created"
+    run_dir="$(<"$ready")"
+    [[ "$run_dir" == "${RUN_BASE}/vpsctl-server-test.tcpquality."* ]] || fail "TCPQuality output directory escaped run base"
+    [[ ! -e "$run_dir" ]] || fail "TCPQuality output directory was not cleaned"
+    [[ -f "$TCP_EXTERNAL_EXISTING" ]] || fail "pre-existing external TCP CSV was removed"
+    [[ -f "$TCP_EXTERNAL_NEW" ]] || fail "new external TCP CSV was removed"
 }
+
+wait_for_fixture_file() {
+    local path="$1" attempt
+
+    for ((attempt = 0; attempt < 100; attempt++)); do
+        [[ -s "$path" ]] && return 0
+        sleep 0.05
+    done
+    return 1
+}
+
+test_tcp_overlapping_cleanup() (
+    local barrier="${TEST_TEMP}/tcp-overlap" pid_a="" pid_b="" status=0 run_dir_a run_dir_b
+
+    mkdir -p "$barrier"
+    trap '
+        : >"$barrier/a.release"
+        : >"$barrier/b.release"
+        [[ -z "$pid_a" ]] || wait "$pid_a" 2>/dev/null || true
+        [[ -z "$pid_b" ]] || wait "$pid_b" 2>/dev/null || true
+    ' EXIT
+
+    MOCK_CREATE_TCP_ARTIFACTS=1 MOCK_READY="$barrier/a.ready" MOCK_TCP_RELEASE="$barrier/a.release" \
+        run_entry tcpquality 0 >"$barrier/a.output" 2>&1 &
+    pid_a=$!
+    wait_for_fixture_file "$barrier/a.ready" || fail "first overlapping TCPQuality fixture did not start"
+
+    MOCK_CREATE_TCP_ARTIFACTS=1 MOCK_READY="$barrier/b.ready" MOCK_TCP_RELEASE="$barrier/b.release" \
+        MOCK_TCP_EXTERNAL_FILE="$TCP_EXTERNAL_OVERLAP" run_entry tcpquality 0 >"$barrier/b.output" 2>&1 &
+    pid_b=$!
+    wait_for_fixture_file "$barrier/b.ready" || fail "second overlapping TCPQuality fixture did not start"
+
+    run_dir_a="$(<"$barrier/a.ready")"
+    run_dir_b="$(<"$barrier/b.ready")"
+    [[ "$run_dir_a" != "$run_dir_b" ]] || fail "overlapping TCPQuality runs shared an output directory"
+    [[ -f "$run_dir_a/zstatic_nping_fixture.csv" && -f "$run_dir_b/zstatic_nping_fixture.csv" ]] || \
+        fail "overlapping TCPQuality output artifacts were not created"
+
+    # B stays in its upstream fixture until A has finished cleanup.
+    : >"$barrier/a.release"
+    wait "$pid_a" || status=$?
+    pid_a=""
+    assert_equal 0 "$status" "first overlapping TCPQuality cleanup status"
+    [[ ! -e "$run_dir_a" ]] || fail "first overlapping TCPQuality output directory was not cleaned"
+    [[ -d "$run_dir_b" ]] || fail "first TCPQuality run removed the second run's output directory"
+
+    : >"$barrier/b.release"
+    wait "$pid_b" || status=$?
+    pid_b=""
+    assert_equal 0 "$status" "second overlapping TCPQuality cleanup status"
+    [[ -f "$barrier/b.ready.checked" ]] || fail "second TCPQuality run did not check its artifacts after the first finished"
+    [[ -f "$TCP_EXTERNAL_OVERLAP" ]] || fail "first TCPQuality run removed the second run's external CSV"
+    [[ ! -e "$run_dir_b" ]] || fail "second overlapping TCPQuality output directory was not cleaned"
+    [[ -z "$(find "$RUN_BASE" -mindepth 1 -maxdepth 1 -print -quit)" ]] || fail "overlapping TCPQuality run directory was not cleaned"
+)
 
 test_mount_residue_blocks_removal() {
     local status=0 run_dir="${RUN_BASE}/vpsctl-server-test.nodequality.Mount123" rm_log="${TEST_TEMP}/rm.log"
@@ -284,6 +353,7 @@ test_download_failure_cleanup
 test_official_download_and_exit_contract
 test_upstream_interactive_input
 test_signal_forwarding_and_cleanup
-test_tcp_csv_cleanup_ownership
+test_tcp_output_cleanup_ownership
+test_tcp_overlapping_cleanup
 test_mount_residue_blocks_removal
 printf 'PASS: server-test unit tests\n'

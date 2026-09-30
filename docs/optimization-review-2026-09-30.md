@@ -170,3 +170,31 @@
 - **一次测试修正：** DNS 新增断言首轮未捕获成功日志的 stderr，导致文案断言失败；仅修正三处测试捕获后，相关单测通过，应用代码未因此改变。首次结果保留在 `evidence/dns-unit.log`。
 - **语法与静态检查：** 七个脚本的 `bash -n` 全部通过。逐文件 ShellCheck 使用 `-x -P SCRIPTDIR --extended-analysis=false` 与基线对比，诊断由 33 条变为 40 条；应用代码与入口测试无新增诊断，新增 7 条均为 DNS 测试有意隔离的子 shell 提示或 TLS 延迟展开的替身脚本文本提示，级别为 info。未新增 warning／error；未以零诊断通过表述。证据为 `evidence/static.log` 和 `static-checks/comparison.json`。
 - **验证范围：** 本轮未重跑完整默认套件、跨发行版矩阵、真实 ACME 签发或 GitHub 发布升级；菜单生命周期在真实 TTY 与隔离目录中验证，更新事务由相关分发测试覆盖。未新增依赖、公开命令、配置项或通用恢复框架。
+
+## TcpQuality 清理与转发检查优化验收（2026-09-30）
+
+以 `a61d88a` 为基线完成 **#11、#17**。#10 进程树收尾、#18 nftables 渲染、#15 manifest 复用继续暂缓。
+
+- **#11：** TcpQuality 子进程将 `TCPQUALITY_OUTPUT_DIR` 指向本次运行目录，沿用现有目录清理及挂载保护；删除宿主 `/tmp/zstatic_nping_*.csv` 的快照、差集删除及相关状态。并发实例各自清理自己的输出，不再根据出现时间推断全局 CSV 的归属。旧上游或特殊环境写到目录之外的文件保持原样。
+- **#17：** 冲突检查按需各读取一次 relay 与节点字段，使用 NUL 分隔、`mapfile` 和显式等待 jq 生产者；协议及掩码只在本次调用内计算并复用。保留原有成对比较、节点顺序、首条诊断、协议映射、REALITY 辅助端口及标量字符处理。解析／读取失败返回 10，不引入临时文件、通用编解码、区间索引或跨调用缓存。
+
+所有项目执行均通过 `ssh host-vps-scripts`，证据位于 `/var/tmp/vpsctl-cleanup-forward.6sI20N/`。四个改动脚本的本地与远端 SHA-256 一致，见 `evidence/tested-sources.sha256`。
+
+- **服务器测试回归通过：** 包括上游输出目录传递、CSV／日志／调试包随目录清理、原有与运行期间新增的外部 CSV 保留；两个实例通过屏障重叠运行，A 清理后由 B 自行确认其输出及外部 CSV 仍存在，然后两者正常清理。既有输入、信号、下载失败和挂载残留用例继续通过，见 `evidence/server-test.log`。
+- **当前上游导出函数限定验收通过：** 从官方 `runTcpQuality-rootfs.sh` 提取并执行输出目录赋值与 `persist_guest_outputs`，确认真实导出逻辑将 CSV、日志、调试包放入包装器目录，随后由包装器清理。未执行 rootfs 安装、网络测速或报告上传。上游源码 SHA-256 为 `57a52d66bae9fc848500dfe9d56945f627789f46b4a9a5e1175133e03b77f0ec`，源码保存在本轮远端目录；日志为 `evidence/tcp-output-real.log`。首次验收因夹具未创建临时系统根目录被前置检查阻断，补齐该目录后仅续跑这一验收，初次日志保留为 `tcp-output-initial.log`。
+- **代理相关回归通过：** 在现有代理单测中执行新增的 `relay-conflicts` 及原有 `relay-forward`、`relay-family`、`reality-anti-relay` 分组。新覆盖包含端点重叠、全部协议组合、auto 提示来源、节点协议映射、辅助 TCP 端口、首错顺序、NUL／尾换行／结构化字段、空或缺失节点文件，以及完整／部分 jq 输出后失败和读取失败。
+- **独立旧新对照通过：** 37 组夹具的退出码、标准输出和应用诊断一致。对包含 NUL 的特例仅排除旧 Bash 命令替换自身的 NUL 丢弃提示，字段和应用诊断仍逐字比较。原始结果位于 `conflict-checks/results.json` 与 `evidence/conflict-comparison.log`。
+- **语法与静态检查：** 四个改动脚本的 `bash -n` 全部通过。逐文件 ShellCheck 使用 `-x -P SCRIPTDIR --extended-analysis=false` 与基线对比，诊断由 283 条变为 294 条；新增 11 条均为测试中的 info（9 条 jq 单引号表达式 SC2016、2 条隔离子 shell SC2030），应用代码无新增诊断，未新增 warning／error。并非零诊断通过；完整扩展分析未运行。证据见 `evidence/static.log` 和 `static-checks/comparison.json`。
+
+### 同夹具性能对比
+
+复用原有五节点、1／5／10／20 条无冲突转发夹具，新旧实现各运行三次取中位数；计时不启用 jq 调用跟踪，调用次数另测。
+
+| 转发数量 | 修改前中值 | 修改后中值 | jq 调用次数（前→后） |
+|---|---:|---:|---:|
+| 1 | 60.09 ms | 13.40 ms | 23→2 |
+| 5 | 377.81 ms | 17.47 ms | 171→2 |
+| 10 | 1099.01 ms | 21.56 ms | 491→2 |
+| 20 | 3531.71 ms | 34.72 ms | 1581→2 |
+
+20 条样例耗时减少约 99%。这些数字只代表冲突检查函数，不包含其他清单校验、DNS 查询、规则渲染、nftables 应用或服务操作。本轮未运行完整默认套件、跨发行版矩阵或外网压力测试。

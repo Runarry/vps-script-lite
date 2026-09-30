@@ -9,8 +9,6 @@ VPS_SERVER_TEST_CHILD_PID=""
 VPS_SERVER_TEST_CHILD_GROUP=""
 VPS_SERVER_TEST_SIGNAL_STATUS=0
 VPS_SERVER_TEST_EXIT_CLEANUP_ACTIVE=0
-VPS_SERVER_TEST_TCP_SNAPSHOT_ACTIVE=0
-declare -gA VPS_SERVER_TEST_TCP_EXISTING=()
 declare -ga VPS_SERVER_TEST_MOUNTS=()
 
 vps_server_test_require_linux() {
@@ -206,45 +204,6 @@ vps_server_test_cleanup_run_dir() {
     VPS_SERVER_TEST_RUN_DIR=""
 }
 
-vps_server_test_snapshot_tcp_files() {
-    local path
-
-    VPS_SERVER_TEST_TCP_EXISTING=()
-    for path in /tmp/zstatic_nping_*.csv; do
-        [[ -e "$path" || -L "$path" ]] || continue
-        VPS_SERVER_TEST_TCP_EXISTING["$path"]=1
-    done
-    VPS_SERVER_TEST_TCP_SNAPSHOT_ACTIVE=1
-}
-
-vps_server_test_cleanup_tcp_files() {
-    local path status=0
-
-    for path in /tmp/zstatic_nping_*.csv; do
-        [[ -e "$path" || -L "$path" ]] || continue
-        [[ -z "${VPS_SERVER_TEST_TCP_EXISTING[$path]+present}" ]] || continue
-        [[ "$path" =~ ^/tmp/zstatic_nping_[^/]+\.csv$ ]] || {
-            vps_cmd_warning "拒绝清理未通过校验的 TcpQuality 临时文件：$path"
-            status=30
-            continue
-        }
-        if [[ -L "$path" ]]; then
-            vps_cmd_warning "本次 TcpQuality 新增了符号链接，拒绝删除并按清理异常处理：$path"
-            status=30
-        elif [[ -f "$path" ]]; then
-            if ! rm -f -- "$path"; then
-                vps_cmd_warning "无法清理本次 TcpQuality 新增的临时文件：$path"
-                status=30
-            fi
-        else
-            vps_cmd_warning "本次 TcpQuality 新增的 CSV 路径不是普通文件，拒绝删除：$path"
-            status=30
-        fi
-    done
-    VPS_SERVER_TEST_TCP_SNAPSHOT_ACTIVE=0
-    return "$status"
-}
-
 vps_server_test_handle_signal() {
     local signal="$1" signal_status="$2"
     local pid="${VPS_SERVER_TEST_CHILD_PID:-}"
@@ -319,9 +278,6 @@ vps_server_test_exit_cleanup() {
     fi
     VPS_SERVER_TEST_CHILD_PID=""
     VPS_SERVER_TEST_CHILD_GROUP=""
-    if [[ "${VPS_SERVER_TEST_TCP_SNAPSHOT_ACTIVE:-0}" == 1 ]]; then
-        vps_server_test_cleanup_tcp_files || cleanup_status=30
-    fi
     vps_server_test_cleanup_run_dir || cleanup_status=30
     if ((cleanup_status != 0)); then
         exit 30
@@ -346,6 +302,7 @@ vps_server_test_run_upstream() {
         if [[ "$kind" == tcpquality ]]; then
             export TMPDIR="$VPS_SERVER_TEST_RUN_DIR"
             export TCPQUALITY_ROOTFS_TMPDIR="$VPS_SERVER_TEST_RUN_DIR"
+            export TCPQUALITY_OUTPUT_DIR="$VPS_SERVER_TEST_RUN_DIR"
         fi
         # Keep the caller's controlling terminal. Current TcpQuality releases
         # open /dev/tty for their own menu, which would fail after setsid.
@@ -397,7 +354,6 @@ vps_server_test_run() {
 
     VPS_SERVER_TEST_SIGNAL_STATUS=0
     VPS_SERVER_TEST_EXIT_CLEANUP_ACTIVE=1
-    VPS_SERVER_TEST_TCP_SNAPSHOT_ACTIVE=0
     trap vps_server_test_exit_cleanup EXIT
     trap 'vps_server_test_handle_signal HUP 129' HUP
     trap 'vps_server_test_handle_signal INT 130' INT
@@ -419,9 +375,6 @@ vps_server_test_run() {
         elif ((VPS_SERVER_TEST_SIGNAL_STATUS != 0)); then
             status="$VPS_SERVER_TEST_SIGNAL_STATUS"
         else
-            if [[ "$kind" == tcpquality ]]; then
-                vps_server_test_snapshot_tcp_files
-            fi
             upstream_started=1
             vps_cmd_info "开始执行官方服务器测试脚本"
             if vps_server_test_run_upstream "$kind" "$script"; then
@@ -435,9 +388,6 @@ vps_server_test_run() {
         status=$?
     fi
 
-    if [[ "$kind" == tcpquality && "$upstream_started" == 1 ]]; then
-        vps_server_test_cleanup_tcp_files || cleanup_status=30
-    fi
     vps_server_test_cleanup_run_dir || cleanup_status=30
 
     VPS_SERVER_TEST_EXIT_CLEANUP_ACTIVE=0

@@ -2059,6 +2059,175 @@ test_relay_xray_pending_and_validation() {
     assert_equal 0 "$RUN_STATUS" "Xray forward cleanup after restart rollback"
 }
 
+test_relay_forward_conflicts() (
+    local manifest="${TEST_TEMP}/conflicts-relay.json" nodes="${TEST_TEMP}/conflicts-nodes.json"
+    local base="${TEST_TEMP}/conflicts-base.json" calls="${TEST_TEMP}/conflicts-jq.log"
+    local first second expected hint source profile profile_json node_id failure='' read_count=0 size
+    source "${TEST_ROOT}/commands/service/proxy/relay-forward.sh"
+    vps_cmd_error() { printf '%s\n' "$*" >&2; }
+    jq() {
+        local file="${*: -1}"
+        printf '%s\n' "$file" >>"$calls"
+        if [[ "$failure" == forward-short && "$file" == "$manifest" || "$failure" == node-short && "$file" == "$nodes" ]]; then
+            printf 'incomplete\0'
+            return 0
+        fi
+        if [[ "$failure" == forward-partial && "$file" == "$manifest" || "$failure" == node-partial && "$file" == "$nodes" ]]; then
+            printf 'incomplete\0'
+            return 42
+        fi
+        "$REAL_JQ" "$@" || return $?
+        # A successful read of complete records must not hide producer failure.
+        if [[ "$failure" == forward-stream && "$file" == "$manifest" || "$failure" == node-stream && "$file" == "$nodes" ]]; then return 42; fi
+        return 0
+    }
+    mapfile() {
+        read_count=$((read_count + 1))
+        builtin mapfile "$@" || return $?
+        [[ "$failure" != "read-$read_count" ]]
+    }
+    check_conflicts() {
+        local expected_status="$1" expected_output="$2" description="$3" expected_calls="${4:-2}"
+        : >"$calls"
+        read_count=0
+        if RUN_OUTPUT="$(proxy_relay_forward_validate_conflicts "$manifest" "$nodes" 2>&1)"; then RUN_STATUS=0; else RUN_STATUS=$?; fi
+        assert_equal "$expected_status" "$RUN_STATUS" "$description status"
+        assert_equal "$expected_output" "$RUN_OUTPUT" "$description diagnostic"
+        assert_equal "$expected_calls" "$(wc -l <"$calls")" "$description jq count"
+    }
+    cat >"$base" <<'JSON'
+{"exits":[{"id":"exit","protocol":{"network_hint":"tcp"}}],"forwards":[
+{"id":"F0","exit_id":"exit","listen_port_start":20000,"listen_port_end":20010,"network":"tcp"},
+{"id":"F1","exit_id":"exit","listen_port_start":20010,"listen_port_end":20020,"network":"tcp"},
+{"id":"F2","exit_id":"exit","listen_port_start":20010,"listen_port_end":20020,"network":"tcp"}]}
+JSON
+    printf '{"nodes":[]}\n' >"$nodes"
+    while IFS=' ' read -r first second expected; do
+        "$REAL_JQ" --arg first "$first" --arg second "$second" '
+            .forwards = .forwards[:2] | .forwards[0].network = $first | .forwards[1].network = $second
+        ' "$base" >"$manifest"
+        if [[ "$expected" == 10 ]]; then
+            check_conflicts 10 '转发 F0 与 F1 的端口区间及网络相交' "$first/$second shared endpoint" 1
+        else
+            check_conflicts 0 '' "$first/$second shared endpoint"
+        fi
+    done <<'CASES'
+tcp tcp 10
+tcp udp 0
+tcp both 10
+udp tcp 0
+udp udp 10
+udp both 10
+both tcp 10
+both udp 10
+both both 10
+CASES
+    "$REAL_JQ" '.forwards = .forwards[:2] | .forwards |= reverse' "$base" >"$manifest"
+    check_conflicts 10 '转发 F1 与 F0 的端口区间及网络相交' 'inclusive lower endpoint' 1
+    "$REAL_JQ" '.forwards = .forwards[:2] | .forwards[1].listen_port_start = 20011' "$base" >"$manifest"
+    check_conflicts 0 '' 'adjacent disjoint intervals'
+
+    for source in protocol legacy; do
+        for hint in tcp udp both; do
+            "$REAL_JQ" --arg source "$source" --arg hint "$hint" '
+                .forwards = .forwards[:2] | .forwards[0].network = "auto" | .forwards[1].network = "udp" |
+                .exits[0].network_hint = "both" |
+                if $source == "protocol" then .exits[0].protocol.network_hint = $hint
+                else .exits[0].protocol = {} | .exits[0].network_hint = $hint end
+            ' "$base" >"$manifest"
+            if [[ "$hint" == tcp ]]; then check_conflicts 0 '' "$source auto $hint";
+            else check_conflicts 10 '转发 F0 与 F1 的端口区间及网络相交' "$source auto $hint" 1; fi
+        done
+    done
+    "$REAL_JQ" '.forwards = .forwards[:1] | .forwards[0].network = "auto" | .exits[0].protocol.network_hint = "invalid"' "$base" >"$manifest"
+    check_conflicts 2 'network=auto 时出口 protocol.network_hint 必须是 tcp、udp 或 both' 'invalid auto hint' 1
+    "$REAL_JQ" '.forwards = .forwards[:1] | .exits[0].protocol.network_hint = "invalid"' "$base" >"$manifest"
+    check_conflicts 0 '' 'explicit network ignores invalid hint'
+
+    while IFS=' ' read -r profile hint; do
+        "$REAL_JQ" -n --arg profile "$profile" '{nodes:[{id:"N0",port:20010,profile:$profile,tls:{}}]}' >"$nodes"
+        for first in tcp udp; do
+            "$REAL_JQ" --arg network "$first" '.forwards = .forwards[:1] | .forwards[0].network = $network' "$base" >"$manifest"
+            if [[ "$hint" == both || "$hint" == "$first" ]]; then
+                check_conflicts 10 "转发 F0 与受管节点 N0 的端口及网络相交（20010/${hint}）" "$profile/$first node mapping"
+            else
+                check_conflicts 0 '' "$profile/$first node mapping"
+            fi
+        done
+    done <<'PROFILES'
+hysteria2 udp
+tuic-v5 udp
+shadowsocks-aes-256-gcm both
+shadowsocks-chacha20-poly1305 both
+shadowsocks-2022 both
+shadowsocks-2022-padding both
+vless-reality-vision tcp
+unknown-profile tcp
+PROFILES
+    printf '{"nodes":[{"id":"N0","port":25000,"profile":"hysteria2","tls":{"reality_guard":{"enabled":true,"listen_port":20010}}}]}\n' >"$nodes"
+    for first in tcp udp both; do
+        "$REAL_JQ" --arg network "$first" '.forwards = .forwards[:1] | .forwards[0].network = $network' "$base" >"$manifest"
+        if [[ "$first" == udp ]]; then check_conflicts 0 '' 'UDP skips TCP guard';
+        else check_conflicts 10 '转发 F0 与受管节点 N0 的 REALITY 防偷辅助端口及网络相交（20010/tcp）' "$first guard collision"; fi
+    done
+    printf '{"nodes":[{"id":"N0","port":25000,"profile":"hysteria2","tls":{"reality_guard":{"enabled":false,"listen_port":null}}},{"id":"N1","port":20010,"profile":"unknown","tls":{}}]}\n' >"$nodes"
+    "$REAL_JQ" '.forwards = .forwards[:1]' "$base" >"$manifest"
+    check_conflicts 10 '转发 F0 与受管节点 N1 的端口及网络相交（20010/tcp）' 'empty guard retains record alignment'
+
+    printf '{"nodes":[{"id":"N0","port":20000,"profile":"unknown","tls":{}},{"id":"N1","port":20000,"profile":"unknown","tls":{}}]}\n' >"$nodes"
+    cp "$base" "$manifest"
+    check_conflicts 10 '转发 F0 与 F1 的端口区间及网络相交' 'first later forward precedes nodes and F2' 1
+    "$REAL_JQ" '.forwards[1,2].listen_port_start = 21000 | .forwards[1,2].listen_port_end = 21010' "$base" >"$manifest"
+    check_conflicts 10 '转发 F0 与受管节点 N0 的端口及网络相交（20000/tcp）' 'F0 first node precedes F1/F2 pair'
+    "$REAL_JQ" '.forwards[2].network = "invalid"' "$base" >"$manifest"
+    check_conflicts 10 '转发 F0 与 F1 的端口区间及网络相交' 'earlier pair precedes later invalid network' 1
+    "$REAL_JQ" '.forwards[1,2].listen_port_start = 21000 | .forwards[1,2].listen_port_end = 21010 | .forwards[2].network = "invalid"' "$base" >"$manifest"
+    check_conflicts 2 'network 必须是 auto、tcp、udp 或 both：invalid' 'later pair validation precedes F0 node' 1
+
+    node_id=$'N |"\t中\r\ninner'
+    for profile_json in '"\u0000hysteria2"' '"hysteria2\n"' '"tuic-v5\u0000\n\n"'; do
+        "$REAL_JQ" -n --arg id "$node_id" --argjson profile "$profile_json" '
+            {nodes:[{id:($id + "\u0000\n\n"),port:20010,profile:$profile,tls:{}}]}
+        ' >"$nodes"
+        "$REAL_JQ" '.forwards = .forwards[:1] | .forwards[0].network = "udp" | .forwards[0].id += "\u0000\n\n"' "$base" >"$manifest"
+        check_conflicts 10 "转发 F0 与受管节点 ${node_id} 的端口及网络相交（20010/udp）" 'NUL and trailing LF preserve UDP profile mapping and IDs'
+    done
+    for profile_json in '""' 'null' 'false' '42' '"unknown |\t\r\nprofile"' '{"nested":["hysteria2",true]}'; do
+        "$REAL_JQ" -n --argjson profile "$profile_json" '
+            {nodes:[{id:{label:"line\nbreak",nested:[true,2]},port:20010,profile:$profile,tls:{}}]}
+        ' >"$nodes"
+        "$REAL_JQ" '.forwards = .forwards[:1]' "$base" >"$manifest"
+        node_id="$("$REAL_JQ" -r '.nodes[0].id' "$nodes")"
+        check_conflicts 10 "转发 F0 与受管节点 ${node_id} 的端口及网络相交（20010/tcp）" 'unrestricted node ID/profile values retain legacy behavior'
+    done
+
+    printf '{"forwards":[]}\n' >"$manifest"
+    printf '{invalid\n' >"$nodes"
+    check_conflicts 0 '' 'empty forwards skip node reads' 1
+    "$REAL_JQ" '.forwards = .forwards[:1]' "$base" >"$manifest"
+    rm -f -- "$nodes"
+    check_conflicts 0 '' 'missing nodes' 1
+    mkdir "$nodes"
+    check_conflicts 0 '' 'node directory skipped by conflict helper' 1
+    rmdir "$nodes"
+    ln -s "$base" "$nodes"
+    check_conflicts 0 '' 'node symlink skipped by conflict helper' 1
+    rm -f -- "$nodes"
+    printf '{"nodes":[]}\n' >"$nodes"
+    check_conflicts 0 '' 'empty nodes'
+
+    for size in 1 20; do
+        "$REAL_JQ" -n --argjson size "$size" '{exits:[{id:"exit",network_hint:"both"}],forwards:[range($size) |
+            {id:("F" + tostring),exit_id:"exit",listen_port_start:(30000 + . * 2),listen_port_end:(30001 + . * 2),network:"auto"}]}' >"$manifest"
+        "$REAL_JQ" -n --argjson size "$size" '{nodes:[range($size) | {id:("N" + tostring),port:(40000 + .),profile:"unknown",tls:{}}]}' >"$nodes"
+        check_conflicts 0 '' "$size forwards and nodes use two jq calls"
+    done
+    for failure in forward-short forward-partial forward-stream read-1 node-short node-partial node-stream read-2; do
+        case "$failure" in forward-* | read-1) expected=1 ;; *) expected=2 ;; esac
+        check_conflicts 10 '' "$failure rejects incomplete or failed transport" "$expected"
+    done
+)
+
 test_relay_forwarding_subscription_and_rollback() {
     local node_id node_uri exit_id forward_id direct_id ipv6_id ipv6_forward_id state_hash batch_hash cache_hash
     local decoded status_json
@@ -2858,6 +3027,7 @@ case "${VPSCTL_TEST_ONLY:-}" in
     node-ip-policy) test_node_ip_strategy_and_batch; printf 'PASS: node IP policy tests\n'; exit 0 ;;
     relay-state) test_relay_state_bindings_and_purge; printf 'PASS: relay state tests\n'; exit 0 ;;
     relay-xray) test_relay_xray_pending_and_validation; printf 'PASS: relay Xray tests\n'; exit 0 ;;
+    relay-conflicts) test_relay_forward_conflicts; printf 'PASS: relay conflict tests\n'; exit 0 ;;
     relay-forward) test_relay_forwarding_subscription_and_rollback; printf 'PASS: relay forward tests\n'; exit 0 ;;
     relay-family) test_relay_forward_family_modes; printf 'PASS: relay forward family tests\n'; exit 0 ;;
     relay-service) test_relay_forward_service_lifecycle; printf 'PASS: relay service tests\n'; exit 0 ;;
@@ -2899,6 +3069,7 @@ test_relay_state_bindings_and_purge
 printf 'TEST: proxy relay Xray pending and validation\n'
 test_relay_xray_pending_and_validation
 printf 'TEST: proxy relay forwarding, subscriptions and rollback\n'
+test_relay_forward_conflicts
 test_relay_forwarding_subscription_and_rollback
 printf 'TEST: proxy relay forward address-family modes\n'
 test_relay_forward_family_modes
