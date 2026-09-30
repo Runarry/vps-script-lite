@@ -10,6 +10,9 @@ readonly MOCK_BIN="${TEST_TMP}/mock-bin"
 readonly SYSTEM_ROOT="${TEST_TMP}/system-root"
 readonly FIXTURES="${TEST_TMP}/fixtures"
 readonly MOCK_LOG="${TEST_TMP}/mock.log"
+REAL_OPENSSL="$(command -v openssl)"
+REAL_RM="$(command -v rm)"
+readonly REAL_OPENSSL REAL_RM
 
 cleanup() { rm -rf -- "$TEST_TMP"; }
 trap cleanup EXIT
@@ -43,6 +46,22 @@ printf "\n" >>"${MOCK_LOG}"
 case "${1:-}" in
     is-active) [[ -e "${VPSCTL_SYSTEM_ROOT}/run/tls-timer-active" ]] ;;
     is-enabled) [[ -e "${VPSCTL_SYSTEM_ROOT}/run/tls-timer-enabled" ]] ;;
+    show)
+        if [[ -e "${VPSCTL_SYSTEM_ROOT}/run/tls-query-fail" ]]; then
+            printf "Failed to connect to bus: Permission denied\n" >&2
+            exit 1
+        fi
+        [[ ! -e "${VPSCTL_SYSTEM_ROOT}/run/tls-query-empty" ]] || exit 0
+        load_state=not-found unit_state="" active_state=inactive
+        if [[ -e "${VPSCTL_SYSTEM_ROOT}/etc/systemd/system/vpsctl-tls-renew.timer" ||
+            -e "${VPSCTL_SYSTEM_ROOT}/run/tls-timer-enabled" ||
+            -e "${VPSCTL_SYSTEM_ROOT}/run/tls-timer-active" ]]; then
+            load_state=loaded unit_state=disabled
+        fi
+        [[ ! -e "${VPSCTL_SYSTEM_ROOT}/run/tls-timer-enabled" ]] || unit_state=enabled
+        [[ ! -e "${VPSCTL_SYSTEM_ROOT}/run/tls-timer-active" ]] || active_state=active
+        printf "UnitFileState=%s\nActiveState=%s\nLoadState=%s\n" "$unit_state" "$active_state" "$load_state"
+        ;;
     cat)
         [[ -e "${VPSCTL_SYSTEM_ROOT}/run/mock-systemd/${2:-}" ]] || exit 1
         ;;
@@ -51,13 +70,40 @@ case "${1:-}" in
         [[ " $* " != *" --now "* ]] || : >"${VPSCTL_SYSTEM_ROOT}/run/tls-timer-active"
         ;;
     disable)
+        if [[ -e "${VPSCTL_SYSTEM_ROOT}/run/tls-disable-fail" ]]; then
+            printf "mock timer disable failed\n" >&2
+            exit 1
+        fi
         rm -f -- "${VPSCTL_SYSTEM_ROOT}/run/tls-timer-enabled"
         [[ " $* " != *" --now "* ]] || rm -f -- "${VPSCTL_SYSTEM_ROOT}/run/tls-timer-active"
         ;;
-    daemon-reload) ;;
+    daemon-reload) [[ ! -e "${VPSCTL_SYSTEM_ROOT}/run/tls-reload-fail" ]] ;;
     try-reload-or-restart|restart) ;;
     *) exit 0 ;;
 esac'
+
+make_mock rm '
+for target in "$@"; do
+    case "$target" in
+        "${VPSCTL_SYSTEM_ROOT}/etc/systemd/system/vpsctl-tls-renew.timer"|"${VPSCTL_SYSTEM_ROOT}/etc/systemd/system/vpsctl-tls-renew.service")
+            printf "rm %s\n" "$target" >>"${MOCK_LOG}"
+            if [[ -f "${VPSCTL_SYSTEM_ROOT}/run/tls-remove-fail" &&
+                "$target" == "$(<"${VPSCTL_SYSTEM_ROOT}/run/tls-remove-fail")" ]]; then
+                printf "mock unit removal failed\n" >&2
+                exit 1
+            fi
+            ;;
+    esac
+done
+exec "$REAL_RM" "$@"'
+
+make_mock openssl '
+if [[ " $* " == *" -checkend "* ]]; then
+    printf "openssl" >>"${MOCK_LOG}"
+    printf " %s" "$@" >>"${MOCK_LOG}"
+    printf "\n" >>"${MOCK_LOG}"
+fi
+exec "$REAL_OPENSSL" "$@"'
 
 make_mock ss '
 if [[ -e "${VPSCTL_SYSTEM_ROOT}/run/port80" ]]; then
@@ -99,11 +145,24 @@ export VPSCTL_TESTING=1 VPSCTL_SYSTEM_ROOT="$SYSTEM_ROOT"
 export VPSCTL_ENV_KERNEL_NAME=Linux VPSCTL_ENV_INIT=systemd VPSCTL_ENV_ARCH=x86_64
 export VPSCTL_DRY_RUN=0 VPSCTL_INSTALL_DEPS=0 VPSCTL_ASSUME_YES=1 VPSCTL_NON_INTERACTIVE=1
 export VPSCTL_QUIET=0 VPSCTL_VERBOSE=0 VPSCTL_NO_COLOR=1
-export MOCK_LOG
+export MOCK_LOG REAL_OPENSSL REAL_RM
 
 run_tls() {
     bash "$TEST_ROOT/commands/security/tls.sh" --no-color --non-interactive "$@"
 }
+
+run_tls_with_mock_days() (
+    # shellcheck source=../../commands/security/tls.sh
+    source "$TEST_ROOT/commands/security/tls.sh"
+    # Called indirectly by tls_main through the inventory commands.
+    # shellcheck disable=SC2317
+    tls_days_remaining() {
+        printf 'mock-days %s\n' "$1" >>"$MOCK_LOG"
+        [[ -n "${TLS_TEST_DAYS_RESULT:-}" ]] || return 20
+        printf '%s\n' "$TLS_TEST_DAYS_RESULT"
+    }
+    tls_main --no-color --non-interactive "$@"
+)
 
 reset_system() {
     rm -rf -- "$SYSTEM_ROOT"
@@ -195,6 +254,63 @@ test_import_replace_delete() {
     assert_status 3 "deleted cert missing" run_tls show --id "$id"
 }
 
+test_status_days_cache() {
+    local output baseline expected id checks baseline_checks
+    reset_system
+    make_cert cache-fresh.example 40
+    make_cert cache-soon.example 2
+    output="$(run_tls import --name fresh --cert-file "${FIXTURES}/cache-fresh.example/cert.pem" \
+        --key-file "${FIXTURES}/cache-fresh.example/key.pem")"
+    id="$(imported_id "$output")"
+    run_tls import --name soon --cert-file "${FIXTURES}/cache-soon.example/cert.pem" \
+        --key-file "${FIXTURES}/cache-soon.example/key.pem" >/dev/null
+    : >"$MOCK_LOG"
+    baseline="$(run_tls list --json)"
+    baseline_checks="$(grep -c '^openssl .* -checkend ' "$MOCK_LOG" || true)"
+    [[ "$baseline_checks" -gt 0 ]] || fail "list json did not calculate certificate days"
+    expected='{"schema_version":1,"lego_installed":false,"lego_version":null,"timer":{"supported":true,"enabled":false,"active":false},"counts":{"total":2,"imported":2,"acme":0,"expiring_soon":1},"certificates":'
+    expected+="${baseline#*\"certificates\":}"
+    : >"$MOCK_LOG"
+    output="$(run_tls status --json)"
+    [[ "$output" == "$expected" ]] || fail "cached status changed JSON fields, counts, or certificate order: $output"
+    checks="$(grep -c '^openssl .* -checkend ' "$MOCK_LOG" || true)"
+    [[ "$checks" == "$baseline_checks" ]] || fail "status JSON repeated certificate day calculations: $checks vs $baseline_checks"
+    : >"$MOCK_LOG"
+    run_tls status >/dev/null
+    checks="$(grep -c '^openssl .* -checkend ' "$MOCK_LOG" || true)"
+    [[ "$checks" == "$baseline_checks" ]] || fail "human status changed certificate day calculations"
+    : >"$MOCK_LOG"
+    output="$(run_tls show --json --id "$id")"
+    assert_not_contains "$output" '"days_remaining":null' "independent show still calculates days"
+    checks="$(grep -Fc "openssl x509 -in ${SYSTEM_ROOT}/var/lib/vpsctl/security/tls/live/${id}/fullchain.pem -noout -checkend 0" "$MOCK_LOG" || true)"
+    [[ "$checks" == 1 ]] || fail "independent show did not calculate certificate days once"
+
+    : >"$MOCK_LOG"
+    baseline="$(run_tls_with_mock_days list --json)"
+    assert_contains "$baseline" '"days_remaining":null,"expiring_soon":false' "empty days stay null"
+    checks="$(grep -c '^mock-days ' "$MOCK_LOG" || true)"
+    [[ "$checks" == 2 ]] || fail "independent list skipped empty day calculations"
+    expected='{"schema_version":1,"lego_installed":false,"lego_version":null,"timer":{"supported":true,"enabled":false,"active":false},"counts":{"total":2,"imported":2,"acme":0,"expiring_soon":0},"certificates":'
+    expected+="${baseline#*\"certificates\":}"
+    : >"$MOCK_LOG"
+    output="$(run_tls_with_mock_days status --json)"
+    [[ "$output" == "$expected" ]] || fail "cached empty days changed status JSON: $output"
+    checks="$(grep -c '^mock-days ' "$MOCK_LOG" || true)"
+    [[ "$checks" == 2 ]] || fail "status recalculated cached empty days: $checks calls"
+    : >"$MOCK_LOG"
+    output="$(run_tls_with_mock_days show --json --id "$id")"
+    assert_contains "$output" '"days_remaining":null,"expiring_soon":false' "independent show handles empty days"
+    checks="$(grep -c '^mock-days ' "$MOCK_LOG" || true)"
+    [[ "$checks" == 1 ]] || fail "independent show skipped empty day calculation"
+    : >"$MOCK_LOG"
+    output="$(TLS_TEST_DAYS_RESULT=0 run_tls_with_mock_days status --json)"
+    assert_contains "$output" '"expiring_soon":2' "zero days count as expiring"
+    assert_contains "$output" '"days_remaining":0,"expiring_soon":true' "cached zero days remain numeric"
+    assert_not_contains "$output" '"days_remaining":null' "zero days are not empty values"
+    checks="$(grep -c '^mock-days ' "$MOCK_LOG" || true)"
+    [[ "$checks" == 2 ]] || fail "status recalculated cached zero days: $checks calls"
+}
+
 test_validation_failures() {
     reset_system
     make_expired_cert
@@ -275,6 +391,40 @@ test_issue_renew_and_timer() {
     unset MOCK_LEGO_CERT MOCK_LEGO_KEY
 }
 
+test_timer_disable_failures_and_idempotence() {
+    reset_system
+    run_tls timer enable
+    : >"${SYSTEM_ROOT}/run/tls-disable-fail"
+    assert_status 20 "timer disable failure propagates" run_tls timer disable
+    assert_not_contains "$TLS_TEST_OUTPUT" "已停用" "failed timer disable has no success message"
+    assert_file "${SYSTEM_ROOT}/run/tls-timer-active" "failed disable kept timer active"
+    : >"${SYSTEM_ROOT}/run/tls-query-fail"
+    : >"$MOCK_LOG"
+    assert_status 20 "timer query failure is not absence" run_tls timer disable
+    assert_not_contains "$TLS_TEST_OUTPUT" "已停用" "failed timer query has no success message"
+    assert_not_contains "$(<"$MOCK_LOG")" "systemctl disable" "query failure prevented disable"
+    : >"$MOCK_LOG"
+    assert_status 0 "timer disable dry-run skips failed queries" run_tls --dry-run timer disable
+    [[ ! -s "$MOCK_LOG" ]] || fail "timer disable dry-run invoked systemctl"
+    assert_file "${SYSTEM_ROOT}/run/tls-timer-active" "dry-run kept timer active"
+    rm -f -- "${SYSTEM_ROOT}/run/tls-query-fail" "${SYSTEM_ROOT}/run/tls-disable-fail"
+    run_tls timer disable
+    : >"${SYSTEM_ROOT}/run/tls-disable-fail"
+    : >"$MOCK_LOG"
+    assert_status 0 "already disabled inactive timer is idempotent" run_tls timer disable
+    assert_not_contains "$(<"$MOCK_LOG")" "systemctl disable" "disabled inactive timer needs no disable"
+    run_tls timer enable
+    rm -f -- "${SYSTEM_ROOT}/run/tls-timer-enabled"
+    assert_status 20 "disabled active timer still needs stop" run_tls timer disable
+    assert_file "${SYSTEM_ROOT}/run/tls-timer-active" "failed stop kept disabled timer active"
+    reset_system
+    : >"${SYSTEM_ROOT}/run/tls-disable-fail"
+    assert_status 0 "known absent timer is idempotent" run_tls timer disable
+    assert_not_contains "$(<"$MOCK_LOG")" "systemctl disable" "absent timer needs no disable"
+    : >"${SYSTEM_ROOT}/run/tls-query-empty"
+    assert_status 20 "empty query output is not known absence" run_tls timer disable
+}
+
 test_dns_credentials_and_secrets() {
     local output id cred cred_mode
     reset_system
@@ -327,6 +477,95 @@ test_uninstall_keeps_backups() {
     [[ -d "${SYSTEM_ROOT}/var/lib/vpsctl/backups/security/tls" ]] || fail "purge removed backups"
 }
 
+test_uninstall_failures_and_order() {
+    local output id live_cert fault target
+    local timer="${SYSTEM_ROOT}/etc/systemd/system/vpsctl-tls-renew.timer"
+    local service="${SYSTEM_ROOT}/etc/systemd/system/vpsctl-tls-renew.service"
+    local -a purge_args=(uninstall --purge --confirm-uninstall REMOVE-VPSCTL-TLS --confirm-purge) events=()
+    reset_system
+    make_cert uninstall-failure.example
+    output="$(run_tls import --name failure --cert-file "${FIXTURES}/uninstall-failure.example/cert.pem" \
+        --key-file "${FIXTURES}/uninstall-failure.example/key.pem")"
+    id="$(imported_id "$output")"
+    live_cert="${SYSTEM_ROOT}/var/lib/vpsctl/security/tls/live/${id}/fullchain.pem"
+    run_tls timer enable
+    : >"${SYSTEM_ROOT}/run/tls-query-fail"
+    : >"$MOCK_LOG"
+    assert_status 0 "purge dry-run skips failed queries" run_tls --dry-run "${purge_args[@]}"
+    [[ ! -s "$MOCK_LOG" ]] || fail "purge dry-run invoked systemctl"
+    assert_file "$timer" "purge dry-run kept timer"
+    assert_file "$live_cert" "purge dry-run kept certificate"
+    rm -f -- "${SYSTEM_ROOT}/run/tls-query-fail"
+    for fault in tls-disable-fail tls-query-fail; do
+        : >"${SYSTEM_ROOT}/run/${fault}"
+        : >"$MOCK_LOG"
+        assert_status 20 "uninstall propagates $fault" run_tls "${purge_args[@]}"
+        assert_not_contains "$TLS_TEST_OUTPUT" "已卸载" "failed uninstall has no success message"
+        assert_file "$timer" "failed uninstall kept timer unit"
+        assert_file "$service" "failed uninstall kept service unit"
+        assert_file "${SYSTEM_ROOT}/run/tls-timer-active" "failed uninstall kept timer running"
+        assert_file "$live_cert" "failed timer removal blocked purge"
+        assert_not_contains "$(<"$MOCK_LOG")" "rm $timer" "failed disable prevented unit deletion"
+        assert_not_contains "$(<"$MOCK_LOG")" "systemctl daemon-reload" "failed disable prevented reload"
+        rm -f -- "${SYSTEM_ROOT}/run/${fault}"
+    done
+    for target in "$timer" "$service"; do
+        run_tls timer enable
+        printf '%s\n' "$target" >"${SYSTEM_ROOT}/run/tls-remove-fail"
+        : >"$MOCK_LOG"
+        assert_status 30 "unit removal failure reports partial completion" run_tls "${purge_args[@]}"
+        assert_not_contains "$TLS_TEST_OUTPUT" "已卸载" "partial uninstall has no success message"
+        assert_file "$target" "failed unit deletion kept its file"
+        assert_file "$live_cert" "failed unit deletion blocked purge"
+        [[ ! -e "${SYSTEM_ROOT}/run/tls-timer-enabled" && ! -e "${SYSTEM_ROOT}/run/tls-timer-active" ]] || fail "unit deletion began before stop and disable"
+        assert_not_contains "$(<"$MOCK_LOG")" "systemctl daemon-reload" "failed unit deletion prevented reload"
+        if [[ "$target" == "$timer" ]]; then
+            assert_file "$service" "first failed deletion kept second unit"
+        else
+            [[ ! -e "$timer" ]] || fail "partial service deletion failure retained timer unit"
+        fi
+        rm -f -- "${SYSTEM_ROOT}/run/tls-remove-fail"
+    done
+    run_tls timer enable
+    : >"${SYSTEM_ROOT}/run/tls-reload-fail"
+    : >"$MOCK_LOG"
+    assert_status 30 "reload failure after unit deletion is partial completion" run_tls "${purge_args[@]}"
+    assert_not_contains "$TLS_TEST_OUTPUT" "已卸载" "failed reload has no success message"
+    [[ ! -e "$timer" && ! -e "$service" ]] || fail "reload ran before managed unit deletion"
+    assert_file "$live_cert" "failed reload blocked purge"
+    mapfile -t events < <(grep -E '^systemctl disable|^rm |^systemctl daemon-reload' "$MOCK_LOG")
+    [[ "${events[*]}" == $'systemctl disable --now vpsctl-tls-renew.timer\n'"rm $timer"$'\n'"rm $service"$'\nsystemctl daemon-reload' ]] || fail "uninstall operation order changed: ${events[*]}"
+    assert_status 20 "reload failure with nothing changed is external failure" run_tls "${purge_args[@]}"
+    assert_file "$live_cert" "idempotent uninstall reload failure blocked purge"
+    rm -f -- "${SYSTEM_ROOT}/run/tls-reload-fail"
+    assert_status 0 "uninstall of known absent timer succeeds" run_tls "${purge_args[@]}"
+    [[ ! -e "$live_cert" ]] || fail "successful timer removal did not allow purge"
+}
+
+test_uninstall_no_systemd_and_managed_protection() {
+    local timer="${SYSTEM_ROOT}/etc/systemd/system/vpsctl-tls-renew.timer"
+    local service="${SYSTEM_ROOT}/etc/systemd/system/vpsctl-tls-renew.service"
+    reset_system
+    run_tls timer enable
+    printf '%s\n' "$timer" >"${SYSTEM_ROOT}/run/tls-remove-fail"
+    : >"$MOCK_LOG"
+    VPSCTL_ENV_INIT=openrc assert_status 20 "first deletion failure without systemd is external failure" run_tls uninstall
+    assert_file "$timer" "failed non-systemd deletion kept timer"
+    assert_file "$service" "failed non-systemd deletion kept service"
+    assert_not_contains "$(<"$MOCK_LOG")" "systemctl" "non-systemd uninstall skipped systemctl"
+    rm -f -- "${SYSTEM_ROOT}/run/tls-remove-fail"
+    : >"$MOCK_LOG"
+    VPSCTL_ENV_INIT=openrc assert_status 0 "non-systemd uninstall removes managed units" run_tls uninstall
+    [[ ! -e "$timer" && ! -e "$service" ]] || fail "non-systemd uninstall retained managed units"
+    assert_not_contains "$(<"$MOCK_LOG")" "systemctl" "non-systemd removal skipped systemctl"
+    printf 'Unmanaged timer\n' >"$timer"
+    ln -s -- "${FIXTURES}/missing.service" "$service"
+    : >"$MOCK_LOG"
+    VPSCTL_ENV_INIT=openrc assert_status 0 "uninstall preserves unmanaged files and links" run_tls uninstall
+    [[ "$(<"$timer")" == 'Unmanaged timer' && -L "$service" ]] || fail "uninstall removed unmanaged file or broken symlink"
+    [[ ! -s "$MOCK_LOG" ]] || fail "unmanaged non-systemd uninstall performed removal"
+}
+
 test_uninstall_menu_confirmation() {
     local command output id confirmations status=0 timer="${SYSTEM_ROOT}/etc/systemd/system/vpsctl-tls-renew.timer"
     command -v script >/dev/null 2>&1 || fail "uninstall menu tests require util-linux script"
@@ -364,11 +603,15 @@ test_uninstall_menu_confirmation() {
 
 test_help_and_status
 test_import_replace_delete
+test_status_days_cache
 test_validation_failures
 test_dry_run_does_not_write
 test_drift_rejects_writes
 test_issue_renew_and_timer
+test_timer_disable_failures_and_idempotence
 test_dns_credentials_and_secrets
 test_uninstall_keeps_backups
+test_uninstall_failures_and_order
+test_uninstall_no_systemd_and_managed_protection
 test_uninstall_menu_confirmation
 printf 'PASS: security tls unit tests\n'

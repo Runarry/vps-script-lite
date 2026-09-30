@@ -1048,7 +1048,9 @@ proxy_node_add() (
 )
 
 proxy_node_list() {
-    local core="all" json=0 arg count total node profile label ip_strategy relay_bound strategy_suffix bindings='[]'
+    local core="all" json=0 arg count total profile label ip_strategy relay_bound strategy_suffix bindings='[]'
+    local node_name node_id node_core listen port address reality_guard list_fd list_pid offset status=0
+    local -a fields=()
     while (($#)); do
         arg="$1"
         case "$arg" in
@@ -1066,8 +1068,27 @@ proxy_node_list() {
         return 0
     }
     proxy_manifest_validate_file "$PROXY_MANIFEST" || return $?
-    if [[ -n "${PROXY_RELAY_FILE:-}" && -f "$PROXY_RELAY_FILE" && ! -L "$PROXY_RELAY_FILE" ]]; then
-        bindings="$(jq -c '.bindings // []' "$PROXY_RELAY_FILE" 2>/dev/null)" || bindings='[]'
+    if [[ -n "${PROXY_RELAY_FILE:-}" && ( -e "$PROXY_RELAY_FILE" || -L "$PROXY_RELAY_FILE" ) ]]; then
+        [[ -f "$PROXY_RELAY_FILE" && -r "$PROXY_RELAY_FILE" && ! -L "$PROXY_RELAY_FILE" ]] || {
+            vps_cmd_error "中转状态不是安全的可读普通文件：$PROXY_RELAY_FILE"
+            return 3
+        }
+        bindings="$(jq -ces '
+            select(length == 1 and (.[0] | type) == "object" and
+                (.[0].bindings | type) == "array" and
+                all(.[0].bindings[];
+                    type == "object" and
+                    (.node_id | type == "string" and test("^node-[a-f0-9]{16}$")))) |
+            .[0].bindings
+        ' "$PROXY_RELAY_FILE" 2>/dev/null)" || {
+            status=$?
+            if ((status == 2)); then
+                vps_cmd_error "无法读取中转状态：$PROXY_RELAY_FILE"
+                return 3
+            fi
+            vps_cmd_error "中转状态的节点绑定格式校验失败：$PROXY_RELAY_FILE"
+            return 10
+        }
     fi
     if ((json)); then
         jq --arg core "$core" --argjson bindings "$bindings" '{
@@ -1086,30 +1107,57 @@ proxy_node_list() {
         }' "$PROXY_MANIFEST"
         return
     fi
+    # Preserve the former per-field command substitution's NUL and trailing-LF removal.
+    if ! exec {list_fd}< <(jq -j --arg core "$core" --argjson bindings "$bindings" '
+        ((.nodes | length),
+         (.nodes[] | select($core == "all" or .core == $core) | . as $node |
+            .profile, .name, .id, .core, .listen, .port, .address,
+            (.ip_strategy // "auto"),
+            any($bindings[]; .node_id == $node.id),
+            (.tls.reality_guard.enabled // false))) |
+        tostring | gsub("\u0000"; "") | sub("\n+$"; "") + "\u0000"
+    ' "$PROXY_MANIFEST"); then
+        vps_cmd_error "无法读取节点列表：$PROXY_MANIFEST"
+        return 10
+    fi
+    list_pid=$!
+    mapfile -d '' -t fields <&"$list_fd" || status=$?
+    exec {list_fd}<&-
+    if ! wait "$list_pid"; then
+        vps_cmd_error "无法读取节点列表：$PROXY_MANIFEST"
+        return 10
+    fi
+    if ((status != 0 || ${#fields[@]} < 1 || (${#fields[@]} - 1) % 10 != 0)); then
+        vps_cmd_error "节点列表字段读取失败：$PROXY_MANIFEST"
+        return 10
+    fi
+    total="${fields[0]}"
     count=0
-    while IFS= read -r node; do
+    for ((offset = 1; offset < ${#fields[@]}; offset += 10)); do
         count=$((count + 1))
-        profile="$(jq -r '.profile' <<<"$node")"
+        profile="${fields[offset]}"
+        node_name="${fields[offset + 1]}"
+        node_id="${fields[offset + 2]}"
+        node_core="${fields[offset + 3]}"
+        listen="${fields[offset + 4]}"
+        port="${fields[offset + 5]}"
+        address="${fields[offset + 6]}"
+        ip_strategy="${fields[offset + 7]}"
+        relay_bound="${fields[offset + 8]}"
+        reality_guard="${fields[offset + 9]}"
         label="$(proxy_profile_label "$profile" 2>/dev/null || printf '%s' "$profile")"
-        printf '[%d] %s\n' "$count" "$(jq -r '.name' <<<"$node")"
+        printf '[%d] %s\n' "$count" "$node_name"
         printf '    ID：%s  内核：%s  配置：%s\n' \
-            "$(jq -r '.id' <<<"$node")" "$(proxy_core_label "$(jq -r '.core' <<<"$node")")" "$label"
+            "$node_id" "$(proxy_core_label "$node_core")" "$label"
         printf '    监听：%s:%s  连接地址：%s\n' \
-            "$(jq -r '.listen' <<<"$node")" "$(jq -r '.port' <<<"$node")" "$(jq -r '.address' <<<"$node")"
-        ip_strategy="$(jq -r '.ip_strategy // "auto"' <<<"$node")"
-        relay_bound=0
-        if [[ "$ip_strategy" != "auto" ]] && declare -F proxy_relay_node_binding >/dev/null 2>&1 && \
-            proxy_relay_node_binding "$(jq -r '.id' <<<"$node")" >/dev/null 2>&1; then
-            relay_bound=1
-        fi
+            "$listen" "$port" "$address"
         strategy_suffix=""
-        [[ "$relay_bound" != 1 ]] || strategy_suffix='（已绑定中转，暂不生效）'
+        [[ "$relay_bound" != true || "$ip_strategy" == auto ]] || strategy_suffix='（已绑定中转，暂不生效）'
         printf '    IP 策略：%s%s\n' "$(proxy_ip_strategy_label "$ip_strategy")" "$strategy_suffix"
         if proxy_profile_uses_reality "$profile"; then
-            printf '    REALITY 防偷：%s\n' "$(proxy_reality_guard_label "$(jq -r '.tls.reality_guard.enabled // false' <<<"$node")")"
+            printf '    REALITY 防偷：%s\n' "$(proxy_reality_guard_label "$reality_guard")"
         fi
-    done < <(jq -c --arg core "$core" '.nodes[] | select($core == "all" or .core == $core)' "$PROXY_MANIFEST")
-    total="$(proxy_manifest_count all)"
+    done
     printf '当前筛选：%d 个；节点总数：%s 个\n' "$count" "$total"
 }
 

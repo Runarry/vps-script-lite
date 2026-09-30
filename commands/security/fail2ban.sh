@@ -644,13 +644,23 @@ fail2ban_wait_ready() {
 }
 
 fail2ban_rollback_daemon() {
-    local was_active="$1" was_enabled="$2"
+    local was_active="$1" was_enabled="$2" rc=0
     if [[ "$was_active" == 1 ]]; then
-        fail2ban-client reload --restart sshd >/dev/null 2>&1 || systemctl restart "$FAIL2BAN_SERVICE" >/dev/null 2>&1 || true
+        if ! fail2ban-client reload --restart sshd >/dev/null 2>&1 && ! systemctl restart "$FAIL2BAN_SERVICE" >/dev/null 2>&1; then
+            vps_cmd_error "Fail2ban 服务回滚失败：fail2ban-client reload --restart sshd 和 systemctl restart $FAIL2BAN_SERVICE 均失败"
+            rc=30
+        fi
     else
-        systemctl stop "$FAIL2BAN_SERVICE" >/dev/null 2>&1 || true
-        [[ "$was_enabled" == 1 ]] || systemctl disable "$FAIL2BAN_SERVICE" >/dev/null 2>&1 || true
+        if ! systemctl stop "$FAIL2BAN_SERVICE" >/dev/null 2>&1; then
+            vps_cmd_error "Fail2ban 服务回滚失败：systemctl stop $FAIL2BAN_SERVICE"
+            rc=30
+        fi
+        if [[ "$was_enabled" != 1 ]] && ! systemctl disable "$FAIL2BAN_SERVICE" >/dev/null 2>&1; then
+            vps_cmd_error "Fail2ban 服务回滚失败：systemctl disable $FAIL2BAN_SERVICE"
+            rc=30
+        fi
     fi
+    return "$rc"
 }
 
 fail2ban_apply_loaded_config() {
@@ -673,10 +683,13 @@ fail2ban_apply_loaded_config() {
     if ((rc != 0)); then
         vps_cmd_warning "配置应用失败，正在恢复备份 $backup_id"
         if ! fail2ban_restore_snapshot "$backup_id"; then
-            vps_cmd_error "Fail2ban 配置回滚失败"
+            vps_cmd_error "Fail2ban 配置回滚失败；备份 ID：$backup_id"
             return 30
         fi
-        fail2ban_rollback_daemon "$was_active" "$was_enabled"
+        if ! fail2ban_rollback_daemon "$was_active" "$was_enabled"; then
+            vps_cmd_error "Fail2ban 服务回滚未完成；备份 ID：$backup_id"
+            return 30
+        fi
         return "$rc"
     fi
     vps_cmd_success "Fail2ban sshd jail 已应用；备份 ID：$backup_id"
@@ -1020,16 +1033,36 @@ fail2ban_restore() {
     elif [[ "$was_active" == 1 ]] && ! fail2ban-client reload --restart sshd; then rc=20
     fi
     if ((rc != 0)); then
-        fail2ban_restore_snapshot "$safety" || return 30
-        fail2ban_rollback_daemon "$was_active" "$was_enabled"
+        if ! fail2ban_restore_snapshot "$safety"; then
+            vps_cmd_error "Fail2ban 配置回滚失败；安全备份 ID：$safety"
+            return 30
+        fi
+        if ! fail2ban_rollback_daemon "$was_active" "$was_enabled"; then
+            vps_cmd_error "Fail2ban 服务回滚未完成；安全备份 ID：$safety"
+            return 30
+        fi
         return "$rc"
     fi
     if [[ ! -e "$FAIL2BAN_CONFIG" ]]; then rm -f -- "$FAIL2BAN_HASH_FILE" "$FAIL2BAN_METADATA_FILE" || rc=20; fi
     if ((rc == 0)) && ! awk -F '\t' 'BEGIN{OFS="\t"} $1=="lifecycle" {$2="restored"} {print}' "$manifest" | fail2ban_atomic_file "$manifest" 0600; then rc=20; fi
     if ((rc != 0)); then
-        fail2ban_restore_snapshot "$safety" || return 30
-        if grep -Fqx "$FAIL2BAN_MARKER" "$FAIL2BAN_CONFIG" 2>/dev/null; then fail2ban_write_state || return 30; else rm -f -- "$FAIL2BAN_HASH_FILE" "$FAIL2BAN_METADATA_FILE" || return 30; fi
-        fail2ban_rollback_daemon "$was_active" "$was_enabled"
+        if ! fail2ban_restore_snapshot "$safety"; then
+            vps_cmd_error "Fail2ban 配置回滚失败；安全备份 ID：$safety"
+            return 30
+        fi
+        if grep -Fqx "$FAIL2BAN_MARKER" "$FAIL2BAN_CONFIG" 2>/dev/null; then
+            if ! fail2ban_write_state; then
+                vps_cmd_error "Fail2ban 状态写入回滚失败；安全备份 ID：$safety"
+                return 30
+            fi
+        elif ! rm -f -- "$FAIL2BAN_HASH_FILE" "$FAIL2BAN_METADATA_FILE"; then
+            vps_cmd_error "Fail2ban 状态清理回滚失败；安全备份 ID：$safety"
+            return 30
+        fi
+        if ! fail2ban_rollback_daemon "$was_active" "$was_enabled"; then
+            vps_cmd_error "Fail2ban 服务回滚未完成；安全备份 ID：$safety"
+            return 30
+        fi
         return "$rc"
     fi
     vps_cmd_success "已恢复备份 $backup；恢复前状态保存在 $safety"

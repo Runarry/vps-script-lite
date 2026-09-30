@@ -44,10 +44,20 @@ case "${1:-}" in
     enable)
         : >"${VPSCTL_SYSTEM_ROOT}/run/fail2ban-enabled"
         [[ " $* " != *" --now "* ]] || : >"${VPSCTL_SYSTEM_ROOT}/run/fail2ban-active"
+        [[ ! -e "${VPSCTL_SYSTEM_ROOT}/run/fail-systemctl-enable" ]] || exit 1
         ;;
-    start|restart) : >"${VPSCTL_SYSTEM_ROOT}/run/fail2ban-active" ;;
-    stop) rm -f -- "${VPSCTL_SYSTEM_ROOT}/run/fail2ban-active" ;;
-    disable) rm -f -- "${VPSCTL_SYSTEM_ROOT}/run/fail2ban-enabled" ;;
+    start|restart)
+        [[ ! -e "${VPSCTL_SYSTEM_ROOT}/run/fail-systemctl-${1}" ]] || exit 1
+        : >"${VPSCTL_SYSTEM_ROOT}/run/fail2ban-active"
+        ;;
+    stop)
+        [[ ! -e "${VPSCTL_SYSTEM_ROOT}/run/fail-systemctl-stop" ]] || exit 1
+        rm -f -- "${VPSCTL_SYSTEM_ROOT}/run/fail2ban-active"
+        ;;
+    disable)
+        [[ ! -e "${VPSCTL_SYSTEM_ROOT}/run/fail-systemctl-disable" ]] || exit 1
+        rm -f -- "${VPSCTL_SYSTEM_ROOT}/run/fail2ban-enabled"
+        ;;
 esac'
 
 make_mock fail2ban-client '
@@ -58,6 +68,11 @@ case "${1:-}" in
     -V) printf "%s\n" "${MOCK_FAIL2BAN_VERSION_OUTPUT:-Fail2Ban v1.0.2}" ;;
     -t) [[ ! -e "${VPSCTL_SYSTEM_ROOT}/run/fail-config-test" ]] ;;
     reload)
+        if [[ -e "${VPSCTL_SYSTEM_ROOT}/run/pass-reload-once" ]]; then
+            rm -f -- "${VPSCTL_SYSTEM_ROOT}/run/pass-reload-once"
+            exit 0
+        fi
+        [[ ! -e "${VPSCTL_SYSTEM_ROOT}/run/fail-reload" ]] || exit 1
         if [[ -e "${VPSCTL_SYSTEM_ROOT}/run/fail-reload-once" ]]; then
             rm -f -- "${VPSCTL_SYSTEM_ROOT}/run/fail-reload-once"
             exit 1
@@ -119,6 +134,14 @@ make_mock apt-get '
 printf "apt-get" >>"${MOCK_LOG}"
 printf " %s" "$@" >>"${MOCK_LOG}"
 printf "\n" >>"${MOCK_LOG}"'
+make_mock mv '
+target="${!#}"
+if [[ "$target" == "${VPSCTL_SYSTEM_ROOT}/var/lib/vpsctl/backups/security/fail2ban/"*/manifest && -e "${VPSCTL_SYSTEM_ROOT}/run/fail-lifecycle-once" ]]; then
+    rm -f -- "${VPSCTL_SYSTEM_ROOT}/run/fail-lifecycle-once"
+    printf "mv lifecycle failure\n" >>"${MOCK_LOG}"
+    exit 1
+fi
+exec /usr/bin/mv "$@"'
 
 export PATH="${MOCK_BIN}:/usr/bin:/bin"
 export VPSCTL_TESTING=1 VPSCTL_SYSTEM_ROOT="$SYSTEM_ROOT"
@@ -147,6 +170,13 @@ first_backup() {
         return 0
     done
     return 1
+}
+
+assert_recovery_backup() {
+    local id="${FAIL2BAN_TEST_OUTPUT##*备份 ID：}"
+    id="${id%%$'\n'*}"
+    [[ "$id" == bak-* && -f "$SYSTEM_ROOT/var/lib/vpsctl/backups/security/fail2ban/$id/manifest" ]] || fail "rollback diagnostic did not identify an existing recovery backup"
+    FAIL2BAN_TEST_RECOVERY_BACKUP="$id"
 }
 
 test_cli_and_install() {
@@ -238,6 +268,108 @@ test_drift_rollback_and_verify_cleanup() {
     assert_contains "$FAIL2BAN_TEST_OUTPUT" '哈希漂移' "drift diagnostic"
 }
 
+test_apply_daemon_rollback_failures() {
+    local config="$SYSTEM_ROOT/etc/fail2ban/jail.d/99-vpsctl-sshd.local" state="$SYSTEM_ROOT/var/lib/vpsctl/security/fail2ban"
+    local recovery expected before
+    for recovery in restart failed; do
+        reset_system
+        run_fail2ban install
+        before="$(sha256sum "$config" "$state/config.sha256" "$state/metadata")"
+        : >"$SYSTEM_ROOT/run/fail-config-test"
+        : >"$SYSTEM_ROOT/run/fail-reload"
+        expected=20
+        if [[ "$recovery" == failed ]]; then
+            : >"$SYSTEM_ROOT/run/fail-systemctl-restart"
+            expected=30
+        fi
+        : >"$MOCK_LOG"
+        assert_status "$expected" "configure rollback with $recovery recovery" run_fail2ban configure --maxretry 9
+        [[ "$before" == "$(sha256sum "$config" "$state/config.sha256" "$state/metadata")" ]] || fail "daemon recovery failure lost the restored configuration or state"
+        assert_contains "$(<"$MOCK_LOG")" $'fail2ban-client reload --restart sshd\nsystemctl restart fail2ban.service' "rollback reload then restart fallback"
+        if [[ "$recovery" == failed ]]; then
+            assert_contains "$FAIL2BAN_TEST_OUTPUT" 'fail2ban-client reload --restart sshd 和 systemctl restart fail2ban.service 均失败' "exhausted daemon recovery diagnostic"
+            assert_recovery_backup
+        else
+            [[ "$FAIL2BAN_TEST_OUTPUT" != *'回滚未完成'* ]] || fail "successful fallback reported incomplete rollback"
+        fi
+    done
+}
+
+test_inactive_daemon_rollback() {
+    local was_enabled failed_steps expected
+    for was_enabled in 0 1; do
+        for failed_steps in none stop disable both; do
+            [[ "$was_enabled" == 0 || "$failed_steps" == none || "$failed_steps" == stop ]] || continue
+            reset_system
+            [[ "$was_enabled" == 0 ]] || : >"$SYSTEM_ROOT/run/fail2ban-enabled"
+            : >"$SYSTEM_ROOT/run/fail-systemctl-enable"
+            expected=20
+            case "$failed_steps" in stop|both) : >"$SYSTEM_ROOT/run/fail-systemctl-stop"; expected=30 ;; esac
+            case "$failed_steps" in disable|both) : >"$SYSTEM_ROOT/run/fail-systemctl-disable"; expected=30 ;; esac
+            [[ "$was_enabled" == 0 ]] || : >"$SYSTEM_ROOT/run/fail-systemctl-disable"
+            assert_status "$expected" "inactive rollback enabled=$was_enabled failed=$failed_steps" run_fail2ban install
+            [[ ! -e "$SYSTEM_ROOT/etc/fail2ban/jail.d/99-vpsctl-sshd.local" ]] || fail "inactive rollback retained the candidate config"
+            assert_contains "$(<"$MOCK_LOG")" 'systemctl stop fail2ban.service' "inactive rollback stops service"
+            if [[ "$was_enabled" == 0 ]]; then
+                assert_contains "$(<"$MOCK_LOG")" $'systemctl stop fail2ban.service\nsystemctl disable fail2ban.service' "disable follows stop even when stop fails"
+            else
+                [[ "$(<"$MOCK_LOG")" != *'systemctl disable'* ]] || fail "rollback disabled an originally enabled service"
+                [[ -e "$SYSTEM_ROOT/run/fail2ban-enabled" ]] || fail "rollback lost the original enabled state"
+            fi
+            case "$failed_steps" in stop|both) assert_contains "$FAIL2BAN_TEST_OUTPUT" '回滚失败：systemctl stop fail2ban.service' "stop recovery diagnostic" ;; esac
+            case "$failed_steps" in disable|both) assert_contains "$FAIL2BAN_TEST_OUTPUT" '回滚失败：systemctl disable fail2ban.service' "disable recovery diagnostic" ;; esac
+            if [[ "$failed_steps" == none ]]; then
+                [[ ! -e "$SYSTEM_ROOT/run/fail2ban-active" ]] || fail "successful inactive rollback left service active"
+                [[ "$was_enabled" == 1 || ! -e "$SYSTEM_ROOT/run/fail2ban-enabled" ]] || fail "successful inactive rollback left service enabled"
+            else
+                assert_recovery_backup
+            fi
+        done
+    done
+}
+
+test_restore_daemon_rollback_failures() {
+    local config="$SYSTEM_ROOT/etc/fail2ban/jail.d/99-vpsctl-sshd.local" state="$SYSTEM_ROOT/var/lib/vpsctl/security/fail2ban"
+    local branch recovery expected backup before
+    for branch in apply lifecycle; do
+        for recovery in restart failed; do
+            reset_system
+            run_fail2ban install
+            backup="$(first_backup)" || fail "no initial restore backup"
+            before="$(sha256sum "$config" "$state/config.sha256")"
+            : >"$SYSTEM_ROOT/run/fail-reload"
+            if [[ "$branch" == lifecycle ]]; then
+                : >"$SYSTEM_ROOT/run/pass-reload-once"
+                : >"$SYSTEM_ROOT/run/fail-lifecycle-once"
+            fi
+            expected=20
+            if [[ "$recovery" == failed ]]; then
+                : >"$SYSTEM_ROOT/run/fail-systemctl-restart"
+                expected=30
+            fi
+            : >"$MOCK_LOG"
+            assert_status "$expected" "restore $branch rollback with $recovery recovery" run_fail2ban restore --backup "$backup" --confirm-restore "$backup"
+            [[ "$before" == "$(sha256sum "$config" "$state/config.sha256")" ]] || fail "restore $branch rollback lost the original configuration or hash"
+            assert_file_contains "$state/metadata" $'config_sha256\t'"$(<"$state/config.sha256")" "restore rollback state tracks restored config"
+            assert_contains "$(<"$MOCK_LOG")" $'fail2ban-client reload --restart sshd\nsystemctl restart fail2ban.service' "restore rollback reload then restart fallback"
+            [[ "$(grep -c '^fail2ban-client reload --restart sshd$' "$MOCK_LOG")" == 2 ]] || fail "restore $branch did not apply and recover exactly once"
+            if [[ "$branch" == lifecycle ]]; then
+                assert_contains "$(<"$MOCK_LOG")" 'mv lifecycle failure' "restore lifecycle failure injected"
+                [[ ! -e "$SYSTEM_ROOT/run/fail-lifecycle-once" ]] || fail "restore did not reach lifecycle rollback branch"
+            fi
+            assert_file_contains "$SYSTEM_ROOT/var/lib/vpsctl/backups/security/fail2ban/$backup/manifest" $'lifecycle\tactive' "failed restore preserves target backup lifecycle"
+            if [[ "$recovery" == failed ]]; then
+                assert_contains "$FAIL2BAN_TEST_OUTPUT" 'fail2ban-client reload --restart sshd 和 systemctl restart fail2ban.service 均失败' "restore daemon recovery diagnostic"
+                assert_contains "$FAIL2BAN_TEST_OUTPUT" '安全备份 ID：' "restore safety backup diagnostic"
+                assert_recovery_backup
+                [[ "$FAIL2BAN_TEST_RECOVERY_BACKUP" != "$backup" ]] || fail "restore diagnostic identified the target instead of safety backup"
+            else
+                [[ "$FAIL2BAN_TEST_OUTPUT" != *'回滚未完成'* ]] || fail "successful restore fallback reported incomplete rollback"
+            fi
+        done
+    done
+}
+
 test_adoption_restore_and_uninstall() {
     local config="$SYSTEM_ROOT/etc/fail2ban/jail.d/99-vpsctl-sshd.local" backup
     reset_system
@@ -318,6 +450,9 @@ test_readonly_status_without_systemd() {
 test_cli_and_install
 test_config_ignore_sync_and_services
 test_drift_rollback_and_verify_cleanup
+test_apply_daemon_rollback_failures
+test_inactive_daemon_rollback
+test_restore_daemon_rollback_failures
 test_adoption_restore_and_uninstall
 test_uninstall_menu_confirmation
 test_missing_backend_package_plan

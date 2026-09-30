@@ -250,9 +250,13 @@ tls_show_json_one() {
     local -a domains=()
     tls_load_record "$id" || return $?
     state="$(tls_record_state "$id")"
-    live_cert="$(tls_live_fullchain "$id")"
-    days=""
-    [[ -f "$live_cert" ]] && days="$(tls_days_remaining "$live_cert" 2>/dev/null || true)"
+    if (($# >= 2)); then
+        days="$2"
+    else
+        live_cert="$(tls_live_fullchain "$id")"
+        days=""
+        [[ -f "$live_cert" ]] && days="$(tls_days_remaining "$live_cert" 2>/dev/null || true)"
+    fi
     IFS=',' read -r -a domains <<<"$TLS_CERT_DOMAINS"
     printf '{"id":"%s","name":"%s","source":"%s","ca":' \
         "$(tls_json_escape "$TLS_CERT_ID")" "$(tls_json_escape "$TLS_CERT_NAME")" "$(tls_json_escape "$TLS_CERT_SOURCE")"
@@ -363,6 +367,7 @@ tls_timer_flags() {
 tls_status() {
     local json="$1" id days
     local -a ids=()
+    local -A days_by_id=()
     local total=0 imported=0 acme=0 expiring=0 first=1
     mapfile -t ids < <(tls_list_ids | sort)
     total=${#ids[@]}
@@ -370,10 +375,12 @@ tls_status() {
         tls_load_record "$id" || continue
         [[ "$TLS_CERT_SOURCE" == imported ]] && imported=$((imported + 1))
         [[ "$TLS_CERT_SOURCE" == acme ]] && acme=$((acme + 1))
+        days=""
         if [[ -f "$(tls_live_fullchain "$id")" ]]; then
             days="$(tls_days_remaining "$(tls_live_fullchain "$id")" 2>/dev/null || true)"
             [[ "$days" =~ ^[0-9]+$ && "$days" -le $TLS_RENEW_DAYS ]] && expiring=$((expiring + 1))
         fi
+        days_by_id["$id"]="$days"
     done
     tls_timer_flags
     if [[ "$json" == 1 ]]; then
@@ -385,7 +392,7 @@ tls_status() {
         for id in "${ids[@]}"; do
             ((first)) || printf ','
             first=0
-            tls_show_json_one "$id" || return $?
+            tls_show_json_one "$id" "${days_by_id[$id]-}" || return $?
         done
         printf ']}\n'
         return 0

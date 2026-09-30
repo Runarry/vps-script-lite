@@ -110,13 +110,22 @@ test_cli() {
 }
 
 test_dispatch_security() {
-    local sandbox output status marker menu_command
+    local sandbox output status marker menu_command download_marker core invalid
+    local -a invalid_args=()
 
     [[ "$(uname -s)" == "Linux" ]] || return 0
     sandbox="$(mktemp -d)"
     mkdir -p "$sandbox/bin" "$sandbox/lib" "$sandbox/commands/network" "$sandbox/commands/system" "$sandbox/commands/security" "$sandbox/commands/service/proxy" "$sandbox/commands/test"
     cp "$TEST_ROOT/bin/vpsctl" "$sandbox/bin/vpsctl"
     cp "$TEST_ROOT"/lib/*.sh "$sandbox/lib/"
+    cat >>"$sandbox/lib/distribution.sh" <<'EOF'
+
+vps_distribution_ensure_command() {
+    if [[ -n "${VPSCTL_DOWNLOAD_MARKER:-}" ]]; then
+        printf '%s\n' "$1" >>"$VPSCTL_DOWNLOAD_MARKER"
+    fi
+}
+EOF
     cat >>"$sandbox/lib/environment.sh" <<'EOF'
 
 # Make dispatch capability checks hermetic: this fixture deliberately exposes
@@ -276,12 +285,15 @@ EOF
     fi
 
     marker="$sandbox/executed"
-    output="$(VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" network ip-policy --help)"
+    download_marker="$sandbox/downloaded"
+    output="$(VPSCTL_DOWNLOAD_MARKER="$download_marker" VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" network ip-policy --help)"
     test_contains "$output" "ip_policy_args=--help" "IP policy help dispatch without glibc capability"
-    rm -f -- "$marker"
+    [[ -f "$download_marker" ]] || test_fail 'allowed help did not load its command bundle'
+    rm -f -- "$marker" "$download_marker"
     status=0
-    VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" network ip-policy status >/dev/null 2>&1 || status=$?
+    VPSCTL_DOWNLOAD_MARKER="$download_marker" VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" network ip-policy status >/dev/null 2>&1 || status=$?
     [[ "$status" == "3" ]] || test_fail "IP policy status without glibc capability should return 3, got ${status}"
+    [[ ! -e "$download_marker" ]] || test_fail 'unsupported platform loaded a command bundle before rejection'
     [[ ! -e "$marker" ]] || test_fail "IP policy status bypassed the glibc capability gate"
 
     output="$(VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" --no-color network rfw --help)"
@@ -330,6 +342,16 @@ EOF
 
     output="$(VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" --no-color service proxy status)"
     test_contains "$output" "proxy_no_color=1" "proxy no-color child context"
+    output="$(VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" service proxy status --json)"
+    test_contains "$output" 'proxy_args=status --json' 'proxy JSON status without service capability'
+    for core in all sing-box xray; do
+        output="$(bash "$sandbox/bin/vpsctl" service proxy status --core "$core")"
+        test_contains "$output" "proxy_args=status --core $core" 'proxy selected-core status without service capability'
+        output="$(bash "$sandbox/bin/vpsctl" service proxy status --core "$core" --json)"
+        test_contains "$output" "proxy_args=status --core $core --json" 'proxy selected-core JSON status without service capability'
+        output="$(bash "$sandbox/bin/vpsctl" service proxy status --json --core "$core")"
+        test_contains "$output" "proxy_args=status --json --core $core" 'proxy reordered JSON status without service capability'
+    done
     output="$(VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" service proxy --help)"
     test_contains "$output" "proxy_args=--help" "proxy global help dispatch without service capability"
     output="$(VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" service proxy help)"
@@ -353,9 +375,10 @@ EOF
 
     rm -f -- "$marker"
     status=0
-    VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" test nodequality >/dev/null 2>&1 || status=$?
+    VPSCTL_DOWNLOAD_MARKER="$download_marker" VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" test nodequality >/dev/null 2>&1 || status=$?
     [[ "$status" == "4" ]] || test_fail "NodeQuality execution without root capability should return 4, got ${status}"
     [[ ! -e "$marker" ]] || test_fail "NodeQuality execution bypassed the root capability gate"
+    [[ ! -e "$download_marker" ]] || test_fail 'unprivileged execution loaded a bundle before rejection'
     status=0
     VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" test tcpquality help extra >/dev/null 2>&1 || status=$?
     [[ "$status" == "4" ]] || test_fail "malformed TCPQuality help without root capability should return 4, got ${status}"
@@ -403,6 +426,14 @@ EOF
     VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" service proxy start >/dev/null 2>&1 || status=$?
     [[ "$status" == "3" ]] || test_fail "proxy start without service capability should return 3, got ${status}"
     [[ ! -e "$marker" ]] || test_fail "proxy start bypassed the capability gate"
+    for invalid in '--json --json' '--core xray --core all' '--core' '--core --json' '--core unknown' '--json extra' '--unknown'; do
+        IFS=' ' read -r -a invalid_args <<<"$invalid"
+        status=0
+        VPSCTL_DOWNLOAD_MARKER="$download_marker" VPSCTL_DISPATCH_MARKER="$marker" \
+            bash "$sandbox/bin/vpsctl" service proxy status "${invalid_args[@]}" >/dev/null 2>&1 || status=$?
+        [[ "$status" == 3 ]] || test_fail "malformed proxy status bypassed service capability: $invalid (rc=$status)"
+        [[ ! -e "$marker" && ! -e "$download_marker" ]] || test_fail "malformed proxy status loaded or ran a command: $invalid"
+    done
     status=0
     VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" service proxy profiles extra >/dev/null 2>&1 || status=$?
     [[ "$status" == "3" ]] || test_fail "proxy malformed profiles without service capability should return 3, got ${status}"

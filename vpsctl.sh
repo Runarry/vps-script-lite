@@ -58,6 +58,7 @@ vpsctl_download() {
 
     curl --proto '=https' --proto-redir '=https' --tlsv1.2 \
         --fail --location --silent --show-error \
+        --connect-timeout 15 --max-time 300 --retry 2 --retry-max-time 900 \
         --output "$destination" "${VPSCTL_RELEASE_BASE_URL}/${filename}"
     [[ -f "$destination" && ! -L "$destination" ]] ||
         vpsctl_bootstrap_die "download did not produce a regular file: ${filename}"

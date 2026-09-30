@@ -184,9 +184,12 @@ vps_distribution_parse_manifest() {
 vps_distribution_download() {
     local url="$1" destination="$2"
     if command -v curl >/dev/null 2>&1; then
-        curl --fail --location --silent --show-error --proto '=https' --proto-redir '=https' --tlsv1.2 --output "$destination" "$url" || return 20
+        curl --fail --location --silent --show-error --proto '=https' --proto-redir '=https' --tlsv1.2 \
+            --connect-timeout 15 --max-time 300 --retry 2 --retry-max-time 900 \
+            --output "$destination" "$url" || return 20
     elif command -v wget >/dev/null 2>&1; then
-        wget --https-only --quiet --output-document="$destination" "$url" || return 20
+        wget --https-only --quiet --dns-timeout=15 --connect-timeout=15 --read-timeout=60 --tries=3 \
+            --output-document="$destination" "$url" || return 20
     else
         vps_distribution_error '下载 release 需要 curl 或 wget'
         return 3

@@ -778,7 +778,6 @@ proxy_main() {
     # Direct-mode globals were parsed after vps_cmd_init; normalize them once
     # more so invalid external values cannot leak into helpers.
     vps_cmd_init "service proxy" "$PROXY_PROJECT_ROOT" || return $?
-    proxy_common_init || return $?
     if vps_cmd_is_interactive; then
         PROXY_INTERACTIVE=1
     else

@@ -85,6 +85,31 @@ tls_timer_enable() {
     vps_cmd_success "已启用证书续期 timer"
 }
 
+tls_timer_disable_quiet() {
+    local properties key value load_state="" unit_state="" active_state=""
+    TLS_TIMER_DISABLE_CHANGED=0
+    properties="$(systemctl show -p LoadState -p UnitFileState -p ActiveState vpsctl-tls-renew.timer)" || {
+        vps_cmd_error "无法查询证书续期 timer 状态"
+        return 20
+    }
+    while IFS='=' read -r key value; do
+        case "$key" in
+            LoadState) load_state="$value" ;;
+            UnitFileState) unit_state="$value" ;;
+            ActiveState) active_state="$value" ;;
+        esac
+    done <<<"$properties"
+    if [[ "$active_state" == inactive || "$active_state" == failed ]] &&
+        [[ "$load_state" == not-found || "$unit_state" == disabled ]]; then
+        return 0
+    fi
+    vps_cmd_run systemctl disable --now vpsctl-tls-renew.timer || {
+        vps_cmd_error "停用证书续期 timer 失败"
+        return 20
+    }
+    TLS_TIMER_DISABLE_CHANGED=1
+}
+
 tls_timer_disable() {
     (($# == 0)) || { vps_cmd_error "timer disable 不接受参数"; return 2; }
     vps_cmd_require_root || return $?
@@ -96,7 +121,7 @@ tls_timer_disable() {
         vps_cmd_info "演练：停用 vpsctl-tls-renew.timer"
         return 0
     fi
-    vps_cmd_run systemctl disable --now vpsctl-tls-renew.timer || true
+    tls_timer_disable_quiet || return $?
     vps_cmd_success "已停用证书续期 timer"
 }
 
@@ -112,16 +137,30 @@ tls_timer_dispatch() {
 }
 
 tls_remove_timer_units() {
-    if command -v systemctl >/dev/null 2>&1; then
-        vps_cmd_run systemctl disable --now vpsctl-tls-renew.timer || true
-        vps_cmd_run systemctl daemon-reload || true
+    local systemd=0 changed=0 file
+    if [[ "$(tls_init_detected)" == systemd ]] && command -v systemctl >/dev/null 2>&1; then
+        systemd=1
+        tls_timer_disable_quiet || return $?
+        changed="$TLS_TIMER_DISABLE_CHANGED"
     fi
-    if tls_is_managed_unit "$TLS_TIMER_UNIT" || [[ ! -e "$TLS_TIMER_UNIT" ]]; then
-        rm -f -- "$TLS_TIMER_UNIT"
+    for file in "$TLS_TIMER_UNIT" "$TLS_TIMER_SERVICE"; do
+        if tls_is_managed_unit "$file"; then
+            rm -f -- "$file" || {
+                vps_cmd_error "删除证书续期 unit 失败：$file"
+                ((changed)) && return 30
+                return 20
+            }
+            changed=1
+        fi
+    done
+    if ((systemd)); then
+        vps_cmd_run systemctl daemon-reload || {
+            vps_cmd_error "重载 systemd unit 失败"
+            ((changed)) && return 30
+            return 20
+        }
     fi
-    if tls_is_managed_unit "$TLS_TIMER_SERVICE" || [[ ! -e "$TLS_TIMER_SERVICE" ]]; then
-        rm -f -- "$TLS_TIMER_SERVICE"
-    fi
+    return 0
 }
 
 tls_uninstall() {
@@ -159,7 +198,7 @@ tls_uninstall() {
         vps_cmd_info "演练：卸载 TLS 续期 timer$( ((purge)) && printf ' 并清除证书库存' )"
         return 0
     fi
-    tls_remove_timer_units
+    tls_remove_timer_units || return $?
     if ((purge)); then
         rm -rf -- "$TLS_LIVE_DIR" "$TLS_CERTS_DIR" "$TLS_ACCOUNT_DIR" "$TLS_CRED_DIR"
         rm -f -- "$TLS_LEGO_META" "$TLS_GLOBAL_META"

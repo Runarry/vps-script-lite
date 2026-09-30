@@ -891,6 +891,151 @@ test_status_service_and_logs() {
     printf '  service routing done\n'
 }
 
+# Runtime-loaded list calls the jq failure override below.
+# shellcheck disable=SC1091,SC2317
+test_node_list_bindings_and_text() (
+    local first second third expected invalid format failure=""
+
+    reset_root
+    run_proxy node list
+    assert_equal 0 "$RUN_STATUS" "node list without manifest"
+    assert_equal '当前没有受管节点。' "$RUN_OUTPUT" "missing manifest text"
+    run_proxy node list --json
+    assert_equal 0 "$RUN_STATUS" "JSON node list without manifest"
+    assert_equal '{"schema_version":1,"total":0,"nodes":[]}' "$RUN_OUTPUT" "missing manifest JSON"
+
+    mkdir -p "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy"
+    jq -n '{schema_version:1,nodes:[
+        {id:"node-0000000000000001",core:"sing-box",profile:"shadowsocks-aes-256-gcm",
+         name:"\u0000  第一\tsecond\\path\nmiddle\n\u0000\n",listen:"\u0000::\t \\bind\n\n",
+         port:18011,address:"\u0000  proxy\t\\host\nline\n\u0000\n",ip_strategy:"prefer_ipv4",
+         credentials:{},tls:{},transport:{},options:{}},
+        {id:"node-0000000000000002",core:"xray",profile:"\u0000unknown\tprofile\\path\npart\n\u0000\n",
+         name:"\u0000\n\n",listen:"\u0000",port:18012,address:"\n\n",
+         credentials:{},tls:{},transport:{},options:{}},
+        {id:"node-0000000000000003",core:"xray",profile:"vless-reality-vision",name:"plain-three",
+         listen:"::",port:18013,address:"proxy.example",ip_strategy:"ipv6_only",
+         credentials:{},tls:{},transport:{},options:{}}
+    ]}' >"$(manifest_path)"
+    # Listing only needs node IDs. Unrelated relay data, duplicate bindings and
+    # IDs not present in the manifest must not invoke the full relay validator.
+    printf '%s\n' '{"exits":[{"uri":"unused-invalid-uri"}],"forwards":"unused","bindings":[{"node_id":"node-0000000000000001"},{"node_id":"node-0000000000000001"},{"node_id":"node-ffffffffffffffff"}]}' >"$(relay_path)"
+
+    first="$(printf '[1] %s\n    ID：node-0000000000000001  内核：sing-box  配置：Shadowsocks AES-256-GCM\n    监听：%s:18011  连接地址：%s\n    IP 策略：优先 IPv4（已绑定中转，暂不生效）\n' \
+        $'  第一\tsecond\\path\nmiddle' $'::\t \\bind' $'  proxy\t\\host\nline')"
+    second="$(printf '[2] \n    ID：node-0000000000000002  内核：Xray  配置：%s\n    监听：:18012  连接地址：\n    IP 策略：自动\n' \
+        $'unknown\tprofile\\path\npart')"
+    third='[3] plain-three
+    ID：node-0000000000000003  内核：Xray  配置：VLESS + REALITY + XTLS Vision
+    监听：:::18013  连接地址：proxy.example
+    IP 策略：仅 IPv6
+    REALITY 防偷：关闭'
+    expected="$(printf '%s\n%s\n%s\n当前筛选：3 个；节点总数：3 个\n' "$first" "$second" "$third")"
+    run_proxy node list
+    assert_equal 0 "$RUN_STATUS" "complex node text list"
+    assert_equal "$expected" "$RUN_OUTPUT" "text field boundaries and command substitution compatibility"
+    run_proxy node list --core sing-box
+    assert_equal 0 "$RUN_STATUS" "complex filtered node text list"
+    assert_equal "$(printf '%s\n当前筛选：1 个；节点总数：3 个\n' "$first")" "$RUN_OUTPUT" "filtered text keeps full total"
+    run_proxy node list --core xray
+    assert_equal 0 "$RUN_STATUS" "Xray filtered node text list"
+    assert_contains "$RUN_OUTPUT" $'[1] \n    ID：node-0000000000000002' "filtered list keeps empty values and order"
+    assert_contains "$RUN_OUTPUT" '[2] plain-three' "filtered list restarts numbering"
+    assert_contains "$RUN_OUTPUT" '当前筛选：2 个；节点总数：3 个' "Xray filtered count"
+
+    run_proxy node list --json
+    assert_equal 0 "$RUN_STATUS" "complex node JSON list"
+    jq -e '
+        .total == 3 and (.nodes | length) == 3 and
+        .nodes[0].name == "\u0000  第一\tsecond\\path\nmiddle\n\u0000\n" and
+        .nodes[0].relay_bound == true and .nodes[0].ip_strategy_effective == false and
+        .nodes[0].ip_strategy_status == "relay_bound" and
+        .nodes[1].ip_strategy == "auto" and .nodes[1].relay_bound == false and
+        .nodes[2].reality_anti_relay == false and .nodes[2].ip_strategy_effective == true
+    ' <<<"$RUN_OUTPUT" >/dev/null || fail "JSON list keeps raw names and binding annotations"
+    run_proxy node list --core sing-box --json
+    assert_equal 0 "$RUN_STATUS" "filtered node JSON list"
+    jq -e '.total == 1 and (.nodes | length) == 1 and .nodes[0].id == "node-0000000000000001"' \
+        <<<"$RUN_OUTPUT" >/dev/null || fail "JSON list filtered total"
+
+    cp "$(manifest_path)" "${TEST_TEMP}/list-manifest.json"
+    jq '.nodes[0].core = "xray"' "$(manifest_path)" >"${TEST_TEMP}/list-xray-only.json"
+    cp "${TEST_TEMP}/list-xray-only.json" "$(manifest_path)"
+    run_proxy node list --core sing-box
+    assert_equal 0 "$RUN_STATUS" "empty text filter"
+    assert_equal '当前筛选：0 个；节点总数：3 个' "$RUN_OUTPUT" "empty filter keeps full total"
+    run_proxy node list --core sing-box --json
+    assert_equal 0 "$RUN_STATUS" "empty JSON filter"
+    jq -e '.total == 0 and .nodes == []' <<<"$RUN_OUTPUT" >/dev/null || fail "empty JSON filter"
+    cp "${TEST_TEMP}/list-manifest.json" "$(manifest_path)"
+
+    rm -f -- "$(relay_path)"
+    run_proxy node list
+    assert_equal 0 "$RUN_STATUS" "text list without relay state"
+    assert_equal "${expected/'（已绑定中转，暂不生效）'/}" "$RUN_OUTPUT" "missing relay state leaves policy active"
+    run_proxy node list --json
+    assert_equal 0 "$RUN_STATUS" "JSON list without relay state"
+    jq -e 'all(.nodes[]; .relay_bound == false and .ip_strategy_effective == true)' \
+        <<<"$RUN_OUTPUT" >/dev/null || fail "missing relay state JSON annotations"
+
+    for invalid in '' '{' '[]' '{}' '{"bindings":null}' '{"bindings":{}}' \
+        '{"bindings":[17]}' '{"bindings":[{}]}' '{"bindings":[{"node_id":17}]}' \
+        '{"bindings":[{"node_id":"node-bad"}]}' $'{"bindings":[]}\n{"bindings":[]}'; do
+        printf '%s\n' "$invalid" >"$(relay_path)"
+        for format in text json; do
+            if [[ "$format" == json ]]; then run_proxy node list --json; else run_proxy node list; fi
+            assert_equal 10 "$RUN_STATUS" "$format rejects invalid relay binding state"
+            assert_contains "$RUN_OUTPUT" '中转状态的节点绑定格式校验失败' "$format invalid binding message"
+            assert_not_contains "$RUN_OUTPUT" '当前筛选：' "$format invalid state has no success totals"
+        done
+    done
+    rm -f -- "$(relay_path)"
+    mkdir "$(relay_path)"
+    for format in text json; do
+        if [[ "$format" == json ]]; then run_proxy node list --json; else run_proxy node list; fi
+        assert_equal 3 "$RUN_STATUS" "$format rejects relay directory"
+        assert_contains "$RUN_OUTPUT" '可读普通文件' "$format relay directory message"
+    done
+    rmdir "$(relay_path)"
+    ln -s "${TEST_TEMP}/missing-relay.json" "$(relay_path)"
+    for format in text json; do
+        if [[ "$format" == json ]]; then run_proxy node list --json; else run_proxy node list; fi
+        assert_equal 3 "$RUN_STATUS" "$format rejects dangling relay symlink"
+    done
+    rm -f -- "$(relay_path)"
+    printf '{"bindings":[]}\n' >"$(relay_path)"
+
+    source "${TEST_ROOT}/lib/command.sh"
+    vps_cmd_init "proxy node list tests" "$TEST_ROOT"
+    source "${TEST_ROOT}/commands/service/proxy/common.sh"
+    source "${TEST_ROOT}/commands/service/proxy/protocols-sing-box.sh"
+    source "${TEST_ROOT}/commands/service/proxy/protocols-xray.sh"
+    source "${TEST_ROOT}/commands/service/proxy/nodes.sh"
+    source "${TEST_ROOT}/commands/service/proxy/relay.sh"
+    proxy_common_init
+    proxy_relay_init
+    jq() {
+        if [[ "$failure" == read && "${1:-}" == -ces ]]; then return 2; fi
+        "${TEST_FAKE_BIN}/jq" "$@" || return $?
+        # Emit a complete valid batch before failing to prove that mapfile's
+        # successful read cannot hide the producer's nonzero exit status.
+        if [[ "$failure" == stream && "${1:-}" == -j ]]; then return 42; fi
+        return 0
+    }
+    for failure in read stream; do
+        if RUN_OUTPUT="$(proxy_node_list 2>&1)"; then RUN_STATUS=0; else RUN_STATUS=$?; fi
+        if [[ "$failure" == read ]]; then
+            assert_equal 3 "$RUN_STATUS" "relay read failure"
+            assert_contains "$RUN_OUTPUT" '无法读取中转状态' "relay read failure message"
+        else
+            assert_equal 10 "$RUN_STATUS" "node list producer failure"
+            assert_contains "$RUN_OUTPUT" '无法读取节点列表' "node list producer failure message"
+        fi
+        assert_not_contains "$RUN_OUTPUT" '[1]' "$failure failure has no partial node output"
+        assert_not_contains "$RUN_OUTPUT" '当前筛选：' "$failure failure has no success totals"
+    done
+)
+
 test_core_choice_crud_pending_and_validation() {
     reset_root
     install_external xray
@@ -2709,6 +2854,7 @@ fi
 case "${VPSCTL_TEST_ONLY:-}" in
     core-install) test_core_install_autostart; printf 'PASS: proxy install autostart tests\n'; exit 0 ;;
     core-release) test_core_release_channels; printf 'PASS: proxy core release tests\n'; exit 0 ;;
+    node-list) test_node_list_bindings_and_text; printf 'PASS: proxy node list tests\n'; exit 0 ;;
     node-ip-policy) test_node_ip_strategy_and_batch; printf 'PASS: node IP policy tests\n'; exit 0 ;;
     relay-state) test_relay_state_bindings_and_purge; printf 'PASS: relay state tests\n'; exit 0 ;;
     relay-xray) test_relay_xray_pending_and_validation; printf 'PASS: relay Xray tests\n'; exit 0 ;;
@@ -2730,6 +2876,8 @@ printf 'TEST: proxy dependency installation plans\n'
 test_dependency_install_plans
 printf 'TEST: proxy status, services and logs\n'
 test_status_service_and_logs
+printf 'TEST: proxy node list bindings and text fields\n'
+test_node_list_bindings_and_text
 printf 'TEST: proxy CRUD, pending and validation\n'
 test_core_choice_crud_pending_and_validation
 printf 'TEST: proxy core choice, ports and uninstall\n'
