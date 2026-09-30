@@ -557,12 +557,30 @@ test_user_password_and_keys() {
     local -a key_manifests=()
 
     reset_system
-    assert_status 0 "user add" run_access user add --name deploy
+    VPSCTL_QUIET=0 assert_status 0 "user add" run_access user add --name deploy
+    assert_contains "$ACCESS_TEST_OUTPUT" '已创建管理员用户 deploy' "user creation success diagnostic"
     assert_file_contains "$TEST_SYSTEM_ROOT/run/useradd.log" '-- deploy' "useradd terminates options before username"
     assert_file_contains "$TEST_SYSTEM_ROOT/run/useradd.log" '--groups sudo' "useradd administrator group"
     rm -f -- "$TEST_SYSTEM_ROOT/run/useradd.log"
-    assert_status 0 "user add with password dry-run" run_access --dry-run user add --name deploy --set-password
+    VPSCTL_QUIET=0 assert_status 0 "user add dry-run" run_access --dry-run user add --name deploy
+    [[ "$ACCESS_TEST_OUTPUT" != *'已创建管理员用户'* ]] || fail "user add dry-run claimed creation success"
+    VPSCTL_QUIET=0 assert_status 0 "user add with password dry-run" run_access --dry-run user add --name deploy --set-password
+    assert_contains "$ACCESS_TEST_OUTPUT" '演练：用户创建后将通过系统 passwd 为 deploy 设置密码' "user password dry-run plan"
+    [[ "$ACCESS_TEST_OUTPUT" != *'已创建管理员用户'* ]] || fail "user add with password dry-run claimed creation success"
     [[ ! -e "$TEST_SYSTEM_ROOT/run/useradd.log" ]] || fail "user add dry-run invoked useradd"
+
+    assert_status 20 "user add rolls back after password failure" env VPSCTL_QUIET=0 bash -c '
+        set -Eeuo pipefail
+        source "$1/lib/command.sh"
+        source "$1/commands/security/access/common.sh"
+        source "$1/commands/security/access/users.sh"
+        access_password_set() { return 20; }
+        access_user_add deploy 1
+    ' _ "$TEST_ROOT"
+    assert_file_contains "$TEST_SYSTEM_ROOT/run/useradd.log" '-- deploy' "password failure follows user creation"
+    assert_file_contains "$TEST_SYSTEM_ROOT/run/userdel.log" '--remove -- deploy' "password failure rolls back new user"
+    assert_contains "$ACCESS_TEST_OUTPUT" '密码设置失败；已回滚本次新用户创建' "password failure rollback diagnostic"
+    [[ "$ACCESS_TEST_OUTPUT" != *'已创建管理员用户'* ]] || fail "password failure claimed creation success"
 
     assert_status 3 "password set refuses non-TTY" run_access password set --user alice
     [[ ! -e "$TEST_SYSTEM_ROOT/run/passwd.log" ]] || fail "passwd was invoked without a TTY"

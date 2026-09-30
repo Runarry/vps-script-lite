@@ -404,7 +404,7 @@ vps_server_test_run() {
         return "$VPS_SERVER_TEST_SIGNAL_STATUS"
     fi
     if [[ "$kind" == nodequality && "$upstream_started" == 1 && "$upstream_status" == 1 ]]; then
-        vps_cmd_warning "NodeQuality 已完成报告流程但上游返回 1；临时资源已清理，按成功处理"
+        vps_cmd_warning "NodeQuality 上游返回 1；本次临时目录已清理，按成功处理（兼容上游退出码）。"
         return 0
     fi
     return "$status"

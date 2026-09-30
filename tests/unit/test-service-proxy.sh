@@ -2228,6 +2228,327 @@ PROFILES
     done
 )
 
+test_relay_forward_render_nft() (
+    local manifest="${TEST_TEMP}/render-relay.json" cache="${TEST_TEMP}/render-cache.json"
+    local base="${TEST_TEMP}/render-base.json" cache_base="${TEST_TEMP}/render-cache-base.json"
+    local actual="${TEST_TEMP}/render-actual.nft" errors="${TEST_TEMP}/render-errors.log" calls="${TEST_TEMP}/render-jq.log"
+    local header="${TEST_TEMP}/render-header.nft" golden="${TEST_TEMP}/render-golden.nft" expected="${TEST_TEMP}/render-expected.nft"
+    local empty="${TEST_TEMP}/render-empty.nft" helper_args_file="${TEST_TEMP}/render-args" failure='' fixture
+    local PROXY_RELAY_FORWARD_TABLE4=render4 PROXY_RELAY_FORWARD_TABLE6=render6
+    local -a captured=()
+    source "${TEST_ROOT}/commands/service/proxy/relay-forward.sh"
+    vps_cmd_error() { printf '%s\n' "$*" >&2; }
+    jq() {
+        printf 'jq\n' >>"$calls"
+        case "$failure" in
+            short) printf 'incomplete\0'; return 0 ;;
+            partial) printf 'incomplete\0'; return 42 ;;
+            empty) return 42 ;;
+        esac
+        "$REAL_JQ" "$@" || return $?
+        [[ "$failure" != stream ]]
+    }
+    mapfile() {
+        builtin mapfile "$@" || return $?
+        [[ "$failure" != read ]]
+    }
+    check_render() {
+        local expected_status="$1" expected_file="$2" description="$3" expected_calls="${4:-1}"
+        : >"$calls"
+        if proxy_relay_forward_render_nft "$manifest" "$cache" >"$actual" 2>"$errors"; then RUN_STATUS=0; else RUN_STATUS=$?; fi
+        RUN_OUTPUT="$(<"$errors")"
+        assert_equal "$expected_status" "$RUN_STATUS" "$description status"
+        assert_equal "$expected_calls" "$(wc -l <"$calls")" "$description jq count"
+        cmp -s "$expected_file" "$actual" || { diff -u "$expected_file" "$actual" >&2; fail "$description output differs"; }
+    }
+    cat >"$base" <<'JSON'
+{"exits":[
+{"id":"v4","endpoint":{"port":8443},"protocol":{"network_hint":"udp"}},
+{"id":"dual","endpoint":{"port":443},"protocol":{"network_hint":"both"},"network_hint":"udp"},
+{"id":"v6","endpoint":{"port":5353},"network_hint":"udp"}],"forwards":[
+{"id":"F0","exit_id":"v4","network":"tcp","listen_port_start":30000,"listen_port_end":30002,"publish_address":"public.example","family":"ipv4"},
+{"id":"F1","exit_id":"dual","network":"auto","listen_port_start":31000,"listen_port_end":31000,"publish_address":"203.0.113.1"},
+{"id":"F2","exit_id":"v6","network":"auto","listen_port_start":32000,"listen_port_end":32001,"publish_address":"2001:db8::1","family":"ipv6"}]}
+JSON
+    cat >"$cache_base" <<'JSON'
+{"exits":{"v4":{"ipv4":"198.51.100.10","ipv6":"2001:db8::10"},"dual":{"ipv4":"198.51.100.20","ipv6":"2001:db8::20"},"v6":{"ipv4":"198.51.100.30","ipv6":"2001:db8::30"}}}
+JSON
+    cat >"$header" <<'NFT'
+destroy table ip render4
+add table ip render4
+add chain ip render4 prerouting { type nat hook prerouting priority dstnat; policy accept; }
+add chain ip render4 forward { type filter hook forward priority filter; policy accept; }
+add chain ip render4 postrouting { type nat hook postrouting priority srcnat; policy accept; }
+destroy table ip6 render6
+add table ip6 render6
+add chain ip6 render6 prerouting { type nat hook prerouting priority dstnat; policy accept; }
+add chain ip6 render6 forward { type filter hook forward priority filter; policy accept; }
+add chain ip6 render6 postrouting { type nat hook postrouting priority srcnat; policy accept; }
+NFT
+    cp "$header" "$golden"
+    cat >>"$golden" <<'NFT'
+add rule ip render4 prerouting fib daddr type local tcp dport 30000-30002 counter dnat to 198.51.100.10:8443 comment "vpsctl:F0"
+add rule ip render4 forward ct status dnat ip daddr 198.51.100.10 tcp dport 8443 ct state { new, established, related } counter accept comment "vpsctl:F0"
+add rule ip render4 forward ct status dnat ct direction reply ct original proto-dst 30000-30002 meta l4proto tcp ct state { established, related } counter accept comment "vpsctl:F0:return"
+add rule ip render4 postrouting ct status dnat ip daddr 198.51.100.10 tcp dport 8443 counter masquerade comment "vpsctl:F0"
+add rule ip render4 prerouting fib daddr type local tcp dport 31000 counter dnat to 198.51.100.20:443 comment "vpsctl:F1"
+add rule ip render4 forward ct status dnat ip daddr 198.51.100.20 tcp dport 443 ct state { new, established, related } counter accept comment "vpsctl:F1"
+add rule ip render4 forward ct status dnat ct direction reply ct original proto-dst 31000 meta l4proto tcp ct state { established, related } counter accept comment "vpsctl:F1:return"
+add rule ip render4 postrouting ct status dnat ip daddr 198.51.100.20 tcp dport 443 counter masquerade comment "vpsctl:F1"
+add rule ip render4 prerouting fib daddr type local udp dport 31000 counter dnat to 198.51.100.20:443 comment "vpsctl:F1"
+add rule ip render4 forward ct status dnat ip daddr 198.51.100.20 udp dport 443 ct state { new, established, related } counter accept comment "vpsctl:F1"
+add rule ip render4 forward ct status dnat ct direction reply ct original proto-dst 31000 meta l4proto udp ct state { established, related } counter accept comment "vpsctl:F1:return"
+add rule ip render4 postrouting ct status dnat ip daddr 198.51.100.20 udp dport 443 counter masquerade comment "vpsctl:F1"
+add rule ip6 render6 prerouting fib daddr type local tcp dport 31000 counter dnat to [2001:db8::20]:443 comment "vpsctl:F1"
+add rule ip6 render6 forward ct status dnat ip6 daddr 2001:db8::20 tcp dport 443 ct state { new, established, related } counter accept comment "vpsctl:F1"
+add rule ip6 render6 forward ct status dnat ct direction reply ct original proto-dst 31000 meta l4proto tcp ct state { established, related } counter accept comment "vpsctl:F1:return"
+add rule ip6 render6 postrouting ct status dnat ip6 daddr 2001:db8::20 tcp dport 443 counter masquerade comment "vpsctl:F1"
+add rule ip6 render6 prerouting fib daddr type local udp dport 31000 counter dnat to [2001:db8::20]:443 comment "vpsctl:F1"
+add rule ip6 render6 forward ct status dnat ip6 daddr 2001:db8::20 udp dport 443 ct state { new, established, related } counter accept comment "vpsctl:F1"
+add rule ip6 render6 forward ct status dnat ct direction reply ct original proto-dst 31000 meta l4proto udp ct state { established, related } counter accept comment "vpsctl:F1:return"
+add rule ip6 render6 postrouting ct status dnat ip6 daddr 2001:db8::20 udp dport 443 counter masquerade comment "vpsctl:F1"
+add rule ip6 render6 prerouting fib daddr type local udp dport 32000-32001 counter dnat to [2001:db8::30]:5353 comment "vpsctl:F2"
+add rule ip6 render6 forward ct status dnat ip6 daddr 2001:db8::30 udp dport 5353 ct state { new, established, related } counter accept comment "vpsctl:F2"
+add rule ip6 render6 forward ct status dnat ct direction reply ct original proto-dst 32000-32001 meta l4proto udp ct state { established, related } counter accept comment "vpsctl:F2:return"
+add rule ip6 render6 postrouting ct status dnat ip6 daddr 2001:db8::30 udp dport 5353 counter masquerade comment "vpsctl:F2"
+NFT
+    cp "$base" "$manifest"
+    cp "$cache_base" "$cache"
+    : >"$empty"
+    check_render 0 "$golden" 'mixed family/protocol rules retain exact order and formatting'
+    for fixture in ipv4 ipv6 missing; do
+        "$REAL_JQ" --arg fixture "$fixture" '
+            if $fixture == "missing" then del(.exits.dual) else del(.exits.dual[$fixture]) end
+        ' "$cache_base" >"$cache"
+        case "$fixture" in
+            ipv4) sed '/^add rule ip render4 .*vpsctl:F1/d' "$golden" >"$expected" ;;
+            ipv6) sed '/^add rule ip6 render6 .*vpsctl:F1/d' "$golden" >"$expected" ;;
+            missing) sed '/^add rule .*vpsctl:F1/d' "$golden" >"$expected" ;;
+        esac
+        check_render 0 "$expected" "dual forward skips $fixture cache address"
+    done
+    cp "$cache_base" "$cache"
+    "$REAL_JQ" '.forwards[1].network = "invalid"' "$base" >"$manifest"
+    head -n 14 "$golden" >"$expected"
+    check_render 2 "$expected" 'network errors retain preceding header and forward rules'
+    assert_contains "$RUN_OUTPUT" 'network 必须是 auto、tcp、udp 或 both：invalid' 'invalid network diagnostic'
+    printf '{"forwards":[]}\n' >"$manifest"
+    check_render 0 "$header" 'empty forwards emit the ten-line clear batch'
+    printf '{}\n' >"$cache"
+    check_render 0 "$header" 'empty forwards need no cache entries'
+
+    (
+        # Capture helper arguments to cover fields such as publish_address which
+        # deliberately do not appear in the resulting nft rules.
+        _proxy_relay_forward_emit_rule_set() { printf '%s\0' "$@" >>"$helper_args_file"; }
+        "$REAL_JQ" -n '{exits:[{id:"edge",endpoint:{port:"8443\u0000\n\n"},protocol:{network_hint:"tcp\u0000\n\n"}}],forwards:[
+            {id:"F |\"\t中\r\ninner\u0000\n\n",exit_id:"edge\u0000\n\n",network:"auto\u0000\n\n",listen_port_start:"30000\u0000\n",listen_port_end:"30002\u0000\n",
+             publish_address:"public |\"\t中\r\ninner\u0000\n\n",family:"ipv4\u0000\n\n"}]}' >"$manifest"
+        printf '{"exits":{"edge":{"ipv4":"198.51.100.42\\u0000\\n\\n"}}}\n' >"$cache"
+        : >"$helper_args_file"
+        check_render 0 "$header" 'scalar fields retain internal characters and strip NUL/trailing LF'
+        builtin mapfile -d '' -t captured <"$helper_args_file"
+        assert_equal 9 "${#captured[@]}" 'one rule helper call with nine fields'
+        assert_equal ip "${captured[0]}" 'normalized family'
+        assert_equal render4 "${captured[1]}" 'family table'
+        assert_equal 198.51.100.42 "${captured[2]}" 'normalized cache address'
+        assert_equal 8443 "${captured[3]}" 'normalized endpoint port'
+        assert_equal $'public |"\t中\r\ninner' "${captured[4]}" 'publish field character preservation'
+        assert_equal tcp "${captured[5]}" 'normalized auto network hint'
+        assert_equal 30000 "${captured[6]}" 'normalized interval start'
+        assert_equal 30002 "${captured[7]}" 'normalized interval end'
+        assert_equal $'F |"\t中\r\ninner' "${captured[8]}" 'ID character preservation'
+
+        "$REAL_JQ" -n '{exits:[{id:"edge",endpoint:{port:[8443,"line\nbreak"]},network_hint:"udp"}],forwards:[
+            {id:{label:"line\nbreak",nested:[true,2]},exit_id:"edge",network:"tcp",listen_port_start:30000,listen_port_end:30000,publish_address:[],family:"ipv4"}]}' >"$manifest"
+        printf '{"exits":{"edge":{"ipv4":{"address":"198.51.100.42"}}}}\n' >"$cache"
+        : >"$helper_args_file"
+        check_render 0 "$header" 'non-string fields retain native jq rendering without new schema restrictions'
+        builtin mapfile -d '' -t captured <"$helper_args_file"
+        assert_equal "$("$REAL_JQ" -r '.exits.edge.ipv4' "$cache")" "${captured[2]}" 'structured cache address'
+        assert_equal "$("$REAL_JQ" -r '.exits[0].endpoint.port' "$manifest")" "${captured[3]}" 'structured endpoint port'
+        assert_equal '[]' "${captured[4]}" 'structured publish field'
+        assert_equal "$("$REAL_JQ" -r '.forwards[0].id' "$manifest")" "${captured[8]}" 'structured ID'
+
+        "$REAL_JQ" '.forwards = .forwards[:1] | .forwards[0].id = "" | .forwards[0].publish_address = "" | .exits[0].endpoint.port = ""' "$base" >"$manifest"
+        cp "$cache_base" "$cache"
+        : >"$helper_args_file"
+        check_render 0 "$header" 'empty scalar fields retain record alignment'
+        builtin mapfile -d '' -t captured <"$helper_args_file"
+        assert_equal 9 "${#captured[@]}" 'empty fields retain nine rule helper arguments'
+        assert_equal '' "${captured[3]}" 'empty endpoint port'
+        assert_equal '' "${captured[4]}" 'empty publish field'
+        assert_equal '' "${captured[8]}" 'empty ID'
+    )
+
+    cp "$base" "$manifest"
+    cp "$cache_base" "$cache"
+    for failure in short partial empty stream read; do
+        check_render 10 "$empty" "$failure extraction failure emits no batch"
+    done
+    failure=''
+    for fixture in manifest cache; do
+        cp "$base" "$manifest"
+        cp "$cache_base" "$cache"
+        if [[ "$fixture" == manifest ]]; then printf '{invalid\n' >>"$manifest"; else printf '{invalid\n' >"$cache"; fi
+        check_render 10 "$empty" "$fixture JSON parse failure emits no batch"
+    done
+    printf '{"forwards":[]}\n' >"$manifest"
+    check_render 10 "$empty" 'cache parse failure is caught even with empty forwards'
+    for fixture in empty-manifest empty-cache multiple-manifest multiple-cache; do
+        cp "$base" "$manifest"
+        cp "$cache_base" "$cache"
+        case "$fixture" in
+            empty-manifest) : >"$manifest" ;;
+            empty-cache) : >"$cache" ;;
+            multiple-manifest) printf '{}\n' >>"$manifest" ;;
+            multiple-cache) printf '{}\n' >>"$cache" ;;
+        esac
+        check_render 10 "$empty" "$fixture document read failure emits no batch"
+    done
+    cp "$base" "$manifest"
+    "$REAL_JQ" '.exits.dual = 42' "$cache_base" >"$cache"
+    check_render 10 "$empty" 'cache field read failure emits no batch'
+    cp "$base" "$manifest"
+    rm -f -- "$cache"
+    check_render 2 "$empty" 'missing cache retains file-type failure' 0
+    cp "$cache_base" "$cache"
+    rm -f -- "$manifest"
+    ln -s "$base" "$manifest"
+    check_render 2 "$empty" 'manifest symlink retains file-type failure' 0
+)
+
+test_relay_forward_refresh_cache() (
+    local manifest="${TEST_TEMP}/cache-relay.json" old_cache="${TEST_TEMP}/cache-old.json"
+    local output="${TEST_TEMP}/cache-actual.json" calls="${TEST_TEMP}/cache-getent.log"
+    local errors="${TEST_TEMP}/cache-errors.log" dns="${TEST_TEMP}/cache-dns"
+    source "${TEST_ROOT}/commands/service/proxy/relay-forward.sh"
+    mkdir -p "$dns"
+    vps_cmd_warning() { printf '%s\n' "$*" >&2; }
+    getent() {
+        local database="$1" host="$2" address file="${dns}/$1-$2"
+        printf '%s %s\n' "$database" "$host" >>"$calls"
+        [[ -f "$file" ]] || return 2
+        while IFS= read -r address; do
+            [[ -z "$address" ]] || printf '%s STREAM %s\n' "$address" "$host"
+        done <"$file"
+        return 0
+    }
+    check_cache() {
+        local expected_queries="$1" description="$2"
+        : >"$calls"
+        # Call in the same shell so a cache leaking across invocations is observable.
+        if proxy_relay_forward_refresh_cache "$manifest" "$old_cache" "$output" >"$errors" 2>&1; then RUN_STATUS=0; else RUN_STATUS=$?; fi
+        RUN_OUTPUT="$(<"$errors")"
+        assert_equal 0 "$RUN_STATUS" "$description status"
+        assert_equal "$expected_queries" "$(LC_ALL=C sort "$calls")" "$description getent requests"
+        jq -e '
+            .schema_version == 1 and (.resolved | type) == "array" and (.degraded | type) == "array" and
+            (.updated_at | type) == "string" and .updated_at == .generated_at and
+            all(.exits[]; (.host | type) == "string" and .updated_at != null)
+        ' "$output" >/dev/null || fail "$description cache schema"
+    }
+
+    cat >"$manifest" <<'JSON'
+{"exits":[
+{"id":"a","endpoint":{"host":"shared.example"}},
+{"id":"b","endpoint":{"host":"shared.example"}},
+{"id":"other","endpoint":{"host":"other.example"}},
+{"id":"case","endpoint":{"host":"Shared.example"}},
+{"id":"dot","endpoint":{"host":"shared.example."}},
+{"id":"unused","endpoint":{"host":"unused.example"}}],"forwards":[
+{"exit_id":"a"},{"exit_id":"a","family":"ipv4"},{"exit_id":"b","family":"dual"},
+{"exit_id":"other","family":"ipv4"},{"exit_id":"case","family":"ipv4"},{"exit_id":"dot","family":"ipv4"}]}
+JSON
+    printf '%s\n' '!invalid' '999.0.0.1' '198.51.100.20' '198.51.100.10' '198.51.100.20' >"${dns}/ahostsv4-shared.example"
+    printf '%s\n' '!invalid' '2001:db8::20' '2001:db8::10' '2001:db8::20' >"${dns}/ahostsv6-shared.example"
+    printf '%s\n' '198.51.100.30' >"${dns}/ahostsv4-other.example"
+    printf '%s\n' '198.51.100.40' >"${dns}/ahostsv4-Shared.example"
+    printf '%s\n' '198.51.100.50' >"${dns}/ahostsv4-shared.example."
+    check_cache $'ahostsv4 Shared.example\nahostsv4 other.example\nahostsv4 shared.example\nahostsv4 shared.example.\nahostsv6 shared.example' 'shared DNS, family union and exact host text'
+    jq -e '
+        .exits.a.ipv4 == "198.51.100.10" and .exits.b.ipv4 == "198.51.100.10" and
+        .exits.a.ipv6 == "2001:db8::10" and .exits.b.ipv6 == "2001:db8::10" and
+        .exits.other.ipv4 == "198.51.100.30" and .exits.case.ipv4 == "198.51.100.40" and
+        .exits.dot.ipv4 == "198.51.100.50" and (.exits | has("unused") | not) and
+        (.resolved | length) == 5 and .degraded == []
+    ' "$output" >/dev/null || fail 'shared DNS selects sorted valid addresses and keeps hosts distinct'
+    printf '%s\n' '198.51.100.60' >"${dns}/ahostsv4-shared.example"
+    printf '%s\n' '2001:db8::60' >"${dns}/ahostsv6-shared.example"
+    check_cache $'ahostsv4 Shared.example\nahostsv4 other.example\nahostsv4 shared.example\nahostsv4 shared.example.\nahostsv6 shared.example' 'next refresh queries new DNS answers'
+    jq -e '
+        .exits.a.ipv4 == "198.51.100.60" and .exits.b.ipv4 == "198.51.100.60" and
+        .exits.a.ipv6 == "2001:db8::60" and .exits.b.ipv6 == "2001:db8::60" and .degraded == []
+    ' "$output" >/dev/null || fail 'successful DNS results must not survive the next refresh'
+
+    cat >"$manifest" <<'JSON'
+{"exits":[
+{"id":"a","endpoint":{"host":"failed.example"}},
+{"id":"b","endpoint":{"host":"failed.example"}},
+{"id":"none","endpoint":{"host":"failed.example"}},
+{"id":"mismatch","endpoint":{"host":"failed.example"}}],"forwards":[
+{"exit_id":"a"},{"exit_id":"b"},{"exit_id":"none","family":"ipv4"},{"exit_id":"mismatch","family":"ipv4"}]}
+JSON
+    cat >"$old_cache" <<'JSON'
+{"exits":{
+"a":{"host":"failed.example","ipv4":"198.51.100.11","ipv6":"2001:db8::11"},
+"b":{"host":"failed.example","ipv4":"198.51.100.22","ipv6":"2001:db8::22"},
+"mismatch":{"host":"previous.example","ipv4":"198.51.100.33"}}}
+JSON
+    check_cache $'ahostsv4 failed.example\nahostsv6 failed.example' 'failed DNS reuses empty results with separate exit fallbacks'
+    jq -e '
+        .exits.a.ipv4 == "198.51.100.11" and .exits.a.ipv6 == "2001:db8::11" and
+        .exits.b.ipv4 == "198.51.100.22" and .exits.b.ipv6 == "2001:db8::22" and
+        .exits.none.ipv4 == null and .exits.mismatch.ipv4 == null and
+        (.degraded | length) == 6 and all(.degraded[]; .reason == "dns-failed" and
+            .retained == (.exit_id == "a" or .exit_id == "b")) and
+        ([.degraded[] | [.exit_id,.family]] | sort) ==
+            [["a","ipv4"],["a","ipv6"],["b","ipv4"],["b","ipv6"],["mismatch","ipv4"],["none","ipv4"]]
+    ' "$output" >/dev/null || fail 'old cache is retained only for the matching exit, host and family'
+    : >"${dns}/ahostsv4-failed.example"
+    : >"${dns}/ahostsv6-failed.example"
+    check_cache $'ahostsv4 failed.example\nahostsv6 failed.example' 'successful empty DNS output is also reused'
+    jq -e '
+        .exits.a.ipv4 == "198.51.100.11" and .exits.b.ipv4 == "198.51.100.22" and
+        .exits.none.ipv4 == null and .exits.mismatch.ipv4 == null and (.degraded | length) == 6
+    ' "$output" >/dev/null || fail 'empty DNS output preserves separate old cache decisions'
+    printf '%s\n' '198.51.100.44' >"${dns}/ahostsv4-failed.example"
+    printf '%s\n' '2001:db8::44' >"${dns}/ahostsv6-failed.example"
+    check_cache $'ahostsv4 failed.example\nahostsv6 failed.example' 'DNS recovers on a later refresh'
+    jq -e '
+        all(.exits[]; .ipv4 == "198.51.100.44") and
+        .exits.a.ipv6 == "2001:db8::44" and .exits.b.ipv6 == "2001:db8::44" and .degraded == []
+    ' "$output" >/dev/null || fail 'failed DNS and retained addresses must not survive the next refresh'
+
+    old_cache=''
+    cat >"$manifest" <<'JSON'
+{"exits":[
+{"id":"v4","endpoint":{"host":"v4.example"}},
+{"id":"v6","endpoint":{"host":"v6.example"}},
+{"id":"partial-a","endpoint":{"host":"partial.example"}},
+{"id":"partial-b","endpoint":{"host":"partial.example"}},
+{"id":"literal4","endpoint":{"host":"198.51.100.70"}},
+{"id":"literal6","endpoint":{"host":"2001:db8::70"}}],"forwards":[
+{"exit_id":"v4","family":"ipv4"},{"exit_id":"v6","family":"ipv6"},
+{"exit_id":"partial-a"},{"exit_id":"partial-b","family":"dual"},{"exit_id":"literal4"},{"exit_id":"literal6"}]}
+JSON
+    printf '%s\n' '198.51.100.80' >"${dns}/ahostsv4-v4.example"
+    printf '%s\n' '2001:db8::80' >"${dns}/ahostsv6-v6.example"
+    printf '%s\n' '198.51.100.90' >"${dns}/ahostsv4-partial.example"
+    check_cache $'ahostsv4 partial.example\nahostsv4 v4.example\nahostsv6 partial.example\nahostsv6 v6.example' 'single stack, partial dual stack and IP literals'
+    jq -e '
+        .exits.v4.ipv4 == "198.51.100.80" and (.exits.v4 | has("ipv6") | not) and
+        .exits.v6.ipv6 == "2001:db8::80" and (.exits.v6 | has("ipv4") | not) and
+        .exits["partial-a"].ipv4 == "198.51.100.90" and .exits["partial-a"].ipv6 == null and
+        .exits["partial-b"].ipv4 == "198.51.100.90" and .exits["partial-b"].ipv6 == null and
+        .exits.literal4.ipv4 == "198.51.100.70" and (.exits.literal4 | has("ipv6") | not) and
+        .exits.literal6.ipv6 == "2001:db8::70" and (.exits.literal6 | has("ipv4") | not) and
+        ([.degraded[] | [.exit_id,.family,.reason,.retained]] | sort) ==
+            [["literal4","ipv6","family-unavailable",false],["literal6","ipv4","family-unavailable",false],
+             ["partial-a","ipv6","dns-failed",false],["partial-b","ipv6","dns-failed",false]]
+    ' "$output" >/dev/null || fail 'address-family modes and IP literal degradation stay unchanged'
+)
+
 test_relay_forwarding_subscription_and_rollback() {
     local node_id node_uri exit_id forward_id direct_id ipv6_id ipv6_forward_id state_hash batch_hash cache_hash
     local decoded status_json
@@ -3028,6 +3349,8 @@ case "${VPSCTL_TEST_ONLY:-}" in
     relay-state) test_relay_state_bindings_and_purge; printf 'PASS: relay state tests\n'; exit 0 ;;
     relay-xray) test_relay_xray_pending_and_validation; printf 'PASS: relay Xray tests\n'; exit 0 ;;
     relay-conflicts) test_relay_forward_conflicts; printf 'PASS: relay conflict tests\n'; exit 0 ;;
+    relay-render) test_relay_forward_render_nft; printf 'PASS: relay render tests\n'; exit 0 ;;
+    relay-cache) test_relay_forward_refresh_cache; printf 'PASS: relay cache tests\n'; exit 0 ;;
     relay-forward) test_relay_forwarding_subscription_and_rollback; printf 'PASS: relay forward tests\n'; exit 0 ;;
     relay-family) test_relay_forward_family_modes; printf 'PASS: relay forward family tests\n'; exit 0 ;;
     relay-service) test_relay_forward_service_lifecycle; printf 'PASS: relay service tests\n'; exit 0 ;;
@@ -3070,6 +3393,8 @@ printf 'TEST: proxy relay Xray pending and validation\n'
 test_relay_xray_pending_and_validation
 printf 'TEST: proxy relay forwarding, subscriptions and rollback\n'
 test_relay_forward_conflicts
+test_relay_forward_render_nft
+test_relay_forward_refresh_cache
 test_relay_forwarding_subscription_and_rollback
 printf 'TEST: proxy relay forward address-family modes\n'
 test_relay_forward_family_modes

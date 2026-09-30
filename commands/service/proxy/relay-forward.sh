@@ -442,6 +442,8 @@ _proxy_relay_forward_first_valid_address() {
 proxy_relay_forward_refresh_cache() {
     local manifest="${1:-}" old_cache="${2:-}" output="${3:-}"
     local cache='{"schema_version":1,"exits":{}}' degraded='[]' resolved_list exit id host family resolved old_address now entry retained literal_family="" required_families
+    local query_key
+    local -A query_results=()
     [[ -f "$manifest" && ! -L "$manifest" && -n "$output" ]] || return 2
     now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     while IFS= read -r exit; do
@@ -461,7 +463,12 @@ proxy_relay_forward_refresh_cache() {
                 degraded="$(jq -cn --argjson current "$degraded" --arg id "$id" --arg host "$host" --arg family "$family" '$current + [{exit_id:$id,host:$host,family:$family,reason:"family-unavailable",retained:false}]')" || return 20
                 continue
             fi
-            resolved="$(proxy_relay_forward_resolve_family "$host" "$family" | LC_ALL=C sort -u | _proxy_relay_forward_first_valid_address "$family" || true)"
+            query_key="${family}:${host}"
+            if [[ -z "${query_results[$query_key]+present}" ]]; then
+                query_results["$query_key"]="$(proxy_relay_forward_resolve_family "$host" "$family" | LC_ALL=C sort -u | _proxy_relay_forward_first_valid_address "$family" || true)"
+            fi
+            # Reuse empty DNS results too; old addresses remain exit-specific.
+            resolved="${query_results[$query_key]}"
             if [[ -z "$resolved" && -n "$old_cache" && -f "$old_cache" ]]; then
                 old_address="$(jq -r --arg id "$id" --arg host "$host" --arg family "$family" '.exits[$id] | select(.host == $host) | .[$family] // empty' "$old_cache" 2>/dev/null || true)"
                 case "$family" in
@@ -544,8 +551,32 @@ _proxy_relay_forward_emit_rule_set() {
 }
 
 proxy_relay_forward_render_nft() {
-    local manifest="${1:-}" cache="${2:-}" forward id exit_id network hint effective start end publish family forward_family target target_port table protocol
+    local manifest="${1:-}" cache="${2:-}" id network hint effective start end publish family forward_family target target_port table protocol
+    local fields_fd fields_pid offset status=0
+    local -a fields=()
     [[ -f "$manifest" && ! -L "$manifest" && -f "$cache" && ! -L "$cache" ]] || return 2
+    # Finish field extraction before emitting a batch, including producer failures.
+    if ! exec {fields_fd}< <(jq -j -n --slurpfile manifest "$manifest" --slurpfile cache "$cache" '
+        if ($manifest | length) != 1 or ($cache | length) != 1 then
+            error("relay manifest and cache must each contain one JSON document")
+        else $manifest[0] end |
+        . as $root | .forwards[] |
+        (.exit_id | tostring | gsub("\u0000"; "") | sub("\n+$"; "")) as $exit_id |
+        ([$root.exits[] | select(.id == $exit_id)][0]) as $exit |
+        (.id, .network, ($exit.protocol.network_hint // $exit.network_hint // ""),
+         .listen_port_start, .listen_port_end, .publish_address, (.family // "dual"),
+         (if $exit == null then "" else $exit.endpoint.port end),
+         ($cache[0].exits[$exit_id].ipv4 // ""), ($cache[0].exits[$exit_id].ipv6 // "")) |
+        (if type == "string" then gsub("\u0000"; "") | sub("\n+$"; "") else . end), "\u0000"
+    '); then
+        return 10
+    fi
+    fields_pid=$!
+    mapfile -d '' -t fields <&"$fields_fd" || status=$?
+    exec {fields_fd}<&-
+    wait "$fields_pid" || return 10
+    ((status == 0 && ${#fields[@]} % 10 == 0)) || return 10
+
     printf 'destroy table ip %s\nadd table ip %s\n' "$PROXY_RELAY_FORWARD_TABLE4" "$PROXY_RELAY_FORWARD_TABLE4"
     printf 'add chain ip %s prerouting { type nat hook prerouting priority dstnat; policy accept; }\n' "$PROXY_RELAY_FORWARD_TABLE4"
     printf 'add chain ip %s forward { type filter hook forward priority filter; policy accept; }\n' "$PROXY_RELAY_FORWARD_TABLE4"
@@ -555,26 +586,24 @@ proxy_relay_forward_render_nft() {
     printf 'add chain ip6 %s forward { type filter hook forward priority filter; policy accept; }\n' "$PROXY_RELAY_FORWARD_TABLE6"
     printf 'add chain ip6 %s postrouting { type nat hook postrouting priority srcnat; policy accept; }\n' "$PROXY_RELAY_FORWARD_TABLE6"
 
-    while IFS= read -r forward; do
-        [[ -n "$forward" ]] || continue
-        id="$(jq -r '.id' <<<"$forward")"
-        exit_id="$(jq -r '.exit_id' <<<"$forward")"
-        network="$(jq -r '.network' <<<"$forward")"
-        hint="$(_proxy_relay_forward_exit_hint "$manifest" "$exit_id")"
+    for ((offset = 0; offset < ${#fields[@]}; offset += 10)); do
+        id="${fields[offset]}"
+        network="${fields[offset + 1]}"
+        hint="${fields[offset + 2]}"
         effective="$(proxy_relay_forward_effective_network "$network" "$hint")" || return $?
-        start="$(jq -r '.listen_port_start' <<<"$forward")"
-        end="$(jq -r '.listen_port_end' <<<"$forward")"
-        publish="$(jq -r '.publish_address' <<<"$forward")"
-        forward_family="$(jq -r '.family // "dual"' <<<"$forward")"
-        target_port="$(jq -r --arg id "$exit_id" '.exits[] | select(.id == $id) | .endpoint.port' "$manifest")"
+        start="${fields[offset + 3]}"
+        end="${fields[offset + 4]}"
+        publish="${fields[offset + 5]}"
+        forward_family="${fields[offset + 6]}"
+        target_port="${fields[offset + 7]}"
         for family in ip ip6; do
             if [[ "$family" == ip ]]; then
                 [[ "$forward_family" == dual || "$forward_family" == ipv4 ]] || continue
-                target="$(jq -r --arg id "$exit_id" '.exits[$id].ipv4 // empty' "$cache")"
+                target="${fields[offset + 8]}"
                 table="$PROXY_RELAY_FORWARD_TABLE4"
             else
                 [[ "$forward_family" == dual || "$forward_family" == ipv6 ]] || continue
-                target="$(jq -r --arg id "$exit_id" '.exits[$id].ipv6 // empty' "$cache")"
+                target="${fields[offset + 9]}"
                 table="$PROXY_RELAY_FORWARD_TABLE6"
             fi
             [[ -n "$target" ]] || continue
@@ -589,7 +618,7 @@ proxy_relay_forward_render_nft() {
                 *) return 10 ;;
             esac
         done
-    done < <(jq -c '.forwards[]' "$manifest")
+    done
 }
 
 _proxy_relay_forward_runtime_allowed() {

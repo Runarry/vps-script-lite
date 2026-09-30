@@ -198,3 +198,30 @@
 | 20 | 3531.71 ms | 34.72 ms | 1581→2 |
 
 20 条样例耗时减少约 99%。这些数字只代表冲突检查函数，不包含其他清单校验、DNS 查询、规则渲染、nftables 应用或服务操作。本轮未运行完整默认套件、跨发行版矩阵或外网压力测试。
+
+## 规则渲染与成功提示修复验收（2026-09-30）
+
+以 `995a6b6` 为基线完成 **#18、#36、#37**。#10 进程树收尾、#19 DNS 缓存生成、#15 manifest 复用继续暂缓。
+
+- **#18：** 仅在 `proxy_relay_forward_render_nft` 内改为一次 jq 读取 manifest 与缓存，以 NUL 分隔字段，通过 `mapfile` 读取并等待生产者完成后再输出表头。两个文件各需包含一个 JSON 文档；坏 JSON、空文档、多文档、字段读取或生产者失败返回 10，标准输出为空。保留字段字符与空值处理、转发顺序、协议计算、IPv4→IPv6、TCP→UDP、每组四行规则及空清单的重置批次；未改变 DNS 缓存生成、规则内容或应用流程。
+- **#36：** 用户创建成功提示移到可选密码设置成功之后；密码失败及回滚失败不再先输出创建成功。演练继续输出操作计划，原有执行顺序与 20／30 返回码保留。
+- **#37：** NodeQuality 提示改为“NodeQuality 上游返回 1；本次临时目录已清理，按成功处理（兼容上游退出码）。”，保留 1→0 的兼容规则，不再未经验证宣称报告已完成。
+
+所有项目执行均通过 `ssh host-vps-scripts`，证据位于 `/var/tmp/vpsctl-render-messages.v6sdmZ/`。五个改动脚本的本地与远端 SHA-256 一致，见 `evidence/tested-sources.sha256`。
+
+- **相关回归通过：** `test-server-test.sh`、`test-security-access.sh`，以及代理单测的 `relay-render`、`relay-forward`、`relay-family` 分组。渲染用例覆盖双栈／单栈、协议组合、缺失缓存地址、空清单、特殊字符与空字段，以及坏 JSON、空／多个 JSON 文档、读取及 jq 失败；用户用例覆盖正常成功、演练及密码失败后回滚且无成功提示。NodeQuality 复用既有退出码兼容测试。日志见 `evidence/server-test.log`、`access.log`、`relay-render-final.log`、`relay-forward.log`、`relay-family.log`。
+- **独立新旧对照通过：** 37 组夹具的退出码、规则输出与应用诊断一致，规则输出逐字节比较。含 NUL 的特例仅排除旧 Bash 命令替换自身的 NUL 丢弃提示。7 个代表性批次通过真实 `nft -c -f` 预检，未应用规则。原始结果位于 `render-checks/results.json`、各批次 `.nft` 文件及 `evidence/render-comparison.log`。
+- **语法与静态检查：** 五个脚本的 `bash -n` 全部通过。逐文件 ShellCheck 使用 `-x -P SCRIPTDIR --extended-analysis=false` 与基线对比，诊断由 314 条变为 316 条；新增 4 条均为测试中的 info（2 条隔离子 shell SC2030、2 条单引号表达式／脚本文本 SC2016），应用代码无新增诊断，未新增 warning／error。并非零诊断通过；完整扩展分析未运行。检查发现的测试变量重名已修正，仅复跑受影响的渲染测试及该测试文件的语法、静态检查，其余结果复用。证据见 `evidence/static.log`、`static-final.log` 和 `static-checks/comparison-final.json`。
+
+### 同夹具渲染性能对比
+
+复用原有 1／5／10／20 条转发夹具，新旧实现各运行三次取中位数；计时不启用 jq 调用跟踪，调用次数另测。
+
+| 转发数量 | 修改前中值 | 修改后中值 | jq 调用次数（前→后） |
+|---|---:|---:|---:|
+| 1 | 34.32 ms | 10.85 ms | 12→1 |
+| 5 | 142.92 ms | 27.44 ms | 56→1 |
+| 10 | 282.98 ms | 48.42 ms | 111→1 |
+| 20 | 571.26 ms | 78.60 ms | 221→1 |
+
+20 条样例耗时减少约 86%。这些数字仅代表规则渲染函数，不包含 DNS 缓存生成、nftables 应用或服务操作。本轮未运行完整默认套件、跨发行版矩阵或外网压力测试；未增加依赖、配置项、确认步骤、通用解析模块或跨调用缓存。

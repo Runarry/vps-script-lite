@@ -79,7 +79,6 @@ access_user_add() {
         vps_cmd_error "sudo 策略未确认 $user 的管理员授权，已尝试回滚"
         return 20
     fi
-    vps_cmd_success "已创建管理员用户 $user（同名主组、$admin_group、主目录、/bin/bash）"
     if [[ "$set_password" == 1 ]]; then
         if [[ "${VPSCTL_DRY_RUN:-0}" == 1 ]]; then
             vps_cmd_info "演练：用户创建后将通过系统 passwd 为 $user 设置密码"
@@ -98,6 +97,8 @@ access_user_add() {
             return 20
         fi
     fi
+    [[ "${VPSCTL_DRY_RUN:-0}" != 1 ]] || return 0
+    vps_cmd_success "已创建管理员用户 $user（同名主组、$admin_group、主目录、/bin/bash）"
 }
 
 access_password_set() {
