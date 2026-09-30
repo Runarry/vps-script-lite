@@ -381,6 +381,42 @@ vpsctl_dispatch() {
     fi
 }
 
+vpsctl_menu_after_self_command() {
+    local command_key="$1" status="$2" current_release
+    local -a menu_options=()
+
+    case "$command_key" in
+        self:update | self:uninstall) ;;
+        *) return 0 ;;
+    esac
+    vps_distribution_is_distributed || return 0
+    [[ "$status" != 30 ]] || exit "$status"
+
+    current_release="$(readlink -f -- "${VPSCTL_INSTALL_ROOT}/current" 2>/dev/null)" || current_release=""
+    if [[ -z "$current_release" || ! -f "$VPSCTL_MANAGED_ENTRY" || ! -f "${current_release}/bin/vpsctl" ]]; then
+        if [[ "$command_key" == self:update && "$status" == 0 ]]; then
+            vpsctl_error "更新后受管入口不可用，已结束旧菜单"
+            exit 20
+        fi
+        exit "$status"
+    fi
+    [[ "$current_release" != "$VPSCTL_PROJECT_ROOT" ]] || return 0
+
+    # The old release can already be gone. Only a fresh entry can safely
+    # continue, and a partial/failed update must retain its original status.
+    if [[ "$command_key" == self:update && "$status" == 0 ]]; then
+        [[ "$VPSCTL_NO_COLOR" != 1 ]] || menu_options+=(--no-color)
+        [[ "$VPSCTL_CLEAR" != 0 ]] || menu_options+=(--no-clear)
+        vps_ui_info "正在进入新版本主菜单。"
+        shopt -s execfail
+        exec "$VPSCTL_MANAGED_ENTRY" "${menu_options[@]}" menu || {
+            vpsctl_error "无法启动更新后的受管入口，已结束旧菜单"
+            exit 20
+        }
+    fi
+    exit "$status"
+}
+
 vpsctl_run_domain_menu() {
     local domain="$1"
     local choice command_index command_key status notice=""
@@ -425,6 +461,7 @@ vpsctl_run_domain_menu() {
                     printf '\n %s命令已结束%s  退出码 ' "$VPS_UI_CYAN" "$VPS_UI_RESET"
                     vps_ui_exit_code "$status"
                     printf '\n'
+                    vpsctl_menu_after_self_command "$command_key" "$status"
                     vps_ui_pause
                 else
                     notice="选择无效，请输入列表中的编号、b 返回或 q 退出"

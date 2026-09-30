@@ -30,6 +30,10 @@ assert_equal() { [[ "$1" == "$2" ]] || fail "$3: expected '$1', got '$2'"; }
 assert_contains() { [[ "$1" == *"$2"* ]] || fail "$3: missing '$2'"; }
 assert_not_contains() { [[ "$1" != *"$2"* ]] || fail "$3: unexpectedly contains '$2'"; }
 
+mock_dig_answer() {
+    printf ';; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 1\n;; ANSWER SECTION:\nexample.com. 60 IN A 203.0.113.8\n'
+}
+
 test_address_validation() {
     vps_dns_validate_server 1.1.1.1 || fail "valid IPv4 was rejected"
     vps_dns_validate_server 2001:4860:4860::8888 || fail "valid IPv6 was rejected"
@@ -40,6 +44,232 @@ test_address_validation() {
     assert_equal 2 "${#VPS_DNS_SERVERS[@]}" "server deduplication"
     ! vps_dns_parse_servers --server 1.1.1.1 --server 8.8.8.8 --server 9.9.9.9 --server 208.67.222.222 >/dev/null 2>&1 || fail "more than three servers were accepted"
 }
+
+test_dns_answer_records_required() (
+    local tool header response records code query_status=0
+    dig() { printf '%s\n' "$response"; return "$query_status"; }
+    drill() { printf '%s\n' "$response"; return "$query_status"; }
+
+    for tool in dig drill; do
+        if [[ "$tool" == dig ]]; then header=status; else header=rcode; fi
+        response=";; ->>HEADER<<- opcode: QUERY, $header: NOERROR, id: 1"$'\n;; ANSWER SECTION:\nresolver.example. 60 IN CNAME target.example.\ntarget.example. 60 IN A 203.0.113.8'
+        vps_dns_query "$tool" 192.0.2.53 resolver.example || fail "$tool rejected a CNAME followed by an address"
+        response=";; ->>HEADER<<- opcode: QUERY, $header: NOERROR, id: 1"$'\n;; ANSWER SECTION:\nresolver.example. 60 IN AAAA 2001:db8::8'
+        vps_dns_query "$tool" 192.0.2.53 resolver.example || fail "$tool rejected an IPv6-only answer"
+
+        for records in '' \
+            'resolver.example. 60 IN CNAME target.example.' \
+            'resolver.example. 60 IN TXT 203.0.113.8' \
+            'resolver.example. 60 IN A 256.0.0.1' \
+            'resolver.example. 60 IN AAAA 2001:::8' \
+            'resolver.example. 60 IN A target.example.'; do
+            response=";; ->>HEADER<<- opcode: QUERY, $header: NOERROR, id: 1"$'\n;; ANSWER SECTION:\n'"$records"
+            ! vps_dns_query "$tool" 192.0.2.53 resolver.example || fail "$tool accepted an answer without a valid address: $records"
+        done
+        for code in NXDOMAIN SERVFAIL; do
+            response=";; ->>HEADER<<- opcode: QUERY, $header: $code, id: 1"$'\n;; ANSWER SECTION:\nresolver.example. 60 IN A 203.0.113.8'
+            ! vps_dns_query "$tool" 192.0.2.53 resolver.example || fail "$tool accepted $code"
+        done
+        response=";; ->>HEADER<<- opcode: QUERY, $header: NOERROR, id: 1"$'\n;; QUESTION SECTION:\nresolver.example. 60 IN A 203.0.113.8\n;; ANSWER SECTION:\nresolver.example. 60 IN CNAME target.example.\n;; AUTHORITY SECTION:\nns.example. 60 IN A 192.0.2.53\n;; ADDITIONAL SECTION:\nns.example. 60 IN AAAA 2001:db8::53'
+        ! vps_dns_query "$tool" 192.0.2.53 resolver.example || fail "$tool accepted an address outside the answer section"
+        response=$';; ANSWER SECTION:\nresolver.example. 60 IN A 203.0.113.8'
+        ! vps_dns_query "$tool" 192.0.2.53 resolver.example || fail "$tool accepted an answer without NOERROR"
+        response=";; ->>HEADER<<- opcode: QUERY, $header: NOERROR, id: 1"$'\n;; ANSWER SECTION:\nresolver.example. 60 IN A 203.0.113.8'
+        query_status=1
+        ! vps_dns_query "$tool" 192.0.2.53 resolver.example || fail "$tool accepted a failing command"
+        query_status=0
+    done
+)
+
+test_lookup_answer_addresses() (
+    local response tool
+    nslookup() { printf '%s\n' "$response"; }
+    host() { printf '%s\n' "$response"; }
+
+    response=$'Server:\t192.0.2.53\nAddress:\t192.0.2.53#53\n\nNon-authoritative answer:\nName:\tresolver.example\nAddress: 203.0.113.8'
+    vps_dns_query nslookup 192.0.2.53 resolver.example || fail "BIND nslookup answer was rejected"
+    response=$'Server: 192.0.2.53\nAddress 1: 192.0.2.53 ns.example\n\nName: resolver.example\nAddress 1: 203.0.113.8 resolver.example'
+    vps_dns_query nslookup 192.0.2.53 resolver.example || fail "BusyBox numbered nslookup answer was rejected"
+    response=$'Server: 192.0.2.53\nAddress: 192.0.2.53:53\n\nName: resolver.example\nAddress: 2001:db8::8'
+    vps_dns_query nslookup 192.0.2.53 resolver.example || fail "nslookup IPv6-only answer was rejected"
+    response=$'Server: 192.0.2.53\nAddress 1: 192.0.2.53 ns.example\n\nName: resolver.example\nAddress 1: 2001:db8::8 resolver.example'
+    vps_dns_query nslookup 192.0.2.53 resolver.example || fail "BusyBox numbered IPv6 answer was rejected"
+    for response in \
+        $'Server: 192.0.2.53\nAddress: 192.0.2.53#53\nName: resolver.example' \
+        $'Server: 192.0.2.53\nAddress 1: 192.0.2.53 ns.example\nresolver.example canonical name = target.example.' \
+        $'Address: 203.0.113.8\nName: resolver.example\nServer: 192.0.2.53\nAddress: 192.0.2.53' \
+        $'Server: 192.0.2.53\nAddress: 192.0.2.53#53\n** server can\047t find resolver.example: NXDOMAIN' \
+        $'Server: 192.0.2.53\nAddress: 192.0.2.53#53\n** server can\047t find resolver.example: SERVFAIL' \
+        $'Name: resolver.example\nAddress: 256.0.0.1\nAddress 2: 2001:::8'; do
+        ! vps_dns_query nslookup 192.0.2.53 resolver.example || fail "nslookup accepted output without an answer address"
+    done
+
+    response=$'resolver.example is an alias for target.example.\ntarget.example has address 203.0.113.8'
+    vps_dns_query host "" resolver.example || fail "host answer was rejected"
+    response='resolver.example has IPv6 address 2001:db8::8'
+    vps_dns_query host "" resolver.example || fail "host IPv6-only answer was rejected"
+    for response in \
+        'resolver.example is an alias for target.example.' \
+        'resolver.example mail is handled by 10 mail.example.' \
+        $'Using domain server:\nName: 192.0.2.53\nAddress: 192.0.2.53#53' \
+        'Host resolver.example not found: 3(NXDOMAIN)' \
+        'Host resolver.example not found: 2(SERVFAIL)' \
+        'resolver.example has address 256.0.0.1' \
+        'resolver.example has IPv6 address 2001:::8'; do
+        ! vps_dns_query host "" resolver.example || fail "host accepted output without an answer address"
+    done
+    for tool in nslookup host; do
+        if [[ "$tool" == nslookup ]]; then
+            nslookup() { printf 'Name: resolver.example\nAddress: 203.0.113.8\n'; return 1; }
+        else
+            host() { printf 'resolver.example has address 203.0.113.8\n'; return 1; }
+        fi
+        ! vps_dns_query "$tool" "" resolver.example || fail "$tool accepted a failing command"
+    done
+)
+
+test_query_server_routing_and_ipv6_retry() (
+    local calls="$TEST_SYSTEM_ROOT/dns-query-calls" tool output expected response_a response_aaaa
+    record_query() {
+        local IFS='|'
+        printf '%s\n' "$*" >>"$calls"
+        case "$*" in
+            *'|AAAA' | *'-type=AAAA|'* | *'|-t|AAAA|'*) printf '%s\n' "$response_aaaa" ;;
+            *) printf '%s\n' "$response_a" ;;
+        esac
+    }
+    dig() { record_query dig "$@"; }
+    drill() { record_query drill "$@"; }
+    nslookup() { record_query nslookup "$@"; }
+    host() { record_query host "$@"; }
+
+    for tool in dig drill nslookup host; do
+        case "$tool" in
+            dig | drill)
+                if [[ "$tool" == dig ]]; then output=status; else output=rcode; fi
+                response_a=";; ->>HEADER<<- opcode: QUERY, $output: NOERROR, id: 1"$'\n;; ANSWER SECTION:\nresolver.example. 60 IN A 203.0.113.8'
+                response_aaaa=";; ->>HEADER<<- opcode: QUERY, $output: NOERROR, id: 1"$'\n;; ANSWER SECTION:\nresolver.example. 60 IN AAAA 2001:db8::8'
+                ;;
+            nslookup)
+                response_a=$'Name: resolver.example\nAddress: 203.0.113.8'
+                response_aaaa=$'Name: resolver.example\nAddress: 2001:db8::8'
+                ;;
+            host)
+                response_a='resolver.example has address 203.0.113.8'
+                response_aaaa='resolver.example has IPv6 address 2001:db8::8'
+                ;;
+        esac
+        : >"$calls"
+        vps_dns_query "$tool" 192.0.2.53 resolver.example || fail "$tool explicit query failed"
+        output="$(<"$calls")"
+        case "$tool" in
+            dig) expected='dig|+time=3|+tries=1|+noall|+comments|+answer|@192.0.2.53|resolver.example|A' ;;
+            drill) expected='drill|@192.0.2.53|resolver.example|A' ;;
+            nslookup) expected='nslookup|-timeout=3|-type=A|resolver.example|192.0.2.53' ;;
+            host) expected='host|-W|3|-t|A|resolver.example|192.0.2.53' ;;
+        esac
+        assert_equal "$expected" "$output" "$tool explicit server and A-first invocation"
+
+        : >"$calls"
+        vps_dns_query "$tool" "" resolver.example || fail "$tool default query failed"
+        output="$(<"$calls")"
+        expected="${expected//|@192.0.2.53/}"
+        expected="${expected//|192.0.2.53/}"
+        assert_equal "$expected" "$output" "$tool default resolver invocation"
+
+        response_a=''
+        : >"$calls"
+        vps_dns_query "$tool" "" resolver.example || fail "$tool IPv6 retry failed"
+        output="$(<"$calls")"
+        assert_contains "$output" "$expected" "$tool A query before IPv6 retry"
+        assert_contains "$output" 'AAAA' "$tool AAAA retry"
+        assert_equal 2 "$(wc -l <"$calls" | tr -d '[:space:]')" "$tool IPv6 retry query count"
+    done
+)
+
+test_system_resolution_routes() (
+    local available='getent host dig drill nslookup' calls="$TEST_SYSTEM_ROOT/dns-system-calls"
+    local response=$'203.0.113.8 STREAM resolver.example\n203.0.113.8 DGRAM\n203.0.113.8 RAW' getent_status=0 output status tool
+    VPS_DNS_TEST_DOMAIN=resolver.example
+    VPS_DNS_SERVERS=(192.0.2.53)
+    VPS_DNS_BACKEND=plain
+    VPSCTL_QUIET=0
+    command() {
+        if [[ "${1:-}" == -v ]]; then
+            case "${2:-}" in
+                getent | host | dig | drill | nslookup) [[ " $available " == *" $2 "* ]]; return $? ;;
+            esac
+        fi
+        builtin command "$@"
+    }
+    getent() {
+        local IFS='|'
+        printf 'getent|%s\n' "$*" >>"$calls"
+        printf '%s\n' "$response"
+        return "$getent_status"
+    }
+    record_query() {
+        local IFS='|'
+        printf '%s\n' "$*" >>"$calls"
+        printf '%s\n' "$response"
+    }
+    host() { record_query host "$@"; }
+    dig() { record_query dig "$@"; }
+    drill() { record_query drill "$@"; }
+    nslookup() { record_query nslookup "$@"; }
+    vps_dns_verify_servers() { return 0; }
+
+    for response in $'203.0.113.8 STREAM resolver.example' $'2001:db8::8 STREAM resolver.example'; do
+        : >"$calls"
+        vps_dns_verify_system_resolution || fail "getent address was rejected"
+        assert_equal 'getent|ahosts|resolver.example' "$(<"$calls")" "getent uses the libc/NSS route"
+        output="$(vps_dns_verify 2>&1)" || fail "getent verification failed"
+        assert_contains "$output" 'DNS 服务器与系统解析验证通过' "getent success wording"
+    done
+    for response in '' 'resolver.example STREAM' '256.0.0.1 STREAM resolver.example' '2001:::8 STREAM resolver.example'; do
+        : >"$calls"
+        ! vps_dns_verify_system_resolution || fail "getent output without a valid address was accepted"
+        assert_equal 'getent|ahosts|resolver.example' "$(<"$calls")" "invalid getent output does not fall back"
+    done
+    response=$'203.0.113.8 STREAM resolver.example'
+    getent_status=2
+    : >"$calls"
+    ! vps_dns_verify_system_resolution || fail "getent failure with address output was accepted"
+    assert_equal 'getent|ahosts|resolver.example' "$(<"$calls")" "getent failure does not bypass libc/NSS"
+    status=0
+    vps_dns_verify >/dev/null 2>&1 || status=$?
+    assert_equal 20 "$status" "verify preserves resolution failure status"
+
+    getent_status=0
+    available='host dig drill nslookup'
+    response='resolver.example is an alias for target.example.'
+    : >"$calls"
+    ! vps_dns_verify_system_resolution >/dev/null 2>&1 || fail "host CNAME-only system lookup was accepted"
+    output="$(<"$calls")"
+    assert_not_contains "$output" 'dig|' "host failure does not try another tool"
+    assert_equal 2 "$(wc -l <"$calls" | tr -d '[:space:]')" "host A and AAAA failure query count"
+    status=0
+    output="$(vps_dns_verify 2>&1)" || status=$?
+    assert_equal 20 "$status" "default DNS failure verify status"
+    assert_contains "$output" '默认 DNS 解析 resolver.example 失败' "default DNS failure wording"
+
+    for tool in host dig drill nslookup; do
+        available="$tool"
+        case "$tool" in
+            host) response='resolver.example has address 203.0.113.8' ;;
+            dig) response=$';; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 1\n;; ANSWER SECTION:\nresolver.example. 60 IN A 203.0.113.8' ;;
+            drill) response=$';; ->>HEADER<<- opcode: QUERY, rcode: NOERROR, id: 1\n;; ANSWER SECTION:\nresolver.example. 60 IN A 203.0.113.8' ;;
+            nslookup) response=$'Server: 192.0.2.53\nAddress: 192.0.2.53#53\nName: resolver.example\nAddress: 203.0.113.8' ;;
+        esac
+        : >"$calls"
+        output="$(vps_dns_verify_system_resolution 2>&1)" || fail "$tool system fallback failed"
+        assert_contains "$output" "getent 不可用，使用 $tool 检查默认 DNS 配置" "$tool fallback wording"
+        assert_not_contains "$(<"$calls")" '192.0.2.53' "$tool system fallback must omit configured server"
+        assert_equal 1 "$(wc -l <"$calls" | tr -d '[:space:]')" "$tool default resolver query count"
+        output="$(vps_dns_verify 2>&1)" || fail "$tool fallback verification failed"
+        assert_contains "$output" 'DNS 服务器与默认 DNS 解析验证通过' "$tool fallback success wording"
+    done
+)
 
 test_standalone_globals() {
     VPSCTL_DRY_RUN=0 VPSCTL_INSTALL_DEPS=0 VPSCTL_ASSUME_YES=0 VPSCTL_NON_INTERACTIVE=0 VPSCTL_QUIET=0 VPSCTL_VERBOSE=0
@@ -331,7 +561,7 @@ test_legacy_resolvconf_refusal() {
     local before after status
     mkdir -p "$TEST_SYSTEM_ROOT/etc/resolvconf/run"
     resolvconf() { [[ "${1:-}" == --version ]] && printf 'Debian resolvconf 1.91\n'; }
-    dig() { printf '203.0.113.8\n'; }
+    dig() { mock_dig_answer; }
     VPS_DNS_SERVERS=(8.8.8.8)
     VPS_DNS_TEST_DOMAIN=example.com
     before="$(<"$TEST_SYSTEM_ROOT/etc/resolv.conf")"
@@ -356,7 +586,7 @@ test_post_verify_failure_retains_change_and_restore() {
     vps_dns_refresh_backend() { return 0; }
     vps_cmd_lock() { return 0; }
     vps_cmd_unlock() { return 0; }
-    dig() { printf '203.0.113.8\n'; }
+    dig() { mock_dig_answer; }
     getent() { return 1; }
     VPS_DNS_SERVERS=(1.0.0.1)
     VPS_DNS_TEST_DOMAIN=example.com
@@ -466,7 +696,7 @@ test_refresh_failure_after_write_returns_30() {
     VPSCTL_DRY_RUN=0
     VPS_DNS_SERVERS=(4.4.4.4)
     VPS_DNS_TEST_DOMAIN=example.com
-    dig() { printf '203.0.113.8\n'; }
+    dig() { mock_dig_answer; }
     vps_dns_detect_backend() {
         VPS_DNS_BACKEND=plain
         VPS_DNS_NM_CONNECTION=""
@@ -518,6 +748,10 @@ test_nm_restore_rejects_unknown_property() {
 }
 
 test_address_validation
+test_dns_answer_records_required
+test_lookup_answer_addresses
+test_query_server_routing_and_ipv6_retry
+test_system_resolution_routes
 test_standalone_globals
 test_shared_dependency_handling
 test_dry_run_dependency_and_dns_plan

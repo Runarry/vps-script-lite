@@ -54,7 +54,7 @@ vpsctl security tls uninstall --purge --confirm-uninstall REMOVE-VPSCTL-TLS
 
 live 路径必须是普通文件的原子替换，不能使用符号链接。项目拒绝路径中的符号链接组件。证书 ID 形如 `crt-` 加 16 位小写十六进制。`--name` 只用于展示。
 
-写入事务顺序：获取锁、校验 PEM 与未加密私钥、确认公钥匹配、确认 SAN 覆盖声明域名、写入 fingerprint 归档、备份旧 live、原子替换 live、写入 metadata。失败时回滚 live 与 metadata；回滚也失败则返回 `30` 并输出备份 ID。metadata 与 live 指纹不一致时，写操作拒绝覆盖。
+写入顺序：获取锁、校验 PEM 与未加密私钥、确认公钥匹配、确认 SAN 覆盖声明域名、备份旧 live 与 metadata、写入 fingerprint 归档、原子替换 live、写入 metadata。备份复制失败返回 `20`，不变更当前文件。live 或 metadata 写入失败时，逐项原子恢复证书、私钥和 metadata；原先缺失的文件恢复为缺失，首次导入或签发则撤销本次写入的三个当前文件。恢复完整保留原失败码，恢复不完整返回 `30` 并输出备份 ID 或未恢复路径。归档、ACME 账户和凭证不参与这一步恢复；成功提交后的服务 reload 失败沿用原有行为。metadata 与 live 指纹不一致时，写操作拒绝覆盖。
 
 `self uninstall` 不得删除上述路径。`tls uninstall` 只停用并删除续期 unit，支持 `vpsctl --yes security tls uninstall`；菜单清库只进行一次说明完整删除范围的强确认；`--purge` 再删除 live、账户、凭证和 lego 二进制，保留 backups。
 

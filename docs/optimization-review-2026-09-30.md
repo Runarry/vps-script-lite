@@ -152,3 +152,21 @@
 | 20 | 454 ms | 68 ms | 165→4 |
 
 20 节点样例耗时降低约 85%。单证书 TLS JSON 状态的 OpenSSL `-checkend` 调用由 **26 次降为 13 次**，JSON 输出一致；此数字仅指到期检查，不代表整个命令的全部 OpenSSL 调用。原始结果为 `evidence/performance.log` 与 `evidence/node-performance.json`。
+
+## 下一轮局部正确性修复与验收（2026-09-30）
+
+实施基线为 `238dfed`，本轮完成 **#2、#5、#45、#1**，合并为 TLS、DNS 和菜单三项局部修改。#17 性能优化、#10／#11 进程及临时文件收尾、#15 manifest 复用继续排除。
+
+| 编号 | 实施结果 |
+|---|---|
+| #2 | 备份复制失败返回 20 并阻止当前文件写入；live 或 metadata 提交失败时，按原有内容和存在状态恢复证书、私钥、metadata。恢复副本在目标同目录准备，成功后原子替换；恢复失败返回 30、报告路径及已有备份 ID，并继续处理其余文件。首次提交失败撤销三个当前文件；归档、ACME 账户、凭证及提交后的 reload 行为保持原样。renew 命令层原有失败汇总行为保持不变。 |
+| #5、#45 | 候选查询显式指定服务器，系统备用查询使用默认 DNS。getent 可用但失败时直接失败；备用工具明确显示默认 DNS 检查范围。查询按 A→AAAA 顺序，依据成功响应与答案区中的有效地址判断结果，排除服务器地址、CNAME-only 和错误／空答案。配置写后验证失败仍保留新配置并返回 30。 |
+| #1 | 菜单根据实际 current 指向处理 self 操作；完整跨版本更新自动进入新主菜单，保留显示选项。同版本和取消操作继续原菜单；部分完成、卸载已移除入口或当前指针时结束旧菜单并保留退出码；新入口无法启动返回 20。 |
+
+全部项目执行通过 `ssh host-vps-scripts`，证据保留在 `/var/tmp/vpsctl-correctness.4czGuF/`，七个改动脚本的本地与远端 SHA-256 一致，记录于 `evidence/tested-sources.sha256`。
+
+- **相关回归通过：** `test-security-tls.sh`、`test-network-dns.sh`、`test-distribution.sh` 和入口 `test-vpsctl.sh`。TLS 覆盖备份失败、三个文件提交失败、恢复复制中断、恢复重命名失败、首次清理失败、原私钥缺失及四个入口的错误传播。入口包含 11 个 TTY 场景，验证旧目录删除后从新菜单继续分发，以及更新失败、部分完成、同版本、取消和卸载。日志位于 `evidence/tls.log`、`dns-unit-fixed.log`、`distribution.log`、`entry.log`。
+- **DNS 真实工具验收通过：** dig、drill、BIND nslookup、BusyBox nslookup 和 host 各运行 IPv4、IPv6-only、CNAME-only、NODATA、NXDOMAIN、SERVFAIL 六个场景，共 30 项；另验证真实 getent 对 localhost 的解析。使用回环 UDP 夹具，未修改主机 DNS，监听进程已清理。证据为 `evidence/dns-real.log`、`dns-host-real.log` 和 `dns-real/requests.jsonl`。
+- **一次测试修正：** DNS 新增断言首轮未捕获成功日志的 stderr，导致文案断言失败；仅修正三处测试捕获后，相关单测通过，应用代码未因此改变。首次结果保留在 `evidence/dns-unit.log`。
+- **语法与静态检查：** 七个脚本的 `bash -n` 全部通过。逐文件 ShellCheck 使用 `-x -P SCRIPTDIR --extended-analysis=false` 与基线对比，诊断由 33 条变为 40 条；应用代码与入口测试无新增诊断，新增 7 条均为 DNS 测试有意隔离的子 shell 提示或 TLS 延迟展开的替身脚本文本提示，级别为 info。未新增 warning／error；未以零诊断通过表述。证据为 `evidence/static.log` 和 `static-checks/comparison.json`。
+- **验证范围：** 本轮未重跑完整默认套件、跨发行版矩阵、真实 ACME 签发或 GitHub 发布升级；菜单生命周期在真实 TTY 与隔离目录中验证，更新事务由相关分发测试覆盖。未新增依赖、公开命令、配置项或通用恢复框架。

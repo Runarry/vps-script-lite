@@ -461,6 +461,114 @@ EOF
     rm -rf -- "$sandbox"
 }
 
+test_menu_self_lifecycle() (
+    [[ "$(uname -s)" == Linux ]] || return 0
+    command -v script >/dev/null 2>&1 || { printf 'SKIP: self menu tests require script\n'; return 0; }
+    local sandbox install template scenario command output status expected action input domain_index index
+    local self_index status_index update_index uninstall_index
+    sandbox="$(mktemp -d)"
+    trap 'rm -rf -- "$sandbox"' EXIT
+    install="$sandbox/install"
+    template="$sandbox/template"
+    mkdir -p "$template/bin" "$template/lib" "$template/commands/self"
+    cp "$TEST_ROOT/bin/vpsctl" "$template/bin/vpsctl"
+    cp "$TEST_ROOT"/lib/*.sh "$template/lib/"
+    cat >>"$template/lib/distribution.sh" <<'EOF'
+
+# Exercise the real menu and dispatch with lifecycle operations isolated to
+# this fixture. Bundle activation itself has separate distribution coverage.
+vps_distribution_ensure_command() { return 0; }
+EOF
+    cat >"$template/commands/self/status.sh" <<'EOF'
+printf 'menu-status:%s color=%s clear=%s\n' "${VPSCTL_PROJECT_ROOT##*/}" "$VPSCTL_NO_COLOR" "$VPSCTL_CLEAR"
+EOF
+    cat >"$template/commands/self/update.sh" <<'EOF'
+set -Eeuo pipefail
+case "$VPSCTL_MENU_CASE" in
+    update | partial-new | invalid-entry)
+        ln -sfn -- "$VPSCTL_INSTALL_ROOT/releases/new" "$VPSCTL_INSTALL_ROOT/current"
+        rm -rf -- "$VPSCTL_INSTALL_ROOT/releases/old"
+        if [[ "$VPSCTL_MENU_CASE" == invalid-entry ]]; then
+            printf '#!/nonexistent/vpsctl-menu-interpreter\n' >"$VPSCTL_MANAGED_ENTRY"
+        fi
+        [[ "$VPSCTL_MENU_CASE" != partial-new ]] || exit 30
+        ;;
+    fail) exit 20 ;;
+    partial-old) exit 30 ;;
+    no-entry) rm -- "$VPSCTL_MANAGED_ENTRY" ;;
+    uninstall) rm -- "$VPSCTL_MANAGED_ENTRY" "$VPSCTL_INSTALL_ROOT/current" ;;
+    partial-uninstall) rm -- "$VPSCTL_MANAGED_ENTRY"; exit 20 ;;
+    same | cancel-update | cancel-uninstall) ;;
+    *) exit 99 ;;
+esac
+EOF
+    cp "$template/commands/self/update.sh" "$template/commands/self/uninstall.sh"
+
+    # shellcheck source=../../lib/registry.sh
+    source "$TEST_ROOT/lib/registry.sh"
+    vps_registry_init
+    for domain_index in "${!VPS_DOMAIN_IDS[@]}"; do
+        [[ "${VPS_DOMAIN_IDS[$domain_index]}" != self ]] || self_index=$((domain_index + 1))
+    done
+    vps_registry_commands_for_domain self
+    for index in "${!VPS_REGISTRY_RESULTS[@]}"; do
+        case "${VPS_REGISTRY_RESULTS[$index]}" in
+            self:status) status_index=$((index + 1)) ;;
+            self:update) update_index=$((index + 1)) ;;
+            self:uninstall) uninstall_index=$((index + 1)) ;;
+        esac
+    done
+
+    for scenario in update same cancel-update fail partial-old partial-new no-entry invalid-entry uninstall cancel-uninstall partial-uninstall; do
+        rm -rf -- "$install"
+        mkdir -p "$install/releases"
+        cp -a -- "$template" "$install/releases/old"
+        cp -a -- "$template" "$install/releases/new"
+        ln -s -- "$install/releases/old" "$install/current"
+        cat >"$install/entry" <<'EOF'
+#!/usr/bin/env bash
+exec bash "$VPSCTL_INSTALL_ROOT/current/bin/vpsctl" "$@"
+EOF
+        chmod 0755 "$install/entry"
+        action="$update_index"
+        expected=0
+        case "$scenario" in
+            uninstall | cancel-uninstall | partial-uninstall) action="$uninstall_index" ;;
+        esac
+        case "$scenario" in
+            partial-old | partial-new) expected=30 ;;
+            no-entry | invalid-entry | partial-uninstall) expected=20 ;;
+        esac
+        if [[ "$scenario" == update ]]; then
+            printf -v input '%s\n%s\n%s\n%s\n\nq\n' "$self_index" "$action" "$self_index" "$status_index"
+        else
+            printf -v input '%s\n%s\n\n%s\n\nq\n' "$self_index" "$action" "$status_index"
+        fi
+        printf -v command 'env VPSCTL_DISTRIBUTED=1 VPSCTL_INSTALL_ROOT=%q VPSCTL_MANAGED_ENTRY=%q VPSCTL_MENU_CASE=%q TERM=xterm bash %q --no-color --no-clear menu' \
+            "$install" "$install/entry" "$scenario" "$install/releases/old/bin/vpsctl"
+        status=0
+        output="$(printf '%s' "$input" | script -q -e -f -c "$command" /dev/null 2>&1)" || status=$?
+        [[ "$status" == "$expected" ]] || test_fail "self menu $scenario: expected $expected, got $status: $output"
+        test_no_ansi "$output" "self menu $scenario display options"
+        case "$scenario" in
+            update)
+                test_contains "$output" 'menu-status:new color=1 clear=0' 'updated menu dispatch and display options'
+                test_not_contains "$output" 'menu-status:old' 'old menu must not resume after update'
+                [[ ! -e "$install/releases/old" ]] || test_fail 'update fixture retained old release'
+                ;;
+            same | cancel-update | fail | cancel-uninstall)
+                test_contains "$output" 'menu-status:old color=1 clear=0' "self menu $scenario continuation"
+                test_not_contains "$output" '正在进入新版本主菜单' "self menu $scenario should not restart"
+                ;;
+            *) test_not_contains "$output" 'menu-status:' "self menu $scenario must exit before another command" ;;
+        esac
+        if [[ "$scenario" == invalid-entry ]]; then
+            test_contains "$output" '无法启动更新后的受管入口' 'new entry execution failure'
+        fi
+    done
+)
+
 test_cli
 test_dispatch_security
+test_menu_self_lifecycle
 printf 'PASS: vpsctl integration tests\n'

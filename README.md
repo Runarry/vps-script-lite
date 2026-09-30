@@ -92,6 +92,8 @@ bash "$tmp_dir/vpsctl.sh" --verified-manifest "$tmp_dir/vpsctl-manifest.tsv"
 - 当前版本指针：`/usr/local/lib/vpsctl/current`
 - 安装器、自更新和分发缓存元数据：`/var/lib/vpsctl/self/`
 
+交互菜单内跨版本更新完整成功后，会自动进入新版本主菜单，保留 `--no-color` 和 `--no-clear`。同版本更新或取消操作继续当前菜单；self 操作返回 `30`、卸载已移除入口或当前版本指针时，结束旧菜单并保留退出码。
+
 `self update` 跨版本更新完整提交成功后，会删除所有可验证归属的受管历史 release，仅保留当前版本，不保留自动回退版本；需要回退时重新安装指定 Release。新版本提交完成前发生失败时仍保留原版本；若提交后历史版本清理失败，新版本保持激活，命令报错并返回 `30`，下次成功跨版本更新会再次尝试清理。同版本更新不执行清理，只同步 self 缓存；临时目录、不受管或异常条目以及功能状态与备份均不在清理范围内。self 启动器、manifest 和入口校验值是可恢复缓存，缺失或普通文件内容损坏不阻断更新与普通卸载；更新从当前已校验入口及 release manifest 保存回滚材料并修复缓存。当前代码或入口损坏、归属不明，以及缓存路径为链接或异常文件类型仍会拒绝。
 
 v0.8.10 的 schema 2 分发中，`core` 仅包含入口、版本、环境检测、注册表、UI、分发逻辑和 `self` 命令。每个非 self 公开命令单独发布 `<domain>-<action>` bundle，例如 `network-bbr`；首次执行功能（包括功能帮助）时才下载该功能及其固定共享依赖，浏览全局帮助、清单、环境、版本、菜单和 `self status` 不下载功能。所有功能依赖 `shared-command`；UFW、访问、TLS、代理和 TCP 探测监听另依赖 `shared-ufw`，两项服务器测试另依赖 `shared-server-test`。已缓存功能可离线重复使用；`service tcping uninstall` 成功后只删除自身功能包缓存，下次调用会重新下载该包。跨版本 `self update` 只获取 manifest、安装器和 core，新版本的功能重新按需下载，不预取旧缓存。文件名、版本、SHA-256、路径和文件类型校验仍保留，失败临时下载不会成为有效缓存。

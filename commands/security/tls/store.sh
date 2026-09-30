@@ -49,12 +49,14 @@ tls_commit_material() {
     tls_install_live "$id" "$fullchain" "$key" || {
         status=$?
         vps_cmd_error "写入 live 证书失败${backup_id:+；备份 ID $backup_id}"
+        tls_restore_record "$id" "$backup_id" || return 30
         return "$status"
     }
     tls_write_record "$id" || {
         status=$?
         vps_cmd_error "写入证书 metadata 失败${backup_id:+；备份 ID $backup_id}"
-        return 30
+        tls_restore_record "$id" "$backup_id" || return 30
+        return "$status"
     }
 }
 

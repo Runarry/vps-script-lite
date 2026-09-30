@@ -548,9 +548,15 @@ tls_backup_record() {
     live_cert="$(tls_live_fullchain "$id")"
     live_key="$(tls_live_privkey "$id")"
     meta="$(tls_metadata_path "$id")"
-    [[ -f "$live_cert" && ! -L "$live_cert" ]] && cp -p -- "$live_cert" "$directory/fullchain.pem"
-    [[ -f "$live_key" && ! -L "$live_key" ]] && cp -p -- "$live_key" "$directory/privkey.pem"
-    [[ -f "$meta" && ! -L "$meta" ]] && cp -p -- "$meta" "$directory/metadata"
+    if [[ -f "$live_cert" && ! -L "$live_cert" ]]; then
+        cp -p -- "$live_cert" "$directory/fullchain.pem" || return 20
+    fi
+    if [[ -f "$live_key" && ! -L "$live_key" ]]; then
+        cp -p -- "$live_key" "$directory/privkey.pem" || return 20
+    fi
+    if [[ -f "$meta" && ! -L "$meta" ]]; then
+        cp -p -- "$meta" "$directory/metadata" || return 20
+    fi
     {
         printf 'schema_version\t%s\n' "$TLS_SCHEMA_VERSION"
         printf 'id\t%s\n' "$id"
@@ -559,6 +565,33 @@ tls_backup_record() {
     } >"$directory/manifest" || return 20
     chmod 0600 -- "$directory/manifest" || return 20
     printf '%s\n' "$backup_id"
+}
+
+tls_restore_record() {
+    local id="$1" backup_id="${2:-}" file target temporary status=0
+    for file in fullchain.pem privkey.pem metadata; do
+        case "$file" in
+            fullchain.pem) target="$(tls_live_fullchain "$id")" ;;
+            privkey.pem) target="$(tls_live_privkey "$id")" ;;
+            metadata) target="$(tls_metadata_path "$id")" ;;
+        esac
+        if vps_cmd_require_no_symlink_components "$target"; then
+            if [[ -n "$backup_id" && -f "${TLS_BACKUP_DIR}/${backup_id}/${file}" ]]; then
+                if temporary="$(mktemp "${target%/*}/.${file}.restore.XXXXXX")"; then
+                    if cp -p -- "${TLS_BACKUP_DIR}/${backup_id}/${file}" "$temporary" &&
+                        mv -f -- "$temporary" "$target"; then
+                        continue
+                    fi
+                    rm -f -- "$temporary" || vps_cmd_error "清理证书恢复临时文件失败：$temporary"
+                fi
+            else
+                rm -f -- "$target" && continue
+            fi
+        fi
+        vps_cmd_error "恢复证书文件失败：$target${backup_id:+；备份 ID $backup_id}"
+        status=30
+    done
+    return "$status"
 }
 
 tls_install_live() {

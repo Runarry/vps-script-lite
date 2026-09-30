@@ -12,7 +12,9 @@ readonly FIXTURES="${TEST_TMP}/fixtures"
 readonly MOCK_LOG="${TEST_TMP}/mock.log"
 REAL_OPENSSL="$(command -v openssl)"
 REAL_RM="$(command -v rm)"
-readonly REAL_OPENSSL REAL_RM
+REAL_CP="$(command -v cp)"
+REAL_MV="$(command -v mv)"
+readonly REAL_OPENSSL REAL_RM REAL_CP REAL_MV
 
 cleanup() { rm -rf -- "$TEST_TMP"; }
 trap cleanup EXIT
@@ -93,9 +95,64 @@ for target in "$@"; do
                 exit 1
             fi
             ;;
+        "${VPSCTL_SYSTEM_ROOT}/var/lib/vpsctl/security/tls/live/"crt-*"/fullchain.pem"|"${VPSCTL_SYSTEM_ROOT}/var/lib/vpsctl/security/tls/live/"crt-*"/privkey.pem"|"${VPSCTL_SYSTEM_ROOT}/var/lib/vpsctl/security/tls/certs/"crt-*"/metadata")
+            printf "tls-remove %s\n" "$target" >>"${MOCK_LOG}"
+            if [[ -f "${VPSCTL_SYSTEM_ROOT}/run/tls-restore-remove-fail" &&
+                "${target##*/}" == "$(<"${VPSCTL_SYSTEM_ROOT}/run/tls-restore-remove-fail")" ]]; then
+                exit 1
+            fi
+            ;;
     esac
 done
 exec "$REAL_RM" "$@"'
+
+make_mock cp '
+source_path="${@: -2:1}"
+target="${@: -1}"
+case "$target" in
+    "${VPSCTL_SYSTEM_ROOT}/var/lib/vpsctl/backups/security/tls/"*)
+        if [[ -f "${VPSCTL_SYSTEM_ROOT}/run/tls-backup-copy-fail" &&
+            "${target##*/}" == "$(<"${VPSCTL_SYSTEM_ROOT}/run/tls-backup-copy-fail")" ]]; then
+            exit 1
+        fi
+        ;;
+esac
+case "$source_path" in
+    "${VPSCTL_SYSTEM_ROOT}/var/lib/vpsctl/backups/security/tls/"*)
+        printf "tls-restore-copy %s\n" "${source_path##*/}" >>"${MOCK_LOG}"
+        if [[ -f "${VPSCTL_SYSTEM_ROOT}/run/tls-restore-copy-fail" &&
+            "${source_path##*/}" == "$(<"${VPSCTL_SYSTEM_ROOT}/run/tls-restore-copy-fail")" ]]; then
+            printf "partial restore copy\n" >"$target"
+            exit 1
+        fi
+        ;;
+esac
+exec "$REAL_CP" "$@"'
+
+make_mock mv '
+source_path="${@: -2:1}"
+target="${@: -1}"
+case "$target" in
+    "${VPSCTL_SYSTEM_ROOT}/var/lib/vpsctl/security/tls/live/"crt-*"/fullchain.pem"|"${VPSCTL_SYSTEM_ROOT}/var/lib/vpsctl/security/tls/live/"crt-*"/privkey.pem"|"${VPSCTL_SYSTEM_ROOT}/var/lib/vpsctl/security/tls/certs/"crt-*"/metadata")
+        if [[ "${source_path##*/}" == ."${target##*/}".restore.* ]]; then
+            printf "tls-restore %s\n" "$target" >>"${MOCK_LOG}"
+            if [[ -f "${VPSCTL_SYSTEM_ROOT}/run/tls-restore-rename-fail" &&
+                "${target##*/}" == "$(<"${VPSCTL_SYSTEM_ROOT}/run/tls-restore-rename-fail")" ]]; then
+                exit 1
+            fi
+            exec "$REAL_MV" "$@"
+        fi
+        printf "tls-write %s\n" "$target" >>"${MOCK_LOG}"
+        if [[ -f "${VPSCTL_SYSTEM_ROOT}/run/tls-write-fail" ]]; then
+            fault="$(<"${VPSCTL_SYSTEM_ROOT}/run/tls-write-fail")"
+            if [[ "$target" == "$fault" || "${target##*/}" == "$fault" ]]; then
+                printf "%s\n" "$target" >"${VPSCTL_SYSTEM_ROOT}/run/tls-failed-write"
+                exit 1
+            fi
+        fi
+        ;;
+esac
+exec "$REAL_MV" "$@"'
 
 make_mock openssl '
 if [[ " $* " == *" -checkend "* ]]; then
@@ -145,7 +202,7 @@ export VPSCTL_TESTING=1 VPSCTL_SYSTEM_ROOT="$SYSTEM_ROOT"
 export VPSCTL_ENV_KERNEL_NAME=Linux VPSCTL_ENV_INIT=systemd VPSCTL_ENV_ARCH=x86_64
 export VPSCTL_DRY_RUN=0 VPSCTL_INSTALL_DEPS=0 VPSCTL_ASSUME_YES=1 VPSCTL_NON_INTERACTIVE=1
 export VPSCTL_QUIET=0 VPSCTL_VERBOSE=0 VPSCTL_NO_COLOR=1
-export MOCK_LOG REAL_OPENSSL REAL_RM
+export MOCK_LOG REAL_OPENSSL REAL_RM REAL_CP REAL_MV
 
 run_tls() {
     bash "$TEST_ROOT/commands/security/tls.sh" --no-color --non-interactive "$@"
@@ -163,6 +220,29 @@ run_tls_with_mock_days() (
     }
     tls_main --no-color --non-interactive "$@"
 )
+
+run_tls_renew_one() (
+    # shellcheck source=../../commands/security/tls.sh
+    source "$TEST_ROOT/commands/security/tls.sh"
+    vps_cmd_init "security tls" "$TLS_PROJECT_ROOT"
+    tls_init_paths
+    tls_renew_one "$1" 1
+)
+
+tls_test_record_state() {
+    local id="$1" path
+    for path in "${SYSTEM_ROOT}/var/lib/vpsctl/security/tls/live/${id}/fullchain.pem" \
+        "${SYSTEM_ROOT}/var/lib/vpsctl/security/tls/live/${id}/privkey.pem" \
+        "${SYSTEM_ROOT}/var/lib/vpsctl/security/tls/certs/${id}/metadata"; do
+        if [[ -f "$path" && ! -L "$path" ]]; then
+            sha256sum -- "$path"
+            stat -c '%a:%u:%g:%Y' -- "$path"
+        else
+            [[ ! -e "$path" && ! -L "$path" ]] || fail "unexpected file type: $path"
+            printf 'absent %s\n' "$path"
+        fi
+    done
+}
 
 reset_system() {
     rm -rf -- "$SYSTEM_ROOT"
@@ -252,6 +332,156 @@ test_import_replace_delete() {
     assert_status 2 "delete without confirm" run_tls delete --id "$id"
     run_tls delete --id "$id" --confirm-delete
     assert_status 3 "deleted cert missing" run_tls show --id "$id"
+}
+
+test_commit_backup_and_restore() {
+    local output id before file live_key
+    reset_system
+    make_cert commit-old.example
+    make_cert commit-new.example
+    output="$(run_tls import --name commit-old --cert-file "${FIXTURES}/commit-old.example/cert.pem" \
+        --key-file "${FIXTURES}/commit-old.example/key.pem")"
+    id="$(imported_id "$output")"
+    live_key="${SYSTEM_ROOT}/var/lib/vpsctl/security/tls/live/${id}/privkey.pem"
+    chmod 0640 -- "$live_key"
+    before="$(tls_test_record_state "$id")"
+    for file in fullchain.pem privkey.pem metadata; do
+        printf '%s\n' "$file" >"${SYSTEM_ROOT}/run/tls-backup-copy-fail"
+        : >"$MOCK_LOG"
+        assert_status 20 "failed backup $file stops replacement" run_tls replace --id "$id" \
+            --cert-file "${FIXTURES}/commit-new.example/cert.pem" --key-file "${FIXTURES}/commit-new.example/key.pem"
+        [[ "$(tls_test_record_state "$id")" == "$before" ]] || fail "backup failure changed current files"
+        assert_not_contains "$(<"$MOCK_LOG")" 'tls-write ' "backup failure prevented current writes"
+        assert_not_contains "$TLS_TEST_OUTPUT" '已备份当前证书' "failed backup not reported as successful"
+    done
+    rm -f -- "${SYSTEM_ROOT}/run/tls-backup-copy-fail"
+    for file in fullchain.pem privkey.pem metadata; do
+        printf '%s\n' "$file" >"${SYSTEM_ROOT}/run/tls-write-fail"
+        assert_status 20 "failed $file write restores old record" run_tls replace --id "$id" \
+            --cert-file "${FIXTURES}/commit-new.example/cert.pem" --key-file "${FIXTURES}/commit-new.example/key.pem"
+        [[ "$(tls_test_record_state "$id")" == "$before" ]] || fail "$file failure did not restore bytes and attributes"
+        assert_not_contains "$TLS_TEST_OUTPUT" '已替换证书' "failed replacement has no success message"
+    done
+    rm -f -- "$live_key"
+    before="$(tls_test_record_state "$id")"
+    : >"$MOCK_LOG"
+    assert_status 20 "missing original key is restored as absent" run_tls replace --id "$id" \
+        --cert-file "${FIXTURES}/commit-new.example/cert.pem" --key-file "${FIXTURES}/commit-new.example/key.pem"
+    assert_contains "$TLS_TEST_OUTPUT" '已备份当前证书' "partial backup succeeded before current writes"
+    assert_contains "$(<"$MOCK_LOG")" "tls-write $live_key" "replacement wrote the previously absent key"
+    assert_contains "$(<"$MOCK_LOG")" "tls-remove $live_key" "restore removed the previously absent key"
+    [[ "$(tls_test_record_state "$id")" == "$before" ]] || fail "rollback retained a key absent from the backup"
+    rm -f -- "${SYSTEM_ROOT}/run/tls-write-fail"
+    assert_status 0 "delete still accepts a partial backup" run_tls delete --id "$id" --confirm-delete
+}
+
+test_commit_restore_failure() {
+    local output id live before_key before_meta backup_id file fault leftover
+    for fault in copy rename; do
+        reset_system
+        output="$(run_tls import --name restore --cert-file "${FIXTURES}/commit-old.example/cert.pem" \
+            --key-file "${FIXTURES}/commit-old.example/key.pem")"
+        id="$(imported_id "$output")"
+        live="${SYSTEM_ROOT}/var/lib/vpsctl/security/tls/live/${id}"
+        before_key="$(sha256sum -- "$live/privkey.pem")"
+        before_meta="$(sha256sum -- "${SYSTEM_ROOT}/var/lib/vpsctl/security/tls/certs/${id}/metadata")"
+        printf 'metadata\n' >"${SYSTEM_ROOT}/run/tls-write-fail"
+        printf 'fullchain.pem\n' >"${SYSTEM_ROOT}/run/tls-restore-${fault}-fail"
+        : >"$MOCK_LOG"
+        assert_status 30 "restore $fault failure returns partial completion" run_tls replace --id "$id" \
+            --cert-file "${FIXTURES}/commit-new.example/cert.pem" --key-file "${FIXTURES}/commit-new.example/key.pem"
+        assert_contains "$TLS_TEST_OUTPUT" "恢复证书文件失败：$live/fullchain.pem" "restore failure identifies path"
+        backup_id="$(grep -Eo 'bak-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{16}' <<<"$TLS_TEST_OUTPUT" | head -n 1)"
+        [[ -n "$backup_id" ]] || fail "restore failure omitted backup ID"
+        for file in fullchain.pem privkey.pem metadata; do
+            assert_file "${SYSTEM_ROOT}/var/lib/vpsctl/backups/security/tls/${backup_id}/${file}" "recovery backup retained"
+        done
+        cmp -s -- "${FIXTURES}/commit-new.example/cert.pem" "$live/fullchain.pem" \
+            || fail "restore $fault failure truncated or changed the current cert"
+        [[ "$(sha256sum -- "$live/privkey.pem")" == "$before_key" ]] || fail "restore stopped before old key"
+        [[ "$(sha256sum -- "${SYSTEM_ROOT}/var/lib/vpsctl/security/tls/certs/${id}/metadata")" == "$before_meta" ]] || fail "restore changed old metadata"
+        assert_contains "$(<"$MOCK_LOG")" "tls-restore ${SYSTEM_ROOT}/var/lib/vpsctl/security/tls/certs/${id}/metadata" "restore attempted metadata after cert failure"
+        if [[ "$fault" == copy ]]; then
+            assert_not_contains "$(<"$MOCK_LOG")" "tls-restore $live/fullchain.pem" "incomplete restore copy was never installed"
+        else
+            assert_contains "$(<"$MOCK_LOG")" "tls-restore $live/fullchain.pem" "restore rename failure was exercised"
+        fi
+        leftover="$(find "$live" "${SYSTEM_ROOT}/var/lib/vpsctl/security/tls/certs/${id}" -name '.*.restore.*' -print)"
+        [[ -z "$leftover" ]] || fail "restore $fault failure left temporary files: $leftover"
+    done
+}
+
+test_commit_first_write_failures() {
+    local entry file id path output
+    for entry in import issue; do
+        for file in fullchain.pem privkey.pem metadata; do
+            reset_system
+            printf '%s\n' "$file" >"${SYSTEM_ROOT}/run/tls-write-fail"
+            if [[ "$entry" == import ]]; then
+                assert_status 20 "first import $file failure cleaned up" run_tls import --name first \
+                    --cert-file "${FIXTURES}/commit-new.example/cert.pem" --key-file "${FIXTURES}/commit-new.example/key.pem"
+            else
+                plant_lego
+                export MOCK_LEGO_CERT="${FIXTURES}/commit-new.example/cert.pem"
+                export MOCK_LEGO_KEY="${FIXTURES}/commit-new.example/key.pem"
+                assert_status 20 "first issue $file failure cleaned up" run_tls issue --domain commit-new.example \
+                    --challenge http-01 --email ops@example.com
+            fi
+            id="$(imported_id "$(<"${SYSTEM_ROOT}/run/tls-failed-write")")"
+            for path in "${SYSTEM_ROOT}/var/lib/vpsctl/security/tls/live/${id}/fullchain.pem" \
+                "${SYSTEM_ROOT}/var/lib/vpsctl/security/tls/live/${id}/privkey.pem" \
+                "${SYSTEM_ROOT}/var/lib/vpsctl/security/tls/certs/${id}/metadata"; do
+                [[ ! -e "$path" && ! -L "$path" ]] || fail "$entry retained $path"
+            done
+            output="$(run_tls list --json)"
+            assert_contains "$output" '"certificates":[]' "failed first commit leaves no inventory record"
+        done
+    done
+    unset MOCK_LEGO_CERT MOCK_LEGO_KEY
+    reset_system
+    printf 'metadata\n' >"${SYSTEM_ROOT}/run/tls-write-fail"
+    printf 'fullchain.pem\n' >"${SYSTEM_ROOT}/run/tls-restore-remove-fail"
+    assert_status 30 "first commit cleanup failure propagates" run_tls import --name first \
+        --cert-file "${FIXTURES}/commit-new.example/cert.pem" --key-file "${FIXTURES}/commit-new.example/key.pem"
+    id="$(imported_id "$(<"${SYSTEM_ROOT}/run/tls-failed-write")")"
+    path="${SYSTEM_ROOT}/var/lib/vpsctl/security/tls/live/${id}"
+    assert_contains "$TLS_TEST_OUTPUT" "恢复证书文件失败：$path/fullchain.pem" "cleanup failure identifies unrestored path"
+    assert_file "$path/fullchain.pem" "failed deletion leaves cert for recovery"
+    [[ ! -e "$path/privkey.pem" ]] || fail "cleanup stopped before key deletion"
+    assert_contains "$(<"$MOCK_LOG")" "tls-remove ${SYSTEM_ROOT}/var/lib/vpsctl/security/tls/certs/${id}/metadata" "cleanup attempted metadata after cert failure"
+}
+
+test_commit_renew_failures() {
+    local output id before next_id live
+    local -a ids=()
+    reset_system
+    make_cert commit-renew.example 40
+    plant_lego
+    export MOCK_LEGO_CERT="${FIXTURES}/commit-renew.example/cert.pem"
+    export MOCK_LEGO_KEY="${FIXTURES}/commit-renew.example/key.pem"
+    for _ in 1 2; do
+        output="$(run_tls issue --domain commit-renew.example --challenge http-01 --email ops@example.com)"
+        ids+=("$(imported_id "$output")")
+    done
+    mapfile -t ids < <(printf '%s\n' "${ids[@]}" | sort)
+    id="${ids[0]}" next_id="${ids[1]}"
+    before="$(tls_test_record_state "$id")"
+    make_cert commit-renew.example 40
+    printf '%s\n' "${SYSTEM_ROOT}/var/lib/vpsctl/security/tls/certs/${id}/metadata" >"${SYSTEM_ROOT}/run/tls-write-fail"
+    assert_status 20 "renew caller preserves original write failure" run_tls_renew_one "$id"
+    [[ "$(tls_test_record_state "$id")" == "$before" ]] || fail "renew caller did not restore record"
+    assert_status 30 "renew command preserves failure aggregation" run_tls renew --id "$id" --force
+    [[ "$(tls_test_record_state "$id")" == "$before" ]] || fail "renew command did not restore record"
+    assert_status 30 "renew-all aggregates failure and continues" run_tls renew --all --force
+    [[ "$(tls_test_record_state "$id")" == "$before" ]] || fail "renew-all did not restore failed record"
+    assert_contains "$TLS_TEST_OUTPUT" "已续期证书 $next_id" "renew-all continues after failed commit"
+    cmp -s -- "$MOCK_LEGO_CERT" "${SYSTEM_ROOT}/var/lib/vpsctl/security/tls/live/${next_id}/fullchain.pem" \
+        || fail "renew-all did not update next cert"
+    printf 'fullchain.pem\n' >"${SYSTEM_ROOT}/run/tls-restore-copy-fail"
+    assert_status 30 "renew caller propagates incomplete restoration" run_tls_renew_one "$id"
+    live="${SYSTEM_ROOT}/var/lib/vpsctl/security/tls/live/${id}"
+    assert_contains "$TLS_TEST_OUTPUT" "恢复证书文件失败：$live/fullchain.pem" "renew exposes restore diagnostic"
+    unset MOCK_LEGO_CERT MOCK_LEGO_KEY
 }
 
 test_status_days_cache() {
@@ -603,6 +833,10 @@ test_uninstall_menu_confirmation() {
 
 test_help_and_status
 test_import_replace_delete
+test_commit_backup_and_restore
+test_commit_restore_failure
+test_commit_first_write_failures
+test_commit_renew_failures
 test_status_days_cache
 test_validation_failures
 test_dry_run_does_not_write

@@ -214,23 +214,77 @@ vps_dns_install_query_tool() {
     vps_cmd_ensure_tools network-dns dns-query
 }
 
+vps_dns_output_has_address() {
+    local tool="$1" record_type="$2" output="$3" address
+    while IFS= read -r address; do
+        case "$record_type" in
+            A) vps_dns_is_ipv4 "$address" && return 0 ;;
+            AAAA) vps_dns_is_ipv6 "$address" && return 0 ;;
+            *) vps_dns_validate_server "$address" && return 0 ;;
+        esac
+    done < <(awk -v tool="$tool" -v record_type="$record_type" '
+        tool == "dig" || tool == "drill" {
+            if ($0 ~ /^;;[[:space:]]*->>HEADER<<-/) {
+                noerror=0
+                for (i=1; i<NF; i++) {
+                    if ($i == "status:" || $i == "rcode:") {
+                        code=$(i+1)
+                        sub(/,$/, "", code)
+                        noerror=(code == "NOERROR")
+                    }
+                }
+            }
+            if ($0 ~ /^;;[[:space:]]*ANSWER SECTION:/) {
+                answer=1
+                next
+            }
+            if ($0 ~ /^;/) answer=0
+            if (noerror && answer && $3 == "IN" && $4 == record_type) print $5
+            next
+        }
+        tool == "nslookup" {
+            if ($1 == "Server:") answer=0
+            if ($1 == "Name:") answer=1
+            if (answer && $1 == "Address:") print $2
+            if (answer && $1 == "Address" && $2 ~ /^[0-9]+:$/) print $3
+            next
+        }
+        tool == "host" {
+            if ($2 == "has" && $3 == "address") print $4
+            if ($2 == "has" && $3 == "IPv6" && $4 == "address") print $5
+            next
+        }
+        tool == "getent" { print $1 }
+    ' <<<"$output")
+    return 1
+}
+
 vps_dns_query() {
-    local tool="$1" server="$2" domain="$3" output
+    local tool="$1" server="$2" domain="$3" output record_type
+    local -a server_args=()
     case "$tool" in
-        dig)
-            output="$(dig +time=3 +tries=1 +short "@$server" "$domain" A 2>/dev/null)" || return 1
-            [[ "$output" =~ [^[:space:]] ]]
-            ;;
-        drill)
-            output="$(drill "@$server" "$domain" A 2>/dev/null)" || return 1
-            [[ "$output" == *"ANSWER SECTION"* && "$output" =~ [^[:space:]] ]]
-            ;;
-        nslookup)
-            output="$(nslookup -timeout=3 "$domain" "$server" 2>/dev/null)" || return 1
-            [[ "$output" == *"Address"* && "$output" =~ [^[:space:]] ]]
-            ;;
+        dig | drill) [[ -z "$server" ]] || server_args=("@$server") ;;
+        nslookup | host) [[ -z "$server" ]] || server_args=("$server") ;;
         *) return 3 ;;
     esac
+    for record_type in A AAAA; do
+        case "$tool" in
+            dig)
+                if output="$(dig +time=3 +tries=1 +noall +comments +answer "${server_args[@]}" "$domain" "$record_type" 2>/dev/null)"; then :; else continue; fi
+                ;;
+            drill)
+                if output="$(drill "${server_args[@]}" "$domain" "$record_type" 2>/dev/null)"; then :; else continue; fi
+                ;;
+            nslookup)
+                if output="$(nslookup -timeout=3 "-type=$record_type" "$domain" "${server_args[@]}" 2>/dev/null)"; then :; else continue; fi
+                ;;
+            host)
+                if output="$(host -W 3 -t "$record_type" "$domain" "${server_args[@]}" 2>/dev/null)"; then :; else continue; fi
+                ;;
+        esac
+        vps_dns_output_has_address "$tool" "$record_type" "$output" && return 0
+    done
+    return 1
 }
 
 vps_dns_test_candidates() {
@@ -659,12 +713,14 @@ vps_dns_verify_servers() {
 }
 
 vps_dns_verify_system_resolution() {
-    local tool
+    local tool output
 
     if command -v getent >/dev/null 2>&1; then
-        getent ahosts "$VPS_DNS_TEST_DOMAIN" >/dev/null 2>&1
+        output="$(getent ahosts "$VPS_DNS_TEST_DOMAIN" 2>/dev/null)" || return 1
+        vps_dns_output_has_address getent "" "$output"
+        return $?
     elif command -v host >/dev/null 2>&1; then
-        host "$VPS_DNS_TEST_DOMAIN" >/dev/null 2>&1
+        tool=host
     else
         tool="$(vps_dns_query_tool 2>/dev/null || true)"
         if [[ -z "$tool" ]]; then
@@ -679,12 +735,13 @@ vps_dns_verify_system_resolution() {
             vps_cmd_error "没有可用于验证系统解析链路的工具"
             return 3
         }
-        vps_dns_query "$tool" "${VPS_DNS_SERVERS[0]:-127.0.0.1}" "$VPS_DNS_TEST_DOMAIN"
     fi
+    vps_cmd_info "getent 不可用，使用 $tool 检查默认 DNS 配置"
+    vps_dns_query "$tool" "" "$VPS_DNS_TEST_DOMAIN"
 }
 
 vps_dns_verify() {
-    local server effective
+    local server effective resolution="系统解析"
     [[ -n "${VPS_DNS_BACKEND:-}" ]] || vps_dns_detect_backend
     if ((${#VPS_DNS_SERVERS[@]} == 0)); then
         if effective="$(vps_dns_effective_servers)"; then :; else return 20; fi
@@ -695,11 +752,12 @@ vps_dns_verify() {
         return 10
     }
     vps_dns_verify_servers || return 20
+    command -v getent >/dev/null 2>&1 || resolution="默认 DNS 解析"
     vps_dns_verify_system_resolution || {
-        vps_cmd_error "系统解析 $VPS_DNS_TEST_DOMAIN 失败"
+        vps_cmd_error "$resolution $VPS_DNS_TEST_DOMAIN 失败"
         return 20
     }
-    vps_cmd_success "DNS 服务器与系统解析验证通过"
+    vps_cmd_success "DNS 服务器与${resolution}验证通过"
 }
 
 vps_dns_set() {
