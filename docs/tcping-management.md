@@ -24,7 +24,7 @@ vpsctl --yes service tcping uninstall
 
 ## 平台与按需资源
 
-支持 Linux、Bash 4.4+、systemd 或带 `supervise-daemon` 的 OpenRC。监听脚本仅使用 Python 3 标准库，不使用 pip 包；缺失的 Python 只在启动时通过共享依赖接口安装。UFW 协作使用现有 `jq`、`flock`、`sha256sum`；不把服务管理器作为可自动安装的普通依赖。实际已验证的平台和命令见 [验收记录](tcping-validation.md)。
+支持 Linux 与 Bash 4.4+。`help`、`-h`、`--help` 和无附加参数的 `status` 不需要服务管理器；`start`、`stop` 和 `uninstall` 仍要求 systemd 或带 `supervise-daemon` 的 OpenRC。监听脚本仅使用 Python 3 标准库，不使用 pip 包；缺失的 Python 只在启动时通过共享依赖接口安装。UFW 协作使用现有 `jq`、`flock`、`sha256sum`；不把服务管理器作为可自动安装的普通依赖。实际已验证的平台和命令见 [验收记录](tcping-validation.md)。
 
 `service-tcping` 是独立功能 bundle，包含入口和监听脚本，依赖 `shared-command` 与 `shared-ufw`。安装管理器、浏览全局菜单、全局帮助和清单不下载该功能；首次调用功能（包括功能帮助）时按当前 release 的 manifest 下载、校验和缓存。查看功能帮助、状态及菜单本身不安装系统软件包。缓存完整后可离线启动、停止和卸载。
 

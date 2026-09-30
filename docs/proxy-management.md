@@ -381,7 +381,7 @@ vpsctl service proxy time sync
 
 ## 9. 依赖、演练与退出码
 
-支持的平台范围是 Linux、systemd 或 OpenRC，以及 `x86_64`/`amd64`、`aarch64`/`arm64`、`armv7l`/`armv7` 架构。状态、清单和配置渲染依赖 `jq`；端口检查与订阅输出使用 `ss`、`base64`、`tr`、`awk` 和 `mktemp`；证书与稳定 ID 操作依赖 `openssl` 与 `sha256sum`；端口转发依赖 `nft`、`ip`、`getent` 和 `sysctl`；受管变更使用 `flock` 加锁；官方 Release 安装还依赖 `curl` 以及 Xray 的 `unzip` 或 sing-box 的 `tar`。功能只在当前动作实际需要时检查对应工具：真实执行的交互环境发现缺失后才列出缺失项并询问是否安装，不会在进入代理菜单时预装所有工具；真实非交互安装仍必须提供 `--install-deps`；`--dry-run` 无需该授权即可展示依赖安装计划。获得授权后，当前动作可通过 `apt-get`、`dnf5`、`dnf`、`yum`、`apk`、`pacman` 或 `zypper` 补齐缺失工具；时间同步只在缺少可用 NTP 后端时补齐 chrony。systemd 的 `journalctl`、OpenRC 的 `tail`、服务管理器和 CPU 架构属于平台前置条件，不由该选项安装或绕过。
+支持的平台范围是 Linux、systemd 或 OpenRC，以及 `x86_64`/`amd64`、`aarch64`/`arm64`、`armv7l`/`armv7` 架构。在 Linux 上，帮助、`profiles`、`status [--core all|sing-box|xray] [--json]` 和 `time status [--json]` 不要求服务管理器；其他平台和权限检查仍保留。服务管理和实际变更仍要求 systemd 或 OpenRC。状态、清单和配置渲染依赖 `jq`；端口检查与订阅输出使用 `ss`、`base64`、`tr`、`awk` 和 `mktemp`；证书与稳定 ID 操作依赖 `openssl` 与 `sha256sum`；端口转发依赖 `nft`、`ip`、`getent` 和 `sysctl`；受管变更使用 `flock` 加锁；官方 Release 安装还依赖 `curl` 以及 Xray 的 `unzip` 或 sing-box 的 `tar`。功能只在当前动作实际需要时检查对应工具：真实执行的交互环境发现缺失后才列出缺失项并询问是否安装，不会在进入代理菜单时预装所有工具；真实非交互安装仍必须提供 `--install-deps`；`--dry-run` 无需该授权即可展示依赖安装计划。获得授权后，当前动作可通过 `apt-get`、`dnf5`、`dnf`、`yum`、`apk`、`pacman` 或 `zypper` 补齐缺失工具；时间同步只在缺少可用 NTP 后端时补齐 chrony。systemd 的 `journalctl`、OpenRC 的 `tail`、服务管理器和 CPU 架构属于平台前置条件，不由该选项安装或绕过。
 
 真实协议链路验收脚本为 `tests/integration/test-service-proxy-relay-connectivity-real.sh`，默认对任何失败都严格退出。Xray 26.3.27、26.6.27 和本轮复验的 26.9.9 的 `trojan-grpc-reality` 仍在 REALITY 认证完成后由 gRPC 传输层关闭连接；需要执行其余完整矩阵时可显式设置 `ALLOW_XRAY_TROJAN_GRPC_REALITY_XFAIL=1`。该豁免只接受原有 server-preface 关闭特征；若未来版本修复并实际连通，脚本以 XPASS 失败，要求移除豁免，避免永久静默跳过。
 

@@ -1,6 +1,6 @@
 # 系统内核管理
 
-`system kernel` 在 Debian/Ubuntu amd64 上清点已安装内核，安装发行版官方内核或 XanMod BBRv3 内核，将指定版本固定为 GRUB 2 默认启动项，并按版本安全卸载不再使用的内核；另提供独立的 BIOS GRUB 安装与修复入口。BBR/qdisc 的运行时与持久化设置仍由 `network bbr` 管理。
+`system kernel` 的安装、切换、卸载和 BIOS GRUB 安装/修复仅支持 Debian/Ubuntu amd64：它可清点已安装内核，安装发行版官方内核或 XanMod BBRv3 内核，将指定版本固定为 GRUB 2 默认启动项，并按版本安全卸载不再使用的内核。Linux 上的 `status` 可查询当前运行内核；非 Debian/Ubuntu 时仅显示运行内核，不清点内核软件包。BBR/qdisc 的运行时与持久化设置仍由 `network bbr` 管理。
 
 本功能处于 `experimental` 生命周期。内核和启动器变更可能导致重启后无法启动，首次使用前必须确认云厂商串行控制台、VNC、救援系统或其他带外恢复入口可用。
 
@@ -27,9 +27,9 @@ vpsctl system kernel install-grub [--disk DISK]
 
 ## 2. 支持边界
 
-- 仅支持 Linux 上使用 APT/dpkg 的 Debian/Ubuntu amd64。
-- ARM64 和其他架构明确拒绝；不会回退执行第三方安装脚本。
-- Docker、LXC、OpenVZ、Podman、systemd-nspawn、WSL 等不能替换宿主机内核的环境拒绝安装、切换和卸载。
+- Linux 上的 `status` 可查询当前运行内核，非 Debian/Ubuntu 时仅提供该查询。安装、切换、卸载和 BIOS GRUB 安装/修复仅支持使用 APT/dpkg 的 Debian/Ubuntu amd64。
+- ARM64 和其他架构的变更动作明确拒绝；不会回退执行第三方安装脚本。
+- Docker、LXC、OpenVZ、Podman、systemd-nspawn、WSL 等不能替换宿主机内核的环境拒绝安装、切换、卸载和 BIOS GRUB 安装/修复。
 - 状态与安装入口不要求 GRUB 2；自动切换只支持可以完整识别菜单项与稳定 ID 的标准 GRUB 2。其他启动器、默认项无法解析、菜单缺失或配置冲突时，切换和无法证明安全的卸载会在写入前拒绝。
 - Secure Boot 检查按来源区分：发行版官方签名内核不套用 XanMod 的全面拒绝规则；安装 XanMod 时若 Secure Boot 已启用，或 UEFI 环境中无法可靠判定状态，则在写入前停止。
 

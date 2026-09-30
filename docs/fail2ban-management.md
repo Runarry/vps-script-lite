@@ -2,7 +2,7 @@
 
 `security fail2ban` 安装 Fail2ban，并只管理 OpenSSH 的 `sshd` jail。它不会修改发行版提供的 `jail.conf`、过滤器或动作文件，也不会接管 Nginx、Apache、邮件等其他 jail。受管配置通过 `/etc/fail2ban/jail.d/99-vpsctl-sshd.local` 覆盖必要字段；卸载该功能后，用户原有配置会重新成为有效配置。
 
-本功能处于 `experimental` 生命周期，支持 Bash 4.4+、systemd、OpenSSH Server 和发行版提供的 Fail2ban 0.11+。软件包安装支持 `apt-get`、`dnf5`、`dnf`、`yum`、`pacman` 和 `zypper`；不会自动添加 EPEL 或其他软件源，不支持 apk/OpenRC。
+本功能处于 `experimental` 生命周期，支持 Bash 4.4+、OpenSSH Server 和发行版提供的 Fail2ban 0.11+；配置和变更要求 systemd。软件包安装支持 `apt-get`、`dnf5`、`dnf`、`yum`、`pacman` 和 `zypper`；不会自动添加 EPEL 或其他软件源，不提供 apk 安装或 OpenRC 服务编排。
 
 ## 接口
 
@@ -26,7 +26,7 @@ vpsctl [--yes] security fail2ban uninstall [--confirm-uninstall REMOVE-VPSCTL-FA
 
 无参数且连接交互终端时进入编号菜单；无参数非交互调用等同于人类可读的 `status`。菜单执行真实动作，不提供 dry-run 或机器格式开关。
 
-`status`、帮助和 `ignore list` 允许普通用户执行，`logs` 沿用 journal 自身权限；受 Fail2ban socket、journal 或状态目录权限限制的字段会显示为未知或返回权限错误。所有变更动作需要 root。`status --json` 的顶层包含 `schema_version: 1`，并报告软件版本、init/systemd 状态、配置所有权与漂移、当前和受管 SSH 端口、jail 状态、阈值、封禁动作、忽略列表和封禁计数。
+`status`、帮助和 `ignore list` 允许普通用户执行，`logs` 沿用 journal 自身权限；受 Fail2ban socket、journal 或状态目录权限限制的字段会显示为未知或返回权限错误。所有变更动作需要 root 与 systemd。在 Linux 上，只有 `help`、`-h`、`--help` 和 `status [--json]` 可在没有 systemd 时查询，字段可能未知；此例外不适用于 `ignore list` 或 `logs`。`status --json` 的顶层包含 `schema_version: 1`，并报告软件版本、init/systemd 状态、配置所有权与漂移、当前和受管 SSH 端口、jail 状态、阈值、封禁动作、忽略列表和封禁计数。
 
 ## 默认策略与白名单
 

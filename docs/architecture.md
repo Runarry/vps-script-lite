@@ -18,22 +18,26 @@ vps-script-lite/
 ├── README.md
 ├── bin/                    # 统一管理入口；只负责环境初始化与命令编排
 ├── commands/               # 独立功能脚本
-│   ├── backup/             # 备份、恢复与保留策略
-│   ├── deploy/             # 软件或应用部署
-│   ├── monitoring/         # 健康检查、资源与告警相关操作
+│   ├── backup/             # 预留目录，未登记命令
+│   ├── deploy/             # 预留目录，未登记命令
+│   ├── monitoring/         # 预留目录，未登记命令
 │   ├── network/            # 网络、DNS、防火墙和连通性
+│   │   └── ufw/            # UFW 入口的私有模块
 │   ├── security/           # 加固、审计、证书和访问控制
 │   │   ├── access.sh       # 用户、凭据与 SSH 访问管理公开入口
 │   │   ├── fail2ban.sh     # OpenSSH Fail2ban 防护公开入口
 │   │   └── tls.sh          # 域名 TLS 证书管理公开入口
 │   ├── service/            # 系统服务安装、配置和生命周期管理
 │   │   ├── proxy.sh        # 代理管理公开入口
-│   │   └── proxy/          # 仅由 proxy.sh 加载的私有实现模块
+│   │   ├── proxy/          # 仅由 proxy.sh 加载的私有实现模块
+│   │   ├── tcping.sh       # TCP 探测监听公开入口
+│   │   └── tcping/         # 私有监听脚本
+│   ├── self/               # core 常驻的分发状态、更新与卸载入口
 │   ├── test/               # 服务器综合质量与网络质量测试
 │   └── system/             # 系统信息、内核、软件包和基础维护
 │       ├── kernel.sh       # 系统内核管理公开入口
 │       ├── reinstall.sh    # 上游重装与 DD 启动及清理入口
-│       └── kernel/         # providers、inventory、grub 私有实现模块
+│       └── kernel/         # 内核来源、清点、GRUB 与 BIOS 安装私有模块
 ├── config/                 # 可提交的默认配置与示例；禁止存放真实密钥
 ├── lib/                    # 可被入口或功能脚本复用的稳定公共函数
 ├── tests/
@@ -43,7 +47,7 @@ vps-script-lite/
 └── docs/                   # 架构、开发和命令登记规范
 ```
 
-尚未实现功能的空目录暂以 `.gitkeep` 保存；`commands/network/` 包含网络功能脚本，`commands/system/kernel.sh` 是系统内核管理的唯一公开入口，并固定加载 `commands/system/kernel/providers.sh`、`inventory.sh` 与 `grub.sh` 私有模块；`commands/security/access.sh` 实现访问管理入口，`commands/security/fail2ban.sh` 及其私有子模块实现 OpenSSH Fail2ban 防护，`commands/security/tls.sh` 及其私有子模块实现域名 TLS 证书管理，`commands/service/proxy.sh` 及其私有子模块实现代理管理入口，`commands/service/tcping.sh` 及其私有监听脚本实现 TCP 探测服务，`commands/test/nodequality.sh` 与 `commands/test/tcpquality.sh` 实现服务器测试入口。
+目录树说明组件用途，不是完整的命令或打包清单。尚未实现的空目录以 `.gitkeep` 保存，不会出现在菜单或分发中。公开命令、私有文件和共享依赖的权威清单位于 [lib/registry.sh](../lib/registry.sh)：`vps_registry_init` 登记入口，`VPS_BUNDLE_IDS` 与 `vps_registry_bundle_files` 定义包及文件，`vps_registry_command_bundles` 定义依赖；新增文件时维护这些定义，文档只保留职责和使用说明。
 
 ## 3. 组件职责
 
@@ -114,56 +118,17 @@ vps-script-lite/
 
 `core` 常驻，只包含 `bin/vpsctl`、`VERSION`、`environment.sh`、`registry.sh`、`ui.sh`、`distribution.sh` 和三个 self 命令。每个非 self 公开命令独立打包为 `<domain>-<action>`，文件边界和全部私有模块由 `lib/registry.sh` 的固定清单定义。所有功能依赖 `shared-command`；`network ufw`、`security access`、`security tls`、`service proxy`、`service tcping` 另依赖 `shared-ufw`；两项测试另依赖 `shared-server-test`。首次执行功能或功能帮助时，按依赖顺序下载、校验、缓存，再分发。全局帮助、版本、环境、清单、菜单浏览和 self 状态保持离线。更新只获取目标版本的 manifest、安装器和 core，不预取旧缓存；不同版本的功能和共享库不得混用。功能卸载可在验证当前受管 release 后，持功能包下载锁删除该命令的固定文件和缓存标记；下次调用只重下该功能包。
 
-仓库根 `VERSION` 是项目版本的规范来源。v0.8.10 使用 schema 2，资产名称如下；上一版 v0.8.9 使用 schema 1，不能用新格式覆盖旧 Release：
+仓库根 `VERSION` 是项目版本的规范来源。v0.8.10 使用 schema 2，上一版 v0.8.9 使用 schema 1，不能用新格式覆盖旧 Release。资产由固定注册表生成，命名与交付约定见[Release 资产与发布流程](development-workflow.md#4-release-资产与发布流程)，此处不再维护一份逐包清单。
 
-```text
-vpsctl.sh
-vpsctl-manifest.tsv
-vpsctl-core-0.8.10.tar.gz
-vpsctl-shared-command-0.8.10.tar.gz
-vpsctl-shared-ufw-0.8.10.tar.gz
-vpsctl-shared-server-test-0.8.10.tar.gz
-vpsctl-network-bbr-0.8.10.tar.gz
-vpsctl-network-dns-0.8.10.tar.gz
-vpsctl-network-ip-policy-0.8.10.tar.gz
-vpsctl-network-ufw-0.8.10.tar.gz
-vpsctl-network-rfw-0.8.10.tar.gz
-vpsctl-system-kernel-0.8.10.tar.gz
-vpsctl-system-reinstall-0.8.10.tar.gz
-vpsctl-security-access-0.8.10.tar.gz
-vpsctl-security-fail2ban-0.8.10.tar.gz
-vpsctl-security-tls-0.8.10.tar.gz
-vpsctl-service-proxy-0.8.10.tar.gz
-vpsctl-service-tcping-0.8.10.tar.gz
-vpsctl-test-nodequality-0.8.10.tar.gz
-vpsctl-test-tcpquality-0.8.10.tar.gz
-```
-
-bundle 内部使用项目根相对路径，不能再包一层顶级目录。core 允许 `lib/` 及其子路径内的公共库，构建脚本仍显式选择发布文件；保留必需入口、哈希、路径越界及链接/特殊文件检查。`vpsctl-manifest.tsv` 是严格 TSV，字段顺序如下；SHA-256 使用 64 位小写十六进制：
+bundle 内部使用项目根相对路径，不能再包一层顶级目录。core 允许 `lib/` 及其子路径内的公共库，构建脚本仍显式选择发布文件；保留必需入口、哈希、路径越界及链接/特殊文件检查。`vpsctl-manifest.tsv` 是严格 TSV；以下为字段顺序示意，`VERSION`、`NAME` 和 `SHA256` 是占位符，bundle 行须按注册表完整生成，摘要使用 64 位小写十六进制：
 
 ```text
 schema_version<TAB>2
-version<TAB>0.8.10
+version<TAB>VERSION
 repository<TAB>Runarry/vps-script-lite
 asset<TAB>launcher<TAB>vpsctl.sh<TAB>SHA256
-bundle<TAB>core<TAB>vpsctl-core-0.8.10.tar.gz<TAB>SHA256
-bundle<TAB>shared-command<TAB>vpsctl-shared-command-0.8.10.tar.gz<TAB>SHA256
-bundle<TAB>shared-ufw<TAB>vpsctl-shared-ufw-0.8.10.tar.gz<TAB>SHA256
-bundle<TAB>shared-server-test<TAB>vpsctl-shared-server-test-0.8.10.tar.gz<TAB>SHA256
-bundle<TAB>network-bbr<TAB>vpsctl-network-bbr-0.8.10.tar.gz<TAB>SHA256
-bundle<TAB>network-dns<TAB>vpsctl-network-dns-0.8.10.tar.gz<TAB>SHA256
-bundle<TAB>network-ip-policy<TAB>vpsctl-network-ip-policy-0.8.10.tar.gz<TAB>SHA256
-bundle<TAB>network-ufw<TAB>vpsctl-network-ufw-0.8.10.tar.gz<TAB>SHA256
-bundle<TAB>network-rfw<TAB>vpsctl-network-rfw-0.8.10.tar.gz<TAB>SHA256
-bundle<TAB>system-kernel<TAB>vpsctl-system-kernel-0.8.10.tar.gz<TAB>SHA256
-bundle<TAB>system-reinstall<TAB>vpsctl-system-reinstall-0.8.10.tar.gz<TAB>SHA256
-bundle<TAB>security-access<TAB>vpsctl-security-access-0.8.10.tar.gz<TAB>SHA256
-bundle<TAB>security-fail2ban<TAB>vpsctl-security-fail2ban-0.8.10.tar.gz<TAB>SHA256
-bundle<TAB>security-tls<TAB>vpsctl-security-tls-0.8.10.tar.gz<TAB>SHA256
-bundle<TAB>service-proxy<TAB>vpsctl-service-proxy-0.8.10.tar.gz<TAB>SHA256
-bundle<TAB>service-tcping<TAB>vpsctl-service-tcping-0.8.10.tar.gz<TAB>SHA256
-bundle<TAB>test-nodequality<TAB>vpsctl-test-nodequality-0.8.10.tar.gz<TAB>SHA256
-bundle<TAB>test-tcpquality<TAB>vpsctl-test-tcpquality-0.8.10.tar.gz<TAB>SHA256
+bundle<TAB>core<TAB>vpsctl-core-VERSION.tar.gz<TAB>SHA256
+bundle<TAB>NAME<TAB>vpsctl-NAME-VERSION.tar.gz<TAB>SHA256
 ```
 
 manifest 的 `version`、tag、文件名、安装目标版本和应用展示版本必须一致。schema 2 不解析旧 schema 1；跨格式迁移须普通卸载管理器后重新安装，保留服务、配置、功能状态和备份。bootstrap 在 core 安装前只验证安全、唯一的 bundle 记录并要求 core，不执行下载的注册表。运行时按本地固定清单验证功能及共享包的精确路径和必需文件，锁内再次检查缓存，成功后才写 marker；失败清除本次临时资产。`current` 在 manifest、core 和安装器完成校验并落盘后切换；提交前失败仍恢复原 current、入口和 self 元数据。

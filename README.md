@@ -16,6 +16,7 @@
 - [开发与验收流程](docs/development-workflow.md)：从设计、实现到测试和评审的流程。
 - [主管理脚本与 UI](docs/manager-ui.md)：启动检测、菜单结构、非交互模式和扩展方式。
 - [网络设置](docs/network-settings.md)：BBR、DNS、IP 地址族偏好和 RFW 的接口、安全边界、持久化路径和恢复要求。
+- [UFW 管理](docs/ufw-management.md)：防火墙规则、服务联动、临时租约与恢复边界。
 - [系统内核管理](docs/kernel-management.md)：发行版官方内核与 XanMod BBRv3 的安装、固定默认版本、按版本卸载和恢复；另见[验收记录](docs/kernel-validation.md)。
 - [系统重装与 DD](docs/reinstall-management.md)：按需运行官方 reinstall、取消重装及卸载工具与专属缓存。
 - [代理管理](docs/proxy-management.md)：Xray/sing-box 内核、节点、出口关联、端口转发、订阅、证书、日志与时间同步。
@@ -24,6 +25,7 @@
 - [Fail2ban 管理](docs/fail2ban-management.md)：OpenSSH jail 的安装、均衡递增策略、白名单、验证和恢复。
 - [TLS 证书管理](docs/tls-management.md)：域名证书导入、ACME 申请与自动续期。
 - [服务器测试](docs/server-testing.md)：NodeQuality 与 TcpQuality 的上游来源、负载、报告上传、清理和退出码边界。
+- [优化评审与验收记录](docs/optimization-review-2026-09-30.md#当前处理状态)：已完成范围、剩余候选及各轮验证证据。
 
 ## 安装
 
@@ -40,12 +42,12 @@ apk add --no-cache bash curl ca-certificates
 | 核心管理入口 | `x86_64`、`aarch64` 支持；要求 Bash 4.4+，安装/更新需要 `curl` 和 CA 证书 |
 | `network bbr` | 支持入口与依赖安装；实际变更仍要求内核暴露所选拥塞控制和 qdisc 能力 |
 | `network dns` | 支持静态 `/etc/resolv.conf` 与 openresolv；检测到 Alpine DHCP 可能回写 plain 后端时，会在零写入状态拒绝并要求 openresolv，或明确禁用 udhcpc/dhcpcd 的 DNS hook |
-| `network rfw` | 不支持 Alpine 默认的 OpenRC；仅支持 systemd、`x86_64`/`aarch64`、Linux 5.15+ 及所需 XDP/BPF 能力 |
+| `network rfw` | 帮助和无附加参数的 `status` 可在 Linux 上查询；实际运行不支持 Alpine 默认的 OpenRC，仍要求 systemd、`x86_64`/`aarch64`、Linux 5.15+ 及所需 XDP/BPF 能力 |
 | `network ufw` | 适配 `apk` 和 OpenRC；要求已配置的软件源提供 UFW，实际验证范围见 [UFW 验收记录](docs/ufw-validation.md) |
 | `security access` | SSH 服务编排仅支持 systemd；不能把核心的 OpenRC 支持外推为访问管理支持 |
-| `security fail2ban` | 不支持 `apk`/OpenRC；仅支持文档列出的 systemd 发行版包管理器与 Fail2ban 0.11+ |
+| `security fail2ban` | 帮助与 `status [--json]` 可在无 systemd 的 Linux 上查询；安装和服务编排不支持 `apk`/OpenRC，仍要求文档列出的包管理器与 Fail2ban 0.11+ |
 | `security tls` | 导入与查看支持 Alpine；续期 timer 需要 systemd；ACME 的 lego 二进制仅 `x86_64`/`aarch64` |
-| `system kernel` | 不支持 Alpine；仅支持 Debian/Ubuntu amd64 上的 APT/dpkg，可管理发行版官方内核与 XanMod 官方构建；自动切换限可识别的标准 GRUB 2 |
+| `system kernel` | `status` 可只读查询当前运行内核；内核包及 GRUB 变更不支持 Alpine，仅支持 Debian/Ubuntu amd64 上的 APT/dpkg；自动切换限可识别的标准 GRUB 2 |
 | `system reinstall` | Linux 上提供下载、状态、取消和卸载；重装目标与安装依赖由运行时下载的官方 reinstall 决定 |
 | `network ip-policy` | 不支持 Alpine 的 musl；该入口只管理 glibc `getaddrinfo()` 的 `/etc/gai.conf` 排序 |
 | `service proxy` | 支持 OpenRC 与 systemd；具体内核、协议、架构和依赖仍按代理功能文档与运行时门禁判断 |

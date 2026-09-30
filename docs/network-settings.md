@@ -8,8 +8,8 @@
 | --- | --- | --- | --- | --- | --- | --- |
 | `network bbr` | `status`、`enable`、`set`、`restore` | `change` | `optional-root` | 支持 | `linux` | `experimental` |
 | `network dns` | `show`、`test`、`set`、`refresh`、`verify`、`restore` | `disruptive` | `optional-root` | 支持 | `linux` | `experimental` |
-| `network ip-policy` | `status`、`set`、`restore` | `disruptive` | `optional-root` | 支持 | `linux` | `experimental` |
-| `network rfw` | `status`、`install`、`update`、`configure`、`start`、`stop`、`restart`、`stats`、`logs`、`uninstall` | `disruptive` | `optional-root` | 支持 | `linux`、`init:systemd` | `experimental` |
+| `network ip-policy` | `status`、`set`、`restore` | `disruptive` | `optional-root` | 支持 | `linux`、`libc:glibc`；帮助不要求 glibc | `experimental` |
+| `network rfw` | `status`、`install`、`update`、`configure`、`start`、`stop`、`restart`、`stats`、`logs`、`uninstall` | `disruptive` | `optional-root` | 支持 | `linux`；帮助和无附加参数的 `status` 不要求 systemd，其余操作要求 `init:systemd` | `experimental` |
 | `network ufw` | 安装/卸载、启停、规则增删改查、联动同步及高级配置 | `disruptive` | `optional-root` | 支持 | `linux`；写操作按实际 UFW/包管理器/init 能力检查 | `experimental` |
 
 全局选项必须位于领域前，例如：
@@ -18,7 +18,7 @@
 bash bin/vpsctl --dry-run --install-deps network dns set --server 1.1.1.1
 ```
 
-三项功能的公共约定如下：
+网络功能的公共约定如下：
 
 - `--install-deps` 为真实非交互调用明确授权按当前动作安装缺失的系统工具；演练无需安装授权；真实执行的交互流程则只在当前动作确有缺失时询问。它支持 `apt-get`、`dnf5`、`dnf`、`yum`、`apk`、`pacman` 与 `zypper`，但不安装或绕过内核、init 系统、CPU 架构、XDP/BPF 等平台能力。
 - `--dry-run` 展示检测结果和计划，不写系统、不安装依赖、不改变服务状态。缺少工具时无需 `--install-deps` 即可展示包管理器计划；DNS 可继续展示后续计划，BBR 和 RFW 在缺失工具妨碍安全验证时会提示安装后重跑。

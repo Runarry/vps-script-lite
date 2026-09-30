@@ -1,6 +1,6 @@
 # 开发与验收流程
 
-本流程用于未来新增或修改管理入口、功能脚本和公共库。
+本流程用于新增或修改管理入口、功能脚本、公共库及相关文档。
 
 ## 测试环境限制
 
@@ -8,6 +8,28 @@
 - 禁止在当前系统或 WSL 中运行项目测试或验证命令；当前系统只用于编辑、差异审阅和不执行项目代码的只读仓库检查。
 - `host-vps-scripts` 专门用于本项目验证，可按测试需要安装依赖、修改系统配置及执行破坏性场景。测试时仍须记录执行命令、关键结果和必要的恢复信息，且不得把真实凭据、主机信息或未脱敏日志提交到仓库。
 - 文档中的“隔离环境验证”均特指 `host-vps-scripts`，不得以本机、WSL、容器或其他环境的结果替代。
+
+### 默认套件与定向检查
+
+按变更影响选择最小有效检查范围，优先复用现有测试及仍有效的验收结果；只有新改动、相关失败或明确未覆盖的风险才扩大范围。纯文档修改检查内容、链接与示例，不默认运行功能测试；用户或发布流程明确要求的检查仍须完成。
+
+`tests/run.sh` 先对脚本中的固定清单执行 `bash -n`，再运行列出的单元测试和 `tests/integration/test-vpsctl.sh`。其他真实集成脚本即使出现在语法检查清单中，也没有被执行；末尾的 `PASS: all tests` 只代表该默认套件通过。真实服务、网络、重启或发布验收须按功能文档单独安排，不能用默认套件结果替代。
+
+以下示例中的 `/path/to/vps-script-lite` 需替换为专用主机上的源码副本路径：
+
+```bash
+# 单个相关套件
+ssh host-vps-scripts 'cd /path/to/vps-script-lite && bash tests/unit/test-network-bbr.sh'
+# 代理脚本的定向分组；也可选择 relay-forward 或 relay-family
+ssh host-vps-scripts 'cd /path/to/vps-script-lite && VPSCTL_TEST_ONLY=relay-cache bash tests/unit/test-service-proxy.sh'
+# 构建交付与入口版本的定向检查
+ssh host-vps-scripts 'cd /path/to/vps-script-lite && VPSCTL_TEST_ONLY=release-delivery bash tests/unit/test-release-build.sh'
+ssh host-vps-scripts 'cd /path/to/vps-script-lite && VPSCTL_TEST_ONLY=entry-version bash tests/integration/test-vpsctl.sh'
+```
+
+`VPSCTL_TEST_ONLY` 由上述各脚本自行解释，不是 `tests/run.sh` 的通用筛选参数。分组名以对应脚本的分支为准；位置参数或未识别的分组值不会筛选测试，可能进入该脚本的默认流程。需要默认套件时，在同一 SSH 环境显式运行 `bash tests/run.sh`。
+
+验收记录应注明源码基线、实际命令、检查范围及未运行或受限的部分。ShellCheck 必须区分零诊断、已有诊断无新增、部分分析和检查失败；不能把有限分析或被中止的执行记作完整通过。
 
 ## 1. 设计
 
@@ -31,7 +53,7 @@
 4. 实现最小范围的系统变更。
 5. 实现变更后验证、错误清理和恢复路径。
 6. 接入统一入口的固定命令映射。
-7. 在 `host-vps-scripts` 完成单元测试、真实环境集成测试和命令登记。
+7. 在 `host-vps-scripts` 完成影响范围内的自动化检查及必要的真实验收，更新命令登记与文档。
 
 ## 3. 评审清单
 
@@ -67,30 +89,13 @@
 
 仓库根 `VERSION` 是项目版本的规范来源，当前版本为 `0.8.10`。应用、功能、tag、发布资产、安装目录和命令行展示必须使用同一版本号。v0.8.10 使用 schema 2；上一版 v0.8.9 按领域打包，使用 schema 1，跨格式迁移不通过 self update。
 
-schema 2 Release 必须一次性提供安装器、严格 TSV 清单、core、三个共享库 bundle 及十四个功能 bundle。固定清单位于 `lib/registry.sh`，构建和运行时共用。v0.8.10 的资产名称如下；v0.8.9 的 schema 1 资产保持原样：
+schema 2 Release 必须一次性提供安装器、严格 TSV 清单及注册表中的全部 bundle。构建与运行时共用 [lib/registry.sh](../lib/registry.sh) 中的 `VPS_BUNDLE_IDS`、`vps_registry_bundle_files` 和 `vps_registry_command_bundles`；新增命令、文件或依赖只维护这些固定定义，不复制另一份文档清单。当前生成的完整资产集合以构建输出的 manifest 为准，v0.8.9 的 schema 1 资产保持原样。
 
-```text
-vpsctl.sh
-vpsctl-manifest.tsv
-vpsctl-core-0.8.10.tar.gz
-vpsctl-shared-command-0.8.10.tar.gz
-vpsctl-shared-ufw-0.8.10.tar.gz
-vpsctl-shared-server-test-0.8.10.tar.gz
-vpsctl-network-bbr-0.8.10.tar.gz
-vpsctl-network-dns-0.8.10.tar.gz
-vpsctl-network-ip-policy-0.8.10.tar.gz
-vpsctl-network-ufw-0.8.10.tar.gz
-vpsctl-network-rfw-0.8.10.tar.gz
-vpsctl-system-kernel-0.8.10.tar.gz
-vpsctl-system-reinstall-0.8.10.tar.gz
-vpsctl-security-access-0.8.10.tar.gz
-vpsctl-security-fail2ban-0.8.10.tar.gz
-vpsctl-security-tls-0.8.10.tar.gz
-vpsctl-service-proxy-0.8.10.tar.gz
-vpsctl-service-tcping-0.8.10.tar.gz
-vpsctl-test-nodequality-0.8.10.tar.gz
-vpsctl-test-tcpquality-0.8.10.tar.gz
-```
+| 资产 | 命名规则 |
+|---|---|
+| 安装器 | `vpsctl.sh` |
+| 清单 | `vpsctl-manifest.tsv` |
+| core、共享库与功能包 | `vpsctl-<bundle-id>-<VERSION>.tar.gz`；bundle ID 来自注册表，版本来自根目录 `VERSION` |
 
 每个 tar 包内使用项目根相对路径，不包含额外顶级包目录。`vpsctl-manifest.tsv` 依次包含 `schema_version<TAB>2`、`version<TAB>VERSION`、`repository<TAB>Runarry/vps-script-lite`、`asset<TAB>launcher<TAB>vpsctl.sh<TAB>SHA256`，以及各 bundle 的 `bundle<TAB>NAME<TAB>vpsctl-NAME-VERSION.tar.gz<TAB>SHA256`。名称唯一，文件名和版本精确对应，摘要是 64 位小写十六进制，core 必须存在；功能和共享包内容必须符合注册表固定清单。新增功能或私有模块时同步更新该清单和依赖映射。
 
