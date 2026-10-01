@@ -10,7 +10,7 @@ TEST_TEMP="$(mktemp -d)"
 ENTRY="$TEST_ROOT/commands/system/reinstall.sh"
 TEST_CASE=0
 TEST_PID=''
-trap 'if [[ -n "$TEST_PID" ]]; then kill "$TEST_PID" 2>/dev/null || true; fi; rm -rf -- "$TEST_TEMP"' EXIT
+trap 'if [[ -n "$TEST_PID" ]]; then kill "$TEST_PID" 2>/dev/null || true; fi; if [[ "${VPSCTL_TEST_KEEP_TEMP:-0}" == 1 ]]; then printf "Fixture evidence: %s\n" "$TEST_TEMP"; else rm -rf -- "$TEST_TEMP"; fi' EXIT
 mkdir -p "$TEST_TEMP/bin"
 export PATH="$TEST_TEMP/bin:$PATH"
 export VPSCTL_TESTING=1 VPSCTL_NON_INTERACTIVE=1 VPSCTL_NO_COLOR=1 VPSCTL_ASSUME_YES=1
@@ -39,6 +39,11 @@ if [[ "${MOCK_REMOVE_FAIL:-0}" == 1 && "${*: -1}" == "$VPSCTL_SYSTEM_ROOT/reinst
 fi
 exec /bin/rm "$@"
 EOF
+cat >"$TEST_TEMP/bin/reboot" <<'EOF'
+#!/usr/bin/env bash
+printf 'reboot\n' >>"$VPSCTL_SYSTEM_ROOT/events"
+exit "${MOCK_REBOOT_EXIT:-0}"
+EOF
 cat >"$TEST_TEMP/upstream" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\0' "$@" >"$VPSCTL_SYSTEM_ROOT/args"
@@ -49,9 +54,11 @@ if [[ "${MOCK_READ_STDIN:-0}" == 1 ]]; then
 fi
 if [[ "${MOCK_SLEEP:-0}" == 1 ]]; then
     printf '%s\n' "$$" >"$VPSCTL_SYSTEM_ROOT/pid"
-    trap 'exit 143' TERM
+    trap 'printf "TERM\n" >"$VPSCTL_SYSTEM_ROOT/signal"; exit 143' TERM
+    trap 'printf "INT\n" >"$VPSCTL_SYSTEM_ROOT/signal"; exit 130' INT
     while :; do sleep 0.1; done
 fi
+if [[ "${1:-}" == reset && "${MOCK_RESET_EXIT:-0}" != 0 ]]; then exit "$MOCK_RESET_EXIT"; fi
 if [[ "${1:-}" == reset && "${MOCK_EXIT:-0}" == 0 ]]; then
     if [[ "${MOCK_KEEP_BOOT:-0}" != 1 ]]; then
         /bin/rm -f -- "$VPSCTL_SYSTEM_ROOT/boot/grub/custom.cfg" "$VPSCTL_SYSTEM_ROOT/boot/syslinux/nested/extlinux.conf" "$VPSCTL_SYSTEM_ROOT/efi/EFI/reinstall/grub.cfg"
@@ -84,6 +91,7 @@ new_case() {
     : >"$VPSCTL_SYSTEM_ROOT/proc/cmdline"
     export MOCK_DOWNLOAD=ok MOCK_EXIT=0 MOCK_READ_STDIN=0 MOCK_SLEEP=0
     export MOCK_KEEP_BOOT=0 MOCK_RESET_MOUNT=0 MOCK_REMOVE_FAIL=0
+    export MOCK_RESET_EXIT=0 MOCK_REBOOT_EXIT=0
     VPSCTL_DRY_RUN=0
     VPSCTL_ASSUME_YES=1
 }
@@ -440,6 +448,24 @@ test_permissions_dependencies_and_busybox() {
     absent "$VPSCTL_SYSTEM_ROOT/reinstall.log"
 }
 
+test_menu_headless_and_pty() {
+    new_case
+    invoke menu
+    equal 3 "$STATUS" 'explicit menu requires a terminal'
+    absent "$VPSCTL_SYSTEM_ROOT/events"
+    absent "$VPSCTL_SYSTEM_ROOT/var"
+    absent "$VPSCTL_SYSTEM_ROOT/run"
+    invoke --dry-run menu
+    equal 3 "$STATUS" 'headless terminal requirement still precedes dry run'
+    absent "$VPSCTL_SYSTEM_ROOT/events"
+    absent "$VPSCTL_SYSTEM_ROOT/var"
+    absent "$VPSCTL_SYSTEM_ROOT/run"
+    invoke menu unexpected
+    equal 2 "$STATUS" 'menu rejects extra arguments'
+    command -v python3 >/dev/null 2>&1 || fail 'terminal acceptance requires Python 3'
+    python3 "$TEST_ROOT/tests/fixtures/reinstall-menu.py" "$ENTRY" "$TEST_TEMP"
+}
+
 test_source_and_help
 test_run_and_arguments
 test_download_failure
@@ -449,4 +475,5 @@ test_boundaries
 test_active_environment
 test_lock_signals_and_terminal
 test_permissions_dependencies_and_busybox
+test_menu_headless_and_pty
 printf 'PASS: system reinstall unit tests (%s fixtures)\n' "$TEST_CASE"

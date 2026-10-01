@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# Thin Linux entry point for bin456789/reinstall. Sourcing only defines functions.
+# Linux entry point for bin456789/reinstall. Sourcing only defines functions.
 # shellcheck source-path=SCRIPTDIR
 
 reinstall_usage() {
     cat <<'EOF'
-用法：vpsctl system reinstall [全局选项] [help|status|run [--] 上游参数...|reset|uninstall]
+用法：vpsctl system reinstall [全局选项] [menu|help|status|run [--] 上游参数...|reset|uninstall]
 
-  help / --help  显示本地帮助；不传动作时也显示帮助
+  menu           打开 Linux、Windows 和 RAW 镜像重装快捷菜单（需要终端）
+  help / --help  显示本地帮助；无终端且不传动作时也显示帮助
   status         只读查看重装脚本、启动项和残留文件
   run            每次下载最新上游脚本，原样传递其后的所有参数
   reset          使用保留的上游脚本撤销重装引导；缺失时重新下载
@@ -14,9 +15,13 @@ reinstall_usage() {
 
 全局选项必须放在动作之前：--yes --non-interactive --install-deps
                           --quiet --verbose --no-color
-不支持 --dry-run。run/reset/uninstall 仅支持 Linux，且需要 root。
+不传动作时，有交互式终端则打开菜单。菜单可输入 q/0 返回。
+不支持 --dry-run。准备重装、reset/uninstall 仅支持 Linux，且需要 root。
 --non-interactive 将上游标准输入接到 /dev/null；--yes 只确认本地卸载。
-上游参数及确认交给上游处理；不会自动重启，也不会在 run 后清理启动资源。
+菜单仍需明确确认安装；--yes 不会选择系统、跳过安装确认或重启。
+菜单准备成功后可立即重启、稍后重启（默认）或取消重装；失败不会重启。
+RAW 菜单凭据仅用于安装环境，不会修改镜像内的最终系统账户。
+run 原样传递参数及上游确认，不会自动重启或清理启动资源。
 
 示例：vpsctl system reinstall run debian 12 --password 'your password'
       vpsctl --yes system reinstall uninstall
@@ -25,7 +30,7 @@ EOF
 }
 
 reinstall_parse_args() {
-    REINSTALL_ACTION=help
+    REINSTALL_ACTION=''
     REINSTALL_ARGS=()
     while (($#)); do
         case "$1" in
@@ -38,7 +43,7 @@ reinstall_parse_args() {
             --no-color) VPSCTL_NO_COLOR=1 ;;
             --)
                 shift
-                REINSTALL_ACTION="${1:-help}"
+                REINSTALL_ACTION="${1:-}"
                 if (($#)); then shift; fi
                 break
                 ;;
@@ -64,7 +69,7 @@ reinstall_parse_args() {
             if [[ "${1:-}" == -- ]]; then shift; fi
             REINSTALL_ARGS=("$@")
             ;;
-        help | status | reset | uninstall)
+        '' | menu | help | status | reset | uninstall)
             (($# == 0)) || {
                 vps_cmd_error '此动作不接受额外参数'
                 return 2
@@ -343,6 +348,312 @@ reinstall_execute_upstream() {
     fi
 }
 
+# Menu execution keeps the caller alive, unlike the direct run/reset exec path.
+# Do not unlock on a signal until the child has actually finished.
+reinstall_menu_signal() {
+    REINSTALL_SIGNAL="$1"
+    REINSTALL_SIGNAL_STATUS="$2"
+    if [[ -n "$REINSTALL_CHILD_PID" ]]; then
+        kill -s "$1" "$REINSTALL_CHILD_PID" 2>/dev/null || true
+    elif [[ "$REINSTALL_CHILD_STARTING" != 1 ]]; then
+        exit "$2"
+    fi
+}
+
+reinstall_menu_execute_upstream() {
+    local status=0
+    REINSTALL_CHILD_STARTING=1
+    trap 'reinstall_menu_signal INT 130' INT
+    trap 'reinstall_menu_signal TERM 143' TERM
+    (
+        trap - EXIT INT TERM
+        exec bash "$REINSTALL_SCRIPT" "$@"
+    ) <&0 &
+    REINSTALL_CHILD_PID=$!
+    REINSTALL_CHILD_STARTING=0
+    if [[ -n "$REINSTALL_SIGNAL" ]]; then
+        kill -s "$REINSTALL_SIGNAL" "$REINSTALL_CHILD_PID" 2>/dev/null || true
+    fi
+    while true; do
+        status=0
+        wait "$REINSTALL_CHILD_PID" || status=$?
+        # wait returns early when a trapped signal arrives. Keep the lock and
+        # wait again if the child is still completing its own signal handler.
+        if ((REINSTALL_SIGNAL_STATUS)) && kill -0 "$REINSTALL_CHILD_PID" 2>/dev/null; then continue; fi
+        break
+    done
+    REINSTALL_CHILD_PID=''
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    ((REINSTALL_SIGNAL_STATUS == 0)) || return "$REINSTALL_SIGNAL_STATUS"
+    return "$status"
+}
+
+reinstall_reset_upstream() {
+    if [[ "${REINSTALL_MENU_ACTIVE:-0}" == 1 ]]; then
+        reinstall_menu_execute_upstream reset
+    else
+        (reinstall_execute_upstream reset)
+    fi
+}
+
+reinstall_menu_value() {
+    local prompt="$1" default="$2" kind="$3" value line private_key
+    while true; do
+        value="$(vps_cmd_prompt_value "$prompt（q 取消）" "$default")" || return $?
+        case "$value" in q | Q) return 130 ;; esac
+        case "$kind" in
+            username)
+                if [[ "$value" =~ ^[a-zA-Z_][a-zA-Z0-9_.-]*[$]?$ ]]; then break; fi
+                vps_cmd_warning '用户名需以字母或下划线开头，并仅包含字母、数字、点、下划线或连字符'
+                ;;
+            port)
+                if [[ "$value" =~ ^[0-9]{1,5}$ ]] && ((10#$value >= 1 && 10#$value <= 65535)); then
+                    value="$((10#$value))"
+                    break
+                fi
+                vps_cmd_warning '端口必须是 1 到 65535 的数字'
+                ;;
+            url)
+                if [[ "$value" =~ ^https?://[^/[:space:]]+(/[^[:space:]]*)?$ ]]; then break; fi
+                vps_cmd_warning '请输入有效的 HTTP(S) 镜像 URL'
+                ;;
+            key)
+                if [[ -f "$value" && -r "$value" ]]; then
+                    private_key=0
+                    while IFS= read -r line || [[ -n "$line" ]]; do
+                        if [[ "$line" == *'PRIVATE KEY-----'* ]]; then
+                            private_key=1
+                            break
+                        fi
+                    done <"$value"
+                    if ((private_key == 0)); then break; fi
+                    vps_cmd_warning '所选文件包含私钥；请选择公钥文件（通常以 .pub 结尾）'
+                    continue
+                fi
+                if [[ "$value" =~ ^(ssh-|ecdsa-sha2-|sk-ssh-|sk-ecdsa-)[^[:space:]]+[[:space:]]+[A-Za-z0-9+/]+={0,3}([[:space:]].*)?$ ]] ||
+                    [[ "$value" =~ ^https?://[^/[:space:]]+(/[^[:space:]]*)?$ ]] ||
+                    [[ "$value" =~ ^gh:[a-zA-Z0-9][a-zA-Z0-9-]*$ ]]; then break; fi
+                vps_cmd_warning '请输入公钥原文、可读公钥文件路径、HTTP(S) URL 或 gh:GitHub用户名'
+                ;;
+        esac
+    done
+    printf '%s' "$value"
+}
+
+reinstall_menu_password() {
+    local first second
+    while true; do
+        printf '输入密码（隐藏输入，q 取消）：' >&2
+        IFS= read -r -s first || {
+            printf '\n' >&2
+            return 130
+        }
+        printf '\n' >&2
+        case "$first" in q | Q) return 130 ;; esac
+        if [[ -z "$first" ]]; then
+            vps_cmd_warning '密码不能为空'
+            continue
+        fi
+        printf '再次输入密码（隐藏输入，q 取消）：' >&2
+        IFS= read -r -s second || {
+            printf '\n' >&2
+            return 130
+        }
+        printf '\n' >&2
+        case "$second" in q | Q) return 130 ;; esac
+        if [[ "$first" != "$second" ]]; then
+            vps_cmd_warning '两次密码不一致，请重新输入'
+            continue
+        fi
+        printf '%s' "$first"
+        return 0
+    done
+}
+
+reinstall_menu_random_password() {
+    local random
+    random="$(od -An -N18 -tx1 /dev/urandom | tr -d ' \n')" || return 20
+    [[ "$random" =~ ^[[:xdigit:]]{36}$ ]] || return 20
+    # 144 random bits, with all four Windows password character classes.
+    printf 'Aa1!%s' "$random"
+}
+
+reinstall_menu_install() {
+    local target="$1" version='' image='' language='' url='' username auth password='' key='' port
+    local auth_label port_label='SSH' status
+    local VPSCTL_ASSUME_YES=0
+    local -a versions=() auth_choices=(random '随机密码' custom '自定义密码')
+    REINSTALL_ARGS=()
+    case "$target" in
+        debian) versions=(13 13 12 12 latest 'latest（上游默认版本）') ;;
+        ubuntu) versions=(24.04 24.04 22.04 22.04 26.04 26.04 latest 'latest（上游默认版本）') ;;
+        alpine) versions=(3.24 3.24 3.23 3.23 latest 'latest（上游默认版本）') ;;
+        rocky | almalinux) versions=(9 9 10 10 8 8 latest 'latest（上游默认版本）') ;;
+        windows-client)
+            image="$(vps_cmd_prompt_select 'Windows 客户端版本' 'Windows 11 Enterprise LTSC 2024' \
+                'Windows 11 Enterprise LTSC 2024' 'Windows 11 Enterprise LTSC 2024' \
+                'Windows 11 Pro' 'Windows 11 Pro' \
+                'Windows 10 Enterprise LTSC 2021' 'Windows 10 Enterprise LTSC 2021' \
+                'Windows 10 Pro' 'Windows 10 Pro')" || return $?
+            ;;
+        windows-server)
+            version="$(vps_cmd_prompt_select 'Windows Server 年份' 2022 2022 2022 2025 2025 2019 2019)" || return $?
+            image="$(vps_cmd_prompt_select 'Windows Server 版本（桌面体验）' ServerStandard \
+                ServerStandard Standard ServerDatacenter Datacenter)" || return $?
+            image="Windows Server $version $image"
+            ;;
+        dd) url="$(reinstall_menu_value 'RAW 镜像 HTTP(S) URL' '' url)" || return $? ;;
+    esac
+    if ((${#versions[@]})); then
+        version="$(vps_cmd_prompt_select "$target 版本" "${versions[0]}" "${versions[@]}")" || return $?
+        REINSTALL_ARGS=("$target")
+        [[ "$version" == latest ]] || REINSTALL_ARGS+=("$version")
+    elif [[ "$target" == dd ]]; then
+        REINSTALL_ARGS=(dd --img "$url")
+    else
+        language="$(vps_cmd_prompt_select 'Windows 语言' zh-cn zh-cn '简体中文（zh-cn）' en-us '英语（en-us）')" || return $?
+        REINSTALL_ARGS=(windows --image-name "$image" --lang "$language")
+        port_label=RDP
+    fi
+    if [[ "$port_label" == RDP ]]; then
+        username="$(reinstall_menu_value '用户名' administrator username)" || return $?
+    else
+        username="$(reinstall_menu_value '用户名' root username)" || return $?
+        auth_choices+=(key 'SSH 公钥')
+    fi
+    auth="$(vps_cmd_prompt_select '认证方式' random "${auth_choices[@]}")" || return $?
+    case "$auth" in
+        random)
+            password="$(reinstall_menu_random_password)" || {
+                vps_cmd_error '无法从 /dev/urandom 生成随机密码'
+                return 20
+            }
+            auth_label='随机密码（已隐藏，由上游显示凭据）'
+            ;;
+        custom)
+            password="$(reinstall_menu_password)" || return $?
+            auth_label='自定义密码（已隐藏）'
+            ;;
+        key)
+            vps_cmd_info '支持公钥原文、可读文件路径、HTTP(S) URL 或 gh:GitHub用户名；不接受私钥，URL/gh 由上游获取'
+            key="$(reinstall_menu_value 'SSH 公钥、文件路径、URL 或 gh:用户名' '' key)" || return $?
+            auth_label='SSH 公钥（内容已隐藏）'
+            ;;
+    esac
+    REINSTALL_ARGS+=(--username "$username")
+    if [[ "$auth" == key ]]; then REINSTALL_ARGS+=(--ssh-key "$key"); else REINSTALL_ARGS+=(--password "$password"); fi
+    if [[ "$port_label" == RDP ]]; then
+        port="$(reinstall_menu_value 'RDP 端口' 3389 port)" || return $?
+        REINSTALL_ARGS+=(--rdp-port "$port")
+    else
+        port="$(reinstall_menu_value 'SSH 端口' 22 port)" || return $?
+        REINSTALL_ARGS+=(--ssh-port "$port")
+    fi
+    printf '\n重装计划\n  目标：%s\n  版本：%s\n  用户：%s\n  认证：%s\n  %s 端口：%s\n' \
+        "$target" "${image:-${version:-RAW 镜像}}" "$username" "$auth_label" "$port_label" "$port" >&2
+    if [[ -n "$language" ]]; then printf '  语言：%s（ISO 由上游自动获取）\n' "$language" >&2; fi
+    if [[ "$target" == dd ]]; then
+        vps_cmd_warning 'RAW 镜像格式由上游检测；上述凭据仅用于安装环境，不会修改镜像内最终系统的账户、密码或端口'
+    fi
+    vps_cmd_warning '重装将在下次启动时擦除全部分区和数据，请先备份并确认控制台或救援入口可用'
+    if vps_cmd_confirm '确认准备重装？下次启动将擦除全部分区和数据'; then
+        reinstall_menu_action prepare
+    else
+        status=$?
+        ((status == 1 || status == 130)) && return 130
+        return "$status"
+    fi
+}
+
+reinstall_menu_after_prepare() {
+    local choice status
+    choice="$(vps_cmd_prompt_select '重装准备完成' later reboot '立即重启' later '稍后重启' reset '取消重装')" || {
+        status=$?
+        ((status == 130)) || return "$status"
+        choice=later
+    }
+    case "$choice" in
+        reboot)
+            if ! reboot; then
+                vps_cmd_error '重启失败；保留重装启动项和文件，请稍后手动重启或取消重装'
+                return 20
+            fi
+            ;;
+        later) vps_cmd_info '已保留重装启动项和文件；稍后执行 reboot 重启，或执行 vpsctl system reinstall reset 取消重装' ;;
+        reset)
+            reinstall_check_environment || return $?
+            reinstall_check_boundaries || return $?
+            reinstall_prepare_reset || return $?
+            reinstall_menu_execute_upstream reset
+            ;;
+    esac
+}
+
+reinstall_menu_change() {
+    case "$1" in
+        prepare)
+            reinstall_download || return $?
+            reinstall_check_environment || return $?
+            reinstall_check_boundaries || return $?
+            reinstall_menu_execute_upstream "${REINSTALL_ARGS[@]}" || return $?
+            reinstall_menu_after_prepare
+            ;;
+        reset)
+            reinstall_prepare_reset || return $?
+            reinstall_check_environment || return $?
+            reinstall_check_boundaries || return $?
+            reinstall_menu_execute_upstream reset
+            ;;
+        uninstall)
+            if [[ -d "$(vps_cmd_system_path /sys/firmware/efi/efivars)" ]]; then
+                vps_cmd_ensure_tools system-reinstall efibootmgr || return $?
+            fi
+            reinstall_uninstall
+            ;;
+    esac
+}
+
+reinstall_menu_action() {
+    local REINSTALL_MENU_ACTIVE=1 status=0
+    local REINSTALL_CHILD_PID='' REINSTALL_CHILD_STARTING=0 REINSTALL_SIGNAL='' REINSTALL_SIGNAL_STATUS=0
+    REINSTALL_MENU_EXECUTED=1
+    if reinstall_begin_change; then
+        reinstall_menu_change "$1" || status=$?
+    else
+        status=$?
+    fi
+    reinstall_cleanup
+    trap - EXIT INT TERM
+    return "$status"
+}
+
+reinstall_interactive_menu() {
+    local choice action_status REINSTALL_MENU_EXECUTED=0
+    while true; do
+        choice="$(vps_cmd_prompt_select '系统重装与 DD' '' \
+            debian Debian ubuntu Ubuntu alpine Alpine rocky 'Rocky Linux' almalinux AlmaLinux \
+            windows-client 'Windows 客户端' windows-server 'Windows Server' dd '自定义 RAW 镜像' \
+            status '查看状态' reset '取消重装' uninstall '清理工具和缓存' help '使用帮助')" || {
+            action_status=$?
+            ((action_status == 130)) && return 0
+            return "$action_status"
+        }
+        action_status=0
+        REINSTALL_MENU_EXECUTED=0
+        case "$choice" in
+            status) reinstall_status || action_status=$? ;;
+            help) reinstall_usage ;;
+            reset | uninstall) reinstall_menu_action "$choice" || action_status=$? ;;
+            *) reinstall_menu_install "$choice" || action_status=$? ;;
+        esac
+        REINSTALL_ARGS=()
+        # A cancelled input returns to the menu; an executed operation keeps
+        # its original failure status rather than hiding it in another prompt.
+        if ((action_status != 0)) && ((action_status != 130 || REINSTALL_MENU_EXECUTED)); then return "$action_status"; fi
+    done
+}
+
 reinstall_allocated_bytes() {
     local logical path output total=0
     reinstall_check_boundaries || return 30
@@ -377,7 +688,7 @@ reinstall_uninstall() {
         reinstall_check_environment || return $?
         reinstall_check_boundaries || return $?
         vps_cmd_info '检测到重装启动项，先调用上游 reset'
-        if (reinstall_execute_upstream reset); then
+        if reinstall_reset_upstream; then
             :
         else
             reset_status=$?
@@ -457,6 +768,21 @@ reinstall_cleanup() {
     vps_cmd_unlock
 }
 
+reinstall_begin_change() {
+    vps_cmd_require_root || return $?
+    reinstall_check_environment || return $?
+    reinstall_check_boundaries || return $?
+    vps_cmd_ensure_tools system-reinstall flock || return $?
+    vps_cmd_lock system-reinstall || return $?
+    # Keep the lock file itself: deleting it would allow a second lock inode.
+    REINSTALL_TEMP=''
+    trap 'reinstall_cleanup' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    reinstall_check_environment || return $?
+    reinstall_check_boundaries || return $?
+}
+
 reinstall_main() {
     local REINSTALL_PROJECT_ROOT REINSTALL_ACTION REINSTALL_STATE REINSTALL_SCRIPT
     local REINSTALL_PROC REINSTALL_BOOT REINSTALL_PENDING=0
@@ -466,9 +792,16 @@ reinstall_main() {
     source "$REINSTALL_PROJECT_ROOT/lib/command.sh"
     reinstall_parse_args "$@" || return $?
     vps_cmd_init system-reinstall "$REINSTALL_PROJECT_ROOT" || return $?
+    if [[ -z "$REINSTALL_ACTION" ]]; then
+        if vps_cmd_is_interactive; then REINSTALL_ACTION=menu; else REINSTALL_ACTION=help; fi
+    fi
     if [[ "$REINSTALL_ACTION" == help ]]; then
         reinstall_usage
         return 0
+    fi
+    if [[ "$REINSTALL_ACTION" == menu ]] && ! vps_cmd_is_interactive; then
+        vps_cmd_error '重装菜单需要交互式终端；无终端请使用 help 或显式 run/reset/uninstall'
+        return 3
     fi
     reinstall_init_paths || return $?
     if [[ "$REINSTALL_ACTION" == status ]]; then
@@ -483,18 +816,11 @@ reinstall_main() {
         vps_cmd_error '系统重装仅支持 Linux'
         return 3
     }
-    vps_cmd_require_root || return $?
-    reinstall_check_environment || return $?
-    reinstall_check_boundaries || return $?
-    vps_cmd_ensure_tools system-reinstall flock || return $?
-    vps_cmd_lock system-reinstall || return $?
-    # Keep the lock file itself: deleting it would allow a second lock inode.
-    REINSTALL_TEMP=''
-    trap 'reinstall_cleanup' EXIT
-    trap 'exit 130' INT
-    trap 'exit 143' TERM
-    reinstall_check_environment || return $?
-    reinstall_check_boundaries || return $?
+    if [[ "$REINSTALL_ACTION" == menu ]]; then
+        reinstall_interactive_menu
+        return $?
+    fi
+    reinstall_begin_change || return $?
     if [[ "$REINSTALL_ACTION" == uninstall && -d "$(vps_cmd_system_path /sys/firmware/efi/efivars)" ]]; then
         vps_cmd_ensure_tools system-reinstall efibootmgr || return $?
     fi

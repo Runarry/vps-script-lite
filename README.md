@@ -18,7 +18,7 @@
 - [网络设置](docs/network-settings.md)：BBR、DNS、IP 地址族偏好和 RFW 的接口、安全边界、持久化路径和恢复要求。
 - [UFW 管理](docs/ufw-management.md)：防火墙规则、服务联动、临时租约与恢复边界。
 - [系统内核管理](docs/kernel-management.md)：发行版官方内核与 XanMod BBRv3 的安装、固定默认版本、按版本卸载和恢复；另见[验收记录](docs/kernel-validation.md)。
-- [系统重装与 DD](docs/reinstall-management.md)：按需运行官方 reinstall、取消重装及卸载工具与专属缓存。
+- [系统重装与 DD](docs/reinstall-management.md)：Linux、Windows 与 RAW DD 快捷菜单、上游参数透传、取消重装及工具缓存清理。
 - [代理管理](docs/proxy-management.md)：Xray/sing-box 内核、节点、出口关联、端口转发、订阅、证书、日志与时间同步。
 - [TCPing 测试站点](docs/tcping-management.md)：按需管理独立的 TCP 探测监听服务及其端口。
 - [访问管理](docs/access-management.md)：用户、密码、公钥与 SSH 双端口验证事务、防火墙协同和恢复。
@@ -49,7 +49,7 @@ apk add --no-cache bash curl ca-certificates
 | `security fail2ban` | 帮助与 `status [--json]` 可在无 systemd 的 Linux 上查询；安装和服务编排不支持 `apk`/OpenRC，仍要求文档列出的包管理器与 Fail2ban 0.11+ |
 | `security tls` | 导入与查看支持 Alpine；续期 timer 需要 systemd；ACME 的 lego 二进制仅 `x86_64`/`aarch64` |
 | `system kernel` | `status` 可只读查询当前运行内核；内核包及 GRUB 变更不支持 Alpine，仅支持 Debian/Ubuntu amd64 上的 APT/dpkg；自动切换限可识别的标准 GRUB 2 |
-| `system reinstall` | Linux 上提供下载、状态、取消和卸载；重装目标与安装依赖由运行时下载的官方 reinstall 决定 |
+| `system reinstall` | Linux 上提供快捷菜单、上游参数透传、状态、取消和卸载；重装目标与安装依赖由运行时下载的官方 reinstall 决定 |
 | `network ip-policy` | 不支持 Alpine 的 musl；该入口只管理 glibc `getaddrinfo()` 的 `/etc/gai.conf` 排序 |
 | `service proxy` | 支持 OpenRC 与 systemd；具体内核、协议、架构和依赖仍按代理功能文档与运行时门禁判断 |
 | `service tcping` | Linux 上支持 systemd 与 OpenRC `supervise-daemon`；运行需要 Python 3，帮助与状态可在没有服务管理器时查看 |
@@ -153,6 +153,7 @@ bash bin/vpsctl system kernel status
 bash bin/vpsctl system kernel install --type official --confirm-install INSTALL-KERNEL
 bash bin/vpsctl system kernel switch --release RELEASE --confirm-switch SWITCH-KERNEL
 bash bin/vpsctl system kernel uninstall --release RELEASE --confirm-uninstall REMOVE-KERNEL
+bash bin/vpsctl system reinstall
 bash bin/vpsctl system reinstall status
 bash bin/vpsctl system reinstall run -- debian 13
 bash bin/vpsctl system reinstall reset
@@ -173,7 +174,9 @@ bash bin/vpsctl test nodequality
 bash bin/vpsctl test tcpquality
 ```
 
-`system reinstall` 无参数显示本地帮助；每次 `run` 才下载官方最新 reinstall 并原样传递后续参数。准备完成后保留安装资源，由用户决定重启或取消。`uninstall` 会先取消待执行的重装，再删除工具及专属缓存；重装后的 Linux 可重新安装 vpsctl 清理残留。具体路径、非交互方式及恢复边界见[系统重装与 DD](docs/reinstall-management.md)。
+`system reinstall` 无参数在交互 TTY 中进入快捷菜单；无 TTY 或设置 `--non-interactive` 时显示本地帮助。显式 `menu` 必须具备交互 TTY；独立入口 `bash commands/system/reinstall.sh` 提供相同流程。快捷菜单按编号选择常用 Linux、Windows 或 RAW DD 镜像，设置登录方式与端口，显示隐藏密码的摘要，并要求明确确认安装，默认拒绝；`--yes` 不能替代这次确认。
+
+快捷安装的上游准备成功后，可选择立即重启、稍后重启（默认）或取消重装；选择立即重启即授权，不再追加确认，输入 `q` 或遇到 EOF 按稍后重启处理。直接 `run [--] <上游参数…>` 继续原样传递参数和退出状态，每次下载官方最新 reinstall，且不主动重启。失败时保留恢复材料；`uninstall` 仍先取消待执行的重装，再删除工具及专属缓存，重装后的 Linux 可重新安装 vpsctl 清理残留。常用版本、RAW 安装环境账户与最终镜像账户的区别、非交互方式及恢复边界见[系统重装与 DD](docs/reinstall-management.md)。
 
 直接运行 `bash bin/vpsctl system kernel` 会进入内核管理菜单，按编号查看版本状态、安装/更新、固定默认启动版本或卸载指定版本。菜单默认推荐发行版官方标准内核；直接 CLI 省略 `--type` 时仍默认 XanMod，以兼容旧调用。Debian 还提供 Cloud，Ubuntu LTS 在适配候选存在时提供 HWE。安装不会删除旧内核，切换不会重启；应在重启核对目标版本后再卸载旧版本。
 
@@ -201,7 +204,7 @@ bash bin/vpsctl service proxy update --core xray --version vX.Y.Z
 
 代理内核安装和更新默认选择最新稳定版，也可用 `--release-channel prerelease` 选择最新预发布版，或用 `--version TAG` 精确选择稳定或预发布 Release；后两项互斥。`--core all` 可共享 release channel，但不能共享一个 `--version`，因为 Xray 与 sing-box 的 tag 空间不同。安装时选择的通道不会写入状态；以后不带版本选项执行 `update` 仍选择最新稳定版。内核资产继续执行官方来源、唯一资产、SHA-256、解压目标、二进制版本和现有配置兼容性校验，更新完成后不会自动重启服务。
 
-在主管理菜单中选择 BBR、DNS、IP 地址族偏好、RFW、内核管理、访问管理、Fail2ban、TLS 证书、代理管理或两项服务器测试后，会直接进入对应功能入口，不再经过“命令详情”或输入 `r` 才运行的中间页；菜单选项执行的是真实动作，不提供演练、依赖授权、自动同意、非交互、静默或详细日志等执行型全局参数开关。系统内核菜单以官方标准内核为推荐安装项，并通过编号选择具体切换或卸载版本；代理内核的安装和更新会用编号选择最新稳定版（推荐）、最新预发布版或精确 Release tag。`--dry-run`、`--install-deps`、`--yes`、`--non-interactive`、`--quiet`、`--verbose` 只用于直接功能 CLI，并写在领域之前；服务器测试明确拒绝 `--dry-run`，也不承诺非交互自动化。子动作及选项见[网络设置](docs/network-settings.md)、[系统内核管理](docs/kernel-management.md)、[访问管理](docs/access-management.md)、[Fail2ban 管理](docs/fail2ban-management.md)、[TLS 证书管理](docs/tls-management.md)、[代理管理](docs/proxy-management.md)和[服务器测试](docs/server-testing.md)。机器可读格式开关、`--force` 和 `--confirm-*` 确认标志同样只用于直接 CLI，菜单中的危险动作改用明确的交互提示和必要的强确认短语。
+在主管理菜单中选择 BBR、DNS、IP 地址族偏好、RFW、内核管理、重装与 DD、访问管理、Fail2ban、TLS 证书、代理管理或两项服务器测试后，会直接进入对应功能入口，不再经过“命令详情”或输入 `r` 才运行的中间页；菜单选项执行的是真实动作，不提供演练、依赖授权、自动同意、非交互、静默或详细日志等执行型全局参数开关。系统内核菜单以官方标准内核为推荐安装项，并通过编号选择具体切换或卸载版本；代理内核的安装和更新会用编号选择最新稳定版（推荐）、最新预发布版或精确 Release tag。`--dry-run`、`--install-deps`、`--yes`、`--non-interactive`、`--quiet`、`--verbose` 只用于直接功能 CLI，并写在领域之前；重装与服务器测试明确拒绝 `--dry-run`，服务器测试也不承诺非交互自动化。子动作及选项见[网络设置](docs/network-settings.md)、[系统内核管理](docs/kernel-management.md)、[系统重装与 DD](docs/reinstall-management.md)、[访问管理](docs/access-management.md)、[Fail2ban 管理](docs/fail2ban-management.md)、[TLS 证书管理](docs/tls-management.md)、[代理管理](docs/proxy-management.md)和[服务器测试](docs/server-testing.md)。机器可读格式开关、`--force` 和 `--confirm-*` 确认标志同样只用于直接 CLI，菜单中的危险动作改用明确的交互提示和必要的强确认短语。
 
 依赖检查按用户当前选择的动作延迟执行：只有该动作实际缺少可安装工具时，真实执行的交互流程才询问是否安装，不会为其他菜单动作预装依赖；真实非交互安装仍必须显式提供 `--install-deps`；`--dry-run` 会直接展示缺失依赖和安装计划，无需该授权且不询问。该授权支持 `apt-get`、`dnf5`、`dnf`、`yum`、`apk`、`pacman` 和 `zypper`，实际安装需要 root，也不会绕过 Linux、init 系统、CPU 架构、内核版本、XDP/BPF 或功能本体等平台门禁。它与 `--dry-run` 组合时只展示固定的软件包安装命令，不实际安装，部分动作会在依赖计划后安全停止并提示安装后重跑。上例中的 `--core` 是直接命令和非交互调用保留的高级消歧参数：只有一个符合条件的内核时通常可自动解析，存在多个候选时应显式指定。
 

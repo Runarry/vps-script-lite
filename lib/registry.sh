@@ -255,7 +255,7 @@ vps_registry_init() {
         "system" \
         "reinstall" \
         "系统重装与 DD" \
-        "按需运行官方 reinstall，取消重装并清理工具与缓存" \
+        "菜单重装 Linux、Windows 和 RAW 镜像，取消重装并清理工具与缓存" \
         "commands/system/reinstall.sh" \
         "destructive" \
         "optional-root" \

@@ -37,3 +37,25 @@ qemu-img create -f qcow2 -F qcow2 \
 父任务在 `/var/tmp/vpsctl-reinstall-parent-20260929/validation/full-suite.log` 执行 `bash tests/run.sh` 得到 `PASS: all tests`，包含前一版 37 个重装夹具；`distribution-real.log` 的真实安装和离线帮助通过。最终活动进程识别小修后，定向执行 `bash -n commands/system/reinstall.sh && bash -n tests/unit/test-system-reinstall.sh && shellcheck -x commands/system/reinstall.sh tests/unit/test-system-reinstall.sh && shfmt -d -i 4 -ci commands/system/reinstall.sh tests/unit/test-system-reinstall.sh && bash tests/unit/test-system-reinstall.sh`，40 个夹具通过；该输出来自 `/var/tmp/vpsctl-reinstall-unit-20260929` 的远端工具控制台，未保存单独日志，也没有重跑全量。最终真实 guest 脚本的 `bash -n`、`shellcheck -x`、`shfmt -d -i 4 -ci` 通过，见 `harness-static.log`。旧 `test-libraries.sh` 的既有 ShellCheck/格式诊断及 `test-distribution-real.sh` 的既有格式差异，经父任务与旧版对照，不算新增失败。
 
 `host-uefi-status.log` 仅证明宿主 UEFI 上只读 `system reinstall status` 返回无缓存、无待启动项、0 字节；没有在宿主或额外 UEFI VM 执行 UEFI reset/引导写入。Windows 重装参数也没有真实执行。
+
+## 2026-10-01 快捷菜单验收
+
+本轮基于 `7e2a50ba48aad31fc87560927dfc623ba5c1e664` 的工作区修改，版本号保持 `0.8.11`。应用入口 `commands/system/reinstall.sh` SHA-256 为 `89225fcfb087a310e1a0e81522f1f2a9725fc63d54369e6685890a2ae5311da1`，本地、远端测试副本和真实 guest 使用同一文件。所有项目执行均通过 `ssh host-vps-scripts`，本机只编辑、读取差异和传输文件。
+
+证据目录为专用宿主的 `/var/tmp/vpsctl-reinstall-menu-20261001/evidence/`，源码副本位于同级 `source/`。首次暂存归档带有 CRLF，导致未改动的入口和测试脚本在启动时失败；按既有验收流程仅将远端暂存文本转换为 LF 后继续，未修改仓库无关文件。规范化清单为 `staging-lf-normalization.txt`。最初 SSH 失败源于沙箱账户不能读取现有 SSH 配置和主机密钥记录，使用宿主用户的原有 SSH 配置后恢复，未放宽主机密钥校验。
+
+| 验收项 | 结果与证据 |
+| --- | --- |
+| 应用静态检查 | **PASS**。对重装入口和注册表执行 `bash -n`、`shellcheck -x`、`shfmt -d -i 4 -ci`，最终均退出 0、无诊断；`app-static.log`。首轮 shfmt 的两处新增格式差异已修正。 |
+| 单元与交互回归 | **PASS**。`VPSCTL_TEST_KEEP_TEMP=1 bash tests/unit/test-system-reinstall.sh`：41 个 shell 夹具及 62 个 PTY 夹具，共 103 个。覆盖各系统版本与最新版、Windows 映像、原样参数、密码隐藏与重输、私钥误选、取消无写入、三种收尾、重启/上游/reset 失败、终端输入、INT/TERM 转发及执行和收尾期间持锁；原 CLI 的进程替换、退出码和清理边界回归通过。测试 shell 的语法、ShellCheck、shfmt 同样通过。日志为 `menu-unit.log`，摘要为 `menu-unit-code-state.sha256`，夹具和交互记录保留于 `/tmp/tmp.ceF5Ncvtk5`。 |
+| 主管理入口回归 | **PASS**。`bash tests/integration/test-vpsctl.sh` 返回 `PASS: vpsctl integration tests`，日志为 `entry-integration.log`。 |
+| Debian 13 快捷准备与取消 | **PASS**。通过真实 TTY 调用 `bin/vpsctl --no-color system reinstall menu`，选择 Debian 13、公钥登录及默认 SSH 端口，完成官方准备后在收尾菜单选择取消。`debian-cancel.log` 记录全流程；`debian-cancel-check.log` 中既有 `clean` 验收断言通过，引导项和安装资源均撤销。随后重新启动仍为原 Debian 根分区 UUID `a88eaa57-e875-4855-a3cb-c231758653f8`，没有待执行引导项，见 `raw-before.log`。本轮下载的官方上游脚本 SHA-256 为 `2dcaef25d1cdd10acd0b7439dbf35e362741f4f9834829efca57fe675b839f18`。 |
+| RAW 菜单重启及新系统接入 | **PASS，修正测试 seed 后**。`raw-reboot.log` 记录快捷准备成功、收尾选择立即重启及 SSH 随重启断开；`vm/raw-serial.log` 记录写入全部 671,088,640 字节、`DONE` 和目标系统启动。`raw-guest-check.log` 中公钥 SSH 登录及既有 `dd-boot` 断言通过：Alpine 3.24.1、根设备 `/dev/vda1`、目标 UUID `7af5430b-f94c-484c-8fe6-36878b6de03a`、boot ID `664877f9-e0b0-49b8-bcaa-0ba871d6a26a`；目标标记存在，原 Debian 标记、源码目录和包装器状态均消失。 |
+
+真实验收沿用上文 Debian 关机基线和已验证的 `alpine-partitioned.raw`，新建本轮独立 overlay；未对历史基线写入。VM 为 SeaBIOS/TCG、单核、896 MiB，镜像只通过宿主回环 HTTP 提供。为适应宿主剩余空间，Debian 取消验收后关闭 VM，再为同一 overlay 启用 `discard=unmap,detect-zeroes=unmap` 并对 guest 执行 `fstrim`，减少空闲块及 RAW 零块的宿主占用。运行资料、控制程序和串口记录位于 `/var/tmp/vpsctl-reinstall-menu-20261001/`；恢复原测试起点可关闭 VM 后重新从前述 Debian 基线建立独立 overlay。
+
+首轮 RAW 已完成写盘和 Alpine 启动，但 SSH 被拒绝。只读挂载原镜像与关闭后的测试盘发现：原镜像 root 未锁定，cloud-init 实例为 `vpsctl-reinstall-alpine-20260929`；测试盘被仍挂载的 Debian seed 改成 `vpsctl-bios-grub-debian13-20260908`，root 被该 seed 的 `lock_passwd: true` 重新锁定。证据为 `seed-diagnosis.log`、`raw-guest-check-seed-mismatch.log` 和 `vm/raw-seed-mismatch-serial.log`。保存失败盘信息及摘要后，从原 Debian 基线重建 overlay，等待源系统 cloud-init 完成，再把虚拟光盘换为与原镜像实例相同的既有 `alpine-seed.iso`，重新运行 RAW 快捷菜单。此后完整写盘、启动和 SSH 接入均通过；应用源码、RAW 镜像及历史 seed 均未因该夹具问题修改。光盘切换记录为 `target-seed-switch.log`。
+
+收尾时关闭 guest，`qemu-img check` 无错误；最终 overlay SHA-256 为 `d120a7eb52efb1627ceca14baed13f15f8978761c81dabbaf11a5cf9d3f78977`，保存 `final-overlay-check.log`、`final-overlay-info.txt`、`final-overlay.sha256` 后删除临时 overlay 回收空间。测试 HTTP 服务已停止、只读挂载已解除，Debian 基线与原 RAW 镜像前后摘要一致，宿主 boot ID 未改变，根分区恢复约 1.1 GiB 可用空间，见 `cleanup.log` 和 `base-images-after.log`。保留源码、脚本和日志以便复现，不保留本轮运行中的 VM 或目标盘。
+
+本轮 Windows 只验证菜单映像映射、语言、账户与端口参数，未执行真实 Windows 安装；未重跑全量套件或扩大到其他发行版及 UEFI 实际写入。
