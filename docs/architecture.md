@@ -31,7 +31,8 @@ vps-script-lite/
 │   │   ├── proxy.sh        # 代理管理公开入口
 │   │   ├── proxy/          # 仅由 proxy.sh 加载的私有实现模块
 │   │   ├── tcping.sh       # TCP 探测监听公开入口
-│   │   └── tcping/         # 私有监听脚本
+│   │   ├── tcping/         # 私有监听脚本
+│   │   └── iperf3.sh       # iperf3 测速服务端公开入口
 │   ├── self/               # core 常驻的分发状态、更新与卸载入口
 │   ├── test/               # 服务器综合质量与网络质量测试
 │   └── system/             # 系统信息、内核、软件包和基础维护
@@ -96,7 +97,7 @@ vps-script-lite/
 
 `lib/` 仅存放稳定且至少被两个组件复用的基础能力，例如日志格式、平台检测、权限检查、锁和安全的文件替换。
 
-`lib/ufw.sh` 提供网络管理、SSH、代理、TCP 探测监听和 TLS 共用的规则归属、服务需求与事务接口，随 `shared-ufw` 按需下载。各业务提交声明，UFW 入口通过已知持久数据契约采集存量，不加载其他功能的私有模块。独立 UFW 锁在业务锁之后获取，跨命令同步按访问管理、代理、TLS、TCP 探测监听的固定顺序获取业务锁。中转后台运行时复制同版本共享库，避免升级或重启后丢失端口联动能力。
+`lib/ufw.sh` 提供网络管理、SSH、代理、TCP 探测监听、iperf3 和 TLS 共用的规则归属、服务需求与事务接口，随 `shared-ufw` 按需下载。各业务提交声明，UFW 入口通过已知持久数据契约采集存量，不加载其他功能的私有模块。独立 UFW 锁在业务锁之后获取，跨命令同步按访问管理、代理、TLS、TCP 探测监听、iperf3 的固定顺序获取业务锁。中转后台运行时复制同版本共享库，避免升级或重启后丢失端口联动能力。
 
 公共库不得：
 
@@ -118,7 +119,7 @@ vps-script-lite/
 /var/lib/vpsctl/self/                        # 安装、自更新、资产缓存元数据
 ```
 
-`core` 常驻，只包含 `bin/vpsctl`、`VERSION`、`environment.sh`、`registry.sh`、`ui.sh`、`distribution.sh` 和三个 self 命令。每个非 self 公开命令独立打包为 `<domain>-<action>`，文件边界和全部私有模块由 `lib/registry.sh` 的固定清单定义。所有功能依赖 `shared-command`；`network ufw`、`security access`、`security tls`、`service proxy`、`service tcping` 另依赖 `shared-ufw`；两项测试另依赖 `shared-server-test`。首次执行功能或功能帮助时，按依赖顺序下载、校验、缓存，再分发。全局帮助、版本、环境、清单、菜单浏览和 self 状态保持离线。更新只获取目标版本的 manifest、安装器和 core，不预取旧缓存；不同版本的功能和共享库不得混用。功能卸载可在验证当前受管 release 后，持功能包下载锁删除该命令的固定文件和缓存标记；下次调用只重下该功能包。
+`core` 常驻，只包含 `bin/vpsctl`、`VERSION`、`environment.sh`、`registry.sh`、`ui.sh`、`distribution.sh` 和三个 self 命令。每个非 self 公开命令独立打包为 `<domain>-<action>`，文件边界和全部私有模块由 `lib/registry.sh` 的固定清单定义。所有功能依赖 `shared-command`；`network ufw`、`security access`、`security tls`、`service proxy`、`service tcping`、`service iperf3` 另依赖 `shared-ufw`；两项测试另依赖 `shared-server-test`。首次执行功能或功能帮助时，按依赖顺序下载、校验、缓存，再分发。全局帮助、版本、环境、清单、菜单浏览和 self 状态保持离线。更新只获取目标版本的 manifest、安装器和 core，不预取旧缓存；不同版本的功能和共享库不得混用。功能卸载可在验证当前受管 release 后，持功能包下载锁删除该命令的固定文件和缓存标记；下次调用只重下该功能包。
 
 仓库根 `VERSION` 是项目版本的规范来源。自 v0.8.10 起使用 schema 2，v0.8.9 使用 schema 1，不能用新格式覆盖旧 Release。资产由固定注册表生成，命名与交付约定见[Release 资产与发布流程](development-workflow.md#4-release-资产与发布流程)，此处不再维护一份逐包清单。
 

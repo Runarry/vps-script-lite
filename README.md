@@ -4,7 +4,7 @@
 
 项目采用“一个管理入口、多个独立命令”的结构：管理入口只负责参数解析、固定命令登记、公共上下文和分发；每项实际功能原则上由一个公开入口脚本实现，复杂入口可拆为不单独分发的私有子模块。这样既能通过统一入口使用，也能单独运行、测试和排错。
 
-> 当前版本为 0.8.11，提供网络、系统内核、重装与 DD、访问、TLS 证书、代理、TCPing 探测监听与服务器测试入口。支持演练的系统变更命令应先使用 `--dry-run` 并阅读对应恢复说明；内核变更需提前确认带外控制台或救援入口可用。重装与服务器测试会下载并运行第三方代码，不支持演练；重装在重启后可清除目标磁盘数据，服务器测试会产生明显 CPU/磁盘/网络负载。
+> 当前版本为 0.8.11，提供网络、系统内核、重装与 DD、访问、TLS 证书、代理、TCPing 探测监听、iperf3 测速服务端与服务器测试入口。支持演练的系统变更命令应先使用 `--dry-run` 并阅读对应恢复说明；内核变更需提前确认带外控制台或救援入口可用。重装与服务器测试会下载并运行第三方代码，不支持演练；重装在重启后可清除目标磁盘数据，服务器测试会产生明显 CPU/磁盘/网络负载。
 
 应用、功能与 GitHub Release 分发统一使用 `0.8.11`。仓库根 `VERSION` 是规范版本源，tag 为 `v0.8.11`；发布资产、安装目录、`vpsctl self` 与命令行版本展示均使用同一版本号。
 
@@ -21,6 +21,7 @@
 - [系统重装与 DD](docs/reinstall-management.md)：Linux、Windows 与 RAW DD 快捷菜单、上游参数透传、取消重装及工具缓存清理。
 - [代理管理](docs/proxy-management.md)：Xray/sing-box 内核、节点、出口关联、端口转发、订阅、证书、日志与时间同步。
 - [TCPing 测试站点](docs/tcping-management.md)：按需管理独立的 TCP 探测监听服务及其端口。
+- [iperf3 测速服务端](docs/iperf3-management.md)：安装、更新、启停及卸载 TCP/UDP 测速服务，联动 UFW。
 - [访问管理](docs/access-management.md)：用户、密码、公钥与 SSH 双端口验证事务、防火墙协同和恢复。
 - [Fail2ban 管理](docs/fail2ban-management.md)：OpenSSH jail 的安装、均衡递增策略、白名单、验证和恢复。
 - [TLS 证书管理](docs/tls-management.md)：域名证书导入、ACME 申请与自动续期。
@@ -53,6 +54,7 @@ apk add --no-cache bash curl ca-certificates
 | `network ip-policy` | 不支持 Alpine 的 musl；该入口只管理 glibc `getaddrinfo()` 的 `/etc/gai.conf` 排序 |
 | `service proxy` | 支持 OpenRC 与 systemd；具体内核、协议、架构和依赖仍按代理功能文档与运行时门禁判断 |
 | `service tcping` | Linux 上支持 systemd 与 OpenRC `supervise-daemon`；运行需要 Python 3，帮助与状态可在没有服务管理器时查看 |
+| `service iperf3` | systemd/OpenRC，使用系统软件源的 iperf3，帮助与状态可在没有服务管理器时查看；卸载保留软件包 |
 | `test nodequality` / `test tcpquality` | vpsctl 包装入口要求 Linux/root，但运行时下载的第三方脚本会自行决定依赖和发行版兼容性；核心支持不构成其 Alpine 兼容承诺 |
 
 在受支持的 Linux VPS 的 root shell 中可使用一行命令安装最新 GitHub Release：
@@ -99,7 +101,7 @@ bash "$tmp_dir/vpsctl.sh" --verified-manifest "$tmp_dir/vpsctl-manifest.tsv"
 
 `self update` 跨版本更新完整提交成功后，会删除所有可验证归属的受管历史 release，仅保留当前版本，不保留自动回退版本；需要回退时重新安装指定 Release。新版本提交完成前发生失败时仍保留原版本；若提交后历史版本清理失败，新版本保持激活，命令报错并返回 `30`，下次成功跨版本更新会再次尝试清理。同版本更新不执行清理，只同步 self 缓存；临时目录、不受管或异常条目以及功能状态与备份均不在清理范围内。self 启动器、manifest 和入口校验值是可恢复缓存，缺失或普通文件内容损坏不阻断更新与普通卸载；更新从当前已校验入口及 release manifest 保存回滚材料并修复缓存。当前代码或入口损坏、归属不明，以及缓存路径为链接或异常文件类型仍会拒绝。
 
-schema 2 分发中，`core` 仅包含入口、版本、环境检测、注册表、UI、分发逻辑和 `self` 命令。每个非 self 公开命令单独发布 `<domain>-<action>` bundle，例如 `network-bbr`；首次执行功能（包括功能帮助）时才下载该功能及其固定共享依赖，浏览全局帮助、清单、环境、版本、菜单和 `self status` 不下载功能。所有功能依赖 `shared-command`；UFW、访问、TLS、代理和 TCP 探测监听另依赖 `shared-ufw`，两项服务器测试另依赖 `shared-server-test`。已缓存功能可离线重复使用；`service tcping uninstall` 成功后只删除自身功能包缓存，下次调用会重新下载该包。跨版本 `self update` 只获取 manifest、安装器和 core，新版本的功能重新按需下载，不预取旧缓存。文件名、版本、SHA-256、路径和文件类型校验仍保留，失败临时下载不会成为有效缓存。
+schema 2 分发中，`core` 仅包含入口、版本、环境检测、注册表、UI、分发逻辑和 `self` 命令。每个非 self 公开命令单独发布 `<domain>-<action>` bundle，例如 `network-bbr`；首次执行功能（包括功能帮助）时才下载该功能及其固定共享依赖，浏览全局帮助、清单、环境、版本、菜单和 `self status` 不下载功能。所有功能依赖 `shared-command`；UFW、访问、TLS、代理、TCP 探测监听和 iperf3 另依赖 `shared-ufw`，两项服务器测试另依赖 `shared-server-test`。已缓存功能可离线重复使用；`service tcping uninstall` 与 `service iperf3 uninstall` 成功后只删除自身功能包缓存，下次调用会重新下载该包。跨版本 `self update` 只获取 manifest、安装器和 core，新版本的功能重新按需下载，不预取旧缓存。文件名、版本、SHA-256、路径和文件类型校验仍保留，失败临时下载不会成为有效缓存。
 
 如果旧版升级后启动报 `current/bin/vpsctl: Permission denied`，可能是 core 入口缺少执行位。可在 root shell 中恢复并检查：
 
@@ -170,6 +172,10 @@ bash bin/vpsctl service tcping status
 bash bin/vpsctl service tcping start --port 18080
 bash bin/vpsctl service tcping stop
 bash bin/vpsctl --yes service tcping uninstall
+bash bin/vpsctl --install-deps service iperf3 start --port 5201
+bash bin/vpsctl service iperf3 status
+bash bin/vpsctl service iperf3 stop
+bash bin/vpsctl --yes service iperf3 uninstall
 bash bin/vpsctl test nodequality
 bash bin/vpsctl test tcpquality
 ```
@@ -214,7 +220,7 @@ bash bin/vpsctl service proxy update --core xray --version vX.Y.Z
 - 目录骨架：已建立。
 - 当前版本：0.8.11。
 - 管理入口：提供环境检测、终端 UI、固定注册表和安全分发。
-- 功能命令：提供 `network bbr`、`network dns`、`network ip-policy`、`network ufw`、`network rfw`、`system kernel`、`system reinstall`、`security access`、`security fail2ban`、`security tls`、`service proxy`、`service tcping`、`test nodequality` 和 `test tcpquality`；均处于 `experimental` 生命周期。
+- 功能命令：提供 `network bbr`、`network dns`、`network ip-policy`、`network ufw`、`network rfw`、`system kernel`、`system reinstall`、`security access`、`security fail2ban`、`security tls`、`service proxy`、`service tcping`、`service iperf3`、`test nodequality` 和 `test tcpquality`；均处于 `experimental` 生命周期。
 - UFW：主菜单提供简洁端口管理，进阶功能放在“高级规则管理”。启用后自动维护 SSH、代理节点、中转转发及 HTTP-01 临时端口；支持等价已有规则接管、共享引用和按服务解除联动。安装默认不启用，服务停止但配置保留时规则继续保留。接口和恢复说明见 [UFW 管理](docs/ufw-management.md)。
 - 公共函数库：提供环境检测、命令注册、终端 UI 及网络和服务命令所需公共能力。
 - 验收说明：所有项目测试与验证统一通过 `ssh host-vps-scripts` 在专用真实环境中执行；不得在当前系统或 WSL 中测试。发布前仍须按对应功能文档完成真实环境验收。

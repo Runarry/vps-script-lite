@@ -439,7 +439,7 @@ _vps_ufw_normalize_desired() {
     local -a fields=()
     [[ -f "$file" && ! -L "$file" ]] || return 2
     jq -e 'type=="array" and all(.[];
-      (.owner|type)=="string" and (.owner|test("^(ssh|tcping|node:[A-Za-z0-9_.-]+|forward:[A-Za-z0-9_.-]+|tls:[A-Za-z0-9_.-]+)$")) and
+      (.owner|type)=="string" and (.owner|test("^(ssh|tcping|iperf3|node:[A-Za-z0-9_.-]+|forward:[A-Za-z0-9_.-]+|tls:[A-Za-z0-9_.-]+)$")) and
       (.kind=="input" or .kind=="route") and (.family=="ipv4" or .family=="ipv6") and
       (.proto=="tcp" or .proto=="udp") and (.port|type)=="string" and
       (.port|test("^[0-9]{1,5}(:[0-9]{1,5})?$")) and
@@ -961,7 +961,7 @@ vps_ufw_rollback() {
 
 vps_ufw_link_set() {
     local owner="${1:-}" mode="${2:-}" state status=0
-    [[ "$owner" =~ ^(ssh|tcping|node:[A-Za-z0-9_.-]+|forward:[A-Za-z0-9_.-]+|tls:[A-Za-z0-9_.-]+)$ ]] || return 2
+    [[ "$owner" =~ ^(ssh|tcping|iperf3|node:[A-Za-z0-9_.-]+|forward:[A-Za-z0-9_.-]+|tls:[A-Za-z0-9_.-]+)$ ]] || return 2
     [[ "$mode" == attached || "$mode" == detached ]] || return 2
     vps_ufw_init || return $?
     vps_ufw_require_tools || return $?

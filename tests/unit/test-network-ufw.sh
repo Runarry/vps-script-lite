@@ -280,6 +280,47 @@ EOF
     if ufw_cli_forwards_desired "$relay" "$cache" >/dev/null 2>&1; then fail 'stale host cache accepted'; fi
 }
 
+test_iperf3_inventory_and_sync() {
+    local state output filter before
+    reset_fixture
+    [[ "$(ufw_cli_iperf3_desired)" == '[]' ]] || fail 'absent iperf3 state produced requirements'
+    state="$VPSCTL_SYSTEM_ROOT/var/lib/vpsctl/service/iperf3/state.json"
+    mkdir -p -- "${state%/*}"
+    printf '%s\n' '{"schema_version":1,"port":5201,"enabled":true}' >"$state"
+    output="$(ufw_cli_iperf3_desired)" || fail 'iperf3 inventory failed'
+    jq -e 'length==4 and ([.[]|[.family,.proto]]|sort)==[["ipv4","tcp"],["ipv4","udp"],["ipv6","tcp"],["ipv6","udp"]] and
+        all(.[]; .owner=="iperf3" and .kind=="input" and .port=="5201" and .source=="any" and .destination=="any" and .preserve_existing and .temporary==false)' \
+        <<<"$output" >/dev/null || fail 'iperf3 dual-protocol/family inventory incorrect'
+    printf 'IPV6=no\n' >"$VPSCTL_SYSTEM_ROOT/etc/default/ufw"
+    output="$(ufw_cli_iperf3_desired)" || fail 'IPv4-only iperf3 inventory failed'
+    jq -e 'length==2 and all(.[]; .family=="ipv4") and ([.[].proto]|sort)==["tcp","udp"]' \
+        <<<"$output" >/dev/null || fail 'iperf3 inventory ignored disabled UFW IPv6'
+    printf 'IPV6=yes\n' >"$VPSCTL_SYSTEM_ROOT/etc/default/ufw"
+    run_cli sync
+    assert_status 0 'inactive iperf3 sync'
+    vps_ufw_links | jq -e 'any(.[]; .owner=="iperf3" and (.requirements|length)==4)' >/dev/null || fail 'inactive sync lost iperf3 requirements'
+    [[ "$(vps_ufw_inventory | jq length)" == 0 ]] || fail 'inactive iperf3 sync added rules'
+    run_cli enable
+    assert_status 0 'enable stages iperf3 requirements'
+    vps_ufw_inventory | jq -e '[.[]|select(.port=="5201")]|length==4 and all(.[]; .owners==["iperf3"])' >/dev/null || fail 'enable missed iperf3 endpoints'
+    printf '%s\n' '{"schema_version":1,"port":5301,"enabled":true}' >"$state"
+    run_cli sync
+    assert_status 0 'iperf3 port change sync'
+    vps_ufw_inventory | jq -e 'all(.[]; .port!="5201") and ([.[]|select(.port=="5301")]|length)==4' >/dev/null || fail 'iperf3 port change did not retire only old endpoints'
+    printf '%s\n' '{"schema_version":1,"port":5301,"enabled":false}' >"$state"
+    [[ "$(ufw_cli_iperf3_desired)" == '[]' ]] || fail 'disabled iperf3 state produced requirements'
+    run_cli sync
+    assert_status 0 'disabled iperf3 sync'
+    vps_ufw_inventory | jq -e 'all(.[]; .port!="5301") and any(.[]; .port=="22")' >/dev/null || fail 'disabled iperf3 sync removed unrelated rules or retained endpoints'
+    before="$(sha256sum "$VPSCTL_SYSTEM_ROOT/etc/ufw/user.rules" "$VPSCTL_SYSTEM_ROOT/etc/ufw/user6.rules")"
+    for filter in '.schema_version=2' '.port=0' '.port=65536' '.port=1.5' '.port="5201"' '.enabled=1'; do
+        jq -n '{schema_version:1,port:5201,enabled:true} | '"$filter" >"$state"
+        run_cli sync
+        assert_status 10 "corrupt iperf3 state rejected: $filter"
+        [[ "$(sha256sum "$VPSCTL_SYSTEM_ROOT/etc/ufw/user.rules" "$VPSCTL_SYSTEM_ROOT/etc/ufw/user6.rules")" == "$before" ]] || fail 'corrupt iperf3 state changed firewall rules'
+    done
+}
+
 test_rule_transactions() {
     local rules id original
     reset_fixture
@@ -354,7 +395,7 @@ test_sync_protection_and_lifecycle() {
 }
 
 test_dry_run_and_business_lock() {
-    local before descriptor lock
+    local before descriptor lock feature
     reset_fixture
     before="$(sha256sum "$VPSCTL_SYSTEM_ROOT/etc/ufw/ufw.conf" "$VPSCTL_SYSTEM_ROOT/etc/default/ufw")"
     VPSCTL_DRY_RUN=1
@@ -364,13 +405,15 @@ test_dry_run_and_business_lock() {
     [[ ! -e "$VPSCTL_SYSTEM_ROOT/var/lib/vpsctl/network/ufw" && ! -e "$VPSCTL_SYSTEM_ROOT/run/vpsctl" ]] || fail 'dry-run created managed state or lock'
     [[ "$(sha256sum "$VPSCTL_SYSTEM_ROOT/etc/ufw/ufw.conf" "$VPSCTL_SYSTEM_ROOT/etc/default/ufw")" == "$before" ]] || fail 'dry-run mutated config'
     mkdir -p -- "$VPSCTL_SYSTEM_ROOT/run/vpsctl"
-    lock="$VPSCTL_SYSTEM_ROOT/run/vpsctl/proxy.lock"
-    exec {descriptor}>"$lock"
-    flock -n "$descriptor" || fail 'fixture lock'
-    run_cli sync
-    assert_status 3 'global sync refuses active proxy lock'
-    exec {descriptor}>&-
-    [[ ! -e "$VPSCTL_SYSTEM_ROOT/var/lib/vpsctl/network/ufw" ]] || fail 'lock conflict mutated shared state'
+    for feature in proxy tcping iperf3; do
+        lock="$VPSCTL_SYSTEM_ROOT/run/vpsctl/$feature.lock"
+        exec {descriptor}>"$lock"
+        flock -n "$descriptor" || fail 'fixture lock'
+        run_cli sync
+        assert_status 3 "global sync refuses active $feature lock"
+        exec {descriptor}>&-
+        [[ ! -e "$VPSCTL_SYSTEM_ROOT/var/lib/vpsctl/network/ufw" ]] || fail 'lock conflict mutated shared state'
+    done
     run_cli sync
     assert_status 0 'business descriptors released after conflict'
 }
@@ -593,6 +636,7 @@ test_menu_preserves_defaults() (
 
 test_validation
 test_business_inventory
+test_iperf3_inventory_and_sync
 test_rule_transactions
 test_sync_protection_and_lifecycle
 test_dry_run_and_business_lock

@@ -79,7 +79,7 @@ make_core_asset() {
 
 make_feature_assets() {
     local version="$1" build="${TEST_TEMP}/build-feature" bundle files path
-    for bundle in shared-command shared-ufw network-bbr network-dns network-ufw system-reinstall service-tcping; do
+    for bundle in shared-command shared-ufw network-bbr network-dns network-ufw system-reinstall service-tcping service-iperf3; do
         rm -rf -- "$build"
         mkdir -p "$build"
         files="$(vps_registry_bundle_files "$bundle")"
@@ -297,16 +297,21 @@ test_lazy_feature_install_and_cache() (
     assert_equal 4 "$calls" 'reinstall downloaded unrelated dependencies'
     [[ -f "$release/commands/system/reinstall.sh" ]] || fail 'reinstall command missing'
     [[ ! -e "$TEST_SYSTEM_ROOT/var/lib/vpsctl/reinstall/reinstall.sh" ]] || fail 'feature loading downloaded the upstream installer'
+    vps_distribution_ensure_command service:iperf3 || fail 'iperf3 lazy install failed'
+    assert_equal 6 "$calls" 'iperf3 downloads its feature and shared UFW dependency'
+    [[ -f "$release/commands/service/iperf3.sh" && -f "$release/lib/ufw.sh" ]] || fail 'iperf3 feature or UFW dependency missing'
+    [[ ! -e "$release/commands/service/tcping.sh" ]] || fail 'iperf3 loading downloaded unrelated service'
     vps_distribution_download() { return 20; }
     vps_distribution_ensure_command network:bbr || fail 'cached BBR failed offline'
     vps_distribution_ensure_command network:dns || fail 'cached DNS failed offline'
     vps_distribution_ensure_command system:reinstall || fail 'cached reinstall wrapper failed offline'
+    vps_distribution_ensure_command service:iperf3 || fail 'cached iperf3 failed offline'
     [[ -z "$(find "$release/.bundles" -mindepth 1 ! -name '*.sha256' -print -quit)" ]] || fail 'lazy download left temporary assets'
 )
 
 test_command_cache_eviction() (
     local release="${TEST_INSTALL_ROOT}/releases/0.3.0" marker status=0 calls=0
-    local script listener shared other
+    local script listener shared other iperf3_marker iperf3_script preserved
     prepare_managed_install "$release" 0.3.0
     VPSCTL_DISTRIBUTED=1
     VPSCTL_PROJECT_ROOT="$release"
@@ -315,6 +320,7 @@ test_command_cache_eviction() (
         cp -- "${TEST_ASSETS}/${1##*/}" "$2"
     }
     vps_distribution_ensure_command service:tcping || fail 'initial tcping feature load failed'
+    vps_distribution_ensure_command service:iperf3 || fail 'initial iperf3 feature load failed'
     vps_distribution_ensure_command network:bbr || fail 'other feature load failed'
     marker="$release/.bundles/service-tcping.sha256"
     script="$release/commands/service/tcping.sh"
@@ -394,6 +400,21 @@ test_command_cache_eviction() (
     rm -- "$release/commands/service/tcping/unexpected"
     vps_distribution_remove_command_cache service:tcping || fail 'private directory cleanup was not retryable'
     [[ ! -e "$release/commands/service/tcping" ]] || fail 'private directory remained after retry'
+
+    vps_distribution_ensure_command service:tcping || fail 'tcping reload for iperf3 cache boundary failed'
+    iperf3_marker="$release/.bundles/service-iperf3.sha256"
+    iperf3_script="$release/commands/service/iperf3.sh"
+    [[ -f "$iperf3_marker" && -f "$iperf3_script" ]] || fail 'tcping eviction removed iperf3 cache'
+    preserved="$(sha256sum "$shared" "$release/lib/command.sh" "$other" "$marker" "$script" "$listener" "$release/.bundles/core.sha256")"
+    VPSCTL_DISTRIBUTED=1 VPSCTL_PROJECT_ROOT="$release" bash --noprofile --norc -c \
+        'source "$1"; vps_distribution_remove_command_cache service:iperf3' bash "$TEST_ROOT/lib/distribution.sh" || fail 'fresh child could not evict iperf3 cache'
+    [[ ! -e "$iperf3_marker" && ! -e "$iperf3_script" && ! -e "$release/.bundles/.service-iperf3.lock" ]] || fail 'iperf3 cache eviction was incomplete'
+    [[ -d "$release/commands/service" ]] || fail 'iperf3 eviction removed the service domain'
+    assert_equal "$preserved" "$(sha256sum "$shared" "$release/lib/command.sh" "$other" "$marker" "$script" "$listener" "$release/.bundles/core.sha256")" 'iperf3 eviction preserves shared, core and other features'
+    vps_distribution_remove_command_cache service:iperf3 || fail 'iperf3 cache eviction was not retryable'
+    calls=0
+    vps_distribution_ensure_command service:iperf3 || fail 'evicted iperf3 feature did not re-download'
+    assert_equal 1 "$calls" 'only the evicted iperf3 feature re-downloaded'
 )
 
 test_status_is_offline() (
@@ -795,7 +816,7 @@ test_system_bundle_requires_kernel_modules() (
 
 test_private_modules_and_shared_boundaries() (
     local bundle tree="$TEST_TEMP/private-modules" path files status archive="$TEST_TEMP/boundary.tar.gz"
-    for bundle in network-ufw security-access security-tls service-proxy service-tcping; do
+    for bundle in network-ufw security-access security-tls service-proxy service-tcping service-iperf3; do
         rm -rf "$tree"
         mkdir -p "$tree"
         files="$(vps_registry_bundle_files "$bundle")"

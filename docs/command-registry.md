@@ -55,11 +55,11 @@ vpsctl list
 
 第一条用于源码树，第二条用于安装态。两者均只读检测本机环境并显示命令的“可用／受限”状态，不下载功能包。生命周期描述接口状态，不代表全部平台已经真实验收。
 
-各功能的参数、支持范围和恢复说明见[网络设置](network-settings.md)、[UFW 管理](ufw-management.md)、[系统内核](kernel-management.md)、[重装与 DD](reinstall-management.md)、[访问管理](access-management.md)、[Fail2ban](fail2ban-management.md)、[TLS 证书](tls-management.md)、[代理管理](proxy-management.md)、[TCP 探测监听](tcping-management.md)和[服务器测试](server-testing.md)。下文仅补充登记与分发需要区分的调用边界。
+各功能的参数、支持范围和恢复说明见[网络设置](network-settings.md)、[UFW 管理](ufw-management.md)、[系统内核](kernel-management.md)、[重装与 DD](reinstall-management.md)、[访问管理](access-management.md)、[Fail2ban](fail2ban-management.md)、[TLS 证书](tls-management.md)、[代理管理](proxy-management.md)、[TCP 探测监听](tcping-management.md)、[iperf3 测速服务端](iperf3-management.md)和[服务器测试](server-testing.md)。下文仅补充登记与分发需要区分的调用边界。
 
 `optional-root` 表示只读查询、帮助或部分计划阶段可以普通用户运行；实际系统变更仍须 root 或在具体步骤提权。依赖只在当前动作实际需要且确实缺失时处理：真实执行的交互模式列出缺失项并询问是否安装，真实非交互安装必须显式提供 `--install-deps`。`--dry-run` 无需安装授权即可展示缺失依赖与安装计划，不询问、不写配置、不安装依赖、不启动或重启服务。
 
-在 Release 安装态，公开命令不变，每个非 self 命令对应 `<domain>-<action>` bundle，self 来自 core。`VPS_BUNDLE_IDS` 和 `vps_registry_bundle_files` 定义发布顺序与精确文件清单，必须列出每个私有模块；`vps_registry_command_bundles` 定义固定依赖。所有非 self 命令先加载 `shared-command`；UFW、access、TLS、proxy、tcping 再加载 `shared-ufw`；nodequality、tcpquality 再加载 `shared-server-test`；最后加载功能包。功能帮助也执行该流程，菜单浏览不执行。只使用当前版本经过 manifest 校验的缓存；源码模式直接使用本地路径。`service tcping` 成功卸载后只清除自身功能 bundle 的固定文件和缓存标记，后续调用会重新按需下载；共享库、core 和其他功能缓存保持不变。
+在 Release 安装态，公开命令不变，每个非 self 命令对应 `<domain>-<action>` bundle，self 来自 core。`VPS_BUNDLE_IDS` 和 `vps_registry_bundle_files` 定义发布顺序与精确文件清单，必须列出每个私有模块；`vps_registry_command_bundles` 定义固定依赖。所有非 self 命令先加载 `shared-command`；UFW、access、TLS、proxy、tcping、iperf3 再加载 `shared-ufw`；nodequality、tcpquality 再加载 `shared-server-test`；最后加载功能包。功能帮助也执行该流程，菜单浏览不执行。只使用当前版本经过 manifest 校验的缓存；源码模式直接使用本地路径。`service tcping` 和 `service iperf3` 成功卸载后只清除自身功能 bundle 的固定文件和缓存标记，后续调用会重新按需下载；共享库、core 和其他功能缓存保持不变。
 
 `system kernel` 的状态可由普通用户读取，安装、切换和卸载要求 root 与各自的强确认短语，`--yes` 不能绕过。内核包与 GRUB 变更只支持 Debian/Ubuntu amd64；其他 Linux 上的 `status` 仍可查询运行内核。支持的平台可从当前发行版受信 APT 源安装官方标准内核、Debian Cloud 或有候选的 Ubuntu LTS HWE，也可从 XanMod 官方源安装 BBRv3 并验证完整仓库密钥指纹。直接 CLI 省略安装类型仍默认 XanMod，交互菜单默认推荐官方标准内核。状态按 release 展示来源、关联包、启动完整性和 current/default/next/保护状态；标准 GRUB 2 环境可把具体 release 的稳定 entry ID 固定为默认项，其他启动器或无法解析的默认项拒绝危险动作。卸载必须明确指定非 current/default/next 的 release，只提交经过模拟验证的精确包数组，保护共享包和其他版本，不使用通配符或 `autoremove`。完整恢复边界见[系统内核管理](kernel-management.md)。
 
@@ -69,11 +69,13 @@ vpsctl list
 
 主管理菜单选中登记功能后直接进入对应功能入口，不插入命令详情或二次运行页。封闭枚举由编号选择，开放值沿用命令参数校验；菜单真实执行动作，不暴露执行型全局参数、机器输出开关、`--force` 或 `--confirm-*` 标志。上述参数仅供直接功能 CLI；菜单中的危险动作使用对应交互确认及强确认短语。
 
-入口按“命令 + 完整子参数形状”计算本次调用的能力要求，并在加载功能包之前检查权限与能力。`network ip-policy` 的帮助不要求 `libc:glibc`，但状态和变更都要求 glibc；`system kernel` 的帮助与无参数 `status` 不要求 `os:debian-family`，安装、切换、卸载和交互入口仍要求 Debian/Ubuntu。`network rfw` 的无附加参数 `help`/`--help`/`-h` 与 `status`，以及 `security fail2ban` 的帮助与 `status [--json]`，在 Linux 上不要求 `init:systemd`；`service proxy` 的无附加参数 `help`/`--help`/`-h`、`profiles`，以及 `status [--core all|sing-box|xray] [--json]`、`time status [--json]` 在 Linux 上不要求 `service:any`。`service tcping` 的无附加参数 `help`/`--help`/`-h` 与 `status` 也不要求 `service:any`。`test nodequality` 和 `test tcpquality` 的单个 `help`/`--help`/`-h` 参数不要求 `root`，但仍保留 `linux` 能力要求。未列出的参数形状和两项测试的无参数真实执行不能使用这些例外；服务器测试完整边界见[服务器测试](server-testing.md)。
+入口按“命令 + 完整子参数形状”计算本次调用的能力要求，并在加载功能包之前检查权限与能力。`network ip-policy` 的帮助不要求 `libc:glibc`，但状态和变更都要求 glibc；`system kernel` 的帮助与无参数 `status` 不要求 `os:debian-family`，安装、切换、卸载和交互入口仍要求 Debian/Ubuntu。`network rfw` 的无附加参数 `help`/`--help`/`-h` 与 `status`，以及 `security fail2ban` 的帮助与 `status [--json]`，在 Linux 上不要求 `init:systemd`；`service proxy` 的无附加参数 `help`/`--help`/`-h`、`profiles`，以及 `status [--core all|sing-box|xray] [--json]`、`time status [--json]` 在 Linux 上不要求 `service:any`。`service tcping` 与 `service iperf3` 的无附加参数 `help`/`--help`/`-h` 与 `status` 也不要求 `service:any`。`test nodequality` 和 `test tcpquality` 的单个 `help`/`--help`/`-h` 参数不要求 `root`，但仍保留 `linux` 能力要求。未列出的参数形状和两项测试的无参数真实执行不能使用这些例外；服务器测试完整边界见[服务器测试](server-testing.md)。
 
 `service proxy` 的 `service:any` 能力要求由入口解析为可用服务管理器，功能脚本会进一步限制为 systemd 或 OpenRC。注册表只登记公开入口 `commands/service/proxy.sh`；其 `commands/service/proxy/` 子模块是固定加载的私有实现，不单独登记，也不构成可直接分发的命令。交互菜单统一展示双核状态并按能力分组，通过状态筛选、枚举和编号选择解析内核或节点；订阅可选全部，或选择当前确有节点的 sing-box/Xray 范围。直接命令与非交互模式保留 `--core` 和 `--id` 作为精确消歧接口。帮助、协议矩阵和系统时间状态可由普通用户执行；内核状态与节点/订阅会读取受限状态文件，因此和安装、更新、卸载、服务控制、节点写操作及时间同步一样要求 root。运行中的节点和中转配置变更按待重启策略自动应用；显式 `restart` 使用普通确认，可由全局 `--yes` 或兼容的 `--confirm-disruptive` 授权。外部二进制原地更新、节点切核与 `--purge` 仍按各自接口要求提供专用确认。完整接口见[代理管理](proxy-management.md)。
 
 `service tcping` 登记公开入口 `commands/service/tcping.sh`；`commands/service/tcping/listener.py` 随同一功能包下载，不作为独立命令。运行时由 systemd 或 OpenRC `supervise-daemon` 管理监听进程，使用 Python 3 标准库。帮助和无附加参数的状态查询保持只读，服务变更要求 root；详细接口见[TCP 探测监听](tcping-management.md)。
+
+`service iperf3` 为单入口独立功能包，管理系统软件包和 systemd/OpenRC 服务端，默认端口 5201，声明 TCP/UDP UFW 需求。状态与帮助只读，卸载保留软件包；见 [iperf3 管理](iperf3-management.md)。
 
 `security access` 整体登记为 `linux,init:systemd`，当前不承诺 OpenRC SSH 服务编排。帮助、公开状态和第二 SSH 会话证明可由普通用户运行；用户、密码、公钥、SSH 配置、防火墙、事务和备份的变更由功能脚本要求 root。`ssh apply` 确认后直接应用 root 与密码登录策略，完成备份、校验、reload 和失败恢复，不修改端口或防火墙。端口变更使用 `ssh prepare` 建立保留旧端口的候选配置，新的、符合目标登录策略的 SSH 会话运行 `session verify` 写入短期证明，再由原管理会话运行 `ssh commit`；验证失败或不再继续时使用 `ssh abort`。登录策略仍兼容显式 `ssh prepare` 事务，直接应用与事务的历史备份均由 `restore` 显式恢复。复杂的 include/Match/多值来源等无法安全归并的配置会在写入前拒绝。完整接口与恢复顺序见[访问管理](access-management.md)。
 

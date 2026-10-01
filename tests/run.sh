@@ -33,6 +33,7 @@ for syntax_file in \
     "${TEST_ROOT}/commands/service/proxy.sh" \
     "${TEST_ROOT}"/commands/service/proxy/*.sh \
     "${TEST_ROOT}/commands/service/tcping.sh" \
+    "${TEST_ROOT}/commands/service/iperf3.sh" \
     "${TEST_ROOT}"/commands/self/*.sh \
     "${TEST_ROOT}"/commands/test/*.sh \
     "${TEST_ROOT}/scripts/build-release.sh" \
@@ -69,6 +70,8 @@ for syntax_file in \
     "${TEST_ROOT}/tests/unit/test-service-proxy-node-enhancements.sh" \
     "${TEST_ROOT}/tests/unit/test-service-tcping.sh" \
     "${TEST_ROOT}/tests/integration/test-service-tcping-real.sh" \
+    "${TEST_ROOT}/tests/unit/test-service-iperf3.sh" \
+    "${TEST_ROOT}/tests/integration/test-service-iperf3-real.sh" \
     "${TEST_ROOT}/tests/integration/test-service-proxy-relay-connectivity-real.sh" \
     "${TEST_ROOT}/tests/integration/test-service-proxy-compat-real.sh" \
     "${TEST_ROOT}/tests/integration/test-service-proxy-protocol-enhancements-real.sh" \
@@ -122,6 +125,7 @@ bash "${TEST_ROOT}/tests/unit/test-service-proxy-protocol-enhancements.sh"
 bash "${TEST_ROOT}/tests/unit/test-service-proxy-relay-enhancements.sh"
 bash "${TEST_ROOT}/tests/unit/test-service-proxy-node-enhancements.sh"
 bash "${TEST_ROOT}/tests/unit/test-service-tcping.sh"
+bash "${TEST_ROOT}/tests/unit/test-service-iperf3.sh"
 bash "${TEST_ROOT}/tests/integration/test-vpsctl.sh"
 
 printf 'PASS: all tests\n'

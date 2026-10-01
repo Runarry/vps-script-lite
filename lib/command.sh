@@ -506,6 +506,9 @@ vps_cmd_package_for_tool() {
         python3)
             if [[ "$manager" == pacman ]]; then printf 'python\n'; else printf 'python3\n'; fi
             ;;
+        iperf3)
+            if [[ "$manager" == zypper ]]; then printf 'iperf\n'; else printf 'iperf3\n'; fi
+            ;;
         useradd | userdel | usermod)
             case "$manager" in
                 apt-get) printf 'passwd\n' ;;

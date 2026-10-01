@@ -528,6 +528,34 @@ test_preserve_existing() (
     assert_equal "$original" "$(<"$VPSCTL_SYSTEM_ROOT/etc/ufw/user.rules")" 'last release removes only the created rule and preserves original bytes'
 )
 
+test_iperf3_lifecycle() (
+    local original4 original6 requirements
+    setup iperf3-lifecycle
+    seed ipv4 input allow tcp 5201 0.0.0.0/0 0.0.0.0/0 'operator iperf3 TCP'
+    seed ipv6 input allow udp 5201 ::/0 ::/0 'operator iperf3 UDP'
+    original4="$(<"$VPSCTL_SYSTEM_ROOT/etc/ufw/user.rules")"
+    original6="$(<"$VPSCTL_SYSTEM_ROOT/etc/ufw/user6.rules")"
+    requirements="$(jq -s 'add | [.[] | . as $request | ("tcp","udp") as $proto |
+        $request + {proto:$proto,preserve_existing:true}]' <(desired iperf3 5201) <(desired iperf3 5201 false ipv6))"
+    apply iperf3 "$requirements"
+    assert_json "$(vps_ufw_inventory)" 'length==4 and all(.[]; .port=="5201" and .owners==["iperf3"])' 'iperf3 owns TCP and UDP in both families'
+    assert_json "$(<"$VPS_UFW_STATE_FILE")" '(.managed|length)==2 and (.leases|length)==0' 'iperf3 borrows both manual rules and manages only new endpoints'
+    vps_ufw_link_set iperf3 detached
+    assert_json "$(vps_ufw_inventory)" 'length==4 and all(.[]; .owners==[])' 'iperf3 detach releases ownership without deleting rules'
+    vps_ufw_link_set iperf3 attached
+    apply iperf3 "$requirements"
+    assert_json "$(vps_ufw_inventory)" 'length==4 and all(.[]; .owners==["iperf3"])' 'iperf3 attach restores ownership'
+    apply iperf3 "$(jq 'map(.port="5301")' <<<"$requirements")"
+    assert_json "$(vps_ufw_inventory)" 'length==6 and ([.[]|select(.port=="5201")]|length)==2 and
+        all(.[]|select(.port=="5201"); .comment|startswith("operator iperf3"))' 'iperf3 port change preserves manual old endpoints'
+    apply proxy-nodes "$(desired node:shared 5301)"
+    apply iperf3 '[]'
+    assert_json "$(vps_ufw_inventory)" 'length==3 and any(.[]; .port=="5301" and .owners==["node:shared"])' 'iperf3 removal preserves another owner'
+    apply proxy-nodes '[]'
+    assert_equal "$original4" "$(<"$VPSCTL_SYSTEM_ROOT/etc/ufw/user.rules")" 'iperf3 release preserves original IPv4 bytes'
+    assert_equal "$original6" "$(<"$VPSCTL_SYSTEM_ROOT/etc/ufw/user6.rules")" 'iperf3 release preserves original IPv6 bytes'
+)
+
 test_rollback_and_nesting() (
     local before status=0
     setup rollback
@@ -720,7 +748,7 @@ test_tampered_rule_and_paths() (
 )
 
 for test in test_normalize_batches test_normalize_read_failures test_prune_batches test_prune_read_failures \
-    test_add_rule_batches test_sweep_delete_safety test_disabled test_shared_references test_adoption_and_leases test_preserve_existing test_rollback_and_nesting \
+    test_add_rule_batches test_sweep_delete_safety test_disabled test_shared_references test_adoption_and_leases test_preserve_existing test_iperf3_lifecycle test_rollback_and_nesting \
     test_commit_cleanup_failure test_conflicts_and_detach test_scoped_ssh_restore test_ipv6_and_inventory \
     test_interruption_and_dead_lease test_scoped_history_isolation test_tampered_rule_and_paths; do
     "$test"

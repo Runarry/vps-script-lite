@@ -148,6 +148,11 @@ test_dependency_installation() (
     test_assert_equal chrony "$(vps_cmd_package_for_tool apt-get chronyc)" "chronyc package"
     test_assert_equal gnupg "$(vps_cmd_package_for_tool apt-get gpg)" "GnuPG package"
     test_assert_equal coreutils "$(vps_cmd_package_for_tool apt-get install)" "install package"
+    for manager in "${managers[@]}"; do
+        expected=iperf3
+        [[ "$manager" != zypper ]] || expected=iperf
+        test_assert_equal "$expected" "$(vps_cmd_package_for_tool "$manager" iperf3)" "$manager iperf3 package"
+    done
 
     VPSCTL_ASSUME_YES=1
     status=0

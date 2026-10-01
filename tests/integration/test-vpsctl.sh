@@ -76,6 +76,7 @@ test_cli() {
     test_contains "$output" "security tls" "tls command listing"
     test_contains "$output" "service proxy" "proxy command listing"
     test_contains "$output" "service tcping" "tcping command listing"
+    test_contains "$output" "service iperf3" "iperf3 command listing"
     test_contains "$output" "test nodequality" "NodeQuality command listing"
     test_contains "$output" "test tcpquality" "TCPQuality command listing"
     test_contains "$output" "self status" "self status command listing"
@@ -173,7 +174,7 @@ test_entry_version() (
 )
 
 test_dispatch_security() {
-    local sandbox output status marker menu_command download_marker core invalid
+    local sandbox output status marker menu_command download_marker core invalid option
     local -a invalid_args=()
 
     [[ "$(uname -s)" == "Linux" ]] || return 0
@@ -318,6 +319,13 @@ printf 'tcping_args=%s\n' "$*"
 EOF
     chmod 0644 "$sandbox/commands/service/tcping.sh"
 
+    cat >"$sandbox/commands/service/iperf3.sh" <<'EOF'
+#!/usr/bin/env bash
+printf 'iperf3_args=%s\n' "$*"
+[[ -z "${VPSCTL_DISPATCH_MARKER:-}" ]] || printf 'iperf3:%s\n' "$*" >>"$VPSCTL_DISPATCH_MARKER"
+EOF
+    chmod 0644 "$sandbox/commands/service/iperf3.sh"
+
     cat >"$sandbox/commands/test/nodequality.sh" <<'EOF'
 #!/usr/bin/env bash
 printf 'nodequality_args=%s\n' "$*"
@@ -431,6 +439,10 @@ EOF
     test_contains "$output" "tcping_args=--help" "tcping help dispatch without service capability"
     output="$(VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" service tcping status)"
     test_contains "$output" "tcping_args=status" "tcping status dispatch without service capability"
+    for option in help -h --help status; do
+        output="$(VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" service iperf3 "$option")"
+        test_contains "$output" "iperf3_args=$option" "iperf3 $option dispatch without service capability"
+    done
 
     output="$(VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" test nodequality help)"
     test_contains "$output" "nodequality_args=help" "NodeQuality help dispatch without root capability"
@@ -510,6 +522,14 @@ EOF
     VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" service tcping status extra >/dev/null 2>&1 || status=$?
     [[ "$status" == "3" ]] || test_fail "tcping malformed status without service capability should return 3, got ${status}"
     [[ ! -e "$marker" ]] || test_fail "tcping malformed status bypassed the capability gate"
+    for invalid in 'install' 'start' 'uninstall' 'status extra' 'status --json' 'help extra' '--help extra'; do
+        IFS=' ' read -r -a invalid_args <<<"$invalid"
+        status=0
+        VPSCTL_DOWNLOAD_MARKER="$download_marker" VPSCTL_DISPATCH_MARKER="$marker" \
+            bash "$sandbox/bin/vpsctl" service iperf3 "${invalid_args[@]}" >/dev/null 2>&1 || status=$?
+        [[ "$status" == 3 ]] || test_fail "iperf3 capability gate accepted $invalid (rc=$status)"
+        [[ ! -e "$marker" && ! -e "$download_marker" ]] || test_fail "iperf3 capability rejection loaded or ran a command: $invalid"
+    done
 
     rm -rf -- "$sandbox/commands/network"
     mkdir -p "$sandbox/outside"
