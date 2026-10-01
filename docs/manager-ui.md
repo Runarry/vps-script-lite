@@ -67,7 +67,8 @@ UI 显示以下摘要：
     │   │   ├── 安装 / 更新官方、Cloud、HWE 或 XanMod 内核
     │   │   ├── 固定默认启动版本
     │   │   └── 按版本安全卸载非当前内核
-    │   └── 系统重装与 DD（reinstall，本地帮助与命令行入口）
+    │   ├── 系统重装与 DD（reinstall，本地帮助与命令行入口）
+    │   └── Swap 管理（swap）：状态 / 自动或自定义容量 / 关闭
     ├── 安全与访问（security）
     │   ├── 访问管理（access）
     │   │   ├── 用户、密码与公钥
@@ -98,9 +99,11 @@ UI 显示以下摘要：
         └── 卸载受管脚本（uninstall）
 ```
 
-主菜单不会扫描目录或推测功能分类，只显示固定注册表中已经登记的真实功能。业务领域登记 `network`、`system`、`security`、`service` 与 `test`，包含 `bbr`、`dns`、`ip-policy`、`ufw`、`rfw`、`kernel`、`reinstall`、`access`、`fail2ban`、`tls`、`proxy`、`tcping`、`iperf3`、`nodequality`、`tcpquality` 十五个入口，另有常驻 `self` 领域。用户选择功能后，入口立即无附加参数分发该公开脚本，由功能脚本进入自己的交互 UI、开始测试，或像轻量入口 `reinstall` 一样显示本地帮助；不再显示命令详情页，也不再要求输入 `r` 才运行。环境详情仍可通过非菜单命令 `vpsctl env` 查看。
+主菜单不会扫描目录或推测功能分类，只显示固定注册表中已经登记的真实功能。业务领域登记 `network`、`system`、`security`、`service` 与 `test`，包含 `bbr`、`dns`、`ip-policy`、`ufw`、`rfw`、`kernel`、`reinstall`、`swap`、`access`、`fail2ban`、`tls`、`proxy`、`tcping`、`iperf3`、`nodequality`、`tcpquality` 十六个入口，另有常驻 `self` 领域。用户选择功能后，入口立即无附加参数分发该公开脚本，由功能脚本进入自己的交互 UI、开始测试，或像轻量入口 `reinstall` 一样显示本地帮助；不再显示命令详情页，也不再要求输入 `r` 才运行。环境详情仍可通过非菜单命令 `vpsctl env` 查看。
 
 `system kernel` 的菜单展示当前运行版本，并以编号选择查看完整状态、安装/更新、固定默认版本或卸载指定版本。状态页按完整 release 汇总内核与启动信息。安装类型默认推荐发行版官方标准内核；Debian 可选 Cloud，Ubuntu LTS 仅在适配 HWE 元包有候选时显示，XanMod 继续提供 auto/main/lts 和 CPU 等级选择。切换与卸载候选由 current、default、next、启动文件完整性和 dpkg 归属状态过滤，用户无需手工输入 release。安装、切换、卸载分别要求 `INSTALL-KERNEL`、`SWITCH-KERNEL`、`REMOVE-KERNEL` 强确认；菜单不会自动重启，流程提示重启核对后再卸载旧版本。
+
+系统领域的 Swap 管理追加为第 3 项，内核与重装仍为第 1、2 项。`system swap` 无参数在交互 TTY 中按编号提供查看状态、设置容量、关闭和退出；无 TTY 或使用 `--non-interactive` 时只显示状态。容量输入框显示实际推荐值（例如 `4G`），回车采用该值，也可输入整数二进制 `M`/`G`，最小 64 MiB；非法输入会提示重试。自动值为两倍内存向上取整到 GiB 后限制在 1～8 GiB。设置和关闭各执行一次普通确认，CLI 的全局 `--yes` 可用于无人值守。演练、支持范围与恢复边界见[Swap 管理](swap-management.md)。
 
 `service proxy` 是一个公开登记入口，进入后使用自己的三级操作菜单。Xray 与 sing-box 在该菜单中平级展示并按需安装；每次进入或返回菜单都显示两个内核的状态、配置路径、各自节点数和总节点数，随后按能力分组提供操作，而不是先绑定某个内核。生命周期和服务操作会按当前安装/运行状态过滤候选；安装和更新在有多个候选时允许选择全部，并继续用编号选择最新稳定版（推荐）、最新预发布版或精确 Release tag，其他动作解析到单个适用内核。其 `commands/service/proxy/` 私有模块不会作为额外菜单项出现。
 
@@ -150,12 +153,13 @@ UI 使用 ASCII 边框和可选 ANSI 语义色，适合普通 SSH 终端：青�
 
 ## 5. 当前边界
 
-0.8.11 的管理入口已登记网络功能、系统内核、重装与 DD、访问管理、Fail2ban 防护、TLS 证书、代理管理、TCPing 探测监听与服务器测试。UI 只负责展示元数据、收集用户选择并分发，不实现 BBR、DNS、IP 地址族偏好、RFW、内核、重装、用户凭据、SSH 事务、Fail2ban、TLS、代理、TCPing 或测试业务逻辑。
+0.8.11 的管理入口已登记网络功能、系统内核、重装与 DD、Swap 管理、访问管理、Fail2ban 防护、TLS 证书、代理管理、TCPing 探测监听与服务器测试。UI 只负责展示元数据、收集用户选择并分发，不实现 BBR、DNS、IP 地址族偏好、RFW、内核、重装、Swap、用户凭据、SSH 事务、Fail2ban、TLS、代理、TCPing 或测试业务逻辑。
 
 网络功能的当前边界为：
 
 - BBR 只管理拥塞控制、队列规则及其持久化配置，不负责升级或替换内核。
 - 系统内核管理 Debian/Ubuntu amd64 上的发行版官方内核和 XanMod BBRv3，提供清单、安装、标准 GRUB 2 固定默认版本与按版本卸载；不自动重启、不执行远程脚本，也不替代 `network bbr` 的 sysctl/qdisc 管理。非标准或无法识别的启动器保留状态与安装入口，但拒绝无法证明安全的切换和卸载。
+- Swap 只管理普通磁盘文件和 fstab Swap 分区，开机编排限可识别的 systemd/OpenRC 路径；不接管 zram、自定义 swap unit 或独立管理器，不修改 sysctl。设置先启用新文件再关闭旧 Swap，验证配置后删除旧普通文件；分区只改为 `noauto`。
 - DNS 只修改检测到的权威 DNS 后端；候选解析器必须先通过前测，写后验证失败会保留新配置并返回部分完成状态，以便按备份恢复。
 - IP 地址族偏好只管理 glibc 地址排序，不禁用任一地址族，也不作为 sing-box/Xray 节点的隐式默认值。
 - RFW 只支持 systemd、`x86_64`/`aarch64` 和 IPv4；安装只使用官方最新稳定 release 并校验 checksum。配置和更新不会自行重启服务，实际应用危险规则必须显式强确认。
@@ -165,4 +169,4 @@ UI 使用 ASCII 边框和可选 ANSI 语义色，适合普通 SSH 终端：青�
 - TLS 证书管理导入用户证书或通过钉死版本的 lego 申请 ACME 证书；live 路径是无符号链接的普通文件。续期 timer 仅支持 systemd。本功能不调用代理脚本；`--reload proxy` 只重载已知的代理 unit 名。
 - 服务器测试只在 Linux 上以 root 运行固定官方 HTTPS 地址下载的当前版本脚本，不支持演练或上游参数透传。NodeQuality 保留上游四项交互，TcpQuality 保留当前官方脚本自身的测试选项；两者都可能产生高 CPU、磁盘和网络负载并把报告上传到上游服务。入口只清理当前调用拥有的临时资源，`SIGKILL`、Shell 崩溃和主机异常不保证清理。
 
-详细子动作、路径、恢复和验收要求见 [`docs/network-settings.md`](network-settings.md)、[`docs/kernel-management.md`](kernel-management.md)、[`docs/access-management.md`](access-management.md)、[`docs/fail2ban-management.md`](fail2ban-management.md)、[`docs/tls-management.md`](tls-management.md)、[`docs/proxy-management.md`](proxy-management.md) 与 [`docs/server-testing.md`](server-testing.md)。
+详细子动作、路径、恢复和验收要求见 [`docs/network-settings.md`](network-settings.md)、[`docs/kernel-management.md`](kernel-management.md)、[`docs/swap-management.md`](swap-management.md)、[`docs/access-management.md`](access-management.md)、[`docs/fail2ban-management.md`](fail2ban-management.md)、[`docs/tls-management.md`](tls-management.md)、[`docs/proxy-management.md`](proxy-management.md) 与 [`docs/server-testing.md`](server-testing.md)。

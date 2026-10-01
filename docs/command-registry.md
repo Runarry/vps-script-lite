@@ -55,7 +55,7 @@ vpsctl list
 
 第一条用于源码树，第二条用于安装态。两者均只读检测本机环境并显示命令的“可用／受限”状态，不下载功能包。生命周期描述接口状态，不代表全部平台已经真实验收。
 
-各功能的参数、支持范围和恢复说明见[网络设置](network-settings.md)、[UFW 管理](ufw-management.md)、[系统内核](kernel-management.md)、[重装与 DD](reinstall-management.md)、[访问管理](access-management.md)、[Fail2ban](fail2ban-management.md)、[TLS 证书](tls-management.md)、[代理管理](proxy-management.md)、[TCP 探测监听](tcping-management.md)、[iperf3 测速服务端](iperf3-management.md)和[服务器测试](server-testing.md)。下文仅补充登记与分发需要区分的调用边界。
+各功能的参数、支持范围和恢复说明见[网络设置](network-settings.md)、[UFW 管理](ufw-management.md)、[系统内核](kernel-management.md)、[重装与 DD](reinstall-management.md)、[Swap 管理](swap-management.md)、[访问管理](access-management.md)、[Fail2ban](fail2ban-management.md)、[TLS 证书](tls-management.md)、[代理管理](proxy-management.md)、[TCP 探测监听](tcping-management.md)、[iperf3 测速服务端](iperf3-management.md)和[服务器测试](server-testing.md)。下文仅补充登记与分发需要区分的调用边界。
 
 `optional-root` 表示只读查询、帮助或部分计划阶段可以普通用户运行；实际系统变更仍须 root 或在具体步骤提权。依赖只在当前动作实际需要且确实缺失时处理：真实执行的交互模式列出缺失项并询问是否安装，真实非交互安装必须显式提供 `--install-deps`。`--dry-run` 无需安装授权即可展示缺失依赖与安装计划，不询问、不写配置、不安装依赖、不启动或重启服务。
 
@@ -66,6 +66,8 @@ vpsctl list
 `system reinstall` 无参数在交互 TTY 中进入快捷菜单，无 TTY 或设置 `--non-interactive` 时显示本地帮助；显式 `menu` 要求交互 TTY。菜单提供常用 Linux、Windows 与 RAW DD 预设，摘要隐藏密码，安装确认默认拒绝。准备成功后可选择立即重启、稍后重启（默认）或上游 `reset` 取消；立即重启选择本身即为授权，`q` 或 EOF 按稍后重启处理。`--yes` 不能替代安装确认、系统选择或重启授权。
 
 `status` 只读且不下载上游。`run [--] <上游参数…>` 每次下载官方最新 reinstall，原样透传并以 `exec` 交接上游，保持退出与信号行为，不限制目标系统，也不主动重启；`reset` 使用保留的脚本取消重装，`uninstall` 自动先取消待执行重装再清理专属文件。快捷安装与这三个变更动作要求 root 且拒绝演练，卸载支持一次普通确认与 `--yes`。快捷流程在上游执行和成功后的选择期间保持互斥锁，失败不重启或主动清理恢复材料。系统安装、参数含义和引导撤销由上游负责；完整下载、清理及新系统边界见[系统重装与 DD](reinstall-management.md)。
+
+`system swap` 登记在系统领域末尾，保留内核和重装的菜单编号；风险为 `disruptive`、权限为 `optional-root`、演练为 `supported`、能力为 `linux`、生命周期为 `experimental`。独立 `system-swap` bundle 只包含 `commands/system/swap.sh`，仅依赖 `shared-command`。无参数在交互 TTY 中进入菜单，其他情况显示状态；`status` 普通用户可运行，`set [--size auto|N(M|G)]` 默认自动容量，`disable` 关闭全部受支持磁盘 Swap 并清理旧普通文件，分区保留为 `noauto`。真实变更要求 root 和一次普通确认，自动化可用全局 `--yes`；演练只读。zram、自定义 swap unit 和独立管理器在写入前拒绝，sysctl 保持原值。容量、空间门禁、提交顺序与恢复边界见[Swap 管理](swap-management.md)。
 
 主管理菜单选中登记功能后直接进入对应功能入口，不插入命令详情或二次运行页。封闭枚举由编号选择，开放值沿用命令参数校验；菜单真实执行动作，不暴露执行型全局参数、机器输出开关、`--force` 或 `--confirm-*` 标志。上述参数仅供直接功能 CLI；菜单中的危险动作使用对应交互确认及强确认短语。
 

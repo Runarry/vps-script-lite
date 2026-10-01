@@ -502,7 +502,8 @@ vps_cmd_package_for_tool() {
                 apk | pacman) printf 'openssh\n' ;;
             esac
             ;;
-        systemctl | systemd-run) printf 'systemd\n' ;;
+        systemctl | systemd-run | systemd-escape) printf 'systemd\n' ;;
+        rc-update) printf 'openrc\n' ;;
         python3)
             if [[ "$manager" == pacman ]]; then printf 'python\n'; else printf 'python3\n'; fi
             ;;
@@ -542,13 +543,27 @@ vps_cmd_package_for_tool() {
                 *) printf 'iproute2\n' ;;
             esac
             ;;
-        base64 | sha256sum | tr | mktemp | sort | head | install | od | readlink) printf 'coreutils\n' ;;
+        base64 | sha256sum | tr | mktemp | sort | head | tail | install | od | readlink | stat | df | dd | cp | mv | rm | chmod | chown | date | cat) printf 'coreutils\n' ;;
+        cmp) printf 'diffutils\n' ;;
         awk) printf 'gawk\n' ;;
         flock)
             if [[ "$manager" == apk ]]; then printf 'flock\n'; else printf 'util-linux\n'; fi
             ;;
         mountpoint)
             if [[ "$manager" == apk ]]; then printf 'util-linux-misc\n'; else printf 'util-linux\n'; fi
+            ;;
+        swapon | swapoff)
+            case "$manager" in
+                apt-get) printf 'mount\n' ;;
+                apk) printf 'util-linux-misc\n' ;;
+                *) printf 'util-linux\n' ;;
+            esac
+            ;;
+        mkswap)
+            if [[ "$manager" == apk ]]; then printf 'util-linux-misc\n'; else printf 'util-linux\n'; fi
+            ;;
+        findmnt | blkid | lsblk)
+            if [[ "$manager" == apk ]]; then printf '%s\n' "$tool"; else printf 'util-linux\n'; fi
             ;;
         curl | jq | openssl | unzip | tar | chrony | efibootmgr) printf '%s\n' "$tool" ;;
         gpg) printf 'gnupg\n' ;;
@@ -629,6 +644,10 @@ _vps_cmd_tool_available() {
 
     if [[ "$tool" == dns-query ]]; then
         command -v dig >/dev/null 2>&1 || command -v drill >/dev/null 2>&1 || command -v nslookup >/dev/null 2>&1
+    elif [[ "$tool" == swapon || "$tool" == swapoff || "$tool" == mkswap || "$tool" == blkid || "$tool" == findmnt || "$tool" == lsblk ]]; then
+        # BusyBox applets lack the util-linux query/probe interfaces used by
+        # swap management. Install their real packages even when an applet exists.
+        command -v "$tool" >/dev/null 2>&1 && "$tool" --version >/dev/null 2>&1
     else
         command -v "$tool" >/dev/null 2>&1
     fi

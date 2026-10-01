@@ -148,6 +148,25 @@ test_dependency_installation() (
     test_assert_equal chrony "$(vps_cmd_package_for_tool apt-get chronyc)" "chronyc package"
     test_assert_equal gnupg "$(vps_cmd_package_for_tool apt-get gpg)" "GnuPG package"
     test_assert_equal coreutils "$(vps_cmd_package_for_tool apt-get install)" "install package"
+    test_assert_equal mount "$(vps_cmd_package_for_tool apt-get swapon)" "Debian swapon package"
+    test_assert_equal mount "$(vps_cmd_package_for_tool apt-get swapoff)" "Debian swapoff package"
+    test_assert_equal util-linux "$(vps_cmd_package_for_tool apt-get mkswap)" "Debian mkswap package"
+    test_assert_equal util-linux-misc "$(vps_cmd_package_for_tool apk swapon)" "Alpine swapon package"
+    test_assert_equal util-linux-misc "$(vps_cmd_package_for_tool apk swapoff)" "Alpine swapoff package"
+    test_assert_equal util-linux-misc "$(vps_cmd_package_for_tool apk mkswap)" "Alpine mkswap package"
+    test_assert_equal blkid "$(vps_cmd_package_for_tool apk blkid)" "Alpine blkid package"
+    test_assert_equal findmnt "$(vps_cmd_package_for_tool apk findmnt)" "Alpine findmnt package"
+    test_assert_equal lsblk "$(vps_cmd_package_for_tool apk lsblk)" "Alpine lsblk package"
+    test_assert_equal diffutils "$(vps_cmd_package_for_tool apk cmp)" "comparison package"
+    test_assert_equal systemd "$(vps_cmd_package_for_tool apt-get systemd-escape)" "systemd escape package"
+    test_assert_equal openrc "$(vps_cmd_package_for_tool apk rc-update)" "OpenRC runlevel package"
+    (
+        # A pre-existing BusyBox applet is not sufficient for structured swap queries.
+        swapon() { return 1; }
+        if _vps_cmd_tool_available swapon; then test_fail "incompatible swapon applet accepted"; fi
+        swapon() { [[ "${1:-}" == --version ]]; }
+        _vps_cmd_tool_available swapon || test_fail "util-linux swapon capability rejected"
+    )
     for manager in "${managers[@]}"; do
         expected=iperf3
         [[ "$manager" != zypper ]] || expected=iperf

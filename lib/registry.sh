@@ -25,7 +25,7 @@ declare -ga VPS_REGISTRY_RESULTS=()
 declare -ga VPS_BUNDLE_IDS=(
     core shared-command shared-ufw shared-server-test
     network-bbr network-dns network-ip-policy network-ufw network-rfw
-    system-kernel system-reinstall security-access security-fail2ban security-tls
+    system-kernel system-reinstall system-swap security-access security-fail2ban security-tls
     service-proxy service-tcping service-iperf3 test-nodequality test-tcpquality
 )
 
@@ -41,6 +41,7 @@ vps_registry_bundle_files() {
         network-ufw) printf '%s\n' commands/network/ufw.sh commands/network/ufw/{common,inventory,rules,actions,menu}.sh ;;
         system-kernel) printf '%s\n' commands/system/kernel.sh commands/system/kernel/{providers,inventory,grub,grub-install}.sh ;;
         system-reinstall) printf '%s\n' commands/system/reinstall.sh ;;
+        system-swap) printf '%s\n' commands/system/swap.sh ;;
         security-access) printf '%s\n' commands/security/access.sh commands/security/access/{common,users,keys,firewall,sshd}.sh ;;
         security-fail2ban) printf '%s\n' commands/security/fail2ban.sh ;;
         security-tls) printf '%s\n' commands/security/tls.sh commands/security/tls/{common,store,issue,timer,ufw}.sh ;;
@@ -158,7 +159,7 @@ vps_registry_init() {
     vps_registry_register_domain \
         "system" \
         "系统管理" \
-        "内核、软件包和主机基础维护"
+        "内核、Swap、软件包和主机基础维护"
 
     vps_registry_register_domain \
         "security" \
@@ -261,6 +262,18 @@ vps_registry_init() {
         "destructive" \
         "optional-root" \
         "unsupported" \
+        "linux" \
+        "experimental"
+
+    vps_registry_register_command \
+        "system" \
+        "swap" \
+        "Swap 管理" \
+        "查看、设置或关闭普通磁盘 Swap 及其开机配置" \
+        "commands/system/swap.sh" \
+        "disruptive" \
+        "optional-root" \
+        "supported" \
         "linux" \
         "experimental"
 

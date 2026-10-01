@@ -79,7 +79,7 @@ make_core_asset() {
 
 make_feature_assets() {
     local version="$1" build="${TEST_TEMP}/build-feature" bundle files path
-    for bundle in shared-command shared-ufw network-bbr network-dns network-ufw system-reinstall service-tcping service-iperf3; do
+    for bundle in shared-command shared-ufw network-bbr network-dns network-ufw system-reinstall system-swap service-tcping service-iperf3; do
         rm -rf -- "$build"
         mkdir -p "$build"
         files="$(vps_registry_bundle_files "$bundle")"
@@ -307,6 +307,35 @@ test_lazy_feature_install_and_cache() (
     vps_distribution_ensure_command system:reinstall || fail 'cached reinstall wrapper failed offline'
     vps_distribution_ensure_command service:iperf3 || fail 'cached iperf3 failed offline'
     [[ -z "$(find "$release/.bundles" -mindepth 1 ! -name '*.sha256' -print -quit)" ]] || fail 'lazy download left temporary assets'
+)
+
+test_lazy_swap_install_and_cache() (
+    local release="${TEST_INSTALL_ROOT}/releases/0.1.1" calls=0 swap_sha
+    make_feature_assets 0.1.1
+    swap_sha="$(sha_file "$TEST_ASSETS/vpsctl-system-swap-0.1.1.tar.gz")"
+    mkdir -p "$release/.release" "$release/.bundles"
+    printf '0.1.1\n' >"$release/VERSION"
+    write_manifest "$release/.release/manifest.tsv" 0.1.1 "$(sha_file "$TEST_ASSETS/vpsctl-shared-command-0.1.1.tar.gz")" "$(sha_file "$TEST_ASSETS/vpsctl-network-bbr-0.1.1.tar.gz")"
+    VPSCTL_DISTRIBUTED=1
+    VPSCTL_PROJECT_ROOT="$release"
+    vps_distribution_download() {
+        calls=$((calls + 1))
+        cp -- "${TEST_ASSETS}/${1##*/}" "$2"
+    }
+    vps_distribution_ensure_command system:swap || fail 'lazy swap install failed'
+    assert_equal 2 "$calls" 'swap downloads only its feature and shared command dependency'
+    [[ -f "$release/commands/system/swap.sh" && -f "$release/lib/command.sh" ]] || fail 'swap command or shared dependency missing'
+    assert_equal "$swap_sha" "$(<"$release/.bundles/system-swap.sha256")" 'swap cache marker'
+    assert_equal $'shared-command.sha256\nsystem-swap.sha256' "$(find "$release/.bundles" -type f -printf '%f\n' | sort)" 'swap cache has no unrelated bundles'
+    [[ ! -e "$release/lib/ufw.sh" && ! -e "$release/commands/system/kernel.sh" && ! -e "$release/commands/system/reinstall.sh" ]] || fail 'swap loaded unrelated code'
+    [[ ! -e "$TEST_SYSTEM_ROOT/var/lib/vpsctl/system/swap" ]] || fail 'feature loading created swap state'
+    vps_distribution_download() {
+        calls=$((calls + 1))
+        return 20
+    }
+    vps_distribution_ensure_command system:swap || fail 'cached swap failed offline'
+    assert_equal 2 "$calls" 'cached swap attempted a network download'
+    [[ -z "$(find "$release/.bundles" -mindepth 1 ! -name '*.sha256' -print -quit)" ]] || fail 'swap lazy download left temporary assets'
 )
 
 test_command_cache_eviction() (
@@ -833,7 +862,7 @@ test_private_modules_and_shared_boundaries() (
             mv "$tree/missing" "$tree/$path"
         done <<<"$files"
     done
-    for bundle in shared-command shared-ufw shared-server-test network-bbr security-fail2ban; do
+    for bundle in shared-command shared-ufw shared-server-test network-bbr system-swap security-fail2ban; do
         status=0
         vps_distribution_archive_path_allowed "$bundle" lib/distribution.sh || status=$?
         assert_equal 1 "$status" "$bundle may overwrite core"
@@ -869,6 +898,7 @@ test_source_mode_is_offline_and_mutations_refuse
 test_manifest_is_strict
 test_bootstrap_uses_release_launcher
 test_lazy_feature_install_and_cache
+test_lazy_swap_install_and_cache
 test_command_cache_eviction
 test_status_is_offline
 test_failed_downloads_retry_and_lock_recheck

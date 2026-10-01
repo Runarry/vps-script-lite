@@ -4,7 +4,7 @@
 
 项目采用“一个管理入口、多个独立命令”的结构：管理入口只负责参数解析、固定命令登记、公共上下文和分发；每项实际功能原则上由一个公开入口脚本实现，复杂入口可拆为不单独分发的私有子模块。这样既能通过统一入口使用，也能单独运行、测试和排错。
 
-> 当前版本为 0.8.11，提供网络、系统内核、重装与 DD、访问、TLS 证书、代理、TCPing 探测监听、iperf3 测速服务端与服务器测试入口。支持演练的系统变更命令应先使用 `--dry-run` 并阅读对应恢复说明；内核变更需提前确认带外控制台或救援入口可用。重装与服务器测试会下载并运行第三方代码，不支持演练；重装在重启后可清除目标磁盘数据，服务器测试会产生明显 CPU/磁盘/网络负载。
+> 当前版本为 0.8.11，提供网络、系统内核、重装与 DD、Swap、访问、TLS 证书、代理、TCPing 探测监听、iperf3 测速服务端与服务器测试入口。支持演练的系统变更命令应先使用 `--dry-run` 并阅读对应恢复说明；内核变更需提前确认带外控制台或救援入口可用。重装与服务器测试会下载并运行第三方代码，不支持演练；重装在重启后可清除目标磁盘数据，服务器测试会产生明显 CPU/磁盘/网络负载。
 
 应用、功能与 GitHub Release 分发统一使用 `0.8.11`。仓库根 `VERSION` 是规范版本源，tag 为 `v0.8.11`；发布资产、安装目录、`vpsctl self` 与命令行版本展示均使用同一版本号。
 
@@ -19,6 +19,7 @@
 - [UFW 管理](docs/ufw-management.md)：防火墙规则、服务联动、临时租约与恢复边界。
 - [系统内核管理](docs/kernel-management.md)：发行版官方内核与 XanMod BBRv3 的安装、固定默认版本、按版本卸载和恢复；另见[验收记录](docs/kernel-validation.md)。
 - [系统重装与 DD](docs/reinstall-management.md)：Linux、Windows 与 RAW DD 快捷菜单、上游参数透传、取消重装及工具缓存清理。
+- [Swap 管理](docs/swap-management.md)：内存与 Swap 状态、自动容量、磁盘 Swap 替换和关闭、开机配置及失败恢复。
 - [代理管理](docs/proxy-management.md)：Xray/sing-box 内核、节点、出口关联、端口转发、订阅、证书、日志与时间同步。
 - [TCPing 测试站点](docs/tcping-management.md)：按需管理独立的 TCP 探测监听服务及其端口。
 - [iperf3 测速服务端](docs/iperf3-management.md)：安装、更新、启停及卸载 TCP/UDP 测速服务，联动 UFW。
@@ -51,6 +52,7 @@ apk add --no-cache bash curl ca-certificates
 | `security tls` | 导入与查看支持 Alpine；续期 timer 需要 systemd；ACME 的 lego 二进制仅 `x86_64`/`aarch64` |
 | `system kernel` | `status` 可只读查询当前运行内核；内核包及 GRUB 变更不支持 Alpine，仅支持 Debian/Ubuntu amd64 上的 APT/dpkg；自动切换限可识别的标准 GRUB 2 |
 | `system reinstall` | Linux 上提供快捷菜单、上游参数透传、状态、取消和卸载；重装目标与安装依赖由运行时下载的官方 reinstall 决定 |
+| `system swap` | 状态只读；变更要求可识别的 systemd/OpenRC swap 开机路径与普通磁盘 Swap，新文件所在文件系统限 ext2/3/4 或 XFS；不接管 zram 或独立管理器 |
 | `network ip-policy` | 不支持 Alpine 的 musl；该入口只管理 glibc `getaddrinfo()` 的 `/etc/gai.conf` 排序 |
 | `service proxy` | 支持 OpenRC 与 systemd；具体内核、协议、架构和依赖仍按代理功能文档与运行时门禁判断 |
 | `service tcping` | Linux 上支持 systemd 与 OpenRC `supervise-daemon`；运行需要 Python 3，帮助与状态可在没有服务管理器时查看 |
@@ -160,6 +162,10 @@ bash bin/vpsctl system reinstall status
 bash bin/vpsctl system reinstall run -- debian 13
 bash bin/vpsctl system reinstall reset
 bash bin/vpsctl --yes system reinstall uninstall
+bash bin/vpsctl system swap status
+bash bin/vpsctl --yes system swap set
+bash bin/vpsctl --yes system swap set --size 2G
+bash bin/vpsctl --yes system swap disable
 bash bin/vpsctl security access status
 bash bin/vpsctl security fail2ban status
 bash bin/vpsctl security tls status
@@ -186,6 +192,10 @@ bash bin/vpsctl test tcpquality
 
 直接运行 `bash bin/vpsctl system kernel` 会进入内核管理菜单，按编号查看版本状态、安装/更新、固定默认启动版本或卸载指定版本。菜单默认推荐发行版官方标准内核；直接 CLI 省略 `--type` 时仍默认 XanMod，以兼容旧调用。Debian 还提供 Cloud，Ubuntu LTS 在适配候选存在时提供 HWE。安装不会删除旧内核，切换不会重启；应在重启核对目标版本后再卸载旧版本。
 
+`system swap` 无参数在交互 TTY 中进入 Swap 菜单；无 TTY 或使用 `--non-interactive` 时显示状态。普通用户可查看 RAM、所有活动 Swap 的容量与使用量、开机配置及建议容量。`set` 默认按 `ceil(2 × MemTotal / GiB)` 计算整 GiB 容量，限制在 1～8 GiB；也可指定整数二进制 `M`/`G` 容量，最小 64 MiB。设置和关闭各确认一次，自动化使用全局 `--yes`；演练只读，且不修改任何 sysctl。
+
+设置会在 `/var/lib/vpsctl/system/swap/` 用 `dd` 创建权限为 `0600` 的唯一候选文件，先启用新 Swap，再关闭旧的受支持磁盘 Swap。旧文件一直保留到 `/etc/fstab` 原子提交、systemd/OpenRC 开机配置刷新和验证成功后才删除；原 Swap 分区保留，并改为 `noauto`。创建时需额外容纳新容量与 256 MiB 余量，不能用即将删除的旧文件抵扣。`disable` 关闭全部受支持磁盘 Swap、删除经核验的旧普通文件，并禁用分区的开机启用。zram、自定义 swap unit 和独立管理器会在变更前拒绝。提交前失败尝试恢复配置与活动状态；提交后旧文件清理失败返回 `30` 并报告路径，不承诺恢复已删除文件的内容。完整范围与恢复步骤见 [Swap 管理](docs/swap-management.md)。
+
 直接运行 `bash bin/vpsctl service proxy` 会进入统一代理界面。界面首先同时显示 Xray 与 sing-box 的安装/运行状态、配置路径、各自节点数和节点总数，再按内核生命周期、服务控制、节点管理、中转管理、查看输出和系统工具等能力分组提供操作。节点管理包含将单个节点切换到另一兼容内核；中转管理按编号提供“出口管理 / 节点中转 / 纯端口转发 / 状态与刷新”。一个出口可供多个入口复用，节点 URI 不因关联而改变。交互过程对内核、节点、出口、模式和开关等固定值统一使用编号选择；地址、端口、名称等开放值则在输入后立即校验，不要求输入 `--core` 等 CLI 参数。订阅可按编号选择全部，或只输出当前确有普通节点或端口转发 URI 的 sing-box/Xray 范围。
 
 `node core set` 只接受已经安装且支持该节点 profile 的另一内核，不会代为安装。切换保持客户端端点、凭据、TLS、传输和 IP 策略语义；重新生成的 URI 可能采用不同的字符串编码或参数顺序，自签名和导入证书的受管内部路径会随内核迁移。绑定的协议出口只有在该节点独占、没有端口转发引用且与目标内核兼容时才会一并迁移；共享、有端口转发或不兼容都会拒绝。切换会立即接管并可能短暂中断连接，非交互调用必须提供 `--confirm-disruptive`；目标服务的 active/enabled 状态按源服务可用性继承，任一步失败都会回滚节点、配置、中转、证书与服务状态。
@@ -200,6 +210,8 @@ bash bin/vpsctl --dry-run --install-deps network dns set --server 1.1.1.1 --serv
 bash bin/vpsctl --dry-run network ip-policy set --policy prefer_ipv4
 bash bin/vpsctl --dry-run --install-deps network rfw install
 bash bin/vpsctl --dry-run --install-deps system kernel install --type official
+bash bin/vpsctl --dry-run system swap set --size auto
+bash bin/vpsctl --dry-run system swap disable
 bash bin/vpsctl --dry-run security access ssh prepare --port 2222 --firewall manual
 bash bin/vpsctl --dry-run security fail2ban install
 bash bin/vpsctl --dry-run security tls import --name example --cert-file /path/cert.pem --key-file /path/key.pem
@@ -210,7 +222,7 @@ bash bin/vpsctl service proxy update --core xray --version vX.Y.Z
 
 代理内核安装和更新默认选择最新稳定版，也可用 `--release-channel prerelease` 选择最新预发布版，或用 `--version TAG` 精确选择稳定或预发布 Release；后两项互斥。`--core all` 可共享 release channel，但不能共享一个 `--version`，因为 Xray 与 sing-box 的 tag 空间不同。安装时选择的通道不会写入状态；以后不带版本选项执行 `update` 仍选择最新稳定版。内核资产继续执行官方来源、唯一资产、SHA-256、解压目标、二进制版本和现有配置兼容性校验，更新完成后不会自动重启服务。
 
-在主管理菜单中选择 BBR、DNS、IP 地址族偏好、RFW、内核管理、重装与 DD、访问管理、Fail2ban、TLS 证书、代理管理或两项服务器测试后，会直接进入对应功能入口，不再经过“命令详情”或输入 `r` 才运行的中间页；菜单选项执行的是真实动作，不提供演练、依赖授权、自动同意、非交互、静默或详细日志等执行型全局参数开关。系统内核菜单以官方标准内核为推荐安装项，并通过编号选择具体切换或卸载版本；代理内核的安装和更新会用编号选择最新稳定版（推荐）、最新预发布版或精确 Release tag。`--dry-run`、`--install-deps`、`--yes`、`--non-interactive`、`--quiet`、`--verbose` 只用于直接功能 CLI，并写在领域之前；重装与服务器测试明确拒绝 `--dry-run`，服务器测试也不承诺非交互自动化。子动作及选项见[网络设置](docs/network-settings.md)、[系统内核管理](docs/kernel-management.md)、[系统重装与 DD](docs/reinstall-management.md)、[访问管理](docs/access-management.md)、[Fail2ban 管理](docs/fail2ban-management.md)、[TLS 证书管理](docs/tls-management.md)、[代理管理](docs/proxy-management.md)和[服务器测试](docs/server-testing.md)。机器可读格式开关、`--force` 和 `--confirm-*` 确认标志同样只用于直接 CLI，菜单中的危险动作改用明确的交互提示和必要的强确认短语。
+在主管理菜单中选择 BBR、DNS、IP 地址族偏好、RFW、内核管理、重装与 DD、Swap 管理、访问管理、Fail2ban、TLS 证书、代理管理或两项服务器测试后，会直接进入对应功能入口，不再经过“命令详情”或输入 `r` 才运行的中间页；菜单选项执行的是真实动作，不提供演练、依赖授权、自动同意、非交互、静默或详细日志等执行型全局参数开关。系统内核菜单以官方标准内核为推荐安装项，并通过编号选择具体切换或卸载版本；代理内核的安装和更新会用编号选择最新稳定版（推荐）、最新预发布版或精确 Release tag。`--dry-run`、`--install-deps`、`--yes`、`--non-interactive`、`--quiet`、`--verbose` 只用于直接功能 CLI，并写在领域之前；重装与服务器测试明确拒绝 `--dry-run`，服务器测试也不承诺非交互自动化。子动作及选项见[网络设置](docs/network-settings.md)、[系统内核管理](docs/kernel-management.md)、[系统重装与 DD](docs/reinstall-management.md)、[Swap 管理](docs/swap-management.md)、[访问管理](docs/access-management.md)、[Fail2ban 管理](docs/fail2ban-management.md)、[TLS 证书管理](docs/tls-management.md)、[代理管理](docs/proxy-management.md)和[服务器测试](docs/server-testing.md)。机器可读格式开关、`--force` 和 `--confirm-*` 确认标志同样只用于直接 CLI，菜单中的危险动作改用明确的交互提示和必要的强确认短语。
 
 依赖检查按用户当前选择的动作延迟执行：只有该动作实际缺少可安装工具时，真实执行的交互流程才询问是否安装，不会为其他菜单动作预装依赖；真实非交互安装仍必须显式提供 `--install-deps`；`--dry-run` 会直接展示缺失依赖和安装计划，无需该授权且不询问。该授权支持 `apt-get`、`dnf5`、`dnf`、`yum`、`apk`、`pacman` 和 `zypper`，实际安装需要 root，也不会绕过 Linux、init 系统、CPU 架构、内核版本、XDP/BPF 或功能本体等平台门禁。它与 `--dry-run` 组合时只展示固定的软件包安装命令，不实际安装，部分动作会在依赖计划后安全停止并提示安装后重跑。上例中的 `--core` 是直接命令和非交互调用保留的高级消歧参数：只有一个符合条件的内核时通常可自动解析，存在多个候选时应显式指定。
 
@@ -220,7 +232,7 @@ bash bin/vpsctl service proxy update --core xray --version vX.Y.Z
 - 目录骨架：已建立。
 - 当前版本：0.8.11。
 - 管理入口：提供环境检测、终端 UI、固定注册表和安全分发。
-- 功能命令：提供 `network bbr`、`network dns`、`network ip-policy`、`network ufw`、`network rfw`、`system kernel`、`system reinstall`、`security access`、`security fail2ban`、`security tls`、`service proxy`、`service tcping`、`service iperf3`、`test nodequality` 和 `test tcpquality`；均处于 `experimental` 生命周期。
+- 功能命令：提供 `network bbr`、`network dns`、`network ip-policy`、`network ufw`、`network rfw`、`system kernel`、`system reinstall`、`system swap`、`security access`、`security fail2ban`、`security tls`、`service proxy`、`service tcping`、`service iperf3`、`test nodequality` 和 `test tcpquality`；均处于 `experimental` 生命周期。
 - UFW：主菜单提供简洁端口管理，进阶功能放在“高级规则管理”。启用后自动维护 SSH、代理节点、中转转发及 HTTP-01 临时端口；支持等价已有规则接管、共享引用和按服务解除联动。安装默认不启用，服务停止但配置保留时规则继续保留。接口和恢复说明见 [UFW 管理](docs/ufw-management.md)。
 - 公共函数库：提供环境检测、命令注册、终端 UI 及网络和服务命令所需公共能力。
 - 验收说明：所有项目测试与验证统一通过 `ssh host-vps-scripts` 在专用真实环境中执行；不得在当前系统或 WSL 中测试。发布前仍须按对应功能文档完成真实环境验收。

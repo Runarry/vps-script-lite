@@ -72,6 +72,7 @@ test_cli() {
     test_contains "$output" "network rfw" "RFW command listing"
     test_contains "$output" "system kernel" "kernel command listing"
     test_contains "$output" "system reinstall" "reinstall command listing"
+    test_contains "$output" "system swap" "swap command listing"
     test_contains "$output" "security access" "access command listing"
     test_contains "$output" "security tls" "tls command listing"
     test_contains "$output" "service proxy" "proxy command listing"
@@ -284,6 +285,18 @@ exit "${VPSCTL_DISPATCH_STATUS:-0}"
 EOF
     chmod 0644 "$sandbox/commands/system/reinstall.sh"
 
+    cat >"$sandbox/commands/system/swap.sh" <<'EOF'
+#!/usr/bin/env bash
+printf 'swap_no_color=%s\n' "${VPSCTL_NO_COLOR:-missing}"
+printf 'swap_dry_run=%s\n' "${VPSCTL_DRY_RUN:-missing}"
+printf 'swap_yes=%s\n' "${VPSCTL_ASSUME_YES:-missing}"
+printf 'swap_noninteractive=%s\n' "${VPSCTL_NON_INTERACTIVE:-missing}"
+printf 'swap_arg=<%s>\n' "$@"
+[[ -z "${VPSCTL_DISPATCH_MARKER:-}" ]] || printf 'swap:%s\n' "$*" >>"$VPSCTL_DISPATCH_MARKER"
+exit "${VPSCTL_DISPATCH_STATUS:-0}"
+EOF
+    chmod 0644 "$sandbox/commands/system/swap.sh"
+
     cat >"$sandbox/commands/security/access.sh" <<'EOF'
 #!/usr/bin/env bash
 printf 'access_no_color=%s\n' "${VPSCTL_NO_COLOR:-missing}"
@@ -354,6 +367,15 @@ EOF
         test_not_contains "$output" "命令详情" "removed command detail screen"
         test_not_contains "$output" "[r] 无附加参数运行" "removed run confirmation"
         [[ -f "$marker" && "$(<"$marker")" == "bbr:" ]] || test_fail "menu did not dispatch the selected feature without arguments"
+
+        marker="$sandbox/menu-swap-executed"
+        printf -v menu_command 'env VPSCTL_DISPATCH_MARKER=%q VPSCTL_DISPATCH_STATUS=30 bash %q --no-color --no-clear menu' "$marker" "$sandbox/bin/vpsctl"
+        status=0
+        output="$(printf '2\n3\n\nb\nq\n' | script -q -e -f -c "$menu_command" /dev/null 2>&1)" || status=$?
+        [[ "$status" == 30 ]] || test_fail "swap menu should preserve partial completion status 30, got ${status}"
+        test_contains "$output" "Swap 管理" "system menu swap label"
+        test_contains "$output" "swap_no_color=1" "swap menu child display context"
+        [[ -f "$marker" && "$(<"$marker")" == "swap:" ]] || test_fail "system menu item 3 did not dispatch swap without arguments"
     fi
 
     marker="$sandbox/executed"
@@ -388,6 +410,20 @@ EOF
     status=0
     VPSCTL_DISPATCH_STATUS=17 bash "$sandbox/bin/vpsctl" system reinstall run dd >/dev/null 2>&1 || status=$?
     [[ "$status" == 17 ]] || test_fail "reinstall exit status was not preserved: $status"
+
+    output="$(bash "$sandbox/bin/vpsctl" --no-color system swap status)"
+    test_contains "$output" 'swap_no_color=1' 'swap no-color child context'
+    test_contains "$output" 'swap_arg=<status>' 'swap status dispatch without root or init capability'
+    output="$(bash "$sandbox/bin/vpsctl" --dry-run --yes --non-interactive system swap set --size 2G)"
+    test_contains "$output" 'swap_dry_run=1' 'swap dry-run child context'
+    test_contains "$output" 'swap_yes=1' 'swap confirmation child context'
+    test_contains "$output" 'swap_noninteractive=1' 'swap noninteractive child context'
+    test_contains "$output" 'swap_arg=<set>' 'swap set dispatch'
+    test_contains "$output" 'swap_arg=<--size>' 'swap size option dispatch'
+    test_contains "$output" 'swap_arg=<2G>' 'swap size value dispatch'
+    status=0
+    VPSCTL_DISPATCH_STATUS=30 bash "$sandbox/bin/vpsctl" system swap disable >/dev/null 2>&1 || status=$?
+    [[ "$status" == 30 ]] || test_fail "swap partial completion exit status was not preserved: $status"
     rm -f -- "$marker"
     status=0
     VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" --dry-run system kernel install >/dev/null 2>&1 || status=$?
