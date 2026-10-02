@@ -307,6 +307,57 @@ test_interrupted_update_with_pending() (
     [[ ! -e "$PROXY_TRANSACTION" ]] || fail 'recovered update retained journal'
 )
 
+test_hy2_values_and_capabilities() {
+    local invalid core version feature
+    assert_equal '1,443,5000-5005,65535' "$(proxy_hy2_ports_normalize '65535,05002-05005,443,1,5000-5003,443')" 'canonical HY2 port set'
+    assert_equal '443-446' "$(proxy_hy2_node_ports '{"port":443,"options":{"hop_ports":"444-446"}}')" 'node includes actual listener'
+    assert_equal '443' "$(proxy_hy2_ports_first '8443,443-445')" 'first canonical port'
+    proxy_hy2_ports_multiple '443-444' || fail 'two ports not recognized'
+    if proxy_hy2_ports_multiple '443,443'; then fail 'duplicates create false hopping'; fi
+    proxy_hy2_ports_contains '1-100,65535' 65535 || fail 'last port missing'
+    proxy_hy2_ports_overlap '100-200,300' '200-220' || fail 'shared range endpoint missed'
+    if proxy_hy2_ports_overlap '100-200' '201-300'; then fail 'adjacent independent sets conflict'; fi
+    for invalid in '' 0 65536 9-5 '1,,2' ',1' '1,' '1-2-3' '1, 2' '1;2'; do
+        if proxy_hy2_ports_normalize "$invalid" >"${TEST_TEMP}/invalid" 2>&1; then fail "invalid HY2 port set accepted: $invalid"; fi
+    done
+    assert_equal '5' "$(proxy_hy2_interval_normalize '0005-0005')" 'equal interval bounds'
+    assert_equal '5-30' "$(proxy_hy2_interval_normalize '05-030')" 'random interval normalization'
+    for invalid in '' 0 4 5-4 2147483648 '5s' '5-'; do
+        if proxy_hy2_interval_normalize "$invalid" >"${TEST_TEMP}/invalid" 2>&1; then fail "invalid interval accepted: $invalid"; fi
+    done
+    while IFS=' ' read -r core version feature; do
+        proxy_hy2_capable "$core" "$version" "$feature" || fail "missing HY2 capability $core $version $feature"
+    done <<'EOF'
+xray 26.3.27 base
+xray 26.4.13 bbr-profile
+xray 26.6.1 gecko
+xray 26.9.8 chrome-parrot
+xray 26.9.9 hop-mask
+sing-box 1.11.0 hop-ports
+sing-box 1.14.0 hop-random
+sing-box 1.15.0-alpha.9 bbr-profile
+EOF
+    while IFS=' ' read -r core version feature; do
+        if proxy_hy2_capable "$core" "$version" "$feature"; then fail "premature HY2 capability $core $version $feature"; fi
+    done <<'EOF'
+xray 26.3.26 base
+xray 26.4.12 bbr-profile
+xray 26.4.13-rc.1 bbr-profile
+xray 26.5.9 gecko
+xray 26.7.28 chrome-parrot
+xray 26.9.8 hop-mask
+sing-box 1.10.7 hop-ports
+sing-box 1.13.21 hop-random
+sing-box 1.14.0-rc.5 chrome-parrot
+EOF
+}
+
+printf 'TEST: HY2 port sets, intervals and feature boundaries\n'
+test_hy2_values_and_capabilities
+if [[ "${VPSCTL_TEST_ONLY:-}" == hy2-values ]]; then
+    printf 'PASS: HY2 values and capability boundaries\n'
+    exit 0
+fi
 printf 'TEST: version ordering and Xray Freedom thresholds\n'
 test_version_order
 test_render_versions

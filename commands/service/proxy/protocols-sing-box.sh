@@ -46,7 +46,7 @@ proxy_sb_profile_label() {
 }
 
 proxy_sb_validate_node() {
-    local node="${1:-}" profile=""
+    local node="${1:-}" profile="" hop_ports normalized_ports
     profile="$(jq -r 'if type == "object" then .profile // "" else "" end' <<<"$node" 2>/dev/null)" || profile=""
     if ! proxy_sb_supports_profile "$profile"; then
         printf 'sing-box 不支持节点配置：%s\n' "${profile:-<缺失>}" >&2
@@ -97,6 +97,7 @@ proxy_sb_validate_node() {
              ((.options.obfs_type == "salamander" or .options.obfs_type == "gecko") and (.options.obfs_password | text))) and
             ((.options | has("bbr_profile") | not) or
              (.options.bbr_profile == "standard" or .options.bbr_profile == "conservative" or .options.bbr_profile == "aggressive")) and
+            ((.options | has("hop_ports") | not) or (.options.hop_ports | text)) and
             ((.options.up_mbps | type) == "number" and (.options.up_mbps | floor) == .options.up_mbps and .options.up_mbps > 0) and
             ((.options.down_mbps | type) == "number" and (.options.down_mbps | floor) == .options.down_mbps and .options.down_mbps > 0)
         elif $profile == "tuic-v5" then
@@ -124,6 +125,11 @@ proxy_sb_validate_node() {
         printf 'sing-box 节点 %s（%s）的字段校验失败。\n' "$(jq -r '.id // "<未知>"' <<<"$node" 2>/dev/null || printf '<未知>')" "$profile" >&2
         return 10
     }
+    if [[ "$profile" == hysteria2 ]] && jq -e '.options | has("hop_ports")' <<<"$node" >/dev/null; then
+        hop_ports="$(jq -r '.options.hop_ports' <<<"$node")"
+        normalized_ports="$(proxy_hy2_ports_normalize "$hop_ports")" || return 10
+        [[ "$hop_ports" == "$normalized_ports" ]] || { printf 'Hysteria2 跳跃端口必须规范化。\n' >&2; return 10; }
+    fi
     proxy_reality_guard_validate_node "$node"
 }
 
@@ -205,12 +211,11 @@ proxy_sb_render_node() {
             }] else [] end)'
             ;;
         hysteria2)
-            if jq -e '.options.obfs_type == "gecko" or (.options | has("bbr_profile"))' <<<"$node" >/dev/null; then
-                if [[ -z "$version" ]]; then version="$(proxy_core_config_version sing-box)" || return $?; fi
-                if [[ -n "$version" ]] && ! proxy_core_version_at_least "$version" 1.14.0; then
-                    printf 'Hysteria2 Gecko / BBR profile 运行配置要求 sing-box >= 1.14.0。\n' >&2
-                    return 10
-                fi
+            if jq -e '.options.obfs_type == "gecko"' <<<"$node" >/dev/null; then
+                proxy_hy2_require_feature sing-box "$version" gecko || return $?
+            fi
+            if jq -e '.options | has("bbr_profile")' <<<"$node" >/dev/null; then
+                proxy_hy2_require_feature sing-box "$version" bbr-profile || return $?
             fi
             jq -n --argjson n "$node" '[{
                 type:"hysteria2", tag:$n.id, listen:($n.listen // "::"), listen_port:$n.port,
@@ -276,9 +281,12 @@ proxy_sb_render_node() {
 }
 
 proxy_sb_render_uri() {
-    local node="${1:-}"
+    local node="${1:-}" hy2_ports=""
     proxy_sb_validate_node "$node" || return $?
-    jq -r '
+    if [[ "$(jq -r '.profile' <<<"$node")" == hysteria2 ]]; then
+        hy2_ports="$(proxy_hy2_node_ports "$node")" || return $?
+    fi
+    jq -r --arg hy2_ports "$hy2_ports" '
         def enc: tostring | @uri;
         def host:
             if ((.address | startswith("[")) and (.address | endswith("]"))) then .address
@@ -325,7 +333,7 @@ proxy_sb_render_uri() {
                 ["type", "tcp"], ["headerType", "none"]
             ]) + "#" + (.name | enc)
         elif .profile == "hysteria2" then
-            "hysteria2://" + (.credentials.password | enc) + "@" + endpoint + "?" + query(([
+            "hysteria2://" + (.credentials.password | enc) + "@" + host + ":" + $hy2_ports + "?" + query(([
                 ["sni", .tls.server_name]
             ] + (if .tls.insecure then [["insecure", "1"]] else [] end) +
                 (if .options.obfs_type == "salamander" or .options.obfs_type == "gecko" then

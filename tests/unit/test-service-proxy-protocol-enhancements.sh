@@ -120,7 +120,7 @@ test_xray_hysteria() {
             >/dev/null <<<"$parsed" || fail 'Hysteria2 URI roundtrip'
         [[ "$uri" != *up_mbps* && "$uri" != *brutalUp* && "$uri" != *bbr_profile* && "$uri" != *spki* ]] || fail 'Hysteria2 URI leaked local options'
     done
-    for invalid in '.options.obfs_type="gecko"' '.options.bbr_profile="standard"' \
+    for invalid in '.options.obfs_type="invalid"' '.options.bbr_profile="invalid"' \
         '.options.chrome_parrot=false' '.options.disable_chrome_parrot=true' '.client_options.chrome_parrot=true' \
         '.options.up_mbps=0' '.options.down_mbps=-1'; do
         assert_status 10 proxy_xray_validate_node "$(jq -c "$invalid" <<<"$node")"
@@ -135,6 +135,60 @@ test_xray_hysteria() {
         assert_status 10 proxy_xray_render_node "$node"
         PROXY_RENDER_CORE_VERSION=26.3.27 assert_status 0 proxy_xray_render_node "$node"
     )
+}
+
+test_hysteria_relay_outbounds() {
+    local uri parsed exit_json rendered base single version item
+    uri='hy2://p%2Bass@[2001:db8::10]:24445,24443-24444,24444?sni=relay.example#multi'
+    parsed="$(proxy_relay_uri_parse "$uri")" || fail 'HY2 IPv6 multiport parse'
+    assert_json "$parsed" '.endpoint == {host:"2001:db8::10",port:24443,ports:"24443-24445"}' 'canonical union and numeric fallback port'
+    assert_json "$(proxy_relay_uri_parse 'hy2://secret@relay.example')" '.endpoint == {host:"relay.example",port:443} and .tls.server_name == "relay.example"' 'HY2 omitted port and SNI defaults'
+    assert_json "$(proxy_relay_uri_parse 'hysteria2://secret@[2001:db8::10]?sni=relay.example')" '.endpoint == {host:"2001:db8::10",port:443}' 'HY2 IPv6 omitted port default'
+    assert_json "$(proxy_relay_uri_parse 'hy2://secret@relay.example:00443,443-443')" '.endpoint == {host:"relay.example",port:443}' 'collapsed single port keeps legacy descriptor shape'
+    for item in 0 65536 443-442 '443,,444' '443,' '443:444'; do
+        assert_status 10 proxy_relay_uri_parse "hy2://secret@relay.example:$item"
+    done
+    assert_status 10 proxy_relay_uri_parse 'socks5://user:secret@relay.example'
+    assert_equal 'hy2://p%2Bass@[2001:db8::20]:34443?sni=relay.example#multi' \
+        "$(proxy_relay_uri_rewrite "$uri" '2001:db8::20' 34443)" 'native forward share URI has one local port'
+    base="$(jq -cn --arg uri "$uri" '{id:"exit-0000000000000001",type:"protocol",core:"sing-box",profile:"hysteria2",uri:$uri}')"
+    rendered="$(proxy_relay_render_outbound sing-box "$base" 1.11.0)" || fail 'fixed hop baseline'
+    assert_json "$rendered" '.outbounds[0] | .server_ports == ["24443:24445"] and .hop_interval == "30s" and (has("server_port") | not) and (has("up_mbps") | not)' 'sing-box multiport default hop and auto bandwidth'
+    assert_status 10 proxy_relay_render_outbound sing-box "$base" 1.10.9
+    exit_json="$(jq -c '.client_options={hop_interval:"5-10",up_mbps:17,down_mbps:31,chrome_parrot:false,bbr_profile:"aggressive"}' <<<"$base")"
+    rendered="$(proxy_relay_render_outbound sing-box "$exit_json" 1.14.0)" || fail 'sing-box all HY2 client options'
+    assert_json "$rendered" '.outbounds[0] | .server_ports == ["24443:24445"] and .hop_interval == "5s" and .hop_interval_max == "10s" and .up_mbps == 17 and .down_mbps == 31 and .disable_chrome_parrot and .bbr_profile == "aggressive"' 'sing-box random interval, bandwidth, Chrome and BBR'
+    assert_status 10 proxy_relay_render_outbound sing-box "$(jq -c '.client_options={hop_interval:"5-10"}' <<<"$base")" 1.13.12
+    assert_status 10 proxy_relay_render_outbound sing-box "$exit_json" 1.14.0-beta.1
+    for item in '.client_options={up_mbps:17}' '.client_options={up_mbps:0,down_mbps:31}' \
+        '.client_options={hop_interval:"4"}' '.client_options={hop_interval:"10-5"}'; do
+        assert_status 10 proxy_relay_render_outbound sing-box "$(jq -c "$item" <<<"$base")" 1.14.0
+    done
+    exit_json="$(jq -c '.core="xray"' <<<"$exit_json")"
+    # Keep URI-only data separate from client settings, including Gecko.
+    exit_json="$(jq -c --arg uri "${uri%%#*}&obfs=gecko&obfs-password=mask#multi" '.uri=$uri' <<<"$exit_json")"
+    for version in 26.9.8 26.9.9; do
+        rendered="$(proxy_relay_render_outbound xray "$exit_json" "$version")" || fail "Xray multiport schema $version"
+        assert_json "$rendered" '.outbounds[0] | .settings.port == 24443 and .streamSettings.finalmask.quicParams.brutalUp == "17000000" and .streamSettings.finalmask.quicParams.brutalDown == "31000000" and .streamSettings.finalmask.quicParams.bbrProfile == "aggressive" and .streamSettings.finalmask.quicParams.disableChromeParrot and .streamSettings.finalmask.udp[0] == {type:"salamander",settings:{password:"mask",packetSize:"512-1200"}} and (.streamSettings.finalmask.quicParams | has("congestion") | not)' 'Xray manual negotiation and Gecko mapping'
+        if [[ "$version" == 26.9.8 ]]; then
+            assert_json "$rendered" '.outbounds[0].streamSettings.finalmask | .quicParams.udpHop == {ports:"24443-24445",interval:"5-10"} and (.udp | length) == 1' 'old Xray udpHop schema'
+        else
+            assert_json "$rendered" '.outbounds[0].streamSettings.finalmask | (.quicParams | has("udpHop") | not) and .udp[-1] == {type:"udphop",settings:{mode:"intervalLocal,intervalRemote",remotePorts:"24443-24445",interval:"5-10"}}' 'new Xray udphop must be last'
+        fi
+    done
+    assert_status 10 proxy_relay_render_outbound xray "$exit_json" 26.9.7
+    base="$(jq -c '.core="xray"' <<<"$base")"
+    assert_status 10 proxy_relay_render_outbound xray "$base" 26.3.26
+    assert_status 0 proxy_relay_render_outbound xray "$base" 26.3.27
+    assert_status 10 proxy_relay_render_outbound xray "$(jq -c '.client_options={bbr_profile:"standard"}' <<<"$base")" 26.4.12
+    assert_status 0 proxy_relay_render_outbound xray "$(jq -c '.client_options={bbr_profile:"standard"}' <<<"$base")" 26.4.13
+    exit_json="$(jq -c 'del(.client_options)' <<<"$exit_json")"
+    assert_status 10 proxy_relay_render_outbound xray "$exit_json" 26.5.31
+    assert_status 0 proxy_relay_render_outbound xray "$exit_json" 26.6.1
+    single="$(jq -c '.uri="hy2://secret@relay.example:443"' <<<"$base")"
+    rendered="$(proxy_relay_render_outbound xray "$single" 26.9.9)" || fail 'Xray default HY2 outbound'
+    assert_json "$rendered" '.outbounds[0].streamSettings | has("finalmask") | not' 'single-port auto defaults do not introduce native options'
+    assert_status 10 proxy_relay_render_outbound xray "$(jq -c '.client_options={hop_interval:"30"}' <<<"$single")" 26.9.9
 }
 
 test_sing_box_hysteria_options() {
@@ -177,4 +231,6 @@ printf 'TEST: Xray native Hysteria2 config, units, URI and version gates\n'
 test_xray_hysteria
 printf 'TEST: sing-box Hysteria2 Gecko, BBR and native defaults\n'
 test_sing_box_hysteria_options
+printf 'TEST: Hysteria2 URI multiport and outbound capability/rendering matrix\n'
+test_hysteria_relay_outbounds
 printf 'PASS: proxy protocol enhancements\n'

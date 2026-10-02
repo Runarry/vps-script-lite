@@ -42,7 +42,7 @@ proxy_xray_profile_label() {
 }
 
 proxy_xray_validate_node() {
-    local node_json="${1:-}" profile="unknown"
+    local node_json="${1:-}" profile="unknown" hop_ports normalized_ports
     command -v jq >/dev/null 2>&1 || {
         printf 'Xray 节点校验需要 jq。\n' >&2
         return 10
@@ -117,10 +117,13 @@ proxy_xray_validate_node() {
         elif .profile == "hysteria2" then
             password and certificate_tls and
             (.options.obfs_type == "none" or
-             (.options.obfs_type == "salamander" and (.options.obfs_password | nonempty))) and
+             ((.options.obfs_type == "salamander" or .options.obfs_type == "gecko") and (.options.obfs_password | nonempty))) and
+            ((.options | has("bbr_profile") | not) or
+             (.options.bbr_profile == "standard" or .options.bbr_profile == "conservative" or .options.bbr_profile == "aggressive")) and
+            ((.options | has("hop_ports") | not) or (.options.hop_ports | nonempty)) and
             ((.options.up_mbps | type) == "number" and (.options.up_mbps | floor) == .options.up_mbps and .options.up_mbps > 0) and
             ((.options.down_mbps | type) == "number" and (.options.down_mbps | floor) == .options.down_mbps and .options.down_mbps > 0) and
-            (.options | has("bbr_profile") or has("chrome_parrot") or has("disable_chrome_parrot") | not) and
+            (.options | has("chrome_parrot") or has("disable_chrome_parrot") | not) and
             ((.client_options // {}) | has("chrome_parrot") or has("bbr_profile") | not)
         elif .profile == "shadowsocks-aes-256-gcm" then
             password and .options.method == "aes-256-gcm" and .options.padding == false
@@ -136,6 +139,11 @@ proxy_xray_validate_node() {
         printf 'Xray 节点字段校验失败（profile=%s）。\n' "$profile" >&2
         return 10
     fi
+    if [[ "$profile" == hysteria2 ]] && jq -e '.options | has("hop_ports")' <<<"$node_json" >/dev/null; then
+        hop_ports="$(jq -r '.options.hop_ports' <<<"$node_json")"
+        normalized_ports="$(proxy_hy2_ports_normalize "$hop_ports")" || return 10
+        [[ "$hop_ports" == "$normalized_ports" ]] || { printf 'Hysteria2 跳跃端口必须规范化。\n' >&2; return 10; }
+    fi
     proxy_reality_guard_validate_node "$node_json"
 }
 
@@ -143,10 +151,12 @@ proxy_xray_render_node() {
     local node_json="${1:-}" version="${PROXY_RENDER_CORE_VERSION:-}"
     proxy_xray_validate_node "$node_json" || return $?
     if [[ "$(jq -r '.profile' <<<"$node_json")" == hysteria2 ]]; then
-        if [[ -z "$version" ]]; then version="$(proxy_core_config_version xray)" || return $?; fi
-        if [[ -n "$version" ]] && ! proxy_core_version_at_least "$version" 26.3.27; then
-            printf 'Xray Hysteria2 运行配置要求内核 >= 26.3.27。\n' >&2
-            return 10
+        proxy_hy2_require_feature xray "$version" base || return $?
+        if jq -e '.options.obfs_type == "gecko"' <<<"$node_json" >/dev/null; then
+            proxy_hy2_require_feature xray "$version" gecko || return $?
+        fi
+        if jq -e '.options | has("bbr_profile")' <<<"$node_json" >/dev/null; then
+            proxy_hy2_require_feature xray "$version" bbr-profile || return $?
         fi
     fi
 
@@ -240,11 +250,13 @@ proxy_xray_render_node() {
                 tlsSettings:(tls_settings | .alpn=["h3"]),
                 # Bandwidth strings are bits/s; Xray converts them to bytes/s.
                 # Omitting congestion preserves the native Brutal/BBR negotiation.
-                finalmask:({quicParams:{
+                finalmask:({quicParams:({
                     brutalUp:($node.options.up_mbps * 1000000 | tostring),
-                    brutalDown:($node.options.down_mbps * 1000000 | tostring)}} +
-                    (if $node.options.obfs_type == "salamander" then
-                        {udp:[{type:"salamander",settings:{password:$node.options.obfs_password}}]}
+                    brutalDown:($node.options.down_mbps * 1000000 | tostring)} |
+                    if $node.options | has("bbr_profile") then .bbrProfile=$node.options.bbr_profile else . end)} +
+                    (if $node.options.obfs_type == "salamander" or $node.options.obfs_type == "gecko" then
+                        {udp:[{type:"salamander",settings:({password:$node.options.obfs_password} +
+                            if $node.options.obfs_type == "gecko" then {packetSize:"512-1200"} else {} end)}]}
                      else {} end))}
         }]
         else [{
@@ -301,6 +313,7 @@ proxy_xray_render_uri() {
 
     case "$profile" in
         hysteria2)
+            port="$(proxy_hy2_node_ports "$node_json")" || return $?
             password="$(jq -r '.credentials.password' <<<"$node_json")" || return 10
             userinfo="$(_proxy_xray_urlencode "$password")" || return 10
             sni="$(jq -r '.tls.server_name' <<<"$node_json")" || return 10
@@ -308,9 +321,9 @@ proxy_xray_render_uri() {
             insecure="$(jq -r '.tls.insecure' <<<"$node_json")" || return 10
             [[ "$insecure" != true ]] || query="$(_proxy_xray_query_add "$query" insecure 1)" || return 10
             obfs_type="$(jq -r '.options.obfs_type' <<<"$node_json")" || return 10
-            if [[ "$obfs_type" == salamander ]]; then
+            if [[ "$obfs_type" == salamander || "$obfs_type" == gecko ]]; then
                 obfs_password="$(jq -r '.options.obfs_password' <<<"$node_json")" || return 10
-                query="$(_proxy_xray_query_add "$query" obfs salamander)" || return 10
+                query="$(_proxy_xray_query_add "$query" obfs "$obfs_type")" || return 10
                 query="$(_proxy_xray_query_add "$query" obfs-password "$obfs_password")" || return 10
             fi
             certificate_sha256="$(jq -r '.tls.certificate_sha256 // ""' <<<"$node_json")" || return 10

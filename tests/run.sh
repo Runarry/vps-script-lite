@@ -77,6 +77,7 @@ for syntax_file in \
     "${TEST_ROOT}/tests/integration/test-service-proxy-relay-connectivity-real.sh" \
     "${TEST_ROOT}/tests/integration/test-service-proxy-compat-real.sh" \
     "${TEST_ROOT}/tests/integration/test-service-proxy-protocol-enhancements-real.sh" \
+    "${TEST_ROOT}/tests/integration/test-service-proxy-hy2-real.sh" \
     "${TEST_ROOT}/tests/integration/test-service-proxy-reality-anti-relay-real.sh" \
     "${TEST_ROOT}/tests/integration/test-service-proxy-dns-real.sh" \
     "${TEST_ROOT}/tests/integration/test-distribution-real.sh" \

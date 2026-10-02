@@ -130,8 +130,12 @@ if [[ "${1:-}" == -j && "${2:-}" == list && "${3:-}" == ruleset ]]; then printf 
 if [[ "${1:-}" == -j && "${2:-}" == list && "${3:-}" == tables ]]; then
   [[ ! -e "${VPSCTL_SYSTEM_ROOT}/run/fail-nft-list-tables" ]] || exit 20
   printf "{\"nftables\":["; separator=""
-  if [[ -f "$state/ip-vpsctl_proxy_forward4" ]]; then printf "%s{\"table\":{\"family\":\"ip\",\"name\":\"vpsctl_proxy_forward4\"}}" "$separator"; separator=,; fi
-  if [[ -f "$state/ip6-vpsctl_proxy_forward6" ]]; then printf "%s{\"table\":{\"family\":\"ip6\",\"name\":\"vpsctl_proxy_forward6\"}}" "$separator"; fi
+  for table in vpsctl_proxy_forward4 vpsctl_proxy_forward6 vpsctl_proxy_hy2_4 vpsctl_proxy_hy2_6; do
+    family=ip; [[ "$table" != *6 ]] || family=ip6
+    if [[ -f "$state/$family-$table" ]]; then
+      printf "%s{\"table\":{\"family\":\"%s\",\"name\":\"%s\"}}" "$separator" "$family" "$table"; separator=,
+    fi
+  done
   printf "]}"; exit 0
 fi
 if [[ "${1:-}" == list && "${2:-}" == table ]]; then
@@ -146,8 +150,8 @@ if [[ "${1:-}" == -f ]]; then
   if [[ -e "${VPSCTL_SYSTEM_ROOT}/run/fail-nft-apply-once" ]]; then rm -f "${VPSCTL_SYSTEM_ROOT}/run/fail-nft-apply-once"; exit 20; fi
   [[ ! -e "${VPSCTL_SYSTEM_ROOT}/run/fail-nft-apply" ]] || exit 20
   batch="${2:-}"; cp -p -- "$batch" "${VPSCTL_SYSTEM_ROOT}/run/last-nft.batch"
-  for family in ip ip6; do
-    table="vpsctl_proxy_forward$([[ "$family" == ip ]] && printf 4 || printf 6)"
+  for table in vpsctl_proxy_forward4 vpsctl_proxy_forward6 vpsctl_proxy_hy2_4 vpsctl_proxy_hy2_6; do
+    family=ip; [[ "$table" != *6 ]] || family=ip6
     if grep -Fq "add table $family $table" "$batch" || grep -Fq "table $family $table {" "$batch"; then touch "$state/${family}-${table}"
     elif grep -Eq "(delete|destroy) table $family $table" "$batch"; then rm -f "$state/${family}-${table}"
     fi
@@ -155,7 +159,9 @@ if [[ "${1:-}" == -f ]]; then
   exit 0
 fi
 exit 2'
-make_mock ss '[[ ! -f "${VPSCTL_SYSTEM_ROOT}/run/listening-port" ]] || printf "tcp LISTEN 0 128 0.0.0.0:%s 0.0.0.0:*\n" "$(<"${VPSCTL_SYSTEM_ROOT}/run/listening-port")"'
+make_mock ss '
+[[ ! -f "${VPSCTL_SYSTEM_ROOT}/run/listening-port" ]] || printf "tcp LISTEN 0 128 0.0.0.0:%s 0.0.0.0:*\n" "$(<"${VPSCTL_SYSTEM_ROOT}/run/listening-port")"
+[[ ! -f "${VPSCTL_SYSTEM_ROOT}/run/listening-udp-port" ]] || printf "udp UNCONN 0 0 0.0.0.0:%s 0.0.0.0:*\n" "$(<"${VPSCTL_SYSTEM_ROOT}/run/listening-udp-port")"'
 make_mock flock 'exit 0'
 make_mock ufw '[[ "${1:-}" == status ]] || exit 99; printf "Status: inactive\n"'
 make_mock curl '
@@ -1485,7 +1491,7 @@ test_unified_interactive_api() (
     assert_contains "$output" "证书文件绝对路径" "imported certificate selection"
     assert_contains "$output" "出站 IP 策略" "custom node IP strategy choice"
 
-    output="$(proxy_node_add --profile hysteria2 --port 19402 --address proxy.example <<< $'\n\n2\n\n\n\n\n2\n123\n456\n\n' 2>&1)"
+    output="$(proxy_node_add --profile hysteria2 --port 19402 --address proxy.example <<< $'\n\n2\n\n\n\n\n2\n123\n456\n\n\n' 2>&1)"
     assert_contains "$output" "混淆方式" "custom obfuscation enum"
     assert_contains "$output" "不使用混淆" "obfuscation none choice"
     assert_contains "$output" "Salamander" "obfuscation Salamander choice"
@@ -3462,11 +3468,108 @@ test_reality_anti_relay_guard() {
     ' "$sb_config" >/dev/null || fail "guarded core switch target rendering"
 }
 
+test_hy2_runtime_lifecycle() {
+    local init id exit_id forward_id before state service
+    for init in systemd openrc; do
+        reset_root
+        export VPSCTL_ENV_INIT="$init"
+        install_external sing-box
+        state="${TEST_SYSTEM_ROOT}/run/mock-${init}"
+        if [[ "$init" == systemd ]]; then service=vpsctl-proxy-forward.service; else service=vpsctl-proxy-forward; fi
+        run_proxy node add --profile hysteria2 --core sing-box --name hopping --port 39400 --hop-ports 39400-39405,39500-39600 --address proxy.example --cert-mode self-signed
+        assert_equal 0 "$RUN_STATUS" "$init hop-only node add"
+        id="$(node_id_by_name hopping)"
+        [[ -f "$state/enabled-$service" && -f "$state/active-$service" ]] || fail "$init hopping runtime not active/enabled"
+        [[ ! -e "$(relay_path)" ]] || fail "hop-only created relay manifest"
+        [[ ! -e "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/relay-resolved.json" ]] || fail "hop-only created DNS cache"
+        [[ ! -e "${TEST_SYSTEM_ROOT}/etc/sysctl.d/90-vpsctl-proxy-forward.conf" ]] || fail "hop-only enabled forwarding sysctl"
+        assert_file_contains "${TEST_SYSTEM_ROOT}/run/last-nft.batch" 'fib daddr type local udp dport { 39401-39405,39500-39600 } counter redirect to :39400' "compact redirect excludes base"
+        assert_not_contains "$(cat "${TEST_SYSTEM_ROOT}/run/last-nft.batch")" 'hook forward' "hop-only has no FORWARD chain"
+        : >"$MOCK_LOG"
+        run_proxy node edit --id "$id" --name hopping-renamed
+        assert_equal 0 "$RUN_STATUS" "$init hop node name edit"
+        assert_not_contains "$(cat "$MOCK_LOG")" 'enable --now vpsctl-proxy-forward.service' "ordinary hop edit does not reinstall systemd runtime"
+        assert_not_contains "$(cat "$MOCK_LOG")" 'rc-update add vpsctl-proxy-forward' "ordinary hop edit does not reinstall OpenRC runtime"
+        run_proxy relay status --json
+        assert_equal 0 "$RUN_STATUS" "$init hop runtime status"
+        jq -e '.forward_runtime | .installed and .active and .enabled and .hop_count == 1 and .forward_count == 0' <<<"$RUN_OUTPUT" >/dev/null || fail "hop-only runtime status counts"
+        rm -f "${TEST_SYSTEM_ROOT}/run/mock-nft/ip-vpsctl_proxy_hy2_4" "${TEST_SYSTEM_ROOT}/run/mock-nft/ip6-vpsctl_proxy_hy2_6"
+        run_proxy relay forward refresh
+        assert_equal 0 "$RUN_STATUS" "$init hop-only boot refresh"
+        [[ -f "${TEST_SYSTEM_ROOT}/run/mock-nft/ip-vpsctl_proxy_hy2_4" ]] || fail "boot refresh omitted hops"
+        before="$(sha256sum "$(manifest_path)" | awk '{print $1}')"
+        touch "${TEST_SYSTEM_ROOT}/run/fail-nft-apply-once"
+        run_proxy node edit --id "$id" --hop-ports 39700-39705
+        assert_equal 20 "$RUN_STATUS" "$init nft failure aborts hop edit"
+        assert_equal "$before" "$(sha256sum "$(manifest_path)" | awk '{print $1}')" "nft failure restores node manifest"
+        [[ -f "${TEST_SYSTEM_ROOT}/run/mock-nft/ip-vpsctl_proxy_hy2_4" ]] || fail "nft rollback lost hop table"
+        run_proxy relay exit add --name hop-test-exit --target 198.51.100.80 --target-port 443
+        assert_equal 0 "$RUN_STATUS" "$init relay exit for coexistence"
+        exit_id="$(jq -r '.exits[0].id' "$(relay_path)")"
+        run_proxy relay forward add --name hop-overlap-tcp --exit-id "$exit_id" --listen-ports 39500 --network tcp --address proxy.example
+        assert_equal 0 "$RUN_STATUS" "$init TCP forwarding may overlap hop port"
+        forward_id="$(jq -r '.forwards[0].id' "$(relay_path)")"
+        run_proxy relay forward add --name hop-overlap-udp --exit-id "$exit_id" --listen-ports 39501 --network udp --address proxy.example
+        [[ "$RUN_STATUS" != 0 ]] || fail "UDP forwarding overlaps hops"
+        run_proxy node edit --id "$id" --hop-ports off
+        assert_equal 0 "$RUN_STATUS" "$init last hop off keeps forwarding"
+        [[ -f "${TEST_SYSTEM_ROOT}/run/mock-nft/ip-vpsctl_proxy_forward4" && -f "$state/enabled-$service" ]] || fail "last hop off removed forwarding runtime"
+        [[ ! -e "${TEST_SYSTEM_ROOT}/run/mock-nft/ip-vpsctl_proxy_hy2_4" ]] || fail "hop off retained hop rules"
+        run_proxy node edit --id "$id" --hop-ports 39400-39405,39500-39600
+        assert_equal 0 "$RUN_STATUS" "$init restore hops beside TCP forwarding"
+        run_proxy relay forward delete --id "$forward_id" --confirm-delete
+        assert_equal 0 "$RUN_STATUS" "$init last forwarding removal keeps hop"
+        [[ -f "${TEST_SYSTEM_ROOT}/run/mock-nft/ip-vpsctl_proxy_hy2_4" && -f "$state/enabled-$service" ]] || fail "last forward deletion removed hopping runtime"
+        run_proxy node delete --id "$id" --confirm-delete
+        assert_equal 0 "$RUN_STATUS" "$init last hop delete"
+        [[ ! -e "${TEST_SYSTEM_ROOT}/run/mock-nft/ip-vpsctl_proxy_hy2_4" && ! -e "$state/enabled-$service" ]] || fail "last hop deletion retained rules/service"
+    done
+    export VPSCTL_ENV_INIT=systemd
+    reset_root
+    install_external sing-box
+    printf '39500\n' >"${TEST_SYSTEM_ROOT}/run/listening-udp-port"
+    run_proxy node add --profile hysteria2 --core sing-box --name occupied-hop --port 39400 --hop-ports 39500-39502 --address proxy.example --cert-mode self-signed
+    assert_equal 3 "$RUN_STATUS" "UDP system socket rejects hop candidate"
+    rm -f "${TEST_SYSTEM_ROOT}/run/listening-udp-port"
+    touch "${TEST_SYSTEM_ROOT}/run/fail-service-enable"
+    run_proxy node add --profile hysteria2 --core sing-box --name failed-hop --port 39400 --hop-ports 39500-39502 --address proxy.example --cert-mode self-signed
+    assert_equal 20 "$RUN_STATUS" "runtime enable failure rolls back first hop"
+    assert_equal 0 "$(jq '.nodes | length' "$(manifest_path)")" "failed runtime setup restores empty nodes"
+    [[ ! -e "${TEST_SYSTEM_ROOT}/run/mock-nft/ip-vpsctl_proxy_hy2_4" ]] || fail "failed runtime setup retained hop table"
+    rm -f "${TEST_SYSTEM_ROOT}/run/fail-service-enable"
+    run_proxy node add --profile hysteria2 --core sing-box --name hop-core-rollback --listen 203.0.113.10 --port 39400 --hop-ports 39500-39502 --address proxy.example --cert-mode self-signed
+    assert_equal 0 "$RUN_STATUS" "explicit listen hop add"
+    assert_file_contains "${TEST_SYSTEM_ROOT}/run/last-nft.batch" 'ip daddr 203.0.113.10 udp dport { 39500-39502 } counter dnat to 203.0.113.10:39400' "explicit listen preserves destination address"
+    id="$(node_id_by_name hop-core-rollback)"
+    run_proxy start --core sing-box
+    assert_equal 0 "$RUN_STATUS" "start hop core"
+    before="$(sha256sum "$(manifest_path)" | awk '{print $1}')"
+    touch "${TEST_SYSTEM_ROOT}/run/fail-nft-list-tables"
+    run_proxy node edit --id "$id" --hop-ports 39600-39605
+    assert_equal 20 "$RUN_STATUS" "snapshot enumeration failure aborts hop edit"
+    assert_equal "$before" "$(sha256sum "$(manifest_path)" | awk '{print $1}')" "snapshot failure leaves node declaration unchanged"
+    rm -f "${TEST_SYSTEM_ROOT}/run/fail-nft-list-tables"
+    touch "${TEST_SYSTEM_ROOT}/run/fail-service-restart-once"
+    run_proxy node edit --id "$id" --hop-ports 39600-39605
+    assert_equal 20 "$RUN_STATUS" "core restart failure rolls back hop edit"
+    assert_equal "$before" "$(sha256sum "$(manifest_path)" | awk '{print $1}')" "pending rollback restores hop declaration"
+    [[ -f "${TEST_SYSTEM_ROOT}/run/mock-nft/ip-vpsctl_proxy_hy2_4" ]] || fail "pending rollback lost hop rule table"
+    touch "${TEST_SYSTEM_ROOT}/run/fail-nft-apply-once"
+    run_proxy uninstall --core sing-box --purge --confirm-purge
+    assert_equal 20 "$RUN_STATUS" "purge nft failure restores stopped core"
+    assert_equal "$before" "$(sha256sum "$(manifest_path)" | awk '{print $1}')" "failed purge restores hop declaration"
+    [[ -f "${TEST_SYSTEM_ROOT}/run/mock-systemd/active-vpsctl-proxy-sing-box.service" ]] || fail "failed purge did not restart original core"
+    run_proxy uninstall --core sing-box --purge --confirm-purge
+    assert_equal 0 "$RUN_STATUS" "purge removes final hop"
+    [[ ! -e "${TEST_SYSTEM_ROOT}/run/mock-nft/ip-vpsctl_proxy_hy2_4" ]] || fail "purge retained hop table"
+}
+
 if [[ "${VPSCTL_PROXY_TEST_HARNESS_ONLY:-0}" == 1 ]]; then
     return 0 2>/dev/null || exit 0
 fi
 
 case "${VPSCTL_TEST_ONLY:-}" in
+    hy2-runtime) test_hy2_runtime_lifecycle; printf 'PASS: HY2 runtime lifecycle tests\n'; exit 0 ;;
     core-install) test_core_install_autostart; printf 'PASS: proxy install autostart tests\n'; exit 0 ;;
     core-release) test_core_release_channels; printf 'PASS: proxy core release tests\n'; exit 0 ;;
     node-list) test_node_list_bindings_and_text; printf 'PASS: proxy node list tests\n'; exit 0 ;;
@@ -3486,6 +3589,8 @@ esac
 
 printf 'TEST: proxy arguments, dry-run and time\n'
 test_arguments_dry_run_and_time
+printf 'TEST: HY2 runtime lifecycle\n'
+test_hy2_runtime_lifecycle
 printf 'TEST: proxy core release channels\n'
 test_core_release_channels
 printf 'TEST: proxy install autostart and rollback\n'

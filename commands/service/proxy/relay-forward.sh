@@ -1,6 +1,10 @@
 # shellcheck shell=bash
 # shellcheck source=address.sh
 source "${BASH_SOURCE[0]%/*}/address.sh"
+# shellcheck source=hysteria2.sh
+source "${BASH_SOURCE[0]%/*}/hysteria2.sh"
+# shellcheck source=hysteria2-runtime.sh
+source "${BASH_SOURCE[0]%/*}/hysteria2-runtime.sh"
 # Private relay-forwarding helpers for commands/service/proxy.sh.  Sourcing this
 # file only defines functions; call proxy_relay_forward_init before using paths.
 #
@@ -166,7 +170,7 @@ _proxy_relay_forward_address_family() {
 proxy_relay_forward_validate_conflicts() {
     local manifest="${1:-}" nodes="${2:-${PROXY_MANIFEST:-}}"
     local count index other start end other_start other_end network hint effective mask other_network other_hint other_effective other_mask
-    local id other_id node port node_hint node_mask guard_port offset other_offset fields_fd fields_pid status=0 nodes_loaded=0
+    local id other_id node port node_hint node_mask guard_port offset other_offset fields_fd fields_pid status=0 nodes_loaded=0 has_hops=0
     local -a forward_fields=() forward_masks=() node_fields=() node_hints=() node_masks=()
 
     [[ -f "$manifest" && ! -L "$manifest" ]] || return 3
@@ -225,7 +229,8 @@ proxy_relay_forward_validate_conflicts() {
                 if ! exec {fields_fd}< <(jq -j '
                     .nodes[]? |
                     (.id, .port, .profile,
-                     (if .tls.reality_guard.enabled == true then .tls.reality_guard.listen_port else "" end)) |
+                     (if .tls.reality_guard.enabled == true then .tls.reality_guard.listen_port else "" end),
+                     (.options.hop_ports // "")) |
                     (if type == "string" then gsub("\u0000"; "") | sub("\n+$"; "") else . end), "\u0000"
                 ' "$nodes"); then
                     return 10
@@ -234,24 +239,26 @@ proxy_relay_forward_validate_conflicts() {
                 mapfile -d '' -t node_fields <&"$fields_fd" || status=$?
                 exec {fields_fd}<&-
                 wait "$fields_pid" || return 10
-                ((status == 0 && ${#node_fields[@]} % 4 == 0)) || return 10
-                for ((node = 0; node < ${#node_fields[@]} / 4; node++)); do
-                    node_hints[node]="$(_proxy_relay_forward_node_network_hint "${node_fields[node * 4 + 2]}")"
+                ((status == 0 && ${#node_fields[@]} % 5 == 0)) || return 10
+                for ((node = 0; node < ${#node_fields[@]} / 5; node++)); do
+                    node_hints[node]="$(_proxy_relay_forward_node_network_hint "${node_fields[node * 5 + 2]}")"
                     node_masks[node]="$(_proxy_relay_forward_network_mask "${node_hints[node]}")" || return 10
+                    [[ -z "${node_fields[node * 5 + 4]}" ]] || has_hops=1
                 done
+                if ((has_hops)); then proxy_hy2_validate_conflicts "$nodes" "$manifest" || return $?; fi
                 nodes_loaded=1
             fi
-            for ((node = 0; node < ${#node_fields[@]} / 4; node++)); do
-                port="${node_fields[node * 4 + 1]}"
+            for ((node = 0; node < ${#node_fields[@]} / 5; node++)); do
+                port="${node_fields[node * 5 + 1]}"
                 node_hint="${node_hints[node]}"
                 node_mask="${node_masks[node]}"
                 if ((port >= start && port <= end && (mask & node_mask) != 0)); then
-                    vps_cmd_error "转发 ${id} 与受管节点 ${node_fields[node * 4]} 的端口及网络相交（${port}/${node_hint}）"
+                    vps_cmd_error "转发 ${id} 与受管节点 ${node_fields[node * 5]} 的端口及网络相交（${port}/${node_hint}）"
                     return 10
                 fi
-                guard_port="${node_fields[node * 4 + 3]}"
+                guard_port="${node_fields[node * 5 + 3]}"
                 if [[ -n "$guard_port" ]] && ((guard_port >= start && guard_port <= end && (mask & 1) != 0)); then
-                    vps_cmd_error "转发 ${id} 与受管节点 ${node_fields[node * 4]} 的 REALITY 防偷辅助端口及网络相交（${guard_port}/tcp）"
+                    vps_cmd_error "转发 ${id} 与受管节点 ${node_fields[node * 5]} 的 REALITY 防偷辅助端口及网络相交（${guard_port}/tcp）"
                     return 10
                 fi
             done
@@ -672,7 +679,7 @@ proxy_relay_forward_nft_apply() {
 }
 
 proxy_relay_forward_nft_snapshot() {
-    local output="${1:-}" tmp found=0 tables has4 has6
+    local output="${1:-}" tmp found=0 tables present family table
     [[ -n "$output" ]] || return 2
     _proxy_relay_forward_runtime_allowed || return $?
     tmp="${output}.part"
@@ -682,28 +689,16 @@ proxy_relay_forward_nft_snapshot() {
         vps_cmd_error "无法枚举 nftables 表，拒绝在缺少可靠快照时替换转发规则"
         return 20
     }
-    has4="$(jq -r --arg family ip --arg name "$PROXY_RELAY_FORWARD_TABLE4" '
-        any(.nftables[]?.table?; .family == $family and .name == $name)
-    ' <<<"$tables")" || { rm -f -- "$tmp"; return 20; }
-    has6="$(jq -r --arg family ip6 --arg name "$PROXY_RELAY_FORWARD_TABLE6" '
-        any(.nftables[]?.table?; .family == $family and .name == $name)
-    ' <<<"$tables")" || { rm -f -- "$tmp"; return 20; }
-    if [[ "$has4" == true ]]; then
-        nft list table ip "$PROXY_RELAY_FORWARD_TABLE4" >>"$tmp" 2>/dev/null || {
-            rm -f -- "$tmp"
-            vps_cmd_error "读取 IPv4 受管 nftables 表失败，拒绝替换"
-            return 20
+    while IFS=' ' read -r family table; do
+        present="$(jq -r --arg family "$family" --arg name "$table" '
+            any(.nftables[]?.table?; .family == $family and .name == $name)
+        ' <<<"$tables")" || { rm -f -- "$tmp"; return 20; }
+        [[ "$present" == true ]] || continue
+        nft list table "$family" "$table" >>"$tmp" 2>/dev/null || {
+            rm -f -- "$tmp"; vps_cmd_error "读取受管 nftables 表失败：$family $table"; return 20;
         }
         found=1
-    fi
-    if [[ "$has6" == true ]]; then
-        nft list table ip6 "$PROXY_RELAY_FORWARD_TABLE6" >>"$tmp" 2>/dev/null || {
-            rm -f -- "$tmp"
-            vps_cmd_error "读取 IPv6 受管 nftables 表失败，拒绝替换"
-            return 20
-        }
-        found=1
-    fi
+    done < <(printf '%s\n' "ip $PROXY_RELAY_FORWARD_TABLE4" "ip6 $PROXY_RELAY_FORWARD_TABLE6" 'ip vpsctl_proxy_hy2_4' 'ip6 vpsctl_proxy_hy2_6')
     if ((found == 0)); then
         rm -f -- "$tmp"
         return 1
@@ -727,17 +722,15 @@ _proxy_relay_forward_warn_external_policy() {
 }
 
 proxy_relay_forward_nft_clear() {
-    local tmp has=0
+    local tmp has=0 family table
     _proxy_relay_forward_runtime_allowed || return $?
     tmp="$(mktemp "${TMPDIR:-/tmp}/vpsctl-relay-forward.clear.XXXXXX")" || return 20
-    if nft list table ip "$PROXY_RELAY_FORWARD_TABLE4" >/dev/null 2>&1; then
-        printf 'delete table ip %s\n' "$PROXY_RELAY_FORWARD_TABLE4" >>"$tmp"
-        has=1
-    fi
-    if nft list table ip6 "$PROXY_RELAY_FORWARD_TABLE6" >/dev/null 2>&1; then
-        printf 'delete table ip6 %s\n' "$PROXY_RELAY_FORWARD_TABLE6" >>"$tmp"
-        has=1
-    fi
+    while IFS=' ' read -r family table; do
+        if nft list table "$family" "$table" >/dev/null 2>&1; then
+            printf 'delete table %s %s\n' "$family" "$table" >>"$tmp"
+            has=1
+        fi
+    done < <(printf '%s\n' "ip $PROXY_RELAY_FORWARD_TABLE4" "ip6 $PROXY_RELAY_FORWARD_TABLE6" 'ip vpsctl_proxy_hy2_4' 'ip6 vpsctl_proxy_hy2_6')
     if ((has)); then
         proxy_relay_forward_nft_check "$tmp" && proxy_relay_forward_nft_apply "$tmp"
         local status=$?
@@ -755,6 +748,7 @@ proxy_relay_forward_nft_restore() {
     {
         printf 'destroy table ip %s\n' "$PROXY_RELAY_FORWARD_TABLE4"
         printf 'destroy table ip6 %s\n' "$PROXY_RELAY_FORWARD_TABLE6"
+        printf 'destroy table ip vpsctl_proxy_hy2_4\ndestroy table ip6 vpsctl_proxy_hy2_6\n'
         cat -- "$snapshot"
     } >"$batch" || { rm -f -- "$batch"; return 20; }
     if proxy_relay_forward_nft_check "$batch" && proxy_relay_forward_nft_apply "$batch"; then
@@ -814,6 +808,8 @@ proxy_relay_forward_install_runtime() {
         commands/service/proxy/common.sh
         commands/service/proxy/dns.sh
         commands/service/proxy/address.sh
+        commands/service/proxy/hysteria2.sh
+        commands/service/proxy/hysteria2-runtime.sh
         commands/service/proxy/ufw.sh
         commands/service/proxy/protocols-sing-box.sh
         commands/service/proxy/protocols-xray.sh
@@ -932,6 +928,8 @@ _proxy_relay_forward_service_action() {
         systemd:reload-manager) vps_cmd_run systemctl daemon-reload ;;
         systemd:enable-now) vps_cmd_run systemctl enable --now vpsctl-proxy-forward.service ;;
         systemd:disable-now) vps_cmd_run systemctl disable --now vpsctl-proxy-forward.service ;;
+        systemd:stop) vps_cmd_run systemctl stop vpsctl-proxy-forward.service ;;
+        systemd:disable) vps_cmd_run systemctl disable vpsctl-proxy-forward.service ;;
         systemd:reload) vps_cmd_run systemctl reload vpsctl-proxy-forward.service ;;
         openrc:reload-manager) return 0 ;;
         openrc:enable-now) vps_cmd_run rc-update add vpsctl-proxy-forward default && vps_cmd_run rc-service vpsctl-proxy-forward start ;;
@@ -945,6 +943,8 @@ _proxy_relay_forward_service_action() {
             fi
             ;;
         openrc:reload) vps_cmd_run rc-service vpsctl-proxy-forward reload ;;
+        openrc:stop) vps_cmd_run rc-service vpsctl-proxy-forward stop ;;
+        openrc:disable) vps_cmd_run rc-update del vpsctl-proxy-forward default ;;
         *) return 2 ;;
     esac
 }
@@ -954,6 +954,10 @@ proxy_relay_forward_apply() {
     local had_snapshot=0 cache_existed=0 rollback_failed=0 snapshot_status=0
     proxy_relay_forward_init || return $?
     vps_cmd_require_root || return $?
+    if [[ ! -f "$PROXY_RELAY_FORWARD_MANIFEST" ]] || [[ "$(jq -r '.forwards | length' "$PROXY_RELAY_FORWARD_MANIFEST")" == 0 ]]; then
+        proxy_hy2_apply_only
+        return $?
+    fi
     proxy_ensure_mutation_tools relay-forward-refresh jq nft getent ip || return $?
     if proxy_stop_after_dependency_plan; then return 0; fi
     _proxy_relay_forward_require_safe_paths || return $?
@@ -999,6 +1003,7 @@ proxy_relay_forward_apply() {
         return 20
     fi
     proxy_relay_forward_render_nft "$PROXY_RELAY_FORWARD_MANIFEST" "$cache_candidate" >"$batch" || { local rc=$?; rm -rf -- "$tmp"; return "$rc"; }
+    proxy_hy2_render_nft >>"$batch" || { local rc=$?; rm -rf -- "$tmp"; return "$rc"; }
     chmod 0600 -- "$batch" || { rm -rf -- "$tmp"; return 20; }
     proxy_relay_forward_nft_check "$batch" || { local rc=$?; rm -rf -- "$tmp"; return "$rc"; }
     # DNAT packets traverse FORWARD using the translated destination. Allow the
@@ -1100,12 +1105,11 @@ _proxy_relay_forward_runtime_enabled() {
 }
 
 proxy_relay_forward_runtime_status() {
-    local installed=false active=false enabled=false degraded='[]'
+    local installed=false active=false enabled=false degraded='[]' forwards=0 hops
     proxy_relay_forward_init || return $?
     proxy_ensure_tools relay-forward-status jq || return $?
     if [[ -f "$PROXY_RELAY_FORWARD_HELPER" && ! -L "$PROXY_RELAY_FORWARD_HELPER" &&
           -f "$PROXY_RELAY_FORWARD_SERVICE" && ! -L "$PROXY_RELAY_FORWARD_SERVICE" &&
-          -f "$PROXY_RELAY_FORWARD_SYSCTL" && ! -L "$PROXY_RELAY_FORWARD_SYSCTL" &&
           -f "$PROXY_RELAY_FORWARD_RUNTIME/lib/ui.sh" && ! -L "$PROXY_RELAY_FORWARD_RUNTIME/lib/ui.sh" &&
           -f "$PROXY_RELAY_FORWARD_RUNTIME/commands/service/proxy.sh" ]]; then
         installed=true
@@ -1120,21 +1124,30 @@ proxy_relay_forward_runtime_status() {
             degraded='[{"reason":"cache-invalid"}]'
         fi
     fi
+    [[ ! -f "$PROXY_RELAY_FORWARD_MANIFEST" ]] || forwards="$(jq '.forwards | length' "$PROXY_RELAY_FORWARD_MANIFEST")" || return 10
+    hops="$(proxy_hy2_count)" || return 10
     jq -n --argjson installed "$installed" --argjson active "$active" --argjson enabled "$enabled" --argjson degraded "$degraded" \
-        '{installed:$installed,active:$active,enabled:$enabled,degraded:$degraded}'
+        --argjson forwards "$forwards" --argjson hops "$hops" \
+        '{installed:$installed,active:$active,enabled:$enabled,degraded:$degraded,forward_count:$forwards,hop_count:$hops}'
 }
 
 proxy_relay_forward_install_service() {
-    local tmp helper_candidate service_candidate sysctl_candidate count rc
+    local tmp helper_candidate service_candidate sysctl_candidate count=0 hops rc
     proxy_relay_forward_init || return $?
     proxy_require_platform || return $?
     vps_cmd_require_root || return $?
-    proxy_ensure_mutation_tools relay-forward-install jq nft getent ip sysctl || return $?
+    [[ ! -f "$PROXY_RELAY_FORWARD_MANIFEST" ]] || count="$(jq -r '.forwards | length' "$PROXY_RELAY_FORWARD_MANIFEST")" || return 10
+    hops="$(proxy_hy2_count)" || return 10
+    if ((count > 0)); then
+        proxy_ensure_mutation_tools relay-forward-install jq nft getent ip sysctl || return $?
+    else
+        proxy_ensure_mutation_tools hy2-runtime-install jq nft || return $?
+    fi
     if proxy_stop_after_dependency_plan; then return 0; fi
     _proxy_relay_forward_ensure_layout || return $?
     _proxy_relay_forward_require_managed_targets || return $?
     proxy_relay_forward_install_runtime || return $?
-    if [[ ! -e "$PROXY_RELAY_FORWARD_MANIFEST" ]]; then
+    if [[ ! -e "$PROXY_RELAY_FORWARD_MANIFEST" ]] && ((hops == 0)); then
         if [[ "${VPSCTL_DRY_RUN:-0}" == 1 ]]; then
             vps_cmd_info "演练：初始化 relay 清单 $PROXY_RELAY_FORWARD_MANIFEST_LOGICAL"
         else
@@ -1152,18 +1165,22 @@ proxy_relay_forward_install_service() {
     helper_candidate="$tmp/helper"; service_candidate="$tmp/service"; sysctl_candidate="$tmp/sysctl"
     proxy_relay_forward_emit_helper >"$helper_candidate" || { rm -rf -- "$tmp"; return 20; }
     proxy_relay_forward_emit_service >"$service_candidate" || { rm -rf -- "$tmp"; return 20; }
-    proxy_relay_forward_emit_sysctl >"$sysctl_candidate" || { rm -rf -- "$tmp"; return 20; }
     chmod 0755 "$helper_candidate" || { rm -rf -- "$tmp"; return 20; }
     proxy_atomic_write_from_file "$helper_candidate" "$PROXY_RELAY_FORWARD_HELPER_LOGICAL" 0755 || { rm -rf -- "$tmp"; return 20; }
     proxy_atomic_write_from_file "$service_candidate" "$PROXY_RELAY_FORWARD_SERVICE_LOGICAL" "$( [[ "$PROXY_INIT_SYSTEM" == systemd ]] && printf 0644 || printf 0755 )" || { rm -rf -- "$tmp"; return 20; }
-    proxy_atomic_write_from_file "$sysctl_candidate" "$PROXY_RELAY_FORWARD_SYSCTL_LOGICAL" 0644 || { rm -rf -- "$tmp"; return 20; }
     _proxy_relay_forward_runtime_allowed || { rc=$?; rm -rf -- "$tmp"; return "$rc"; }
-    sysctl -p "$PROXY_RELAY_FORWARD_SYSCTL" >/dev/null || { rm -rf -- "$tmp"; return 20; }
-    _proxy_relay_forward_service_action reload-manager || { rm -rf -- "$tmp"; return 20; }
-    count="$(jq -r '.forwards | length' "$PROXY_RELAY_FORWARD_MANIFEST")"
     if ((count > 0)); then
+        proxy_relay_forward_emit_sysctl >"$sysctl_candidate" || { rm -rf -- "$tmp"; return 20; }
+        proxy_atomic_write_from_file "$sysctl_candidate" "$PROXY_RELAY_FORWARD_SYSCTL_LOGICAL" 0644 || { rm -rf -- "$tmp"; return 20; }
+        sysctl -p "$PROXY_RELAY_FORWARD_SYSCTL" >/dev/null || { rm -rf -- "$tmp"; return 20; }
+    fi
+    _proxy_relay_forward_service_action reload-manager || { rm -rf -- "$tmp"; return 20; }
+    if ((count + hops > 0)); then
         proxy_relay_forward_apply || { rc=$?; rm -rf -- "$tmp"; return "$rc"; }
         _proxy_relay_forward_service_action enable-now || { rm -rf -- "$tmp"; return 20; }
+        if ! _proxy_relay_forward_runtime_active || ! _proxy_relay_forward_runtime_enabled; then
+            rm -rf -- "$tmp"; vps_cmd_error "受管 UDP/转发运行服务未启动或未启用"; return 20
+        fi
     fi
     rm -rf -- "$tmp"
     vps_cmd_success "relay forward 服务组件已安装"
@@ -1189,18 +1206,7 @@ proxy_relay_forward_on_count_change() {
     [[ "$old_count" =~ ^[0-9]+$ && "$new_count" =~ ^[0-9]+$ ]] || return 2
     proxy_relay_forward_init || return $?
     vps_cmd_require_root || return $?
-    if ((old_count == 0 && new_count > 0)); then
-        proxy_relay_forward_install_service
-    elif ((old_count > 0 && new_count == 0)); then
-        if [[ "${VPSCTL_DRY_RUN:-0}" == 1 ]]; then
-            vps_cmd_info "演练：最后一条 relay forward 已删除，停止并禁用服务"
-            return 0
-        fi
-        _proxy_relay_forward_service_action disable-now || return 20
-        proxy_relay_forward_nft_clear
-    elif ((new_count > 0)); then
-        proxy_relay_forward_apply
-    fi
+    proxy_relay_forward_sync
 }
 
 proxy_relay_forward_sync() {
@@ -1227,13 +1233,13 @@ proxy_relay_forward_sync() {
 }
 
 _proxy_relay_forward_sync() {
-    local count
+    local count=0 hops
     proxy_relay_forward_init || return $?
     vps_cmd_require_root || return $?
     proxy_ensure_tools relay-forward-sync jq || return $?
-    [[ -f "$PROXY_RELAY_FORWARD_MANIFEST" && ! -L "$PROXY_RELAY_FORWARD_MANIFEST" ]] || return 0
-    count="$(jq -r '.forwards | length' "$PROXY_RELAY_FORWARD_MANIFEST")" || return 10
-    if ((count == 0)); then
+    [[ ! -f "$PROXY_RELAY_FORWARD_MANIFEST" ]] || count="$(jq -r '.forwards | length' "$PROXY_RELAY_FORWARD_MANIFEST")" || return 10
+    hops="$(proxy_hy2_count)" || return 10
+    if ((count + hops == 0)); then
         if [[ -e "$PROXY_RELAY_FORWARD_SERVICE" ]]; then
             if [[ "${VPSCTL_DRY_RUN:-0}" == 1 ]]; then
                 vps_cmd_info "演练：最后一条 relay forward 已删除，停止并禁用服务"
@@ -1252,14 +1258,15 @@ _proxy_relay_forward_sync() {
         rm -f -- "$PROXY_RELAY_FORWARD_CACHE" || return 20
         return 0
     fi
-    if [[ ! -e "$PROXY_RELAY_FORWARD_SERVICE" || ! -e "$PROXY_RELAY_FORWARD_HELPER" || ! -e "$PROXY_RELAY_FORWARD_SYSCTL" ]]; then
+    if [[ ! -e "$PROXY_RELAY_FORWARD_SERVICE" || ! -e "$PROXY_RELAY_FORWARD_HELPER" || ! -f "$PROXY_RELAY_FORWARD_RUNTIME/commands/service/proxy/hysteria2-runtime.sh" ]] ||
+       { ((count > 0)) && [[ ! -e "$PROXY_RELAY_FORWARD_SYSCTL" ]]; }; then
         proxy_relay_forward_install_service
     else
-        proxy_relay_forward_install_runtime || return $?
         proxy_relay_forward_apply || return $?
         [[ "${VPSCTL_DRY_RUN:-0}" == 1 ]] && return 0
         if ! _proxy_relay_forward_runtime_active || ! _proxy_relay_forward_runtime_enabled; then
             _proxy_relay_forward_service_action enable-now || return 20
+            _proxy_relay_forward_runtime_active && _proxy_relay_forward_runtime_enabled || return 20
         fi
     fi
 }

@@ -47,6 +47,8 @@ proxy_load_module() {
 }
 
 proxy_load_module common.sh || exit $?
+proxy_load_module hysteria2.sh || exit $?
+proxy_load_module hysteria2-runtime.sh || exit $?
 proxy_load_module ufw.sh || exit $?
 proxy_load_module protocols-sing-box.sh || exit $?
 proxy_load_module protocols-xray.sh || exit $?
@@ -96,7 +98,7 @@ proxy_usage() {
            [--xhttp-mode auto|packet-up|stream-up|stream-one] [--host HOST]
            [--cert-mode self-signed|imported|managed --cert-file FILE --key-file FILE --cert-id ID]
            [--obfs none|salamander|gecko] [--up-mbps N] [--down-mbps N]
-           [--bbr-profile standard|conservative|aggressive]
+           [--hop-ports PORTS|off] [--bbr-profile default|standard|conservative|aggressive]
            [--congestion-control bbr|cubic|new_reno] [--ip-strategy STRATEGY]
   node edit --id NODE_ID [可修改 node add 中的非凭据字段]
   node core set --id NODE_ID --core sing-box|xray [--confirm-disruptive]
@@ -117,7 +119,9 @@ REALITY 防偷：仅适用于 REALITY 配置，新增默认 on；已有节点保
   relay exit add --name NAME (--uri URI [--profile PROFILE] [--core CORE] |
                  --target HOST --target-port PORT)
                  [--tls-cert-file FILE | --tls-spki-sha256 BASE64]
-                 [--chrome-parrot on|off] [--bbr-profile standard|conservative|aggressive]
+                  [--chrome-parrot default|on|off] [--bbr-profile default|standard|conservative|aggressive]
+                  [--hop-ports PORTS|off] [--hop-interval N|MIN-MAX|default]
+                  [--bandwidth-mode auto|manual] [--up-mbps N --down-mbps N]
   relay exit edit --id EXIT_ID [出口字段]
   relay exit delete --id EXIT_ID [--cascade --confirm-cascade]
   relay bind list [--core CORE|all] [--json]
@@ -135,9 +139,15 @@ REALITY 防偷：仅适用于 REALITY 配置，新增默认 on；已有节点保
 
 证书 TLS 出口可提供证书或 Base64 公钥 SHA-256 固定值。sing-box 无法仅凭
 整证书指纹固定公钥；受管证书可自动匹配，否则需补充上述材料后绑定节点。
-Chrome QUIC 开关仅适用于 sing-box Hysteria2 出口，省略时使用内核默认值。
-Gecko 与 BBR profile 仅适用于 sing-box 1.14+ Hysteria2；BBR profile
-仅在协商进入 BBR 时生效，不覆盖带宽设置。Xray Hysteria2 要求 26.3.27+。
+Hysteria2：Xray 要求 26.3.27+；BBR 档位要求 26.4.13+，Gecko 要求
+26.6.1+，Chrome QUIC 开关要求 26.9.8+。sing-box 的上述扩展要求 1.14+。
+BBR 档位仅在协商进入 BBR 时生效；Chrome 开关仅用于出口客户端。
+default 删除本地覆盖并恢复内核默认。--congestion-control 仅适用于 TUIC。
+跳跃端口支持 20000-20100,21000 等集合；节点通过本机 UDP 映射接入，
+--port 仍为实际监听端口。出口间隔使用秒数或 MIN-MAX，至少 5 秒，
+默认 30 秒；sing-box 随机间隔要求 1.14+。间隔不写入分享链接。
+出口自动带宽省略带宽字段；manual 首次要求上/下行正整数 Mbps，使用
+正常 Brutal/BBR 协商。节点的上/下行以服务器为参照，出口以本机为参照。
 新建 TLS XHTTP 默认 auto，REALITY XHTTP 默认 stream-one；仅支持 HTTP/2。
 
 系统时间：

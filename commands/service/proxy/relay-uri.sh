@@ -17,6 +17,11 @@
 # Errors are deliberately generic: none of the public functions writes URI,
 # credentials, or decoded userinfo to stderr.
 
+if ! declare -F proxy_hy2_ports_normalize >/dev/null 2>&1; then
+    # shellcheck source=commands/service/proxy/hysteria2.sh
+    source "$(dirname -- "${BASH_SOURCE[0]}")/hysteria2.sh"
+fi
+
 _proxy_relay_uri_error() {
     printf 'protocol exit URI: %s\n' "${1:-invalid input}" >&2
 }
@@ -142,7 +147,23 @@ _proxy_relay_valid_host() {
 }
 
 _proxy_relay_parse_authority() {
-    local authority="${1-}" host port
+    local authority="${1-}" scheme="${2-}" host port ports=""
+    if [[ "$scheme" == hy2 || "$scheme" == hysteria2 ]]; then
+        if [[ "$authority" == \[* ]]; then
+            [[ "$authority" =~ ^\[([^][]+)\](:([0-9,-]+))?$ ]] || return 10
+            host="${BASH_REMATCH[1]}"; ports="${BASH_REMATCH[3]:-443}"
+            _proxy_relay_valid_ipv6 "$host" || return 10
+        else
+            [[ "$authority" =~ ^([^:@/?#]+)(:([0-9,-]+))?$ ]] || return 10
+            host="${BASH_REMATCH[1]}"; ports="${BASH_REMATCH[3]:-443}"
+            _proxy_relay_valid_host "$host" || return 10
+        fi
+        ports="$(proxy_hy2_ports_normalize "$ports")" || return 10
+        port="$(proxy_hy2_ports_first "$ports")" || return 10
+        proxy_hy2_ports_multiple "$ports" || ports=""
+        printf '%s\t%s\t%s' "$host" "$port" "$ports"
+        return 0
+    fi
     if [[ "$authority" == \[* ]]; then
         [[ "$authority" =~ ^\[([^][]+)\]:([0-9]+)$ ]] || return 10
         host="${BASH_REMATCH[1]}"
@@ -253,7 +274,7 @@ _proxy_relay_parse_ss_plugin() {
 
 proxy_relay_uri_parse() {
     local uri="${1-}" requested_profile="${2-}" scheme rest body query='' fragment='' name=''
-    local userinfo authority endpoint host port query_json='{}' profile='' cores_json
+    local userinfo authority endpoint host port ports='' query_json='{}' profile='' cores_json
     local security type encryption flow sni public_key short_id path service_name ws_host grpc_authority mode
     local username='' password='' uuid='' method='' plugin='' plugin_json='{}' shadowtls_password=''
     local tls_enabled='false' tls_mode='none' insecure='false' certificate_sha256='' alpn='[]'
@@ -315,11 +336,11 @@ proxy_relay_uri_parse() {
         _proxy_relay_uri_error 'invalid userinfo'
         return 10
     }
-    endpoint="$(_proxy_relay_parse_authority "$authority")" || {
+    endpoint="$(_proxy_relay_parse_authority "$authority" "$scheme")" || {
         _proxy_relay_uri_error 'invalid host or port'
         return 10
     }
-    IFS=$'\t' read -r host port <<<"$endpoint"
+    IFS=$'\t' read -r host port ports <<<"$endpoint"
 
     security="$(_proxy_relay_query_value "$query_json" security)" || return 10
     type="$(_proxy_relay_query_value "$query_json" type)" || return 10
@@ -380,6 +401,7 @@ proxy_relay_uri_parse() {
             password="$(_proxy_relay_uri_decode "$userinfo")" || parse_valid='false'
             [[ -n "$password" ]] || parse_valid='false'
             profile='hysteria2'
+            sni="${sni:-$host}"
             network_hint='udp'
             tls_enabled='true'
             tls_mode='tls'
@@ -562,7 +584,7 @@ proxy_relay_uri_parse() {
 
     jq -cn \
         --arg profile "$profile" --argjson cores "$cores_json" \
-        --arg host "$host" --argjson port "$port" --arg network "$network_hint" --arg name "$name" \
+        --arg host "$host" --argjson port "$port" --arg ports "$ports" --arg network "$network_hint" --arg name "$name" \
         --arg uuid "$uuid" --arg username "$username" --arg password "$password" \
         --arg public_key "$public_key" --arg short_id "$short_id" --arg shadowtls_password "$shadowtls_password" \
         --argjson tls_enabled "$tls_enabled" --arg tls_mode "$tls_mode" --arg sni "$sni" \
@@ -574,7 +596,7 @@ proxy_relay_uri_parse() {
         --arg congestion "$congestion_control" --arg udp_mode "$udp_relay_mode" --arg uri_format "$uri_format" '
         {
             schema_version:1, profile:$profile, compatible_cores:$cores,
-            endpoint:{host:$host,port:$port}, network_hint:$network, name:$name,
+            endpoint:({host:$host,port:$port} + (if $ports != "" then {ports:$ports} else {} end)), network_hint:$network, name:$name,
             credentials:{uuid:$uuid,username:$username,password:$password,public_key:$public_key,
                 short_id:$short_id,shadowtls_password:$shadowtls_password},
             tls:{enabled:$tls_enabled,mode:$tls_mode,server_name:$sni,insecure:$insecure,
@@ -643,11 +665,11 @@ _proxy_relay_find_certificate_pins() {
 }
 
 _proxy_relay_validate_client_options() {
-    local exit_json="$1" node="$2" spki cert uri_pin
+    local exit_json="$1" node="$2" spki cert uri_pin interval normalized
     jq -e --argjson n "$node" '
         (if has("client_options") then .client_options else {} end) as $c |
         ($c | type == "object") and
-        (($c | keys - ["tls_spki_sha256","tls_cert_sha256","chrome_parrot","bbr_profile"] | length) == 0) and
+        (($c | keys - ["tls_spki_sha256","tls_cert_sha256","chrome_parrot","bbr_profile","hop_interval","up_mbps","down_mbps"] | length) == 0) and
         (if $c | has("tls_spki_sha256") then
             ($c.tls_spki_sha256 | type == "string" and length > 0) and
             $n.tls.enabled and $n.tls.mode == "tls" else true end) and
@@ -655,18 +677,26 @@ _proxy_relay_validate_client_options() {
             ($c.tls_cert_sha256 | type == "string" and test("^[0-9A-Fa-f]{64}$")) and
             ($c | has("tls_spki_sha256")) else true end) and
         (if $c | has("chrome_parrot") then
-            ($c.chrome_parrot | type == "boolean") and .core == "sing-box" and
+            ($c.chrome_parrot | type == "boolean") and
             $n.profile == "hysteria2" else true end) and
         (if $c | has("bbr_profile") then
             ($c.bbr_profile == "standard" or $c.bbr_profile == "conservative" or $c.bbr_profile == "aggressive") and
-            .core == "sing-box" and $n.profile == "hysteria2" else true end)
+            $n.profile == "hysteria2" else true end) and
+        (if $c | has("up_mbps") or has("down_mbps") then
+            $n.profile == "hysteria2" and
+            ($c.up_mbps | type == "number" and floor == . and . > 0) and
+            ($c.down_mbps | type == "number" and floor == . and . > 0) else true end) and
+        (if $c | has("hop_interval") then
+            $n.profile == "hysteria2" and ($n.endpoint | has("ports")) and
+            ($c.hop_interval | type == "string" and length > 0) else true end)
     ' <<<"$exit_json" >/dev/null 2>&1 || {
         _proxy_relay_uri_error 'invalid or unsupported client options'
         return 10
     }
-    if [[ "$(jq -r '.core' <<<"$exit_json")" == xray && "$(jq -r '.options.obfs_type' <<<"$node")" == gecko ]]; then
-        _proxy_relay_uri_error 'Gecko obfuscation requires sing-box'
-        return 10
+    interval="$(jq -r '.client_options.hop_interval // empty' <<<"$exit_json")" || return 10
+    if [[ -n "$interval" ]]; then
+        normalized="$(proxy_hy2_interval_normalize "$interval")" || return 10
+        [[ "$normalized" == "$interval" ]] || return 10
     fi
     spki="$(jq -r '.client_options.tls_spki_sha256 // empty' <<<"$exit_json")" || return 10
     cert="$(jq -r '.client_options.tls_cert_sha256 // empty' <<<"$exit_json")" || return 10
@@ -708,21 +738,9 @@ _proxy_relay_require_sb_version() {
     return 10
 }
 
-_proxy_relay_require_xray_hysteria_version() {
-    local version="${1-}" major minor patch
-    [[ -n "$version" ]] || return 0
-    if declare -F proxy_core_version_at_least >/dev/null 2>&1; then
-        proxy_core_version_at_least "$version" 26.3.27 && return 0
-    elif [[ "$version" =~ ^v?([0-9]+)\.([0-9]+)\.([0-9]+) ]]; then
-        major="${BASH_REMATCH[1]}"; minor="${BASH_REMATCH[2]}"; patch="${BASH_REMATCH[3]}"
-        ((10#$major > 26 || (10#$major == 26 && (10#$minor > 3 || (10#$minor == 3 && 10#$patch >= 27))))) && return 0
-    fi
-    _proxy_relay_uri_error 'Hysteria2 outbound requires Xray >= 26.3.27'
-    return 10
-}
-
 _proxy_relay_render_outbound_from_uri() {
     local core="${1-}" exit_id="${2-}" uri="${3-}" profile="${4-}" client_options="${5-}" version="${6:-${PROXY_RENDER_CORE_VERSION:-}}" node tag spki cert
+    local hop_mask=false interval feature
     [[ $# -ge 3 && $# -le 6 ]] || { _proxy_relay_uri_error 'missing or extra argument'; return 2; }
     [[ -n "$client_options" ]] || client_options='{}'
     [[ "$core" == sing-box || "$core" == xray ]] || { _proxy_relay_uri_error 'unsupported core'; return 2; }
@@ -732,6 +750,10 @@ _proxy_relay_render_outbound_from_uri() {
         _proxy_relay_uri_error 'profile is not supported by selected core'
         return 10
     }
+    if [[ "$(jq -r '.profile' <<<"$node")" == hysteria2 && -z "$version" ]] &&
+        declare -F proxy_core_config_version >/dev/null 2>&1; then
+        version="$(proxy_core_config_version "$core")" || return $?
+    fi
     spki="$(jq -r '.tls_spki_sha256 // empty' <<<"$client_options")" || return 10
     cert="$(jq -r '.tls_cert_sha256 // empty' <<<"$client_options")" || return 10
     if [[ "$core" == sing-box ]]; then
@@ -741,16 +763,30 @@ _proxy_relay_render_outbound_from_uri() {
             _proxy_relay_uri_error 'certificate pin requires --tls-cert-file or --tls-spki-sha256 before proxy outbound use'
             return 10
         fi
-        if jq -e 'has("chrome_parrot") or has("bbr_profile")' <<<"$client_options" >/dev/null ||
-            [[ "$(jq -r '.options.obfs_type' <<<"$node")" == gecko ]]; then
-            _proxy_relay_require_sb_version "$version" 1.14.0 || return $?
-        fi
     elif [[ -n "$spki" && -z "$cert" ]]; then
         _proxy_relay_uri_error 'Xray cannot express an SPKI-only pin; supply --tls-cert-file'
         return 10
     fi
-    if [[ "$core" == xray && "$(jq -r '.profile' <<<"$node")" == hysteria2 ]]; then
-        _proxy_relay_require_xray_hysteria_version "$version" || return $?
+    if [[ "$(jq -r '.profile' <<<"$node")" == hysteria2 ]]; then
+        proxy_hy2_require_feature "$core" "$version" base || return $?
+        for feature in chrome-parrot bbr-profile; do
+            if jq -e --arg key "${feature//-/_}" 'has($key)' <<<"$client_options" >/dev/null; then
+                proxy_hy2_require_feature "$core" "$version" "$feature" || return $?
+            fi
+        done
+        if [[ "$(jq -r '.options.obfs_type' <<<"$node")" == gecko ]]; then
+            proxy_hy2_require_feature "$core" "$version" gecko || return $?
+        fi
+        if jq -e '.endpoint | has("ports")' <<<"$node" >/dev/null; then
+            proxy_hy2_require_feature "$core" "$version" hop-ports || return $?
+            interval="$(jq -r '.hop_interval // "30"' <<<"$client_options")"
+            if [[ "$interval" == *-* ]]; then
+                proxy_hy2_require_feature "$core" "$version" hop-random || return $?
+            fi
+            if [[ "$core" == xray ]] && proxy_hy2_capable "$core" "$version" hop-mask; then
+                hop_mask=true
+            fi
+        fi
     fi
     if [[ -n "$cert" ]]; then
         node="$(jq -c --arg cert "$cert" '.tls.certificate_sha256=$cert' <<<"$node")" || return 10
@@ -795,7 +831,16 @@ _proxy_relay_render_outbound_from_uri() {
                 [base("anytls") + {password:$n.credentials.password,
                     tls:(if $n.tls.mode == "reality" then reality_tls else tls end)}]
             elif $n.profile == "hysteria2" then
-                [base("hysteria2") + {password:$n.credentials.password,tls:tls} +
+                [(base("hysteria2") |
+                    if $n.endpoint | has("ports") then del(.server_port) +
+                        {server_ports:($n.endpoint.ports | split(",") | map(gsub("-";":")))} else . end) +
+                    {password:$n.credentials.password,tls:tls} +
+                    (if $n.endpoint | has("ports") then
+                        (($client.hop_interval // "30") | split("-")) as $hop |
+                        {hop_interval:($hop[0]+"s")} +
+                        (if ($hop | length) == 2 then {hop_interval_max:($hop[1]+"s")} else {} end)
+                     else {} end) +
+                    (if $client | has("up_mbps") then {up_mbps:$client.up_mbps,down_mbps:$client.down_mbps} else {} end) +
                     (if $client | has("chrome_parrot") then {disable_chrome_parrot:($client.chrome_parrot | not)} else {} end) +
                     (if $client | has("bbr_profile") then {bbr_profile:$client.bbr_profile} else {} end) +
                     (if $n.options.obfs_type == "salamander" or $n.options.obfs_type == "gecko" then
@@ -818,7 +863,7 @@ _proxy_relay_render_outbound_from_uri() {
                 _proxy_relay_uri_error 'could not render sing-box outbound'; return 20;
             }
     else
-        jq -cn --argjson n "$node" --arg tag "$tag" '
+        jq -cn --argjson n "$node" --argjson client "$client_options" --argjson hop_mask "$hop_mask" --arg tag "$tag" '
             def tls_settings:
                 {serverName:$n.tls.server_name} +
                 (if $n.tls.certificate_sha256 != "" then
@@ -843,11 +888,24 @@ _proxy_relay_render_outbound_from_uri() {
                 [{tag:$tag,protocol:"trojan",settings:{address:$n.endpoint.host,
                     port:$n.endpoint.port,password:$n.credentials.password},streamSettings:stream}]
             elif $n.profile == "hysteria2" then
+                ((if $client | has("up_mbps") then
+                    {brutalUp:($client.up_mbps * 1000000 | tostring),brutalDown:($client.down_mbps * 1000000 | tostring)} else {} end) +
+                 (if $client | has("bbr_profile") then {bbrProfile:$client.bbr_profile} else {} end) +
+                 (if $client | has("chrome_parrot") then {disableChromeParrot:($client.chrome_parrot | not)} else {} end) +
+                 (if ($n.endpoint | has("ports")) and ($hop_mask | not) then
+                    {udpHop:{ports:$n.endpoint.ports,interval:($client.hop_interval // "30")}} else {} end)) as $quic |
+                ((if $n.options.obfs_type == "salamander" or $n.options.obfs_type == "gecko" then
+                    [{type:"salamander",settings:({password:$n.options.obfs_password} +
+                        (if $n.options.obfs_type == "gecko" then {packetSize:"512-1200"} else {} end))}] else [] end) +
+                 (if ($n.endpoint | has("ports")) and $hop_mask then
+                    [{type:"udphop",settings:{mode:"intervalLocal,intervalRemote",remotePorts:$n.endpoint.ports,
+                        interval:($client.hop_interval // "30")}}] else [] end)) as $udp |
+                ((if $quic != {} then {quicParams:$quic} else {} end) +
+                 (if $udp != [] then {udp:$udp} else {} end)) as $mask |
                 [{tag:$tag,protocol:"hysteria",settings:{version:2,address:$n.endpoint.host,port:$n.endpoint.port},
                     streamSettings:({network:"hysteria",security:"tls",tlsSettings:tls_settings,
                         hysteriaSettings:{version:2,auth:$n.credentials.password}} +
-                        (if $n.options.obfs_type == "salamander" then
-                            {finalmask:{udp:[{type:"salamander",settings:{password:$n.options.obfs_password}}]}} else {} end))}]
+                        (if $mask != {} then {finalmask:$mask} else {} end))}]
             elif ($n.profile|startswith("shadowsocks-")) then
                 [{tag:$tag,protocol:"shadowsocks",settings:{servers:[{address:$n.endpoint.host,
                     port:$n.endpoint.port,method:$n.options.method,password:$n.credentials.password}]}}]
@@ -884,10 +942,14 @@ proxy_relay_uri_rewrite() {
     local scheme rest fragment='' query='' body authority userinfo new_authority decoded encoded parse_status=0
     [[ $# -eq 3 && -n "$uri" ]] || { _proxy_relay_uri_error 'missing or extra argument'; return 2; }
     _proxy_relay_valid_host "$new_host" || { _proxy_relay_uri_error 'invalid replacement host'; return 2; }
-    if [[ ! "$new_port" =~ ^[0-9]+$ || ${#new_port} -gt 5 ]] || ((10#$new_port < 1 || 10#$new_port > 65535)); then
-        _proxy_relay_uri_error 'invalid replacement port'; return 2;
-    fi
     scheme="${uri%%://*}"
+    if [[ "${scheme,,}" == hy2 || "${scheme,,}" == hysteria2 ]]; then
+        new_port="$(proxy_hy2_ports_normalize "$new_port")" || { _proxy_relay_uri_error 'invalid replacement ports'; return 2; }
+    elif [[ ! "$new_port" =~ ^[0-9]+$ || ${#new_port} -gt 5 ]] || ((10#$new_port < 1 || 10#$new_port > 65535)); then
+        _proxy_relay_uri_error 'invalid replacement port'; return 2
+    else
+        new_port="$((10#$new_port))"
+    fi
     proxy_relay_uri_parse "$uri" >/dev/null 2>&1 || parse_status=$?
     if ((parse_status != 0)); then
         if [[ "$parse_status" == 2 && "${scheme,,}" == ss ]]; then
@@ -900,7 +962,7 @@ proxy_relay_uri_rewrite() {
     rest="${uri#*://}"
     if [[ "$rest" == *'#'* ]]; then fragment="#${rest#*#}"; rest="${rest%%#*}"; fi
     if [[ "$rest" == *'?'* ]]; then query="?${rest#*\?}"; body="${rest%%\?*}"; else body="$rest"; fi
-    new_authority="$(_proxy_relay_format_authority "$new_host" "$((10#$new_port))")"
+    new_authority="$(_proxy_relay_format_authority "$new_host" "$new_port")"
     if [[ "${scheme,,}" == ss && "$body" != *@* ]]; then
         decoded="$(_proxy_relay_b64_decode "$body")" || return 10
         authority="${decoded##*@}"

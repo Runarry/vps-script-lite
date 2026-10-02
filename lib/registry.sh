@@ -45,7 +45,7 @@ vps_registry_bundle_files() {
         security-access) printf '%s\n' commands/security/access.sh commands/security/access/{common,users,keys,firewall,sshd}.sh ;;
         security-fail2ban) printf '%s\n' commands/security/fail2ban.sh ;;
         security-tls) printf '%s\n' commands/security/tls.sh commands/security/tls/{common,store,issue,timer,ufw}.sh ;;
-        service-proxy) printf '%s\n' commands/service/proxy.sh commands/service/proxy/{common,core,address,dns,nodes,protocols-xray,protocols-sing-box,relay,relay-uri,relay-forward,time,ufw}.sh ;;
+        service-proxy) printf '%s\n' commands/service/proxy.sh commands/service/proxy/{common,core,address,dns,hysteria2,hysteria2-runtime,nodes,protocols-xray,protocols-sing-box,relay,relay-uri,relay-forward,time,ufw}.sh ;;
         service-tcping) printf '%s\n' commands/service/tcping.sh commands/service/tcping/listener.py ;;
         service-iperf3) printf '%s\n' commands/service/iperf3.sh ;;
         test-nodequality | test-tcpquality) printf 'commands/test/%s.sh\n' "${1#test-}" ;;

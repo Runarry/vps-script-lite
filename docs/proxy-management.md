@@ -139,7 +139,7 @@ vpsctl service proxy node add --profile PROFILE [--core CORE] [--name NAME] [--p
     [--xhttp-mode auto|packet-up|stream-up|stream-one] [--host HOST]
     [--cert-mode self-signed|imported|managed --cert-file FILE --key-file FILE --cert-id ID]
     [--obfs none|salamander|gecko] [--up-mbps N] [--down-mbps N]
-    [--bbr-profile standard|conservative|aggressive]
+    [--hop-ports PORTS|off] [--bbr-profile default|standard|conservative|aggressive]
     [--congestion-control bbr|cubic|new_reno]
     [--ip-strategy auto|prefer_ipv4|prefer_ipv6|ipv4_only|ipv6_only]
 vpsctl service proxy node edit --id NODE_ID [可修改上述非凭据字段]
@@ -166,7 +166,7 @@ vpsctl service proxy subscription [--core CORE|all]
 
 切换属于立即接管的中断性事务，不采用普通配置变更的待重启流程；非交互调用必须显式传入 `--confirm-disruptive`，全局 `--yes` 不能替代该确认。目标服务的 active/enabled 状态按源服务可用性继承。命令会先验证目标清单、目标内核配置、中转和证书迁移计划，再一次提交并完成服务接管；任何阶段失败都会回滚节点清单、两侧内核配置、中转状态、证书内部路径以及服务 active/enabled 状态。
 
-切核还校验 URI 不能表达的运行参数。Hysteria2 的带宽原值保留；Gecko、显式 BBR profile 和中转出口的显式 Chrome QUIC 开关本轮只支持 sing-box，切到 Xray 时会在写入前报错，不会自动丢弃这些选项。仅保存 SPKI 信任值而没有可供 Xray 使用的整证书指纹的出口，同样不能随节点切到 Xray。
+切核还校验 URI 不能表达的运行参数。Hysteria2 的带宽、跳跃端口、Gecko、BBR 档位及独占中转出口的客户端选项会保留并按目标内核转换；目标版本不支持时在写入前报错，不会自动丢弃选项。仅保存 SPKI 信任值而没有可供 Xray 使用的整证书指纹的出口，同样不能随节点切到 Xray。
 
 ### XHTTP 与 Hysteria2 参数
 
@@ -176,7 +176,9 @@ vpsctl service proxy subscription [--core CORE|all]
 
 `hysteria2` 支持 sing-box 和 Xray；Xray 最低版本为 `26.3.27`，支持无混淆和 Salamander。Xray 配置使用 `protocol:"hysteria"` 和版本 2，入站密码写入 `settings.clients[].auth`，出站密码写入 `streamSettings.hysteriaSettings.auth`。带宽和 Salamander 分别写入 `finalmask.quicParams` 和 `finalmask.udp`。带宽仍使用正整数十进制 Mbps，例如 `100 Mbps` 输出字符串 `"100000000"`，由内核解析为 `12500000 B/s`，不使用含二进制倍率的 `"100mbps"`。[Xray 带宽解析](https://github.com/XTLS/Xray-core/blob/v26.3.27/infra/conf/transport_internet.go#L460)
 
-sing-box `1.14+` 的 Hysteria2 额外支持 `--obfs gecko` 与 `--bbr-profile standard|conservative|aggressive`。Gecko 采用上游默认包大小；BBR profile 仅在协商进入 BBR 时生效，不会覆盖现有带宽设置。未设置 BBR profile 时不输出该字段，沿用内核默认值。交互菜单使用编号选择这些值。[sing-box Hysteria2](https://sing-box.sagernet.org/configuration/inbound/hysteria2/)
+sing-box `1.14+` 支持 Gecko、BBR 档位和出口 Chrome QUIC 开关。Xray 的 BBR 档位要求 `26.4.13+`、Gecko 要求 `26.6.1+`、出口 Chrome QUIC 开关要求 `26.9.8+`。Gecko 使用 512–1200 字节范围；Xray 渲染为 Salamander 的 `packetSize`，sing-box 使用 `obfs.type:"gecko"`。交互菜单按已安装版本显示可用选项，不自动更新内核。[sing-box Hysteria2](https://sing-box.sagernet.org/configuration/inbound/hysteria2/)
+
+`--bbr-profile default|standard|conservative|aggressive` 只影响实际使用 BBR 时的本端发送行为，不会覆盖带宽协商；`default` 删除覆盖值。`--congestion-control bbr|cubic|new_reno` 仅适用于 TUIC，对 HY2 显式传入会报错；旧 HY2 状态里的同名字段仍可读取，但不表示正在使用该算法。服务器上行是服务器发送／客户端接收，服务器下行反之；现有带宽和新建默认的上/下各 10000 Mbps 保持原状，不将两核的带宽零值视为等价的“不限速”。
 
 ```text
 vpsctl service proxy node add --profile vless-xhttp-reality --core xray --port 8443 --sni example.com --xhttp-mode stream-one --path /proxy
@@ -184,7 +186,25 @@ vpsctl service proxy node add --profile hysteria2 --core xray --port 8443 --obfs
 vpsctl service proxy node add --profile hysteria2 --core sing-box --port 8443 --obfs gecko --bbr-profile conservative
 ```
 
-Hysteria2 分享 URI 使用标准 `obfs`、`obfs-password` 和 `pinSHA256` 等字段。带宽、BBR profile、Chrome QUIC 开关和公钥固定属于本地运行选项，不写入标准 URI。[Hysteria URI 规范](https://hysteria.network/docs/developers/URI-Scheme/)
+Hysteria2 分享 URI 使用标准 `obfs`、`obfs-password` 和 `pinSHA256` 等字段，以及 authority 中的多端口语法。带宽、跳跃间隔、BBR profile、Chrome QUIC 开关和公钥固定属于本地运行选项，不写入标准 URI。[Hysteria URI 规范](https://hysteria.network/docs/developers/URI-Scheme/)
+
+### Hysteria2 端口跳跃
+
+节点新增和编辑可设置 `--hop-ports '20000-20100,21000'`，以 `--hop-ports off` 关闭。端口和递增范围限 1–65535，自动排序、去重和合并；`--port` 始终是内核实际监听端口。分享 URI 包含实际端口与额外接入端口，例如 `hysteria2://PASSWORD@example.com:8443,20000-20100,21000?sni=example.com`；IPv6 地址继续用方括号包围。节点仅设置可接入的端口，客户端自行决定跳跃间隔。
+
+两个内核均通过脚本受管的 nftables 本机 UDP 映射接入跳跃端口。规则限定本机目的地址及节点监听地址，只在 PREROUTING 转换，不添加 OUTPUT、SNAT 或远端 FORWARD 规则；仅启用跳跃不改变 IP forwarding。跳跃范围与其他 UDP 监听、UDP 节点和 UDP 端口转发冲突时拒绝，与纯 TCP 端口可以共存。UFW 按 NAT 后的实际监听端口放行，防火墙清单不伪造额外的 route 需求。
+
+映射与节点配置共同提交、回滚并恢复；停止内核或保留配置卸载时保留声明，删除节点、purge 或关闭跳跃时清理。受管 nft 服务同时维护普通端口转发和 HY2 跳跃，任一类仍存在时继续运行。规则可在开机及重启时恢复，客户端中转出口不需要服务端映射组件。
+
+```bash
+vpsctl service proxy node add --profile hysteria2 --core sing-box --port 8443 --hop-ports '20000-20100,21000'
+vpsctl service proxy node edit --id NODE_ID --hop-ports off
+vpsctl service proxy relay exit add --name hy2-hop --core xray --uri 'hysteria2://PASSWORD@example.com:20000-20100?sni=example.com' --hop-interval 15-45
+vpsctl service proxy relay exit edit --id EXIT_ID --hop-ports '20000-20200' --hop-interval 30
+vpsctl service proxy relay exit edit --id EXIT_ID --hop-interval default
+```
+
+中转出口接受 `hysteria2://` 和 `hy2://` 的单端口、多端口和省略端口（默认 443）形式。`--hop-ports` 覆盖 URI 端口部分并同步保存链接；`off` 保留一个有效端口。仅修改端口不会清除已有 TLS 信任材料。跳跃间隔使用秒数 `N` 或随机范围 `MIN-MAX`，最低 5 秒，默认 30 秒；只有多端口出口可设置，关闭跳跃后清除间隔覆盖。sing-box 固定间隔要求 `1.11+`，随机间隔要求 `1.14+`；Xray `26.3.27–26.9.8` 使用旧 `quicParams.udpHop`，`26.9.9+` 使用独立 `udphop` UDP mask。纯端口转发继续固定连接出口选定的一个有效端口，周期跳跃由代理出口内核执行。
 
 每个节点独立保存 `ip_strategy`；旧清单缺失该字段时按 `auto` 处理，列表和详情 JSON 始终补出有效默认值。`auto` 使用代理内核自身默认行为，且不会继承 [`network ip-policy`](network-settings.md#4-ip-地址族偏好) 的系统策略。其他策略通过节点专属直连出站和入站标签路由实现：
 
@@ -276,8 +296,10 @@ vpsctl service proxy relay status [--json]
 vpsctl service proxy relay exit list [--json]
 vpsctl service proxy relay exit show --id EXIT_ID [--uri]
 vpsctl service proxy relay exit add --name NAME --uri URI [--profile PROFILE] [--core CORE]
-    [--tls-cert-file FILE | --tls-spki-sha256 BASE64] [--chrome-parrot on|off]
-    [--bbr-profile standard|conservative|aggressive]
+    [--tls-cert-file FILE | --tls-spki-sha256 BASE64] [--chrome-parrot default|on|off]
+    [--bbr-profile default|standard|conservative|aggressive]
+    [--hop-ports PORTS|off] [--hop-interval N|MIN-MAX|default]
+    [--bandwidth-mode auto|manual] [--up-mbps N --down-mbps N]
 vpsctl service proxy relay exit add --name NAME --target HOST --target-port PORT
 vpsctl service proxy relay exit edit --id EXIT_ID [...]
 vpsctl service proxy relay exit delete --id EXIT_ID [--cascade --confirm-cascade]
@@ -296,7 +318,11 @@ sing-box 使用 `certificate_public_key_sha256` 固定证书公钥；URI 的 `pc
 
 旧中转描述是从 URI 派生的缓存，读取时在内存中重建，写入时才保存归一化结果。无法自动完成指纹迁移的旧出口仍可查看、编辑、删除，也可用于纯 nftables 转发；将其绑定为 sing-box 代理出站前必须补齐证书或公钥指纹。更换 URI 会重新确认绑定到服务器的证书信息，重命名保留已有设置。
 
-sing-box Hysteria2 出口可用 `--chrome-parrot on|off` 控制 Chrome QUIC 模拟，省略时沿用内核默认值；可用 `--bbr-profile standard|conservative|aggressive` 设置协商进入 BBR 后的参数档位，两者均要求 sing-box `1.14+`。Hysteria2 节点使用 Ed25519 证书时会提示兼容风险：新版客户端默认 Chrome 握手不支持此算法，可换用 RSA/ECDSA 证书或为相应中转出口关闭模拟。项目默认自签证书仍为 RSA。
+Hysteria2 出口可用 `--chrome-parrot default|on|off` 控制 Chrome QUIC 模拟，用 `--bbr-profile default|standard|conservative|aggressive` 选择 BBR 档位；`default` 删除本地覆盖，省略选项则保留已有值。两者在 sing-box 上要求 `1.14+`；Xray 的版本门槛见上文。Ed25519 证书不兼容 sing-box `1.14+` 和 Xray `26.9.8+` 客户端默认的 Chrome QUIC 握手，可使用 RSA/ECDSA 证书或在相应出口关闭模拟。项目默认自签证书仍为 RSA。
+
+关闭 Chrome 模拟还需留意跨内核 UDP 兼容性：本轮确认 Xray `26.9.30` 客户端设置 `--chrome-parrot off`、连接 sing-box `1.14.2` 服务端时，TCP 可用但 UDP 回包报 `datagram support disabled`；保持默认 Chrome 模拟的无混淆、Salamander、Gecko 组合均通过持续 TCP/UDP 跳跃测试。Xray 的非 Chrome 路径在 `2026-09-01` 后省略 `max_datagram_frame_size`，sing-box 对应服务端依赖未兼容该行为；公开配置没有单独修复此参数的开关，脚本不会写入无效字段或自动换核。具体组合和替代路径见 [HY2 验收记录](proxy-hy2-validation.md)。[Xray 固定版本实现](https://github.com/XTLS/Xray-core/blob/v26.9.30/transport/internet/hysteria/dialer.go)、[sing-box 固定依赖实现](https://github.com/SagerNet/sing-quic/blob/6a3a24d65b99/hysteria2/service.go)。
+
+HY2 出口默认使用自动带宽模式，不输出带宽字段，通常协商使用 BBR。`--bandwidth-mode manual --up-mbps 100 --down-mbps 200` 设置本机到上游服务器的发送/接收带宽提示，使用正常 Brutal/BBR 协商，不强制对端接受 Brutal。首次指定需提供上下行完整值；已有指定模式可只改一侧。`--bandwidth-mode auto` 清除两侧值，不能同时传入具体带宽。旧出口缺少带宽字段时保持自动模式；这些选项不影响入口节点的服务器带宽。
 
 删除仍被引用的出口默认拒绝。`--cascade --confirm-cascade` 会同时删除该出口、全部节点关联和端口转发，并将核心配置、relay 状态和运行规则作为一个可回滚变更处理。关联修改沿用待重启策略：运行中的内核在仅配置变更时自动重启应用；pending 与 LKG 快照同时记录 relay 定义、DNS 运行缓存和受管 nftables 规则，核心应用失败时恢复同一代数据面。
 
@@ -350,7 +376,7 @@ nftables 规则只写入独立的 `ip vpsctl_proxy_forward4` 和 `ip6 vpsctl_pro
 | `vless-xhttp-tls` |  | 是 |
 | `trojan-grpc-tls` |  | 是 |
 
-其中 `vless-reality-vision`、`vless-grpc-tls`、`hysteria2`、`shadowsocks-aes-256-gcm`、`shadowsocks-chacha20-poly1305`、`shadowsocks-2022` 和 `shadowsocks-2022-padding` 由两个内核共同支持。Gecko、BBR profile 和 Chrome QUIC 开关限定 sing-box，不改变基础 Hysteria2 的双核支持。
+其中 `vless-reality-vision`、`vless-grpc-tls`、`hysteria2`、`shadowsocks-aes-256-gcm`、`shadowsocks-chacha20-poly1305`、`shadowsocks-2022` 和 `shadowsocks-2022-padding` 由两个内核共同支持。Hysteria2 的 Gecko、BBR profile、Chrome QUIC 和客户端跳跃选项按具体内核版本开放。
 
 ## 7. 系统时间
 
@@ -373,7 +399,6 @@ vpsctl service proxy time sync
 - 落地机部署、多跳链路、跨主机编排、负载均衡或一个入口多出口。
 - 本机系统 DNS 修改、域名解析托管或分流 DNS 配置；sing-box 内部默认解析器由“sing-box DNS”管理。
 - 节点批量导入、除 IP 地址族策略外的批量编辑、批量删除或批量部署。
-- Hysteria2 端口跳跃；`hysteria2` profile 只使用单个监听端口。
 - Snell、Realm、Dashboard、TUN、ECH、XHTTP/3、XMUX 与通用高级配置透传。
 - ACME 申请与自动续期。
 

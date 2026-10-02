@@ -104,9 +104,10 @@ cmp -s "$PROXY_RELAY_FILE" "$TEST_TEMP/original.json" || fail 'automatic migrati
 
 explicit="$(proxy_relay_apply_client_options "$legacy" '' "$wrong_spki" off)"
 assert_json "$(proxy_relay_normalize_exit "$explicit")" ".client_options.tls_spki_sha256 == \"$wrong_spki\" and .client_options.chrome_parrot == false and (.client_options | has(\"tls_cert_sha256\") | not)" 'preserve canonical explicit trust and false Chrome setting'
-rendered="$(proxy_relay_render_outbound sing-box "$explicit" 1.14.0-alpha.1)"
+rendered="$(proxy_relay_render_outbound sing-box "$explicit" 1.14.0)"
 assert_json "$rendered" ".outbounds[0].tls.certificate_public_key_sha256 == [\"$wrong_spki\"] and .outbounds[0].tls.insecure == false and .outbounds[0].disable_chrome_parrot == true" 'explicit pin cannot be bypassed by URI insecure and Chrome off is rendered'
 expect_failure proxy_relay_render_outbound sing-box "$explicit" 1.13.9
+expect_failure proxy_relay_render_outbound sing-box "$explicit" 1.14.0-alpha.1
 expect_failure proxy_relay_render_outbound sing-box "$normalized" 1.12.9
 rendered="$(proxy_relay_render_outbound sing-box "$normalized" 1.13.0)"
 assert_json "$rendered" '(.outbounds[0] | has("disable_chrome_parrot") | not)' 'omitted Chrome option retains core default'
@@ -163,6 +164,40 @@ cmp -s "$PROXY_RELAY_FILE" "$TEST_TEMP/before-rejection.json" || fail 'unpinned 
 proxy_relay_exit_add --name external-unresolved --core sing-box --uri "$uri"
 assert_json "$(cat "$PROXY_RELAY_FILE")" '.exits | any(.name == "external-unresolved" and .client_options == null)' 'unresolved external pin can be saved before binding'
 
+# HY2 port edits preserve explicit TLS trust, while client-only settings never
+# enter a shared URI. Reducing to one port clears the old hopping interval.
+write_state "$explicit"
+proxy_relay_exit_edit --id exit-0000000000000001 --hop-ports '24445,24443-24444' --hop-interval 5-10 \
+    --bandwidth-mode manual --up-mbps 17 --down-mbps 31 --bbr-profile conservative
+hy2="$(jq -c '.exits[0]' "$PROXY_RELAY_FILE")"
+assert_json "$hy2" ".endpoint == {host:\"relay.example\",port:24443,ports:\"24443-24445\"} and .descriptor.endpoint == .endpoint and .client_options.tls_spki_sha256 == \"$wrong_spki\" and .client_options.hop_interval == \"5-10\" and .client_options.up_mbps == 17 and .client_options.down_mbps == 31" 'port-only edit synchronizes descriptor and preserves trust'
+assert_json "$hy2" '.uri | contains(":24443-24445?") and (test("bandwidth|up_mbps|down_mbps|interval|bbr|chrome") | not)' 'local HY2 settings stay out of URI'
+proxy_relay_exit_edit --id exit-0000000000000001 --up-mbps 21
+assert_json "$(cat "$PROXY_RELAY_FILE")" '.exits[0].client_options | .up_mbps == 21 and .down_mbps == 31' 'manual bandwidth supports one-sided edit'
+proxy_relay_exit_edit --id exit-0000000000000001 --hop-interval default --chrome-parrot default --bbr-profile default --bandwidth-mode auto
+assert_json "$(cat "$PROXY_RELAY_FILE")" '.exits[0].client_options | has("hop_interval") or has("chrome_parrot") or has("bbr_profile") or has("up_mbps") or has("down_mbps") | not' 'default and auto remove explicit client settings'
+proxy_relay_exit_edit --id exit-0000000000000001 --hop-interval 7
+proxy_relay_exit_edit --id exit-0000000000000001 --hop-ports off
+hy2="$(jq -c '.exits[0]' "$PROXY_RELAY_FILE")"
+assert_json "$hy2" ".endpoint == {host:\"relay.example\",port:24443} and (.client_options | has(\"hop_interval\") | not) and .client_options.tls_spki_sha256 == \"$wrong_spki\"" 'off retains numeric base, clears interval and preserves TLS pin'
+cp "$PROXY_RELAY_FILE" "$TEST_TEMP/before-hy2-rejection.json"
+for bad_args in interval manual side zero fraction; do
+    case "$bad_args" in
+        interval) expect_failure proxy_relay_exit_edit --id exit-0000000000000001 --hop-interval 30 ;;
+        manual) expect_failure proxy_relay_exit_edit --id exit-0000000000000001 --bandwidth-mode manual ;;
+        side) expect_failure proxy_relay_exit_edit --id exit-0000000000000001 --up-mbps 17 ;;
+        zero) expect_failure proxy_relay_exit_edit --id exit-0000000000000001 --bandwidth-mode manual --up-mbps 0 --down-mbps 31 ;;
+        fraction) expect_failure proxy_relay_exit_edit --id exit-0000000000000001 --bandwidth-mode manual --up-mbps 1.5 --down-mbps 31 ;;
+    esac
+    cmp -s "$PROXY_RELAY_FILE" "$TEST_TEMP/before-hy2-rejection.json" || fail 'invalid HY2 edit changed state'
+done
+proxy_relay_exit_add --name multi-override --core sing-box --uri 'hy2://secret@[2001:db8::10]:24443-24445?sni=relay.example' \
+    --hop-ports '34443,34445' --hop-interval 7 --bandwidth-mode manual --up-mbps 17 --down-mbps 31
+assert_json "$(cat "$PROXY_RELAY_FILE")" '.exits | any(.name == "multi-override" and .endpoint == {host:"2001:db8::10",port:34443,ports:"34443,34445"} and .client_options.hop_interval == "7")' 'explicit hop option overrides URI ports on add'
+proxy_relay_exit_edit --id exit-0000000000000001 --hop-ports '24443,24445' --hop-interval 8
+proxy_relay_exit_edit --id exit-0000000000000001 --uri "$empty_uri"
+assert_json "$(cat "$PROXY_RELAY_FILE")" '.exits[0] | .endpoint.port == 443 and (.endpoint | has("ports") | not) and (.client_options | has("hop_interval") | not)' 'single-port URI replacement also clears interval'
+
 # A legacy exit used only by nftables remains editable and deletable without an
 # outbound render. A rename must not demand TLS material from a legacy binding.
 write_state "$legacy"
@@ -202,4 +237,50 @@ MENU_FIELD=tls-spki-sha256 MENU_VALUE="$wrong_spki" proxy_relay_menu_exit_edit
 assert_json "$(cat "$PROXY_RELAY_FILE")" ".exits[0].client_options.tls_spki_sha256 == \"$wrong_spki\"" 'numbered menu SPKI input reaches edit'
 MENU_FIELD=chrome-parrot MENU_VALUE='' proxy_relay_menu_exit_edit
 assert_json "$(cat "$PROXY_RELAY_FILE")" '.exits[0].client_options.chrome_parrot == false' 'numbered menu Chrome input reaches edit'
+MENU_FIELD=hop-ports MENU_VALUE='443,445' proxy_relay_menu_exit_edit
+MENU_FIELD=hop-interval MENU_VALUE='5-10' proxy_relay_menu_exit_edit
+assert_json "$(cat "$PROXY_RELAY_FILE")" '.exits[0] | .endpoint.ports == "443,445" and .client_options.hop_interval == "5-10"' 'numbered menu hopping inputs reach edit'
+for choice in hop-ports hop-interval bandwidth-mode up-mbps down-mbps chrome-parrot bbr-profile; do
+    grep -Fxq "$choice" "$TEST_TEMP/menu-options" || fail "missing HY2 menu choice: $choice"
+done
+
+# Installed versions restrict menu choices, while existing overrides can still
+# be reset after a core downgrade. Uninstalled drafts retain all choices above.
+proxy_core_registered() { [[ "${MENU_INSTALLED:-0}" == 1 ]]; }
+proxy_core_config_version() { printf '%s' "$MENU_VERSION"; }
+for menu_case in 'sing-box 1.13.12 no no' 'sing-box 1.14.0 yes yes' \
+    'xray 26.4.12 no no' 'xray 26.4.13 yes no' 'xray 26.9.8 yes yes'; do
+    IFS=' ' read -r menu_core menu_version menu_bbr menu_chrome <<<"$menu_case"
+    write_state "$(make_exit "$empty_uri" "$menu_core")"
+    MENU_INSTALLED=1 MENU_VERSION="$menu_version" MENU_FIELD=name MENU_VALUE=menu-fixture proxy_relay_menu_exit_edit
+    for menu_option in bbr-profile chrome-parrot; do
+        present=no
+        if grep -Fxq "$menu_option" "$TEST_TEMP/menu-options"; then present=yes; fi
+        expected="$menu_bbr"; [[ "$menu_option" != chrome-parrot ]] || expected="$menu_chrome"
+        [[ "$present" == "$expected" ]] || fail "wrong $menu_option menu availability for $menu_core $menu_version"
+    done
+done
+write_state "$(jq -c '.client_options={chrome_parrot:true,bbr_profile:"aggressive"}' <<<"$(make_exit "$empty_uri")")"
+MENU_INSTALLED=1 MENU_VERSION=1.13.12 MENU_FIELD=chrome-parrot MENU_VALUE='' proxy_relay_menu_exit_edit
+MENU_INSTALLED=1 MENU_VERSION=1.13.12 MENU_FIELD=bbr-profile MENU_VALUE='' proxy_relay_menu_exit_edit
+assert_json "$(cat "$PROXY_RELAY_FILE")" '.exits[0].client_options | has("chrome_parrot") or has("bbr_profile") | not' 'unsupported overrides can be restored to default through menu'
+MENU_INSTALLED=1 MENU_VERSION=1.13.12 MENU_FIELD=hop-ports MENU_VALUE='443,445' proxy_relay_menu_exit_edit
+MENU_INSTALLED=1 MENU_VERSION=1.13.12 MENU_FIELD=hop-interval MENU_VALUE='7' proxy_relay_menu_exit_edit
+MENU_INSTALLED=1 MENU_VERSION=1.13.12 MENU_FIELD=hop-interval MENU_VALUE='5-10' expect_failure proxy_relay_menu_exit_edit
+proxy_relay_exit_show --id exit-0000000000000001 >"$TEST_TEMP/hop-details"
+grep -Fq '固定 7 秒' "$TEST_TEMP/hop-details" || fail 'fixed interval details'
+MENU_INSTALLED=1 MENU_VERSION=1.14.0 MENU_FIELD=hop-interval MENU_VALUE='5-10' proxy_relay_menu_exit_edit
+proxy_relay_exit_show --id exit-0000000000000001 >"$TEST_TEMP/hop-details"
+grep -Fq '随机 5-10 秒' "$TEST_TEMP/hop-details" || fail 'random interval details'
+(
+    proxy_is_interactive() { return 0; }
+    proxy_prompt_select() { printf '%s\n' "$1" >>"$TEST_TEMP/add-prompts"; printf '%s' "$2"; }
+    proxy_prompt_value() { printf '%s' "$2"; }
+    MENU_INSTALLED=1 MENU_VERSION=1.13.12 proxy_relay_exit_add --name old-menu-add --uri "$empty_uri" --core sing-box
+    if grep -Eq '^(Chrome QUIC|BBR Profile)$' "$TEST_TEMP/add-prompts"; then fail 'old sing-box add menu exposed unsupported options'; fi
+    : >"$TEST_TEMP/add-prompts"
+    MENU_INSTALLED=1 MENU_VERSION=1.14.0 proxy_relay_exit_add --name new-menu-add --uri "$empty_uri" --core sing-box
+    grep -Fxq 'Chrome QUIC' "$TEST_TEMP/add-prompts" || fail 'new sing-box add menu missing Chrome'
+    grep -Fxq 'BBR Profile' "$TEST_TEMP/add-prompts" || fail 'new sing-box add menu missing BBR'
+)
 printf 'PASS: relay TLS pins, migration, client options, CLI and menu\n'

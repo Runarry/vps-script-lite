@@ -4,6 +4,10 @@
 
 # shellcheck source=commands/service/proxy/dns.sh
 source "$(dirname -- "${BASH_SOURCE[0]}")/dns.sh"
+# shellcheck source=commands/service/proxy/hysteria2.sh
+source "${BASH_SOURCE[0]%/*}/hysteria2.sh"
+# shellcheck source=commands/service/proxy/hysteria2-runtime.sh
+source "${BASH_SOURCE[0]%/*}/hysteria2-runtime.sh"
 
 readonly PROXY_SCHEMA_VERSION=1
 readonly PROXY_ETC_LOGICAL="/etc/vpsctl/proxy"
@@ -380,7 +384,7 @@ proxy_manifest_default() {
 }
 
 proxy_manifest_validate_file() {
-    local file="$1" node
+    local file="$1" node ports canonical
     command -v jq >/dev/null 2>&1 || {
         vps_cmd_error "节点管理需要 jq"
         return 3
@@ -417,7 +421,10 @@ proxy_manifest_validate_file() {
             ((.credentials | type) == "object") and
             ((.tls | type) == "object") and
             ((.transport | type) == "object") and
-            ((.options | type) == "object")
+            ((.options | type) == "object") and
+            ((.options | has("hop_ports") | not) or
+                (.profile == "hysteria2" and (.options.hop_ports | type) == "string" and
+                 (.options.hop_ports | test("^[0-9,-]+$"))))
         )
     ' "$file" >/dev/null 2>&1 || {
         vps_cmd_error "节点清单格式或唯一性校验失败：$file"
@@ -429,6 +436,10 @@ proxy_manifest_validate_file() {
     while IFS= read -r node; do
         proxy_reality_guard_validate_node "$node" || return $?
     done < <(jq -c '.nodes[] | select(.tls | has("reality_guard"))' "$file")
+    while IFS= read -r ports; do
+        canonical="$(proxy_hy2_ports_normalize "$ports")" || return 10
+        [[ "$canonical" == "$ports" ]] || { vps_cmd_error "HY2 跳跃端口必须按升序合并保存：$ports"; return 10; }
+    done < <(jq -r '.nodes[].options | select(has("hop_ports")) | .hop_ports' "$file")
 }
 
 proxy_manifest_ensure() {
@@ -1016,6 +1027,8 @@ proxy_validate_config_with_binary() {
 proxy_write_transaction() {
     local core="$1" manifest_backup="$2" config_backup="$3" manifest_existed="$4" config_existed="$5"
     local relay_backup="${6:-}" relay_existed="${7:-false}" relay_touched="${8:-false}"
+    local runtime="${9:-}"
+    [[ -n "$runtime" ]] || runtime='{}'
     local json
     json="$(jq -n \
         --arg core "$core" \
@@ -1026,11 +1039,12 @@ proxy_write_transaction() {
         --arg relay_backup "$relay_backup" \
         --argjson relay_existed "$relay_existed" \
         --argjson relay_touched "$relay_touched" \
+        --argjson runtime "$runtime" \
         --arg created_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
         '{schema_version:1, core:$core, manifest_backup:$manifest_backup, config_backup:$config_backup,
           manifest_existed:$manifest_existed, config_existed:$config_existed,
           relay_backup:$relay_backup,relay_existed:$relay_existed,relay_touched:$relay_touched,
-          created_at:$created_at}')" || return 20
+          runtime:$runtime,created_at:$created_at}')" || return 20
     proxy_atomic_write_json "${PROXY_STATE_LOGICAL}/transaction.json" 0600 "$json"
 }
 
@@ -1186,6 +1200,7 @@ proxy_recover_core_switch_transaction() {
     proxy_ufw_nodes_sync || failed=1
     proxy_core_switch_restore_service "$target_core" "$target_registered" "$target_active" "$target_enabled" || failed=1
     proxy_core_switch_restore_service "$source_core" "$source_registered" "$source_active" "$source_enabled" || failed=1
+    proxy_hy2_runtime_restore "$(jq -c '.runtime // {}' "$PROXY_TRANSACTION")" || failed=1
     if ((failed)); then
         vps_cmd_error "节点切核事务恢复不完整；事务记录已保留"
         return 30
@@ -1200,7 +1215,7 @@ proxy_recover_core_switch_transaction() {
 
 proxy_recover_transaction() {
     local core manifest_backup config_backup manifest_existed config_existed config_logical failed=0
-    local relay_backup relay_existed relay_touched
+    local relay_backup relay_existed relay_touched runtime
     if [[ ! -e "$PROXY_TRANSACTION" && ! -L "$PROXY_TRANSACTION" ]]; then
         if [[ -e "$PROXY_CORE_SWITCH_CERT_TRANSACTION" || -L "$PROXY_CORE_SWITCH_CERT_TRANSACTION" ]]; then
             proxy_recover_core_switch_cert_stage
@@ -1265,8 +1280,10 @@ proxy_recover_transaction() {
     fi
     ((failed == 0)) || return 30
     proxy_ufw_nodes_sync || return 30
+    runtime="$(jq -c '.runtime // {}' "$PROXY_TRANSACTION")" || return 30
+    proxy_hy2_runtime_restore "$runtime" || return 30
     rm -f -- "$PROXY_TRANSACTION" || return 30
-    if [[ "$relay_touched" == true ]] && declare -F proxy_relay_forward_sync >/dev/null 2>&1; then
+    if [[ "$relay_touched" == true && "$(jq -r '.touched // false' <<<"$runtime")" != true ]] && declare -F proxy_relay_forward_sync >/dev/null 2>&1; then
         proxy_relay_forward_sync || return 30
     fi
     vps_cmd_success "未完成事务已恢复"
@@ -1285,13 +1302,14 @@ _proxy_commit_core_switch() {
     local manifest_backup="" manifest_existed=false source_config_backup="" source_config_existed=false
     local target_config_backup="" target_config_existed=false relay_backup="" relay_existed=false
     local source_config_logical target_config_logical source_config_path target_config_path
-    local source_pending target_pending transaction_json failed=0 post_commit_failed=0
+    local source_pending target_pending transaction_json failed=0 post_commit_failed=0 runtime='{}'
     PROXY_CORE_SWITCH_COMMITTED=0
     proxy_core_valid "$source_core" && proxy_core_valid "$target_core" && [[ "$source_core" != "$target_core" ]] || return 2
     [[ -f "$candidate_manifest" && -f "$source_candidate_config" && -f "$target_candidate_config" ]] || return 2
     [[ "$relay_touched" == true || "$relay_touched" == false ]] || return 2
     jq -e 'type == "array" and all(.[]; type == "string")' <<<"$created_json" >/dev/null 2>&1 || return 2
     proxy_manifest_validate_file "$candidate_manifest" || return $?
+    proxy_hy2_validate_conflicts "$candidate_manifest" "${candidate_relay:-${PROXY_RELAY_FILE:-}}" 1 || return $?
     if [[ "$relay_touched" == true ]]; then
         [[ -n "$candidate_relay" ]] || return 2
         proxy_relay_validate_file "$candidate_relay" "$candidate_manifest" || return $?
@@ -1319,6 +1337,7 @@ _proxy_commit_core_switch() {
         return 0
     fi
     source_config_logical="$(proxy_core_config_logical "$source_core")" || return 2
+    runtime="$(proxy_hy2_runtime_capture "$candidate_manifest")" || return $?
     target_config_logical="$(proxy_core_config_logical "$target_core")" || return 2
     source_config_path="$(proxy_core_config_path "$source_core")" || return 2
     target_config_path="$(proxy_core_config_path "$target_core")" || return 2
@@ -1355,6 +1374,7 @@ _proxy_commit_core_switch() {
         --arg source_config_backup "$source_config_backup" --argjson source_config_existed "$source_config_existed" \
         --arg target_config_backup "$target_config_backup" --argjson target_config_existed "$target_config_existed" \
         --arg relay_backup "$relay_backup" --argjson relay_existed "$relay_existed" --argjson relay_touched "$relay_touched" \
+        --argjson runtime "$runtime" \
         --argjson cert_created "$created_json" --arg created_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
         '{schema_version:2,kind:"node-core-switch",source_core:$source_core,target_core:$target_core,
           source_registered:$source_registered,target_registered:$target_registered,
@@ -1363,7 +1383,7 @@ _proxy_commit_core_switch() {
           source_config_backup:$source_config_backup,source_config_existed:$source_config_existed,
           target_config_backup:$target_config_backup,target_config_existed:$target_config_existed,
           relay_backup:$relay_backup,relay_existed:$relay_existed,relay_touched:$relay_touched,
-          cert_created:$cert_created,created_at:$created_at}')" || return 20
+          runtime:$runtime,cert_created:$cert_created,created_at:$created_at}')" || return 20
     proxy_atomic_write_json "${PROXY_STATE_LOGICAL}/transaction.json" 0600 "$transaction_json" || return 20
     if [[ -e "$PROXY_CORE_SWITCH_CERT_TRANSACTION" || -L "$PROXY_CORE_SWITCH_CERT_TRANSACTION" ]]; then
         if [[ ! -f "$PROXY_CORE_SWITCH_CERT_TRANSACTION" || -L "$PROXY_CORE_SWITCH_CERT_TRANSACTION" ]] ||
@@ -1377,6 +1397,9 @@ _proxy_commit_core_switch() {
     ((failed)) || proxy_atomic_write_from_file "$candidate_manifest" "${PROXY_STATE_LOGICAL}/nodes.json" 0600 || failed=1
     if ((failed == 0)) && [[ "$relay_touched" == true ]]; then
         proxy_atomic_write_from_file "$candidate_relay" "${PROXY_RELAY_LOGICAL}" 0600 || failed=1
+    fi
+    if ((failed == 0)) && [[ "$(jq -r '.touched // false' <<<"$runtime")" == true ]]; then
+        proxy_relay_forward_sync || failed=1
     fi
     if ((failed == 0)) && [[ "$source_active" == true ]]; then
         proxy_service_action "$source_core" stop || failed=1
@@ -1441,6 +1464,8 @@ proxy_mark_pending() {
     local relay_existed="${8:-false}" relay_touched="${9:-false}"
     local relay_runtime_touched="${10:-false}" relay_cache_backup="${11:-}" relay_cache_existed="${12:-false}"
     local relay_nft_backup="${13:-}" relay_nft_existed="${14:-false}"
+    local runtime="${15:-}"
+    [[ -n "$runtime" ]] || runtime='{}'
     local pending_logical pending_path json
     pending_logical="$(proxy_core_pending_logical "$core")" || return 2
     pending_path="$(proxy_core_pending_path "$core")" || return 2
@@ -1474,7 +1499,9 @@ proxy_mark_pending() {
             --argjson relay_existed "$relay_existed" --argjson relay_touched "$relay_touched" \
             --argjson relay_runtime_touched "$relay_runtime_touched" \
             --arg relay_cache_backup "$relay_cache_backup" --argjson relay_cache_existed "$relay_cache_existed" \
-            --arg relay_nft_backup "$relay_nft_backup" --argjson relay_nft_existed "$relay_nft_existed" '
+            --arg relay_nft_backup "$relay_nft_backup" --argjson relay_nft_existed "$relay_nft_existed" \
+            --argjson runtime "$runtime" '
+            if (.runtime.touched // false) then . else .runtime=$runtime end |
             .reason = ((.reason // "") | if length == 0 then $reason elif (split(",") | index($reason)) != null then . else . + "," + $reason end) |
             if ((.manifest_backup // "") == "" and $manifest_backup != "") then .manifest_backup=$manifest_backup else . end |
             if ((.config_backup // "") == "" and $config_backup != "") then .config_backup=$config_backup else . end |
@@ -1498,11 +1525,12 @@ proxy_mark_pending() {
         --argjson relay_runtime_touched "$relay_runtime_touched" \
         --arg relay_cache_backup "$relay_cache_backup" --argjson relay_cache_existed "$relay_cache_existed" \
         --arg relay_nft_backup "$relay_nft_backup" --argjson relay_nft_existed "$relay_nft_existed" \
+        --argjson runtime "$runtime" \
         --arg created_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
         '{schema_version:1,core:$core,reason:$reason,manifest_backup:$manifest_backup,config_backup:$config_backup,
           binary_backup:$binary_backup,meta_backup:$meta_backup,relay_backup:$relay_backup,
           relay_existed:$relay_existed,relay_touched:$relay_touched,
-          relay_runtime_touched:$relay_runtime_touched,
+          runtime:$runtime,relay_runtime_touched:$relay_runtime_touched,
           relay_cache_backup:$relay_cache_backup,relay_cache_existed:$relay_cache_existed,
           relay_nft_backup:$relay_nft_backup,relay_nft_existed:$relay_nft_existed,
           created_at:$created_at}')" || return 20
@@ -1543,13 +1571,14 @@ _proxy_commit_manifest_config() {
     local manifest_backup="" config_backup="" manifest_existed=false config_existed=false
     local relay_backup="" relay_existed=false relay_touched=false
     local relay_runtime_touched=false relay_cache_backup="" relay_cache_existed=false
-    local relay_nft_backup="" relay_nft_existed=false relay_nft_snapshot="" current_forward_count=0 candidate_forward_count=0
-    local config_logical config_path failed=0 pending_required=0 active=0 pending_path
+    local relay_nft_backup="" relay_nft_existed=false relay_nft_snapshot="" current_forward_count=0 candidate_forward_count=0 snapshot_status
+    local config_logical config_path failed=0 pending_required=0 active=0 pending_path runtime='{}'
     proxy_core_registered "$core" || {
         vps_cmd_error "请先安装或登记 $(proxy_core_label "$core") 内核"
         return 3
     }
     proxy_manifest_validate_file "$candidate_manifest" || return $?
+    proxy_hy2_validate_conflicts "$candidate_manifest" "${candidate_relay:-${PROXY_RELAY_FILE:-}}" 1 || return $?
     if [[ -n "$candidate_relay" ]]; then
         declare -F proxy_relay_validate_file >/dev/null 2>&1 || return 20
         proxy_relay_validate_file "$candidate_relay" "$candidate_manifest" || return $?
@@ -1562,6 +1591,7 @@ _proxy_commit_manifest_config() {
         vps_cmd_info "演练：提交 ${core} 节点清单和已验证配置；运行中的内核在仅配置变更时将自动重启"
         return 0
     fi
+    runtime="$(proxy_hy2_runtime_capture "$candidate_manifest")" || return $?
     if [[ -f "$PROXY_MANIFEST" ]]; then
         manifest_existed=true
         manifest_backup="$(proxy_backup_file "$core" "${PROXY_STATE_LOGICAL}/nodes.json" nodes.json)" || return 20
@@ -1592,12 +1622,15 @@ _proxy_commit_manifest_config() {
                     rm -f -- "$relay_nft_snapshot"
                     return 20
                 }
+            else
+                snapshot_status=$?
+                if ((snapshot_status != 1)); then rm -f -- "$relay_nft_snapshot"; return "$snapshot_status"; fi
             fi
             rm -f -- "$relay_nft_snapshot"
         fi
     fi
     proxy_write_transaction "$core" "$manifest_backup" "$config_backup" "$manifest_existed" "$config_existed" \
-        "$relay_backup" "$relay_existed" "$relay_touched" || return 20
+        "$relay_backup" "$relay_existed" "$relay_touched" "$runtime" || return 20
     if ! proxy_atomic_write_from_file "$candidate_config" "$config_logical" 0600; then
         failed=1
     elif ! proxy_atomic_write_from_file "$candidate_manifest" "${PROXY_STATE_LOGICAL}/nodes.json" 0600; then
@@ -1605,11 +1638,13 @@ _proxy_commit_manifest_config() {
     elif [[ "$relay_touched" == true ]] && ! proxy_atomic_write_from_file "$candidate_relay" "${PROXY_RELAY_LOGICAL}" 0600; then
         failed=1
     fi
+    if ((failed == 0)) && [[ "$(jq -r '.touched // false' <<<"$runtime")" == true ]]; then
+        proxy_relay_forward_sync || failed=1
+    fi
     if ((failed)); then
         proxy_recover_transaction || return 30
         return 20
     fi
-    rm -f -- "$PROXY_TRANSACTION" || return 30
     if proxy_service_is_active "$core"; then
         active=1
         pending_required=1
@@ -1619,29 +1654,12 @@ _proxy_commit_manifest_config() {
     fi
     if ((pending_required)) && ! proxy_mark_pending "$core" "$reason" "$manifest_backup" "$config_backup" "" "" \
         "$relay_backup" "$relay_existed" "$relay_touched" "$relay_runtime_touched" \
-        "$relay_cache_backup" "$relay_cache_existed" "$relay_nft_backup" "$relay_nft_existed"; then
-        failed=0
-        if [[ "$config_existed" == "true" ]]; then
-            proxy_restore_backup "$config_backup" "$config_logical" 0600 || failed=1
-        else
-            rm -f -- "$config_path" || failed=1
-        fi
-        if [[ "$manifest_existed" == "true" ]]; then
-            proxy_restore_backup "$manifest_backup" "${PROXY_STATE_LOGICAL}/nodes.json" 0600 || failed=1
-        else
-            rm -f -- "$PROXY_MANIFEST" || failed=1
-        fi
-        if [[ "$relay_touched" == true ]]; then
-            if [[ "$relay_existed" == true ]]; then
-                proxy_restore_backup "$relay_backup" "${PROXY_RELAY_LOGICAL}" 0600 || failed=1
-            else
-                rm -f -- "${PROXY_RELAY_FILE}" || failed=1
-            fi
-        fi
-        ((failed == 0)) || return 30
+        "$relay_cache_backup" "$relay_cache_existed" "$relay_nft_backup" "$relay_nft_existed" "$runtime"; then
+        proxy_recover_transaction || return 30
         vps_cmd_error "无法记录待生效状态，已恢复本次提交前的配置"
         return 30
     fi
+    rm -f -- "$PROXY_TRANSACTION" || return 30
     if ((active)); then
         pending_path="$(proxy_core_pending_path "$core")" || return 30
         if proxy_pending_can_auto_apply "$pending_path"; then
@@ -1668,8 +1686,8 @@ proxy_save_lkg() {
     [[ ! -f "$PROXY_MANIFEST" ]] || cp -p -- "$PROXY_MANIFEST" "$lkg/nodes.json" || return 20
     [[ -z "${PROXY_RELAY_FILE:-}" || ! -f "$PROXY_RELAY_FILE" ]] || cp -p -- "$PROXY_RELAY_FILE" "$lkg/relay.json" || return 20
     rm -f -- "$lkg/relay-resolved.json" "$lkg/relay-nftables.nft" || return 20
-    if [[ -n "${PROXY_RELAY_FILE:-}" && -f "$PROXY_RELAY_FILE" ]] &&
-       [[ "$(jq -r '.forwards | length' "$PROXY_RELAY_FILE")" != 0 ]]; then
+    if [[ "$(proxy_hy2_count)" != 0 ]] || { [[ -n "${PROXY_RELAY_FILE:-}" && -f "$PROXY_RELAY_FILE" ]] &&
+       [[ "$(jq -r '.forwards | length' "$PROXY_RELAY_FILE")" != 0 ]]; }; then
         declare -F proxy_relay_forward_init >/dev/null 2>&1 || return 20
         proxy_relay_forward_init || return $?
         [[ ! -f "$PROXY_RELAY_FORWARD_CACHE" ]] || cp -p -- "$PROXY_RELAY_FORWARD_CACHE" "$lkg/relay-resolved.json" || return 20
@@ -1688,7 +1706,7 @@ _proxy_restore_pending() {
     local core="$1" pending manifest_backup config_backup binary_backup meta_backup failed=0
     local relay_backup relay_existed relay_touched relay_runtime_touched
     local relay_cache_backup relay_cache_existed relay_nft_backup relay_nft_existed
-    local binary_logical meta_logical config_logical
+    local binary_logical meta_logical config_logical runtime
     pending="$(proxy_core_pending_path "$core")" || return 2
     [[ -f "$pending" && ! -L "$pending" ]] || return 1
     jq -e --arg core "$core" '
@@ -1752,8 +1770,10 @@ _proxy_restore_pending() {
         fi
     fi
     ((failed == 0)) || return 30
+    runtime="$(jq -c '.runtime // {}' "$pending")" || return 30
+    proxy_hy2_runtime_restore "$runtime" || return 30
     rm -f -- "$pending" || return 30
-    if [[ "$relay_touched" == true && "$relay_runtime_touched" != true ]] && declare -F proxy_relay_forward_sync >/dev/null 2>&1; then
+    if [[ "$relay_touched" == true && "$relay_runtime_touched" != true && "$(jq -r '.touched // false' <<<"$runtime")" != true ]] && declare -F proxy_relay_forward_sync >/dev/null 2>&1; then
         proxy_relay_forward_sync || return 30
     fi
 }

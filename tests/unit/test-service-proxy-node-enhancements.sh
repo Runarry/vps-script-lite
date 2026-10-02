@@ -73,7 +73,7 @@ proxy_generate_reality_keys() {
     PROXY_REALITY_PRIVATE_KEY=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
     PROXY_REALITY_PUBLIC_KEY=BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB
 }
-ss() { return 0; }
+ss() { [[ -z "${TEST_SS_OUTPUT:-}" ]] || printf '%s\n' "$TEST_SS_OUTPUT"; return 0; }
 proxy_prepare_certificate() {
     printf 'certificate\n' >>"$TEST_WRITES"
     PROXY_CERTIFICATE_LOGICAL="${PROXY_ETC_LOGICAL}/${1}/certs/${2}/cert.pem"
@@ -238,5 +238,72 @@ assert_json "$(proxy_manifest_node "$hy_id")" '.ip_strategy == "ipv6_only" and .
 
 run_ok proxy_node_add --profile hysteria2 --core xray --name hy-xray --port 30202 --address proxy.example
 assert_json "$(node_named hy-xray)" '.core == "xray" and .options.obfs_type == "none" and .options.up_mbps == 10000 and .options.down_mbps == 10000 and (.options | has("bbr_profile") | not)' 'Xray Hysteria2 CLI retains original bandwidth defaults without sing-box options'
+
+# Server features use the target version, and unsupported edits never stage files.
+TEST_XRAY_VERSION=26.4.12
+reject_without_writes proxy_node_add --profile hysteria2 --core xray --port 30210 --address proxy.example --bbr-profile standard
+TEST_XRAY_VERSION=26.4.13
+run_ok proxy_node_add --profile hysteria2 --core xray --name hy-features --port 30210 --address 2001:db8::10 --bbr-profile conservative --hop-ports 30304,30302-30303,30300-30302
+feature_node="$(node_named hy-features)"
+feature_id="$(jq -r '.id' <<<"$feature_node")"
+assert_json "$feature_node" '.port == 30210 and .options.hop_ports == "30300-30304" and .options.bbr_profile == "conservative" and (.options | has("congestion_control") | not)' 'new HY2 stores canonical hop ports and only effective server options'
+assert_json "$(<"${TEST_TEMP}/config-xray.json")" \
+    '.inbounds[] | select(.port == 30210) | .streamSettings.finalmask.quicParams.bbrProfile == "conservative" and .streamSettings.finalmask.quicParams.brutalUp == "10000000000"' 'Xray BBR profile coexists with unchanged bandwidth defaults'
+feature_identity="$(jq -Sc '{credentials,tls}' <<<"$feature_node")"
+uri="$(proxy_node_render_uri_json "$feature_node")"
+[[ "$uri" == *'@[2001:db8::10]:30210,30300-30304?'* && "$uri" == *'pinSHA256='* ]] || fail 'multiport IPv6 URI must retain brackets, base port and TLS pin'
+sb_feature="$(jq '.core="sing-box"' <<<"$feature_node")"
+assert_equal "$uri" "$(proxy_node_render_uri_json "$sb_feature")" 'both cores share the same HY2 multiport authority and authentication'
+reject_without_writes proxy_node_edit --id "$feature_id" --obfs gecko
+TEST_XRAY_VERSION=26.6.0
+reject_without_writes proxy_node_edit --id "$feature_id" --obfs gecko
+TEST_XRAY_VERSION=26.6.1
+run_ok proxy_node_edit --id "$feature_id" --obfs gecko
+assert_json "$(<"${TEST_TEMP}/config-xray.json")" \
+    '.inbounds[] | select(.port == 30210) | .streamSettings.finalmask.udp[0].type == "salamander" and .streamSettings.finalmask.udp[0].settings.packetSize == "512-1200"' 'Gecko uses Xray Salamander packet-size obfuscation'
+feature_before_switch="$(proxy_manifest_node "$feature_id")"
+run_ok proxy_node_core_set --id "$feature_id" --core sing-box --confirm-disruptive
+assert_json "$(<"${TEST_TEMP}/config-sing-box.json")" \
+    '.inbounds[] | select(.listen_port == 30210) | .bbr_profile == "conservative" and .obfs.type == "gecko" and (has("hop_ports") | not)' 'server hopping uses the existing listener while convertible QUIC options reach sing-box'
+run_ok proxy_node_core_set --id "$feature_id" --core xray --confirm-disruptive
+assert_equal "$(jq -Sc 'del(.updated_at)' <<<"$feature_before_switch")" "$(jq -Sc 'del(.updated_at)' <<<"$(proxy_manifest_node "$feature_id")")" 'Gecko, BBR, hopping, credentials and TLS survive both core switches'
+run_ok proxy_node_edit --id "$feature_id" --name hy-features-renamed
+assert_json "$(proxy_manifest_node "$feature_id")" '.options.hop_ports == "30300-30304" and .options.bbr_profile == "conservative"' 'unrelated edits preserve hop ports and BBR'
+
+# Hopping conflicts are detected before certificate creation in both directions.
+reject_without_writes proxy_node_add --profile hysteria2 --core sing-box --port 30211 --address proxy.example --hop-ports 30304-30308
+reject_without_writes proxy_node_add --profile shadowsocks-aes-256-gcm --core sing-box --port 30304 --address proxy.example
+reject_without_writes proxy_node_edit --id "$feature_id" --hop-ports 30201
+reject_without_writes proxy_node_add --profile vless-tcp --core sing-box --port 30211 --address proxy.example --hop-ports off
+reject_without_writes proxy_node_add --profile hysteria2 --core sing-box --port 30211 --address proxy.example --hop-ports 65536
+reject_without_writes proxy_node_edit --id "$feature_id" --hop-ports 30308-30304
+reject_without_writes proxy_node_add --profile hysteria2 --core sing-box --port 30211 --address proxy.example --congestion-control bbr
+reject_without_writes proxy_node_edit --id "$feature_id" --congestion-control cubic
+reject_without_writes proxy_node_edit --id "$feature_id" --up-mbps 0
+reject_without_writes proxy_node_edit --id "$feature_id" --down-mbps 0
+TEST_SS_OUTPUT='udp UNCONN 0 0 *:30303 *:*'
+reject_without_writes proxy_node_edit --id "$feature_id" --hop-ports 30300-30305
+TEST_SS_OUTPUT=$'udp UNCONN 0 0 *:30210 *:*\ntcp LISTEN 0 128 *:30303 *:*'
+run_ok proxy_node_edit --id "$feature_id" --hop-ports 30305,30300-30304
+assert_json "$(proxy_manifest_node "$feature_id")" '.options.hop_ports == "30300-30305" and .port == 30210' 'hop edit permits the existing UDP listener and unrelated TCP sockets'
+TEST_SS_OUTPUT=''
+run_ok proxy_node_edit --id "$feature_id" --hop-ports off --bbr-profile default
+reset_node="$(proxy_manifest_node "$feature_id")"
+assert_json "$reset_node" '(.options | has("hop_ports") or has("bbr_profile") | not) and .port == 30210 and .options.up_mbps == 10000 and .options.down_mbps == 10000' 'off/default remove only optional fields'
+assert_equal "$feature_identity" "$(jq -Sc '{credentials,tls}' <<<"$reset_node")" 'reset preserves authentication and TLS identity'
+assert_json "$(<"${TEST_TEMP}/config-xray.json")" \
+    '.inbounds[] | select(.port == 30210) | .streamSettings.finalmask.quicParams | has("bbrProfile") | not' 'default reset removes the rendered Xray BBR field'
+run_ok proxy_node_add --profile shadowsocks-aes-256-gcm --core sing-box --port 30304 --address proxy.example
+run_ok proxy_node_add --profile tuic-v5 --core sing-box --name tuic-congestion --port 30212 --address proxy.example --congestion-control cubic
+assert_json "$(node_named tuic-congestion)" '.options.congestion_control == "cubic"' 'TUIC retains explicit congestion control'
+
+# Historical HY2 congestion strings remain opaque and no hop defaults are added.
+legacy_hy="$(jq '.options.congestion_control="legacy-choice"' <<<"$reset_node")"
+replace_node "$feature_id" "$legacy_hy"
+run_ok proxy_node_edit --id "$feature_id" --name hy-legacy-compatible
+legacy_hy="$(proxy_manifest_node "$feature_id")"
+assert_json "$legacy_hy" '.options.congestion_control == "legacy-choice" and (.options | has("hop_ports") | not)' 'legacy state retains an unused congestion field without materializing hop ports'
+details="$(proxy_node_details_print "$legacy_hy")"
+[[ "$details" == *'UDP 端口跳跃：关闭'* && "$details" != *'legacy-choice'* ]] || fail 'HY2 details should show hop state without obsolete congestion control'
 
 printf 'PASS: proxy node XHTTP, Hysteria2 and core-switch enhancements\n'

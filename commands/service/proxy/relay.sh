@@ -443,7 +443,7 @@ proxy_relay_exit_list() {
 }
 
 proxy_relay_exit_show() {
-    local id="" show_uri=0 arg exit
+    local id="" show_uri=0 arg exit interval interval_mode
     while (($#)); do
         arg="$1"
         case "$arg" in
@@ -471,11 +471,21 @@ proxy_relay_exit_show() {
         elif [[ "$(jq -r '.descriptor.tls.certificate_sha256 // empty' <<<"$exit")" != '' && "$(jq -r '.core' <<<"$exit")" == sing-box ]]; then
             printf '  TLS pin：尚需证书或 SPKI（纯端口转发可用）\n'
         fi
-        if jq -e '.client_options | has("chrome_parrot")' <<<"$exit" >/dev/null 2>&1; then
-            printf '  Chrome QUIC：%s\n' "$(jq -r 'if .client_options.chrome_parrot then "on" else "off" end' <<<"$exit")"
-        fi
-        if jq -e '.client_options | has("bbr_profile")' <<<"$exit" >/dev/null 2>&1; then
-            printf '  BBR Profile：%s\n' "$(jq -r '.client_options.bbr_profile' <<<"$exit")"
+        if [[ "$(jq -r '.profile' <<<"$exit")" == hysteria2 ]]; then
+            printf '  跳跃端口：%s\n' "$(jq -r '.endpoint.ports // "off"' <<<"$exit")"
+            if jq -e '.endpoint | has("ports")' <<<"$exit" >/dev/null; then
+                interval="$(jq -r '.client_options.hop_interval // "30"' <<<"$exit")"
+                interval_mode="固定"; [[ "$interval" != *-* ]] || interval_mode="随机"
+                printf '  跳跃间隔：%s %s 秒（默认固定 30，仅内核客户端）\n' "$interval_mode" "$interval"
+            fi
+            if jq -e '.client_options | has("up_mbps")' <<<"$exit" >/dev/null 2>&1; then
+                printf '  本地带宽设置：manual，上行 %s / 下行 %s Mbps（最终使用协商结果）\n' \
+                    "$(jq -r '.client_options.up_mbps' <<<"$exit")" "$(jq -r '.client_options.down_mbps' <<<"$exit")"
+            else
+                printf '  本地带宽设置：auto（由内核协商）\n'
+            fi
+            printf '  Chrome QUIC：%s\n' "$(jq -r 'if (.client_options // {} | has("chrome_parrot")) then (if .client_options.chrome_parrot then "on" else "off" end) else "default" end' <<<"$exit")"
+            printf '  BBR Profile：%s（仅协商回退 BBR 时生效）\n' "$(jq -r '.client_options.bbr_profile // "default"' <<<"$exit")"
         fi
         if proxy_core_registered "$(jq -r '.core' <<<"$exit")"; then printf '  二进制验证：可用\n'; else printf '  二进制验证：尚未验证（建立关联前需安装内核）\n'; fi
     fi
@@ -501,6 +511,51 @@ proxy_relay_copy_current() {
 
 proxy_relay_apply_client_options() {
     local exit_json="$1" cert_file="${2-}" spki="${3-}" chrome="${4-}" bbr="${5-}" pins
+    local hop_ports="${6-}" hop_interval="${7-}" bandwidth_mode="${8-}" up_mbps="${9-}" down_mbps="${10-}"
+    local descriptor uri normalized value
+    if [[ -n "$chrome$bbr$hop_ports$hop_interval$bandwidth_mode$up_mbps$down_mbps" && "$(jq -r '.profile' <<<"$exit_json")" != hysteria2 ]]; then
+        vps_cmd_error "跳端口、带宽、Chrome QUIC 和 BBR 参数仅适用于 Hysteria2"; return 2
+    fi
+    if [[ -n "$hop_ports" ]]; then
+        if [[ "$hop_ports" == off ]]; then
+            hop_ports="$(jq -r '.endpoint.port' <<<"$exit_json")"
+        fi
+        normalized="$(proxy_hy2_ports_normalize "$hop_ports")" || { vps_cmd_error "--hop-ports 需要有效端口集合或 off"; return 2; }
+        uri="$(proxy_relay_uri_rewrite "$(jq -r '.uri' <<<"$exit_json")" "$(jq -r '.endpoint.host' <<<"$exit_json")" "$normalized")" || return $?
+        descriptor="$(proxy_relay_uri_parse "$uri" hysteria2)" || return $?
+        exit_json="$(jq -c --arg uri "$uri" --argjson descriptor "$descriptor" \
+            '.uri=$uri | .descriptor=$descriptor | .endpoint=$descriptor.endpoint' <<<"$exit_json")" || return 10
+    fi
+    if [[ -n "$hop_interval" ]]; then
+        if [[ "$hop_interval" == default ]]; then
+            exit_json="$(jq -c 'del(.client_options.hop_interval)' <<<"$exit_json")" || return 10
+        else
+            jq -e '.endpoint | has("ports")' <<<"$exit_json" >/dev/null || { vps_cmd_error "--hop-interval 仅适用于多端口出口"; return 2; }
+            normalized="$(proxy_hy2_interval_normalize "$hop_interval")" || { vps_cmd_error "--hop-interval 需要 >=5 秒的 N、MIN-MAX 或 default"; return 2; }
+            exit_json="$(jq -c --arg interval "$normalized" '.client_options=(.client_options // {}) + {hop_interval:$interval}' <<<"$exit_json")" || return 10
+        fi
+    fi
+    if ! jq -e '.endpoint | has("ports")' <<<"$exit_json" >/dev/null; then
+        exit_json="$(jq -c 'del(.client_options.hop_interval)' <<<"$exit_json")" || return 10
+    fi
+    case "$bandwidth_mode" in
+        '' | auto | manual) ;;
+        *) vps_cmd_error "--bandwidth-mode 需要 auto|manual"; return 2 ;;
+    esac
+    if [[ "$bandwidth_mode" == auto ]]; then
+        [[ -z "$up_mbps$down_mbps" ]] || { vps_cmd_error "auto 模式不能同时设置上行或下行带宽"; return 2; }
+        exit_json="$(jq -c 'del(.client_options.up_mbps,.client_options.down_mbps)' <<<"$exit_json")" || return 10
+    elif [[ -n "$bandwidth_mode$up_mbps$down_mbps" ]]; then
+        up_mbps="${up_mbps:-$(jq -r '.client_options.up_mbps // empty' <<<"$exit_json")}"
+        down_mbps="${down_mbps:-$(jq -r '.client_options.down_mbps // empty' <<<"$exit_json")}"
+        for value in "$up_mbps" "$down_mbps"; do
+            [[ "$value" =~ ^[0-9]+$ ]] && jq -en --arg value "$value" '$value | tonumber | . > 0 and floor == .' >/dev/null || {
+                vps_cmd_error "manual 模式需要成对的正整数 --up-mbps/--down-mbps；已有值可单边修改"; return 2;
+            }
+        done
+        exit_json="$(jq -c --arg up "$up_mbps" --arg down "$down_mbps" \
+            '.client_options=(.client_options // {}) + {up_mbps:($up|tonumber),down_mbps:($down|tonumber)}' <<<"$exit_json")" || return 10
+    fi
     [[ -z "$cert_file" || -z "$spki" ]] || {
         vps_cmd_error "--tls-cert-file 与 --tls-spki-sha256 互斥"; return 2;
     }
@@ -515,17 +570,19 @@ proxy_relay_apply_client_options() {
              .client_options.tls_spki_sha256=$spki' <<<"$exit_json")" || return 10
     fi
     if [[ -n "$chrome" ]]; then
-        [[ "$chrome" == on || "$chrome" == off ]] || { vps_cmd_error "--chrome-parrot 需要 on|off"; return 2; }
+        [[ "$chrome" == default || "$chrome" == on || "$chrome" == off ]] || { vps_cmd_error "--chrome-parrot 需要 default|on|off"; return 2; }
         exit_json="$(jq -c --arg chrome "$chrome" \
-            '.client_options=(.client_options // {}) + {chrome_parrot:($chrome == "on")}' <<<"$exit_json")" || return 10
+            'if $chrome == "default" then del(.client_options.chrome_parrot) else
+             .client_options=(.client_options // {}) + {chrome_parrot:($chrome == "on")} end' <<<"$exit_json")" || return 10
     fi
     if [[ -n "$bbr" ]]; then
         case "$bbr" in
-            standard | conservative | aggressive) ;;
-            *) vps_cmd_error "--bbr-profile 需要 standard|conservative|aggressive"; return 2 ;;
+            default | standard | conservative | aggressive) ;;
+            *) vps_cmd_error "--bbr-profile 需要 default|standard|conservative|aggressive"; return 2 ;;
         esac
         exit_json="$(jq -c --arg bbr "$bbr" \
-            '.client_options=(.client_options // {}) + {bbr_profile:$bbr}' <<<"$exit_json")" || return 10
+            'if $bbr == "default" then del(.client_options.bbr_profile) else
+             .client_options=(.client_options // {}) + {bbr_profile:$bbr} end' <<<"$exit_json")" || return 10
     fi
     exit_json="$(proxy_relay_normalize_exit "$exit_json")" || return $?
     if jq -e '.core == "xray" and (.client_options | has("tls_spki_sha256")) and
@@ -536,10 +593,36 @@ proxy_relay_apply_client_options() {
     printf '%s' "$exit_json"
 }
 
+_proxy_relay_hy2_menu_capable() {
+    local core="$1" feature="$2" version
+    proxy_core_registered "$core" || return 0
+    version="$(proxy_core_config_version "$core")" || return $?
+    proxy_hy2_capable "$core" "$version" "$feature"
+}
+
+_proxy_relay_prompt_hop_interval() {
+    local core="$1" current="${2:-default}" value prompt
+    if _proxy_relay_hy2_menu_capable "$core" hop-random; then
+        prompt="跳跃间隔（秒，固定 N/随机 MIN-MAX/default；最少 5）"
+    else
+        prompt="跳跃间隔（秒，固定 N/default；最少 5）"
+        [[ "$current" != *-* ]] || current=default
+    fi
+    value="$(proxy_prompt_value "$prompt" "$current")" || return $?
+    if [[ "$value" != default ]]; then
+        value="$(proxy_hy2_interval_normalize "$value")" || return $?
+        if [[ "$value" == *-* ]] && ! _proxy_relay_hy2_menu_capable "$core" hop-random; then
+            vps_cmd_error "当前内核版本不支持随机跳跃间隔"; return 2
+        fi
+    fi
+    printf '%s' "$value"
+}
+
 proxy_relay_exit_add() (
     local name="" uri="" profile="" requested_core="" target="" target_port="" arg
     local id descriptor="" core="" type exit_json candidate now status=0
     local tls_cert_file="" tls_spki_sha256="" chrome_parrot="" bbr_profile="" tls_source
+    local hop_ports="" hop_interval="" bandwidth_mode="" up_mbps="" down_mbps=""
     while (($#)); do
         arg="$1"
         case "$arg" in
@@ -553,6 +636,11 @@ proxy_relay_exit_add() (
             --tls-spki-sha256) (($# >= 2)) && [[ -n "$2" ]] || return 2; tls_spki_sha256="$2"; shift 2; continue ;;
             --chrome-parrot) (($# >= 2)) && [[ -n "$2" ]] || return 2; chrome_parrot="$2"; shift 2; continue ;;
             --bbr-profile) (($# >= 2)) && [[ -n "$2" ]] || return 2; bbr_profile="$2"; shift 2; continue ;;
+            --hop-ports) (($# >= 2)) && [[ -n "$2" ]] || return 2; hop_ports="$2"; shift 2; continue ;;
+            --hop-interval) (($# >= 2)) && [[ -n "$2" ]] || return 2; hop_interval="$2"; shift 2; continue ;;
+            --bandwidth-mode) (($# >= 2)) && [[ -n "$2" ]] || return 2; bandwidth_mode="$2"; shift 2; continue ;;
+            --up-mbps) (($# >= 2)) && [[ -n "$2" ]] || return 2; up_mbps="$2"; shift 2; continue ;;
+            --down-mbps) (($# >= 2)) && [[ -n "$2" ]] || return 2; down_mbps="$2"; shift 2; continue ;;
             *) vps_cmd_error "relay exit add 的未知选项：$arg"; return 2 ;;
         esac
     done
@@ -589,12 +677,27 @@ proxy_relay_exit_add() (
                     spki) tls_spki_sha256="$(proxy_prompt_value "SPKI SHA256（Base64）" "")" || return $? ;;
                 esac
             fi
-            if [[ "$core:$profile" == sing-box:hysteria2 && -z "$chrome_parrot" ]]; then
+            if [[ "$profile" == hysteria2 ]]; then
+                if _proxy_relay_hy2_menu_capable "$core" hop-ports; then
+                    [[ -n "$hop_ports" ]] || hop_ports="$(proxy_prompt_value "跳跃端口（逗号、范围或 off）" "$(jq -r '.endpoint.ports // "off"' <<<"$descriptor")")" || return $?
+                    if [[ "$hop_ports" != off ]] && proxy_hy2_ports_multiple "$hop_ports"; then
+                        [[ -n "$hop_interval" ]] || hop_interval="$(_proxy_relay_prompt_hop_interval "$core" default)" || return $?
+                    fi
+                fi
+                if [[ -z "$bandwidth_mode" ]] && _proxy_relay_hy2_menu_capable "$core" base; then
+                    bandwidth_mode="$(proxy_prompt_select "本地带宽设置（最终由协议协商）" auto auto "auto 自动" manual "manual 手动 Mbps")" || return $?
+                fi
+                if [[ "$bandwidth_mode" == manual ]]; then
+                    [[ -n "$up_mbps" ]] || up_mbps="$(proxy_prompt_value "上行带宽（Mbps，正整数）" "")" || return $?
+                    [[ -n "$down_mbps" ]] || down_mbps="$(proxy_prompt_value "下行带宽（Mbps，正整数）" "")" || return $?
+                fi
+            fi
+            if [[ "$profile" == hysteria2 && -z "$chrome_parrot" ]] && _proxy_relay_hy2_menu_capable "$core" chrome-parrot; then
                 chrome_parrot="$(proxy_prompt_select "Chrome QUIC" default default "核心默认" on "开启" off "关闭")" || return $?
                 [[ "$chrome_parrot" != default ]] || chrome_parrot=""
             fi
-            if [[ "$core:$profile" == sing-box:hysteria2 && -z "$bbr_profile" ]]; then
-                printf 'BBR Profile 仅在协商使用 BBR 时生效，不替代带宽设置。\n' >&2
+            if [[ "$profile" == hysteria2 && -z "$bbr_profile" ]] && _proxy_relay_hy2_menu_capable "$core" bbr-profile; then
+                printf 'BBR Profile 仅在协商回退 BBR 时生效，可与手动带宽共存。\n' >&2
                 bbr_profile="$(proxy_prompt_select "BBR Profile" default default "核心默认" standard "standard" conservative "conservative" aggressive "aggressive")" || return $?
                 [[ "$bbr_profile" != default ]] || bbr_profile=""
             fi
@@ -606,7 +709,7 @@ proxy_relay_exit_add() (
             return 2
         }
         [[ -z "$profile$requested_core" ]] || { vps_cmd_error "直连出口不能指定 --profile/--core"; return 2; }
-        [[ -z "$tls_cert_file$tls_spki_sha256$chrome_parrot$bbr_profile" ]] || { vps_cmd_error "直连出口不能设置 TLS、Chrome QUIC 或 BBR 参数"; return 2; }
+        [[ -z "$tls_cert_file$tls_spki_sha256$chrome_parrot$bbr_profile$hop_ports$hop_interval$bandwidth_mode$up_mbps$down_mbps" ]] || { vps_cmd_error "直连出口不能设置 TLS 或 HY2 客户端参数"; return 2; }
         proxy_valid_host "$target" || { vps_cmd_error "目标地址无效"; return 2; }
         proxy_valid_port "$target_port" || { vps_cmd_error "目标端口无效"; return 2; }
         target_port=$((10#$target_port))
@@ -621,7 +724,8 @@ proxy_relay_exit_add() (
             {id:$id,name:$name,type:"protocol",core:$core,profile:$profile,uri:$uri,
              descriptor:$descriptor,endpoint:$descriptor.endpoint,network_hint:$descriptor.network_hint,
              created_at:$now,updated_at:$now}')" || return 10
-        exit_json="$(proxy_relay_apply_client_options "$exit_json" "$tls_cert_file" "$tls_spki_sha256" "$chrome_parrot" "$bbr_profile")" || return $?
+        exit_json="$(proxy_relay_apply_client_options "$exit_json" "$tls_cert_file" "$tls_spki_sha256" "$chrome_parrot" "$bbr_profile" \
+            "$hop_ports" "$hop_interval" "$bandwidth_mode" "$up_mbps" "$down_mbps")" || return $?
         if [[ "$core" == xray ]]; then
             proxy_relay_render_outbound "$core" "$exit_json" >/dev/null || return $?
         fi
@@ -653,6 +757,7 @@ proxy_relay_exit_edit() (
     local old current type descriptor="" core old_core refs binding_count forward_count candidate updated status=0 now
     local parse_profile="" explicit=0 uri_changed=0 profile_changed=0
     local tls_cert_file="" tls_spki_sha256="" chrome_parrot="" bbr_profile="" render_core=""
+    local hop_ports="" hop_interval="" bandwidth_mode="" up_mbps="" down_mbps=""
     while (($#)); do
         arg="$1"
         case "$arg" in
@@ -667,6 +772,11 @@ proxy_relay_exit_edit() (
             --tls-spki-sha256) (($# >= 2)) && [[ -n "$2" ]] || return 2; tls_spki_sha256="$2"; explicit=1; shift 2; continue ;;
             --chrome-parrot) (($# >= 2)) && [[ -n "$2" ]] || return 2; chrome_parrot="$2"; explicit=1; shift 2; continue ;;
             --bbr-profile) (($# >= 2)) && [[ -n "$2" ]] || return 2; bbr_profile="$2"; explicit=1; shift 2; continue ;;
+            --hop-ports) (($# >= 2)) && [[ -n "$2" ]] || return 2; hop_ports="$2"; explicit=1; shift 2; continue ;;
+            --hop-interval) (($# >= 2)) && [[ -n "$2" ]] || return 2; hop_interval="$2"; explicit=1; shift 2; continue ;;
+            --bandwidth-mode) (($# >= 2)) && [[ -n "$2" ]] || return 2; bandwidth_mode="$2"; explicit=1; shift 2; continue ;;
+            --up-mbps) (($# >= 2)) && [[ -n "$2" ]] || return 2; up_mbps="$2"; explicit=1; shift 2; continue ;;
+            --down-mbps) (($# >= 2)) && [[ -n "$2" ]] || return 2; down_mbps="$2"; explicit=1; shift 2; continue ;;
             *) vps_cmd_error "relay exit edit 的未知选项：$arg"; return 2 ;;
         esac
     done
@@ -717,13 +827,14 @@ proxy_relay_exit_edit() (
         if ((uri_changed)); then
             updated="$(jq 'del(.client_options.tls_spki_sha256,.client_options.tls_cert_sha256)' <<<"$updated")" || return 10
         fi
-        updated="$(proxy_relay_apply_client_options "$updated" "$tls_cert_file" "$tls_spki_sha256" "$chrome_parrot" "$bbr_profile")" || return $?
-        if ((binding_count > 0)) && { ((uri_changed || profile_changed)) || [[ -n "$requested_core$tls_cert_file$tls_spki_sha256$chrome_parrot$bbr_profile" ]]; }; then
+        updated="$(proxy_relay_apply_client_options "$updated" "$tls_cert_file" "$tls_spki_sha256" "$chrome_parrot" "$bbr_profile" \
+            "$hop_ports" "$hop_interval" "$bandwidth_mode" "$up_mbps" "$down_mbps")" || return $?
+        if ((binding_count > 0)) && { ((uri_changed || profile_changed)) || [[ -n "$requested_core$tls_cert_file$tls_spki_sha256$chrome_parrot$bbr_profile$hop_ports$hop_interval$bandwidth_mode$up_mbps$down_mbps" ]]; }; then
             render_core="$old_core"
         fi
     else
         [[ -z "$uri$profile$requested_core" ]] || { vps_cmd_error "直连出口不能使用 URI/profile/core 编辑"; return 2; }
-        [[ -z "$tls_cert_file$tls_spki_sha256$chrome_parrot$bbr_profile" ]] || { vps_cmd_error "直连出口不能设置 TLS、Chrome QUIC 或 BBR 参数"; return 2; }
+        [[ -z "$tls_cert_file$tls_spki_sha256$chrome_parrot$bbr_profile$hop_ports$hop_interval$bandwidth_mode$up_mbps$down_mbps" ]] || { vps_cmd_error "直连出口不能设置 TLS 或 HY2 客户端参数"; return 2; }
         target="${target:-$(jq -r '.endpoint.host' <<<"$old")}"
         target_port="${target_port:-$(jq -r '.endpoint.port' <<<"$old")}"
         proxy_valid_host "$target" || { vps_cmd_error "目标地址无效"; return 2; }
@@ -1271,12 +1382,33 @@ proxy_relay_forward_delete() (
 )
 
 proxy_relay_forward_refresh() (
-    local id="" arg count
+    local id="" arg count hop_count=0
     while (($#)); do
         arg="$1"
         case "$arg" in --id) (($# >= 2)) || return 2; id="$2"; shift 2; continue ;; *) vps_cmd_error "relay forward refresh 的未知选项：$arg"; return 2 ;; esac
     done
     [[ -z "$id" || "$id" =~ ^forward-[a-f0-9]{16}$ ]] || { vps_cmd_error "--id 无效"; return 2; }
+    if [[ -z "$id" && -f "$PROXY_MANIFEST" ]] && declare -F proxy_hy2_count >/dev/null 2>&1; then
+        proxy_require_state_access || return $?
+        proxy_ensure_tools relay-forward-refresh jq || return $?
+        proxy_stop_after_dependency_plan && return 0
+        hop_count="$(proxy_hy2_count "$PROXY_MANIFEST")" || return $?
+        count=0
+        if [[ -f "$PROXY_RELAY_FILE" ]]; then
+            count="$(jq -er '.forwards | length' "$PROXY_RELAY_FILE")" || return 10
+        fi
+        if ((hop_count > 0 && count == 0)); then
+            proxy_manifest_validate_file "$PROXY_MANIFEST" || return $?
+            proxy_ensure_mutation_tools relay-forward-refresh jq nft || return $?
+            proxy_stop_after_dependency_plan && return 0
+            declare -F proxy_relay_forward_refresh_runtime >/dev/null 2>&1 || { vps_cmd_error "端口转发刷新后端不可用"; return 20; }
+            vps_cmd_lock proxy || return $?
+            trap 'vps_cmd_unlock' EXIT
+            proxy_recover_transaction || return $?
+            proxy_relay_forward_refresh_runtime ""
+            return $?
+        fi
+    fi
     proxy_relay_prepare_state || return $?
     proxy_stop_after_dependency_plan && return 0
     [[ -z "$id" ]] || proxy_relay_forward "$id" >/dev/null || { vps_cmd_error "未找到端口转发：$id"; return 3; }
@@ -1360,7 +1492,8 @@ proxy_relay_status() {
         "$(jq -r '.exits|length' <<<"$state")" \
         "$(jq -r '[.exits[]|select(.type=="protocol")]|length' <<<"$state")" \
         "$(jq -r '[.exits[]|select(.type=="direct")]|length' <<<"$state")"
-    printf '  节点关联：%s\n  端口转发：%s\n' "$(jq -r '.bindings|length' <<<"$state")" "$(jq -r '.forwards|length' <<<"$state")"
+    printf '  节点关联：%s\n  端口转发：%s\n  HY2 跳跃入口：%s\n' \
+        "$(jq -r '.bindings|length' <<<"$state")" "$(jq -r '.forwards|length' <<<"$state")" "$(jq -r '.hop_count // 0' <<<"$runtime")"
     printf '  nftables 服务：%s / 开机启动：%s\n' \
         "$([[ "$(jq -r '.active // false' <<<"$runtime")" == true ]] && printf '运行中' || printf '未运行')" \
         "$([[ "$(jq -r '.enabled // false' <<<"$runtime")" == true ]] && printf '已启用' || printf '未启用')"
@@ -1435,7 +1568,7 @@ proxy_relay_menu_exit_show() {
 }
 
 proxy_relay_menu_exit_edit() {
-    local id exit type field value
+    local id exit type field value up down core=""
     local -a choices=()
     id="$(proxy_relay_select_exit "请选择要编辑的出口")" || return $?
     exit="$(proxy_relay_exit "$id")" || return 3
@@ -1445,8 +1578,30 @@ proxy_relay_menu_exit_edit() {
         if [[ "$(jq -r '.descriptor.tls.mode' <<<"$exit")" == tls ]]; then
             choices+=(tls-cert-file "TLS PEM 证书" tls-spki-sha256 "TLS SPKI SHA256")
         fi
-        if [[ "$(jq -r '.core + ":" + .profile' <<<"$exit")" == sing-box:hysteria2 ]]; then
-            choices+=(chrome-parrot "Chrome QUIC 开关" bbr-profile "BBR Profile")
+        if [[ "$(jq -r '.profile' <<<"$exit")" == hysteria2 ]]; then
+            core="$(jq -r '.core' <<<"$exit")"
+            if _proxy_relay_hy2_menu_capable "$core" hop-ports; then
+                choices+=(hop-ports "跳跃端口")
+                if jq -e '.endpoint | has("ports")' <<<"$exit" >/dev/null; then choices+=(hop-interval "跳跃间隔"); fi
+            elif jq -e '.endpoint | has("ports")' <<<"$exit" >/dev/null; then
+                choices+=(hop-ports "关闭跳跃端口")
+                if jq -e '.client_options | has("hop_interval")' <<<"$exit" >/dev/null; then choices+=(hop-interval "恢复默认间隔"); fi
+            fi
+            if _proxy_relay_hy2_menu_capable "$core" base; then
+                choices+=(bandwidth-mode "本地带宽模式（auto/manual）" up-mbps "上行 Mbps" down-mbps "下行 Mbps")
+            elif jq -e '.client_options | has("up_mbps")' <<<"$exit" >/dev/null; then
+                choices+=(bandwidth-mode "恢复自动带宽")
+            fi
+            if _proxy_relay_hy2_menu_capable "$core" chrome-parrot; then
+                choices+=(chrome-parrot "Chrome QUIC 开关")
+            elif jq -e '.client_options | has("chrome_parrot")' <<<"$exit" >/dev/null; then
+                choices+=(chrome-parrot "恢复 Chrome QUIC 默认")
+            fi
+            if _proxy_relay_hy2_menu_capable "$core" bbr-profile; then
+                choices+=(bbr-profile "BBR Profile（回退 BBR）")
+            elif jq -e '.client_options | has("bbr_profile")' <<<"$exit" >/dev/null; then
+                choices+=(bbr-profile "恢复 BBR Profile 默认")
+            fi
         fi
         field="$(proxy_prompt_select "编辑字段" name "${choices[@]}")" || return $?
     else
@@ -1457,10 +1612,50 @@ proxy_relay_menu_exit_edit() {
         uri) value="$(proxy_prompt_value "新节点 URI" "")" || return $?; proxy_relay_exit_edit --id "$id" --uri "$value" ;;
         tls-cert-file) value="$(proxy_prompt_value "PEM 叶证书或证书链路径" "")" || return $?; proxy_relay_exit_edit --id "$id" --tls-cert-file "$value" ;;
         tls-spki-sha256) value="$(proxy_prompt_value "可信 SPKI SHA256（Base64）" "")" || return $?; proxy_relay_exit_edit --id "$id" --tls-spki-sha256 "$value" ;;
-        chrome-parrot) value="$(proxy_prompt_select "Chrome QUIC" on on "开启" off "关闭")" || return $?; proxy_relay_exit_edit --id "$id" --chrome-parrot "$value" ;;
+        hop-ports)
+            value=off
+            if _proxy_relay_hy2_menu_capable "$core" hop-ports; then
+                value="$(proxy_prompt_value "跳跃端口（逗号、范围或 off）" "$(jq -r '.endpoint.ports // "off"' <<<"$exit")")" || return $?
+            fi
+            proxy_relay_exit_edit --id "$id" --hop-ports "$value"
+            ;;
+        hop-interval)
+            value=default
+            if _proxy_relay_hy2_menu_capable "$core" hop-ports; then
+                value="$(_proxy_relay_prompt_hop_interval "$core" "$(jq -r '.client_options.hop_interval // "default"' <<<"$exit")")" || return $?
+            fi
+            proxy_relay_exit_edit --id "$id" --hop-interval "$value"
+            ;;
+        bandwidth-mode)
+            value=auto
+            if _proxy_relay_hy2_menu_capable "$core" base; then
+                value="$(proxy_prompt_select "本地带宽设置（最终由协议协商）" "$(jq -r 'if .client_options.up_mbps then "manual" else "auto" end' <<<"$exit")" auto "auto 自动" manual "manual 手动 Mbps")" || return $?
+            fi
+            if [[ "$value" == manual ]]; then
+                up="$(proxy_prompt_value "上行带宽（Mbps，正整数）" "$(jq -r '.client_options.up_mbps // empty' <<<"$exit")")" || return $?
+                down="$(proxy_prompt_value "下行带宽（Mbps，正整数）" "$(jq -r '.client_options.down_mbps // empty' <<<"$exit")")" || return $?
+                proxy_relay_exit_edit --id "$id" --bandwidth-mode manual --up-mbps "$up" --down-mbps "$down"
+            else
+                proxy_relay_exit_edit --id "$id" --bandwidth-mode auto
+            fi
+            ;;
+        up-mbps | down-mbps)
+            value="$(proxy_prompt_value "${field}（正整数，需已有完整手动带宽）" "$(jq -r --arg key "${field//-/_}" '.client_options[$key] // empty' <<<"$exit")")" || return $?
+            proxy_relay_exit_edit --id "$id" "--$field" "$value"
+            ;;
+        chrome-parrot)
+            value=default
+            if _proxy_relay_hy2_menu_capable "$core" chrome-parrot; then
+                value="$(proxy_prompt_select "Chrome QUIC" default default "核心默认" on "开启" off "关闭")" || return $?
+            fi
+            proxy_relay_exit_edit --id "$id" --chrome-parrot "$value"
+            ;;
         bbr-profile)
-            printf 'BBR Profile 仅在协商使用 BBR 时生效，不替代带宽设置。\n' >&2
-            value="$(proxy_prompt_select "BBR Profile" "$(jq -r '.client_options.bbr_profile // "standard"' <<<"$exit")" standard "standard" conservative "conservative" aggressive "aggressive")" || return $?
+            printf 'BBR Profile 仅在协商回退 BBR 时生效，可与手动带宽共存。\n' >&2
+            value=default
+            if _proxy_relay_hy2_menu_capable "$core" bbr-profile; then
+                value="$(proxy_prompt_select "BBR Profile" "$(jq -r '.client_options.bbr_profile // "default"' <<<"$exit")" default "核心默认" standard "standard" conservative "conservative" aggressive "aggressive")" || return $?
+            fi
             proxy_relay_exit_edit --id "$id" --bbr-profile "$value"
             ;;
         target) value="$(proxy_prompt_value "新目标地址" "$(jq -r '.endpoint.host' <<<"$exit")")" || return $?; proxy_relay_exit_edit --id "$id" --target "$value" ;;

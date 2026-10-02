@@ -873,8 +873,8 @@ _proxy_core_cleanup_certs_if_available() {
 _proxy_core_restart_locked() {
     local core="$1" pending
     pending="$(proxy_core_pending_path "$core")" || return $?
-    proxy_service_action "$core" reload-manager || return 20
-    if proxy_service_action "$core" restart && { [[ "${VPSCTL_DRY_RUN:-0}" == "1" ]] || proxy_service_is_active "$core"; }; then
+    if proxy_service_action "$core" reload-manager && proxy_service_action "$core" restart &&
+       { [[ "${VPSCTL_DRY_RUN:-0}" == "1" ]] || proxy_service_is_active "$core"; }; then
         if [[ "${VPSCTL_DRY_RUN:-0}" != "1" ]]; then
             proxy_save_lkg "$core" || return 30
             proxy_clear_pending "$core" || return 30
@@ -1137,7 +1137,7 @@ _proxy_core_confirm_purge() {
 
 proxy_core_uninstall() (
     local core="${1:-}" purge=0 confirmed=0 arg meta binary_logical="" binary_path="" owned=false
-    local service_path service_logical failed=0 rc config_dir lkg backup_dir log_path
+    local service_path service_logical failed=0 rc config_dir lkg backup_dir log_path was_active=false was_enabled=false
     (($# >= 1)) || { vps_cmd_error "uninstall 需要 CORE"; return 2; }
     shift
     while (($#)); do
@@ -1192,13 +1192,25 @@ proxy_core_uninstall() (
         }
     fi
     if proxy_service_is_active "$core"; then
-        proxy_service_action "$core" stop || return 20
+        was_active=true
     fi
     if proxy_service_is_enabled "$core"; then
+        was_enabled=true
+    fi
+    if [[ "$was_active" == true ]]; then
+        proxy_service_action "$core" stop || return 20
+    fi
+    if [[ "$was_enabled" == true ]]; then
         proxy_service_action "$core" disable || return 20
     fi
     if ((purge)); then
-        proxy_purge_core_nodes "$core" || return $?
+        if proxy_purge_core_nodes "$core"; then
+            :
+        else
+            rc=$?
+            proxy_core_switch_restore_service "$core" true "$was_active" "$was_enabled" || return 30
+            return "$rc"
+        fi
     fi
     [[ ! -e "$service_path" ]] || vps_cmd_run rm -f "$service_path" || failed=1
     proxy_service_action "$core" reload-manager || failed=1

@@ -79,7 +79,7 @@ proxy_prompt_hysteria2_obfs() {
     local core="$1" current="${2:-none}" version
     local -a choices=(none "不使用混淆" salamander "Salamander")
     version="$(proxy_core_config_version "$core")" || return $?
-    if [[ "$core" == sing-box ]] && proxy_core_version_at_least "$version" 1.14.0; then
+    if proxy_hy2_capable "$core" "$version" gecko; then
         choices+=(gecko "Gecko")
     fi
     proxy_prompt_select "混淆方式" "$current" "${choices[@]}"
@@ -90,6 +90,24 @@ proxy_prompt_hysteria2_bbr_profile() {
     proxy_prompt_select "BBR 档位" "${1:-default}" \
         default "内核默认（不指定）" standard "standard（标准）" \
         conservative "conservative（保守）" aggressive "aggressive（激进）"
+}
+
+proxy_prompt_hysteria2_hop_ports() {
+    local current="${1:-}" mode=off ports
+    [[ -z "$current" || "$current" == off ]] || mode=on
+    mode="$(proxy_prompt_select "UDP 端口跳跃" "$mode" off "关闭" on "开启")" || return $?
+    if [[ "$mode" == off ]]; then printf off; return 0; fi
+    [[ "$current" != off ]] || current=""
+    ports="$(proxy_prompt_value "跳跃端口（逗号分隔端口或范围，如 20000-20100,20300）" "$current")" || return $?
+    [[ -n "$ports" ]] || { vps_cmd_error "开启端口跳跃需要指定端口或范围"; return 2; }
+    proxy_hy2_ports_normalize "$ports"
+}
+
+proxy_node_hop_ports_valid() {
+    local profile="$1" value="${2:-}"
+    [[ -n "$value" ]] || return 0
+    [[ "$profile" == hysteria2 ]] || { vps_cmd_error "--hop-ports 仅适用于 Hysteria2 节点"; return 2; }
+    [[ "$value" == off ]] || proxy_hy2_ports_normalize "$value" >/dev/null || return $?
 }
 
 proxy_node_transport_options_valid() {
@@ -109,8 +127,8 @@ proxy_node_hysteria2_options_valid() {
     case "$obfs" in '' | none | salamander | gecko) ;;
         *) vps_cmd_error "--obfs 仅支持 none|salamander|gecko"; return 2 ;;
     esac
-    case "$bbr" in '' | standard | conservative | aggressive) ;;
-        *) vps_cmd_error "--bbr-profile 仅支持 standard|conservative|aggressive"; return 2 ;;
+    case "$bbr" in '' | default | standard | conservative | aggressive) ;;
+        *) vps_cmd_error "--bbr-profile 仅支持 default|standard|conservative|aggressive"; return 2 ;;
     esac
     if [[ "$profile" != hysteria2 ]]; then
         [[ "$obfs" != gecko && -z "$bbr" ]] || {
@@ -119,21 +137,10 @@ proxy_node_hysteria2_options_valid() {
         return 0
     fi
     [[ -n "$core" ]] || return 0
-    if [[ "$core" != sing-box && ( "$obfs" == gecko || -n "$bbr" ) ]]; then
-        vps_cmd_error "Gecko 和 BBR 档位仅支持 sing-box 1.14.0 及以上版本"
-        return 3
-    fi
-    if [[ "$core" == xray || "$obfs" == gecko || -n "$bbr" ]]; then
-        [[ -n "$version" ]] || version="$(proxy_core_config_version "$core")" || return $?
-        if [[ "$core" == xray ]]; then
-            proxy_core_version_at_least "$version" 26.3.27 || {
-                vps_cmd_error "Xray Hysteria2 需要 26.3.27 及以上版本"; return 3;
-            }
-        elif ! proxy_core_version_at_least "$version" 1.14.0; then
-            vps_cmd_error "Gecko 和 BBR 档位需要 sing-box 1.14.0 及以上版本"
-            return 3
-        fi
-    fi
+    proxy_hy2_require_feature "$core" "$version" base || return $?
+    [[ "$obfs" != gecko ]] || proxy_hy2_require_feature "$core" "$version" gecko || return $?
+    [[ -z "$bbr" || "$bbr" == default ]] || proxy_hy2_require_feature "$core" "$version" bbr-profile || return $?
+    return 0
 }
 
 proxy_profile_default_name() {
@@ -479,7 +486,7 @@ proxy_warn_hysteria2_certificate() {
     command -v openssl >/dev/null 2>&1 || return 0
     details="$(openssl x509 -in "$certificate" -noout -text 2>/dev/null)" || return 0
     if [[ "${details^^}" == *"PUBLIC KEY ALGORITHM: ED25519"* ]]; then
-        vps_cmd_warning "Hysteria2 使用 Ed25519 证书；sing-box 1.14+ 默认 Chrome QUIC 握手不支持该算法。可使用 RSA/ECDSA 证书，或在中转出口设置 --chrome-parrot off。" >&2
+        vps_cmd_warning "Hysteria2 使用 Ed25519 证书；sing-box 1.14+ 和 Xray 26.9.8+ 客户端默认 Chrome QUIC 握手不支持该算法。可使用 RSA/ECDSA 证书，或在中转出口设置 --chrome-parrot off。" >&2
     fi
 }
 
@@ -665,7 +672,7 @@ proxy_prepare_node_json() {
     local core="$1" profile="$2" id="$3" name="$4" listen="$5" port="$6" address="$7"
     local sni="$8" path="$9" service_name="${10}" cert_mode="${11}" import_cert="${12}" import_key="${13}"
     local obfs_type="${14}" up_mbps="${15}" down_mbps="${16}" congestion_control="${17}" ip_strategy="${18:-auto}"
-    local xhttp_mode="${19:-}" transport_host="${20:-}" bbr_profile="${21:-}"
+    local xhttp_mode="${19:-}" transport_host="${20:-}" bbr_profile="${21:-}" hop_ports="${22:-}"
     local binary uuid="" password="" username="" private_key="" public_key="" short_id="" shadowtls_password=""
     local method="" padding=false shadowtls=false obfs_password="" transport flow="" tls_enabled=false tls_mode="none"
     local cert_path="" key_path="" cert_sha="" insecure=false created_at cert_id=""
@@ -735,7 +742,7 @@ proxy_prepare_node_json() {
         --arg certificate_id "$cert_id" \
         --arg certificate_sha256 "$cert_sha" --arg transport "$transport" --arg path "$path" \
         --arg service_name "$service_name" --arg flow "$flow" --arg method "$method" \
-        --arg xhttp_mode "$xhttp_mode" --arg transport_host "$transport_host" --arg bbr_profile "$bbr_profile" \
+        --arg xhttp_mode "$xhttp_mode" --arg transport_host "$transport_host" --arg bbr_profile "$bbr_profile" --arg hop_ports "$hop_ports" \
         --arg obfs_type "$obfs_type" --arg obfs_password "$obfs_password" \
         --argjson tls_enabled "$tls_enabled" --argjson insecure "$insecure" \
         --argjson padding "$padding" --argjson shadowtls "$shadowtls" \
@@ -748,18 +755,20 @@ proxy_prepare_node_json() {
             tls:{enabled:$tls_enabled,mode:$cert_mode,server_name:$sni,certificate_path:$certificate_path,key_path:$key_path,insecure:$insecure,certificate_sha256:$certificate_sha256,certificate_id:$certificate_id},
             transport:{type:$transport,path:$path,service_name:$service_name,flow:$flow},
             options:{method:$method,padding:$padding,shadowtls:$shadowtls,obfs_type:$obfs_type,obfs_password:$obfs_password,up_mbps:$up_mbps,down_mbps:$down_mbps,congestion_control:$congestion_control}
-        } | if $xhttp_mode != "" then .transport.mode=$xhttp_mode else . end |
+        } | if $profile == "hysteria2" then del(.options.congestion_control) else . end |
+        if $xhttp_mode != "" then .transport.mode=$xhttp_mode else . end |
         if $transport_host != "" then .transport.host=$transport_host else . end |
-        if $bbr_profile != "" then .options.bbr_profile=$bbr_profile else . end'
+        if $bbr_profile != "" and $bbr_profile != "default" then .options.bbr_profile=$bbr_profile else . end |
+        if $hop_ports != "" and $hop_ports != "off" then .options.hop_ports=$hop_ports else . end'
 }
 
 proxy_node_add() (
     local profile="" requested_core="" name="" listen="::" port="" address="" sni="www.amd.com"
     local reality_anti_relay=""
     local path="" service_name="" cert_mode="self-signed" import_cert="" import_key="" managed_cert_id=""
-    local xhttp_mode="" transport_host="" bbr_profile="" core_version=""
+    local xhttp_mode="" transport_host="" bbr_profile="" hop_ports="" core_version="" congestion_changed=0
     local obfs_type="none" up_mbps=10000 down_mbps=10000 congestion_control="bbr" ip_strategy="auto" arg core id node
-    local candidate_manifest candidate_config status=0 mode detected_address address_choice transport
+    local candidate_manifest candidate_config port_node status=0 mode detected_address address_choice transport
     local -a required_tools=(jq openssl ss)
     while (($#)); do
         arg="$1"
@@ -781,6 +790,7 @@ proxy_node_add() (
             --xhttp-mode) (($# >= 2)) && [[ -n "$2" ]] || return 2; xhttp_mode="$2"; shift 2 ;;
             --host) (($# >= 2)) && [[ -n "$2" ]] || return 2; transport_host="$2"; shift 2 ;;
             --bbr-profile) (($# >= 2)) && [[ -n "$2" ]] || return 2; bbr_profile="$2"; shift 2 ;;
+            --hop-ports) (($# >= 2)) && [[ -n "$2" ]] || return 2; hop_ports="$2"; shift 2 ;;
             --service-name) (($# >= 2)) || return 2; service_name="$2"; shift 2 ;;
             --cert-mode) (($# >= 2)) || return 2; cert_mode="$2"; shift 2 ;;
             --cert-id) (($# >= 2)) || return 2; managed_cert_id="$2"; shift 2 ;;
@@ -789,7 +799,7 @@ proxy_node_add() (
             --obfs) (($# >= 2)) || return 2; obfs_type="$2"; shift 2 ;;
             --up-mbps) (($# >= 2)) || return 2; up_mbps="$2"; shift 2 ;;
             --down-mbps) (($# >= 2)) || return 2; down_mbps="$2"; shift 2 ;;
-            --congestion-control) (($# >= 2)) || return 2; congestion_control="$2"; shift 2 ;;
+            --congestion-control) (($# >= 2)) && [[ -n "$2" ]] || return 2; congestion_control="$2"; congestion_changed=1; shift 2 ;;
             --ip-strategy) (($# >= 2)) || return 2; ip_strategy="$2"; shift 2 ;;
             -h | --help) return 2 ;;
             *) vps_cmd_error "node add 的未知选项：$arg"; return 2 ;;
@@ -852,6 +862,11 @@ proxy_node_add() (
     fi
     PROXY_MANAGED_CERT_ID="$managed_cert_id"
     proxy_node_hysteria2_options_valid "$profile" "" "$obfs_type" "$bbr_profile" || return $?
+    proxy_node_hop_ports_valid "$profile" "$hop_ports" || return $?
+    if ((congestion_changed)) && [[ "$profile" != tuic-v5 ]]; then
+        vps_cmd_error "--congestion-control 仅适用于 TUIC 节点；Hysteria2 使用带宽协商和可选 BBR 档位"
+        return 2
+    fi
     [[ "$up_mbps" =~ ^[1-9][0-9]*$ && "$down_mbps" =~ ^[1-9][0-9]*$ ]] || { vps_cmd_error "带宽必须是正整数 Mbps"; return 2; }
     case "$congestion_control" in bbr | cubic | new_reno) ;; *) vps_cmd_error "拥塞控制仅支持 bbr|cubic|new_reno"; return 2 ;; esac
     proxy_ip_strategy_valid "$ip_strategy" || { vps_cmd_error "--ip-strategy 仅支持 auto|prefer_ipv4|prefer_ipv6|ipv4_only|ipv6_only"; return 2; }
@@ -930,7 +945,8 @@ proxy_node_add() (
                 obfs_type="$(proxy_prompt_hysteria2_obfs "$core" "$obfs_type")" || return $?
                 up_mbps="$(proxy_prompt_value "上行 Mbps" "$up_mbps")" || return $?
                 down_mbps="$(proxy_prompt_value "下行 Mbps" "$down_mbps")" || return $?
-                if [[ "$core" == sing-box ]] && proxy_core_version_at_least "$core_version" 1.14.0; then
+                hop_ports="$(proxy_prompt_hysteria2_hop_ports "$hop_ports")" || return $?
+                if proxy_hy2_capable "$core" "$core_version" bbr-profile; then
                     bbr_profile="$(proxy_prompt_hysteria2_bbr_profile "$bbr_profile")" || return $?
                     [[ "$bbr_profile" != default ]] || bbr_profile=""
                 fi
@@ -979,12 +995,21 @@ proxy_node_add() (
     PROXY_MANAGED_CERT_ID="$managed_cert_id"
     proxy_node_transport_options_valid "$profile" "$xhttp_mode" "$transport_host" || return $?
     proxy_node_hysteria2_options_valid "$profile" "$core" "$obfs_type" "$bbr_profile" || return $?
+    proxy_node_hop_ports_valid "$profile" "$hop_ports" || return $?
+    if [[ -n "$hop_ports" && "$hop_ports" != off ]]; then
+        hop_ports="$(proxy_hy2_ports_normalize "$hop_ports")" || return $?
+    fi
     [[ "$up_mbps" =~ ^[1-9][0-9]*$ && "$down_mbps" =~ ^[1-9][0-9]*$ ]] || { vps_cmd_error "带宽必须是正整数 Mbps"; return 2; }
     case "$congestion_control" in bbr | cubic | new_reno) ;; *) vps_cmd_error "拥塞控制仅支持 bbr|cubic|new_reno"; return 2 ;; esac
     proxy_ip_strategy_valid "$ip_strategy" || { vps_cmd_error "--ip-strategy 仅支持 auto|prefer_ipv4|prefer_ipv6|ipv4_only|ipv6_only"; return 2; }
     port=$((10#$port))
     up_mbps=$((10#$up_mbps))
     down_mbps=$((10#$down_mbps))
+    port_node="$(jq -cn --arg core "$core" --arg profile "$profile" --arg listen "$listen" \
+        --argjson port "$port" --arg hop_ports "$hop_ports" \
+        '{id:"",core:$core,profile:$profile,listen:$listen,port:$port,options:{}} |
+         if $hop_ports != "" and $hop_ports != "off" then .options.hop_ports=$hop_ports else . end')" || return 10
+    proxy_hy2_require_node_ports "$port_node" || return $?
 
     if [[ "$reality_anti_relay" == on ]] && ! proxy_reality_sni_valid "$sni"; then
         vps_cmd_error "REALITY 防偷需要有效 DNS 域名作为 SNI，不能使用 IP、通配符、URL 或端口"
@@ -1003,8 +1028,9 @@ proxy_node_add() (
     proxy_manifest_validate_file "$PROXY_MANIFEST" || return $?
     proxy_require_available_port "$port" || return $?
     proxy_require_unique_name "$name" || return $?
+    proxy_hy2_require_node_ports "$port_node" || return $?
     id="$(proxy_generate_node_id)" || return $?
-    node="$(proxy_prepare_node_json "$core" "$profile" "$id" "$name" "$listen" "$port" "$address" "$sni" "$path" "$service_name" "$cert_mode" "$import_cert" "$import_key" "$obfs_type" "$up_mbps" "$down_mbps" "$congestion_control" "$ip_strategy" "$xhttp_mode" "$transport_host" "$bbr_profile")" || {
+    node="$(proxy_prepare_node_json "$core" "$profile" "$id" "$name" "$listen" "$port" "$address" "$sni" "$path" "$service_name" "$cert_mode" "$import_cert" "$import_key" "$obfs_type" "$up_mbps" "$down_mbps" "$congestion_control" "$ip_strategy" "$xhttp_mode" "$transport_host" "$bbr_profile" "$hop_ports")" || {
         status=$?
         proxy_cleanup_orphan_certs "$core" >/dev/null 2>&1 || true
         return "$status"
@@ -1276,11 +1302,10 @@ proxy_node_core_set_validate_runtime() {
     version="$(proxy_core_config_version "$core")" || return $?
     PROXY_RENDER_CORE_VERSION="$version"
     if [[ "$core" == xray ]] && jq -e '
-        (.options | has("bbr_profile") or has("chrome_parrot") or has("disable_chrome_parrot")) or
-        ((.client_options // {}) | has("bbr_profile") or has("chrome_parrot")) or
-        .options.obfs_type == "gecko"
+        (.options | has("chrome_parrot") or has("disable_chrome_parrot")) or
+        ((.client_options // {}) | has("bbr_profile") or has("chrome_parrot"))
     ' <<<"$node" >/dev/null; then
-        vps_cmd_error "节点含 sing-box 专用的 Gecko、BBR 档位或 Chrome 参数，拒绝切换到 Xray"
+        vps_cmd_error "节点含无法转换为服务端配置的 Chrome 或客户端参数，拒绝切换到 Xray"
         return 3
     fi
     proxy_node_hysteria2_options_valid "$profile" "$core" \
@@ -1542,7 +1567,7 @@ proxy_node_core_set() (
 )
 
 proxy_node_details_print() {
-    local node="$1" profile transport ip_strategy relay_bound=0 strategy_suffix=""
+    local node="$1" profile transport ip_strategy core core_version bbr_profile relay_bound=0 strategy_suffix=""
     profile="$(jq -r '.profile' <<<"$node")"
     transport="$(proxy_profile_default_transport "$profile")"
     printf '节点详情\n'
@@ -1580,7 +1605,15 @@ proxy_node_details_print() {
     if [[ "$profile" == "hysteria2" ]]; then
         printf '  混淆：%s  带宽：%s/%s Mbps\n' \
             "$(jq -r '.options.obfs_type' <<<"$node")" "$(jq -r '.options.up_mbps' <<<"$node")" "$(jq -r '.options.down_mbps' <<<"$node")"
-        printf '  BBR 档位：%s（仅协商 BBR 时生效，不替代带宽设置）\n' "$(jq -r '.options.bbr_profile // "内核默认"' <<<"$node")"
+        core="$(jq -r '.core' <<<"$node")"
+        core_version="$(proxy_core_config_version "$core")" || core_version=""
+        bbr_profile="$(jq -r '.options.bbr_profile // "内核默认"' <<<"$node")"
+        if proxy_hy2_capable "$core" "$core_version" bbr-profile; then
+            printf '  BBR 档位：%s（仅协商 BBR 时生效，不替代带宽设置）\n' "$bbr_profile"
+        else
+            printf '  BBR 档位：%s（当前内核版本不支持指定档位）\n' "$bbr_profile"
+        fi
+        printf '  UDP 端口跳跃：%s\n' "$(jq -r 'if .options.hop_ports then "开启（" + .options.hop_ports + "）" else "关闭" end' <<<"$node")"
     elif [[ "$profile" == "tuic-v5" ]]; then
         printf '  拥塞控制：%s\n' "$(jq -r '.options.congestion_control' <<<"$node")"
     fi
@@ -1966,9 +1999,9 @@ proxy_node_menu_run() {
 proxy_node_edit() (
     local id="" name="" listen="" port="" address="" sni="" path="" service_name=""
     local reality_anti_relay="" effective_reality_guard=""
-    local xhttp_mode="" transport_host="" bbr_profile="" bbr_profile_changed=0 core_version=""
+    local xhttp_mode="" transport_host="" bbr_profile="" bbr_profile_changed=0 hop_ports="" hop_ports_changed=0 core_version="" congestion_changed=0
     local requested_cert_mode="" import_cert="" import_key="" managed_cert_id="" obfs_type="" up_mbps="" down_mbps="" congestion_control="" ip_strategy="" arg
-    local node current_node core profile old_port old_cert_mode cert_mode candidate_node candidate_manifest candidate_config status=0
+    local node current_node core profile old_port old_cert_mode cert_mode candidate_node candidate_manifest candidate_config port_node status=0
     local field transport current confirm_status=0 certificate_tools_needed=0
     local -a edit_fields=()
     local -a required_tools=()
@@ -1991,6 +2024,7 @@ proxy_node_edit() (
             --xhttp-mode) (($# >= 2)) && [[ -n "$2" ]] || return 2; xhttp_mode="$2"; shift 2 ;;
             --host) (($# >= 2)) && [[ -n "$2" ]] || return 2; transport_host="$2"; shift 2 ;;
             --bbr-profile) (($# >= 2)) && [[ -n "$2" ]] || return 2; bbr_profile="$2"; bbr_profile_changed=1; shift 2 ;;
+            --hop-ports) (($# >= 2)) && [[ -n "$2" ]] || return 2; hop_ports="$2"; hop_ports_changed=1; shift 2 ;;
             --service-name) (($# >= 2)) || return 2; service_name="$2"; shift 2 ;;
             --cert-mode) (($# >= 2)) || return 2; requested_cert_mode="$2"; shift 2 ;;
             --cert-id) (($# >= 2)) || return 2; managed_cert_id="$2"; shift 2 ;;
@@ -1999,13 +2033,13 @@ proxy_node_edit() (
             --obfs) (($# >= 2)) || return 2; obfs_type="$2"; shift 2 ;;
             --up-mbps) (($# >= 2)) || return 2; up_mbps="$2"; shift 2 ;;
             --down-mbps) (($# >= 2)) || return 2; down_mbps="$2"; shift 2 ;;
-            --congestion-control) (($# >= 2)) || return 2; congestion_control="$2"; shift 2 ;;
+            --congestion-control) (($# >= 2)) && [[ -n "$2" ]] || return 2; congestion_control="$2"; congestion_changed=1; shift 2 ;;
             --ip-strategy) (($# >= 2)) || return 2; ip_strategy="$2"; shift 2 ;;
             *) vps_cmd_error "node edit 的未知选项：$arg"; return 2 ;;
         esac
     done
     local had_explicit_change=0
-    [[ -z "$name$listen$port$address$sni$path$service_name$requested_cert_mode$import_cert$import_key$managed_cert_id$obfs_type$up_mbps$down_mbps$congestion_control$ip_strategy$reality_anti_relay$xhttp_mode$transport_host$bbr_profile" ]] || had_explicit_change=1
+    [[ -z "$name$listen$port$address$sni$path$service_name$requested_cert_mode$import_cert$import_key$managed_cert_id$obfs_type$up_mbps$down_mbps$congestion_control$ip_strategy$reality_anti_relay$xhttp_mode$transport_host$bbr_profile$hop_ports" ]] || had_explicit_change=1
     if [[ -n "$id" && ! "$id" =~ ^node-[a-f0-9]{16}$ ]]; then
         vps_cmd_error "node edit 需要有效 --id"
         return 2
@@ -2028,6 +2062,7 @@ proxy_node_edit() (
     [[ -z "$requested_cert_mode" || "$requested_cert_mode" == "self-signed" || "$requested_cert_mode" == "imported" || "$requested_cert_mode" == "managed" ]] || { vps_cmd_error "--cert-mode 仅支持 self-signed|imported|managed"; return 2; }
     [[ -z "$import_cert$import_key" || ( -n "$import_cert" && -n "$import_key" ) ]] || { vps_cmd_error "证书和私钥必须成对提供"; return 2; }
     proxy_node_hysteria2_options_valid hysteria2 "" "$obfs_type" "$bbr_profile" || return $?
+    proxy_node_hop_ports_valid hysteria2 "$hop_ports" || return $?
     [[ -z "$up_mbps" || "$up_mbps" =~ ^[1-9][0-9]*$ ]] || { vps_cmd_error "上行带宽必须是正整数 Mbps"; return 2; }
     [[ -z "$down_mbps" || "$down_mbps" =~ ^[1-9][0-9]*$ ]] || { vps_cmd_error "下行带宽必须是正整数 Mbps"; return 2; }
     case "$congestion_control" in '' | bbr | cubic | new_reno) ;; *) vps_cmd_error "拥塞控制仅支持 bbr|cubic|new_reno"; return 2 ;; esac
@@ -2047,6 +2082,11 @@ proxy_node_edit() (
     core_version="$(proxy_core_config_version "$core")" || return $?
     proxy_node_transport_options_valid "$profile" "$xhttp_mode" "$transport_host" || return $?
     proxy_node_hysteria2_options_valid "$profile" "$core" "$obfs_type" "$bbr_profile" "$core_version" || return $?
+    proxy_node_hop_ports_valid "$profile" "$hop_ports" || return $?
+    if ((congestion_changed)) && [[ "$profile" != tuic-v5 ]]; then
+        vps_cmd_error "--congestion-control 仅适用于 TUIC 节点；Hysteria2 使用带宽协商和可选 BBR 档位"
+        return 2
+    fi
     old_port="$(jq -r '.port' <<<"$node")"
     if [[ -n "$reality_anti_relay" ]] && ! proxy_profile_uses_reality "$profile"; then
         vps_cmd_error "--reality-anti-relay 仅适用于 REALITY 节点"
@@ -2074,8 +2114,8 @@ proxy_node_edit() (
             edit_fields+=(certificate "证书方式")
         fi
         if [[ "$profile" == "hysteria2" ]]; then
-            edit_fields+=(obfs "混淆方式" up "上行 Mbps" down "下行 Mbps")
-            if [[ "$core" == sing-box ]] && proxy_core_version_at_least "$core_version" 1.14.0; then
+            edit_fields+=(obfs "混淆方式" up "上行 Mbps" down "下行 Mbps" hop_ports "UDP 端口跳跃")
+            if proxy_hy2_capable "$core" "$core_version" bbr-profile; then
                 edit_fields+=(bbr_profile "BBR 档位（仅协商 BBR 时生效）")
             fi
         elif [[ "$profile" == "tuic-v5" ]]; then
@@ -2171,6 +2211,12 @@ proxy_node_edit() (
                     bbr_profile_changed=1
                     had_explicit_change=1
                     ;;
+                hop_ports)
+                    if ((hop_ports_changed)); then current="$hop_ports"; else current="$(jq -r '.options.hop_ports // "off"' <<<"$node")"; fi
+                    hop_ports="$(proxy_prompt_hysteria2_hop_ports "$current")" || return $?
+                    hop_ports_changed=1
+                    had_explicit_change=1
+                    ;;
                 congestion)
                     current="${congestion_control:-$(jq -r '.options.congestion_control' <<<"$node")}"
                     congestion_control="$(proxy_prompt_select "拥塞控制" "$current" bbr BBR cubic CUBIC new_reno "New Reno")" || return $?
@@ -2217,6 +2263,7 @@ proxy_node_edit() (
                     [[ -z "$requested_cert_mode" ]] || printf '  证书方式：%s\n' "$requested_cert_mode"
                     [[ -z "$obfs_type" ]] || printf '  混淆：%s\n' "$obfs_type"
                     [[ "$bbr_profile_changed" == 0 ]] || printf '  BBR 档位：%s（不替代带宽设置）\n' "${bbr_profile:-内核默认}"
+                    [[ "$hop_ports_changed" == 0 ]] || printf '  UDP 端口跳跃：%s\n' "$hop_ports"
                     [[ -z "$up_mbps$down_mbps" ]] || printf '  带宽：%s/%s Mbps\n' \
                         "${up_mbps:-$(jq -r '.options.up_mbps' <<<"$node")}" "${down_mbps:-$(jq -r '.options.down_mbps' <<<"$node")}"
                     [[ -z "$congestion_control" ]] || printf '  拥塞控制：%s\n' "$congestion_control"
@@ -2247,9 +2294,10 @@ proxy_node_edit() (
     service_name="${service_name:-$(jq -r '.transport.service_name' <<<"$node")}"
     obfs_type="${obfs_type:-$(jq -r '.options.obfs_type' <<<"$node")}"
     if ((bbr_profile_changed == 0)); then bbr_profile="$(jq -r '.options.bbr_profile // empty' <<<"$node")"; fi
+    if ((hop_ports_changed == 0)); then hop_ports="$(jq -r '.options.hop_ports // empty' <<<"$node")"; fi
     up_mbps="${up_mbps:-$(jq -r '.options.up_mbps' <<<"$node")}"
     down_mbps="${down_mbps:-$(jq -r '.options.down_mbps' <<<"$node")}"
-    congestion_control="${congestion_control:-$(jq -r '.options.congestion_control' <<<"$node")}"
+    congestion_control="${congestion_control:-$(jq -r '.options.congestion_control // empty' <<<"$node")}"
     ip_strategy="${ip_strategy:-$(jq -r '.ip_strategy // "auto"' <<<"$node")}"
     if proxy_profile_uses_reality "$profile"; then
         effective_reality_guard="${reality_anti_relay:-$(jq -r 'if .tls.reality_guard.enabled == true then "on" else "off" end' <<<"$node")}"
@@ -2267,8 +2315,14 @@ proxy_node_edit() (
     if [[ -n "$service_name" && ! "$service_name" =~ ^[A-Za-z0-9._/-]{1,128}$ ]]; then vps_cmd_error "gRPC serviceName 无效"; return 2; fi
     proxy_node_transport_options_valid "$profile" "$xhttp_mode" "$transport_host" || return $?
     proxy_node_hysteria2_options_valid "$profile" "$core" "$obfs_type" "$bbr_profile" || return $?
+    proxy_node_hop_ports_valid "$profile" "$hop_ports" || return $?
+    if [[ -n "$hop_ports" && "$hop_ports" != off ]]; then
+        hop_ports="$(proxy_hy2_ports_normalize "$hop_ports")" || return $?
+    fi
     [[ "$up_mbps" =~ ^[1-9][0-9]*$ && "$down_mbps" =~ ^[1-9][0-9]*$ ]] || return 2
-    case "$congestion_control" in bbr | cubic | new_reno) ;; *) return 2 ;; esac
+    if [[ "$profile" == tuic-v5 ]]; then
+        case "$congestion_control" in bbr | cubic | new_reno) ;; *) return 2 ;; esac
+    fi
     proxy_ip_strategy_valid "$ip_strategy" || return 2
     if [[ -n "$requested_cert_mode" && "$requested_cert_mode" != "self-signed" && "$requested_cert_mode" != "imported" && "$requested_cert_mode" != "managed" ]]; then
         vps_cmd_error "--cert-mode 仅支持 self-signed|imported|managed"
@@ -2278,7 +2332,7 @@ proxy_node_edit() (
         vps_cmd_error "${profile} 不使用受管 TLS 证书，不能修改证书选项"
         return 2
     fi
-    if [[ -n "$port" && "$port" != "$old_port" ]]; then
+    if [[ -n "$port" && "$port" != "$old_port" ]] || ((hop_ports_changed)); then
         required_tools+=(ss)
     fi
     if ((certificate_tools_needed)); then
@@ -2293,6 +2347,13 @@ proxy_node_edit() (
     port=$((10#$port))
     up_mbps=$((10#$up_mbps))
     down_mbps=$((10#$down_mbps))
+    port_node="$(jq --arg listen "$listen" --argjson port "$port" --arg hop_ports "$hop_ports" \
+        --argjson hop_changed "$hop_ports_changed" '
+        .listen=$listen | .port=$port |
+        if $hop_changed == 1 then
+            if $hop_ports == "off" then del(.options.hop_ports) else .options.hop_ports=$hop_ports end
+        else . end' <<<"$node")" || return 10
+    proxy_hy2_require_node_ports "$port_node" "$node" || return $?
 
     if [[ "${VPSCTL_DRY_RUN:-0}" == 1 && -n "$effective_reality_guard" ]]; then
         vps_cmd_info "演练：更新节点 ${name}（${id}，${listen}:${port}，客户端地址 ${address}，SNI ${sni}，IP 策略 ${ip_strategy}）"
@@ -2313,21 +2374,27 @@ proxy_node_edit() (
     }
     proxy_require_unique_name "$name" "$id" || return $?
     proxy_require_available_port "$port" "$id" "$old_port" || return $?
+    proxy_hy2_require_node_ports "$port_node" "$node" || return $?
     candidate_node="$(jq \
         --arg name "$name" --arg listen "$listen" --argjson port "$port" --arg address "$address" \
         --arg sni "$sni" --arg path "$path" --arg service_name "$service_name" \
         --arg xhttp_mode "$xhttp_mode" --arg transport_host "$transport_host" \
         --arg bbr_profile "$bbr_profile" --argjson bbr_changed "$bbr_profile_changed" \
+        --arg hop_ports "$hop_ports" --argjson hop_changed "$hop_ports_changed" \
         --arg obfs_type "$obfs_type" --argjson up_mbps "$up_mbps" --argjson down_mbps "$down_mbps" \
         --arg congestion_control "$congestion_control" --arg ip_strategy "$ip_strategy" --arg updated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
         '.name=$name | .listen=$listen | .port=$port | .address=$address | .tls.server_name=$sni |
          .transport.path=$path | .transport.service_name=$service_name | .options.obfs_type=$obfs_type |
-         .options.up_mbps=$up_mbps | .options.down_mbps=$down_mbps | .options.congestion_control=$congestion_control |
+         .options.up_mbps=$up_mbps | .options.down_mbps=$down_mbps |
+         if .profile == "tuic-v5" then .options.congestion_control=$congestion_control else . end |
          .ip_strategy=$ip_strategy | .updated_at=$updated_at |
          if $xhttp_mode != "" then .transport.mode=$xhttp_mode else . end |
          if $transport_host != "" then .transport.host=$transport_host else . end |
          if $bbr_changed == 1 then
-             if $bbr_profile == "" then del(.options.bbr_profile) else .options.bbr_profile=$bbr_profile end
+             if $bbr_profile == "" or $bbr_profile == "default" then del(.options.bbr_profile) else .options.bbr_profile=$bbr_profile end
+         else . end |
+         if $hop_changed == 1 then
+             if $hop_ports == "off" then del(.options.hop_ports) else .options.hop_ports=$hop_ports end
          else . end' <<<"$node")" || return 10
 
     if [[ -n "$reality_anti_relay" ]]; then
