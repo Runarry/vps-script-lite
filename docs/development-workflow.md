@@ -87,7 +87,7 @@ ssh host-vps-scripts 'cd /path/to/vps-script-lite && VPSCTL_TEST_ONLY=entry-vers
 
 ## 4. Release 资产与发布流程
 
-仓库根 `VERSION` 是项目版本的规范来源，当前版本为 `0.8.11`。应用、功能、tag、发布资产、安装目录和命令行展示必须使用同一版本号。自 v0.8.10 起使用 schema 2；v0.8.9 按领域打包，使用 schema 1，跨格式迁移不通过 self update。
+仓库根 `VERSION` 是项目版本的规范来源，当前版本为 `0.8.12`。应用、功能、tag、发布资产、安装目录和命令行展示必须使用同一版本号。自 v0.8.10 起使用 schema 2；v0.8.9 按领域打包，使用 schema 1，跨格式迁移不通过 self update。
 
 schema 2 Release 必须一次性提供安装器、严格 TSV 清单及注册表中的全部 bundle。构建与运行时共用 [lib/registry.sh](../lib/registry.sh) 中的 `VPS_BUNDLE_IDS`、`vps_registry_bundle_files` 和 `vps_registry_command_bundles`；新增命令、文件或依赖只维护这些固定定义，不复制另一份文档清单。当前生成的完整资产集合以构建输出的 manifest 为准，v0.8.9 的 schema 1 资产保持原样。
 
