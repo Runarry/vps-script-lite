@@ -297,7 +297,7 @@ _proxy_xray_query_add() {
 proxy_xray_render_uri() {
     local node_json="${1:-}" profile address host port name fragment query="" scheme userinfo
     local uuid password public_key short_id sni transport path service_name flow
-    local method insecure certificate_sha256 mode transport_host obfs_type obfs_password
+    local method insecure certificate_sha256 mode transport_host obfs_type obfs_password hy2_ports
     proxy_xray_validate_node "$node_json" || return $?
 
     profile="$(jq -r '.profile' <<<"$node_json")" || return 10
@@ -313,7 +313,7 @@ proxy_xray_render_uri() {
 
     case "$profile" in
         hysteria2)
-            port="$(proxy_hy2_node_ports "$node_json")" || return $?
+            hy2_ports="$(proxy_hy2_node_ports "$node_json")" || return $?
             password="$(jq -r '.credentials.password' <<<"$node_json")" || return 10
             userinfo="$(_proxy_xray_urlencode "$password")" || return 10
             sni="$(jq -r '.tls.server_name' <<<"$node_json")" || return 10
@@ -328,6 +328,9 @@ proxy_xray_render_uri() {
             fi
             certificate_sha256="$(jq -r '.tls.certificate_sha256 // ""' <<<"$node_json")" || return 10
             [[ -z "$certificate_sha256" ]] || query="$(_proxy_xray_query_add "$query" pinSHA256 "$certificate_sha256")" || return 10
+            if proxy_hy2_ports_multiple "$hy2_ports"; then
+                query="$(_proxy_xray_query_add "$query" mport "$hy2_ports")" || return 10
+            fi
             printf 'hysteria2://%s@%s:%s?%s#%s\n' "$userinfo" "$host" "$port" "$query" "$fragment"
             return 0
             ;;

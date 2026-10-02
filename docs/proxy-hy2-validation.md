@@ -104,3 +104,23 @@ HY2_SCOPE=config bash tests/integration/test-service-proxy-hy2-real.sh
 - `acceptance/supplement-final.log`、`acceptance/chrome-debug/`：同核替代路径、Chrome off 的 TCP 连续跳跃与 UDP 失败。
 - 各 case 的 `counters.json`、`traffic.jsonl`、配置与内核日志：目的端口计数、持续时间和失败原因。
 - `service-acceptance/`、`service-acceptance/purge-check/`：真实服务生命周期、故障注入和原环境恢复。
+
+## 2026-10-02 分享链接导入兼容修正
+
+用户反馈把端口范围直接写为 `:20120-20200` 时，客户端直接拒绝导入。重新核对发现：官方 Hysteria URI 支持 authority 多端口，但 v2rayN/v2rayNG 导入器使用标准 URL 的数字端口，并另读 `mport` 扩展。此前真实内核及本项目 URI 往返检查没有覆盖图形客户端的导入器，不能据此宣称所有客户端都支持原生范围语法。[官方规范](https://hysteria.network/docs/developers/URI-Scheme/)、[v2rayN 实现](https://github.com/2dust/v2rayN/blob/master/v2rayN/ServiceLib/Handler/Fmt/Hysteria2Fmt.cs)、[v2rayNG 实现](https://github.com/2dust/v2rayNG/blob/master/V2rayNG/app/src/main/java/com/v2ray/ang/fmt/Hysteria2Fmt.kt)。
+
+本次将双核节点分享改为 `hysteria2://PASSWORD@HOST:20120?mport=20120-20200&...`。地址后的端口保留实际监听端口；`mport` 包含实际监听与额外接入端口的规范化集合。导入兼容原生范围及 `mport` 两种格式。修改出口跳跃集合时替换旧 `mport`；关闭跳跃或生成普通端口转发链接时删除它，同时保留密码编码、TLS 指纹和其他查询参数。两处同时指定不同多端口集合时拒绝歧义输入。未修改服务端规则或内核配置渲染。
+
+验证均通过 `ssh host-vps-scripts`，证据目录为 `/var/tmp/vpsctl-hy2-uri/evidence/`：
+
+| 检查 | 结果 | 证据 |
+| --- | --- | --- |
+| 协议回归与新增 URI 用例 | PASS | `protocol-and-parser.log` |
+| 独立标准 URL 解析器 | PASS；复现旧范围端口失败，接受双核各域名／IPv4／IPv6 共 6 条实际导出链接 | 同上，使用 Python `urllib.parse`；未把它当作 GUI 实测 |
+| 节点编辑、分享、切核 | PASS | `node.log` |
+| 出口编辑、跳跃开关与 TLS 信任保留 | PASS | `relay-tls.log` |
+| 普通转发、分享与回滚 | PASS | `forward.log` |
+| 六份受影响脚本语法 | PASS | 远端 `bash -n` |
+| 六份受影响脚本 ShellCheck 错误级 | PASS，逐文件全部退出 0 | `static-per-file.log`；首次批量检查被终止，退出 137，随后逐文件完成 |
+
+本轮未直接操作用户的客户端 GUI，也未重复与 URI 变更无关的内核和网络矩阵；`mport` 仍取决于客户端版本支持。用户例子中的 `127.17.12.41` 属于回环地址，如果不是脱敏内容，连接前还应改为服务器实际公网地址。

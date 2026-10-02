@@ -285,6 +285,7 @@ proxy_sb_render_uri() {
     proxy_sb_validate_node "$node" || return $?
     if [[ "$(jq -r '.profile' <<<"$node")" == hysteria2 ]]; then
         hy2_ports="$(proxy_hy2_node_ports "$node")" || return $?
+        proxy_hy2_ports_multiple "$hy2_ports" || hy2_ports=""
     fi
     jq -r --arg hy2_ports "$hy2_ports" '
         def enc: tostring | @uri;
@@ -333,13 +334,14 @@ proxy_sb_render_uri() {
                 ["type", "tcp"], ["headerType", "none"]
             ]) + "#" + (.name | enc)
         elif .profile == "hysteria2" then
-            "hysteria2://" + (.credentials.password | enc) + "@" + host + ":" + $hy2_ports + "?" + query(([
+            "hysteria2://" + (.credentials.password | enc) + "@" + endpoint + "?" + query(([
                 ["sni", .tls.server_name]
             ] + (if .tls.insecure then [["insecure", "1"]] else [] end) +
                 (if .options.obfs_type == "salamander" or .options.obfs_type == "gecko" then
                     [["obfs", .options.obfs_type], ["obfs-password", .options.obfs_password]] else [] end) +
                 (if .tls.certificate_sha256 != "" then
-                    [["pinSHA256", .tls.certificate_sha256]] else [] end))) + "#" + (.name | enc)
+                    [["pinSHA256", .tls.certificate_sha256]] else [] end) +
+                (if $hy2_ports != "" then [["mport", $hy2_ports]] else [] end))) + "#" + (.name | enc)
         elif .profile == "tuic-v5" then
             "tuic://" + (.credentials.uuid | enc) + ":" + (.credentials.password | enc) + "@" + endpoint + "?" + query(([
                 ["sni", .tls.server_name], ["alpn", "h3"],

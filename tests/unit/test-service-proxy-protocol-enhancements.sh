@@ -191,6 +191,45 @@ test_hysteria_relay_outbounds() {
     assert_status 10 proxy_relay_render_outbound xray "$(jq -c '.client_options={hop_interval:"30"}' <<<"$single")" 26.9.9
 }
 
+test_hysteria_gui_uri() {
+    local core host node uri query parsed rewritten native
+    : >"$TEST_TEMP/hy2-gui-uris.txt"
+    for core in sing-box xray; do
+        for host in relay.example 192.0.2.10 2001:db8::10; do
+            node="$(fixture_node "$core" hysteria2 | jq -c --arg host "$host" '.address=$host | .options.hop_ports="20120-20200"')"
+            if [[ "$core" == sing-box ]]; then uri="$(proxy_sb_render_uri "$node")"
+            else uri="$(proxy_xray_render_uri "$node")"; fi
+            [[ "$uri" == *':34443?'* ]] || fail 'GUI URI authority must contain the numeric listener, not a range'
+            query="${uri%%#*}"
+            query="$(_proxy_relay_query_json "${query#*\?}")"
+            assert_json "$query" '.mport == "20120-20200,34443" and .pinSHA256 == ("a" * 64)' 'GUI hopping extension and TLS pin'
+            parsed="$(proxy_relay_uri_parse "$uri")"
+            assert_json "$parsed" '.endpoint.port == 20120 and .endpoint.ports == "20120-20200,34443" and .credentials.password == "p+a&ss:word"' 'compatible URI roundtrip retains the complete port set and password'
+            printf '%s\n' "$uri" >>"$TEST_TEMP/hy2-gui-uris.txt"
+            rewritten="$(proxy_relay_uri_rewrite "$uri" "$host" 24443)"
+            [[ "$rewritten" != *mport=* && "$rewritten" == *':24443?'* && "$rewritten" == *pinSHA256=* ]] || fail 'single-port forward must remove upstream hopping without losing TLS pin'
+            assert_json "$(proxy_relay_uri_parse "$rewritten")" '.endpoint.port == 24443 and (.endpoint | has("ports") | not)' 'single-port rewrite stays single'
+            rewritten="$(proxy_relay_uri_rewrite "$uri" "$host" '24445,24443-24444')"
+            assert_json "$(proxy_relay_uri_parse "$rewritten")" '.endpoint.port == 24443 and .endpoint.ports == "24443-24445"' 'mport replacement removes the previous port set'
+            node="$(jq 'del(.options.hop_ports)' <<<"$node")"
+            if [[ "$core" == sing-box ]]; then uri="$(proxy_sb_render_uri "$node")"
+            else uri="$(proxy_xray_render_uri "$node")"; fi
+            [[ "$uri" != *mport=* && "$uri" == *':34443?'* ]] || fail 'single-port exports stay unchanged'
+        done
+    done
+    native='hy2://secret@relay.example:20120-20200?sni=relay.example'
+    assert_json "$(proxy_relay_uri_parse 'hy2://secret@relay.example:443?mport=20200%2C20120-20199')" '.endpoint == {host:"relay.example",port:20120,ports:"20120-20200"}' 'mport normalizes independently of numeric fallback'
+    assert_equal "$(proxy_relay_uri_parse "$native")" "$(proxy_relay_uri_parse "${native/20120-20200/20120}&mport=20120-20200")" 'native and compatible forms have identical descriptors'
+    assert_status 0 proxy_relay_uri_parse "$native&mport=20120-20200"
+    assert_status 10 proxy_relay_uri_parse "$native&mport=20121-20200"
+    assert_status 10 proxy_relay_uri_parse 'hy2://secret@relay.example:443?mport='
+    assert_status 10 proxy_relay_uri_parse 'hy2://secret@relay.example:443?mport=0-65536'
+    assert_status 10 proxy_relay_uri_parse 'hy2://secret@relay.example:443?mport=443&mport=444'
+    assert_json "$(proxy_relay_uri_parse 'hy2://secret@relay.example?mport=20120')" '.endpoint == {host:"relay.example",port:20120}' 'single mport does not accidentally dial the fallback'
+    assert_equal 'hy2://secret@relay.example:24443' "$(proxy_relay_uri_rewrite 'hy2://secret@relay.example:443?mport=20120-20200' relay.example 24443)" 'rewriting a query containing only mport leaves no empty query'
+    assert_equal 'hy2://secret@relay.example:24443' "$(proxy_relay_uri_rewrite 'hy2://secret@relay.example:443' relay.example 24443)" 'empty query rewrite stays empty'
+}
+
 test_sing_box_hysteria_options() {
     local node base rendered uri parsed profile
     base="$(fixture_node sing-box hysteria2)"
@@ -233,4 +272,6 @@ printf 'TEST: sing-box Hysteria2 Gecko, BBR and native defaults\n'
 test_sing_box_hysteria_options
 printf 'TEST: Hysteria2 URI multiport and outbound capability/rendering matrix\n'
 test_hysteria_relay_outbounds
+printf 'TEST: Hysteria2 GUI-compatible mport links and native import compatibility\n'
+test_hysteria_gui_uri
 printf 'PASS: proxy protocol enhancements\n'

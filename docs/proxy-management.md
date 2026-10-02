@@ -186,11 +186,11 @@ vpsctl service proxy node add --profile hysteria2 --core xray --port 8443 --obfs
 vpsctl service proxy node add --profile hysteria2 --core sing-box --port 8443 --obfs gecko --bbr-profile conservative
 ```
 
-Hysteria2 分享 URI 使用标准 `obfs`、`obfs-password` 和 `pinSHA256` 等字段，以及 authority 中的多端口语法。带宽、跳跃间隔、BBR profile、Chrome QUIC 开关和公钥固定属于本地运行选项，不写入标准 URI。[Hysteria URI 规范](https://hysteria.network/docs/developers/URI-Scheme/)
+Hysteria2 分享 URI 使用 `obfs`、`obfs-password` 和 `pinSHA256` 等字段。官方原生 URI 允许把多端口集合写在 authority 中，但 v2rayN/v2rayNG 等客户端通过标准 URL 解析器读取单个数字端口，再通过 `mport` 扩展读取跳跃范围。本项目默认导出后者以兼容这些客户端，导入仍同时接受两种形式。`mport` 是客户端扩展，不能保证所有工具都支持；内核支持端口跳跃也不等于客户端导入器支持全部 URI 形式。带宽、跳跃间隔、BBR profile、Chrome QUIC 开关和公钥固定仍仅保存在本地运行选项中。[Hysteria URI 规范](https://hysteria.network/docs/developers/URI-Scheme/)、[v2rayN 导入／导出实现](https://github.com/2dust/v2rayN/blob/master/v2rayN/ServiceLib/Handler/Fmt/Hysteria2Fmt.cs)。
 
 ### Hysteria2 端口跳跃
 
-节点新增和编辑可设置 `--hop-ports '20000-20100,21000'`，以 `--hop-ports off` 关闭。端口和递增范围限 1–65535，自动排序、去重和合并；`--port` 始终是内核实际监听端口。分享 URI 包含实际端口与额外接入端口，例如 `hysteria2://PASSWORD@example.com:8443,20000-20100,21000?sni=example.com`；IPv6 地址继续用方括号包围。节点仅设置可接入的端口，客户端自行决定跳跃间隔。
+节点新增和编辑可设置 `--hop-ports '20000-20100,21000'`，以 `--hop-ports off` 关闭。端口和递增范围限 1–65535，自动排序、去重和合并；`--port` 始终是内核实际监听端口。分享 URI 在 authority 中保留该数字端口，`mport` 包含实际端口与额外接入端口的集合，例如 `hysteria2://PASSWORD@example.com:8443?sni=example.com&mport=8443%2C20000-20100%2C21000`；`%2C` 是逗号的 URL 编码，IPv6 地址继续用方括号包围。未开启跳跃时不添加 `mport`。节点仅设置可接入的端口，客户端自行决定跳跃间隔。
 
 两个内核均通过脚本受管的 nftables 本机 UDP 映射接入跳跃端口。规则限定本机目的地址及节点监听地址，只在 PREROUTING 转换，不添加 OUTPUT、SNAT 或远端 FORWARD 规则；仅启用跳跃不改变 IP forwarding。跳跃范围与其他 UDP 监听、UDP 节点和 UDP 端口转发冲突时拒绝，与纯 TCP 端口可以共存。UFW 按 NAT 后的实际监听端口放行，防火墙清单不伪造额外的 route 需求。
 
@@ -199,12 +199,12 @@ Hysteria2 分享 URI 使用标准 `obfs`、`obfs-password` 和 `pinSHA256` 等�
 ```bash
 vpsctl service proxy node add --profile hysteria2 --core sing-box --port 8443 --hop-ports '20000-20100,21000'
 vpsctl service proxy node edit --id NODE_ID --hop-ports off
-vpsctl service proxy relay exit add --name hy2-hop --core xray --uri 'hysteria2://PASSWORD@example.com:20000-20100?sni=example.com' --hop-interval 15-45
+vpsctl service proxy relay exit add --name hy2-hop --core xray --uri 'hysteria2://PASSWORD@example.com:20000?sni=example.com&mport=20000-20100' --hop-interval 15-45
 vpsctl service proxy relay exit edit --id EXIT_ID --hop-ports '20000-20200' --hop-interval 30
 vpsctl service proxy relay exit edit --id EXIT_ID --hop-interval default
 ```
 
-中转出口接受 `hysteria2://` 和 `hy2://` 的单端口、多端口和省略端口（默认 443）形式。`--hop-ports` 覆盖 URI 端口部分并同步保存链接；`off` 保留一个有效端口。仅修改端口不会清除已有 TLS 信任材料。跳跃间隔使用秒数 `N` 或随机范围 `MIN-MAX`，最低 5 秒，默认 30 秒；只有多端口出口可设置，关闭跳跃后清除间隔覆盖。sing-box 固定间隔要求 `1.11+`，随机间隔要求 `1.14+`；Xray `26.3.27–26.9.8` 使用旧 `quicParams.udpHop`，`26.9.9+` 使用独立 `udphop` UDP mask。纯端口转发继续固定连接出口选定的一个有效端口，周期跳跃由代理出口内核执行。
+中转出口接受 `hysteria2://` 和 `hy2://` 的单端口、原生多端口、`mport` 和省略端口（默认 443）形式。`--hop-ports` 覆盖跳跃集合并同步保存为数字端口＋`mport`；`off` 保留一个有效端口并移除 `mport`。仅修改端口不会清除已有 TLS 信任材料。跳跃间隔使用秒数 `N` 或随机范围 `MIN-MAX`，最低 5 秒，默认 30 秒；只有多端口出口可设置，关闭跳跃后清除间隔覆盖。sing-box 固定间隔要求 `1.11+`，随机间隔要求 `1.14+`；Xray `26.3.27–26.9.8` 使用旧 `quicParams.udpHop`，`26.9.9+` 使用独立 `udphop` UDP mask。纯端口转发分享会移除上游的 `mport`，继续固定连接出口选定的一个有效端口，周期跳跃由代理出口内核执行。
 
 每个节点独立保存 `ip_strategy`；旧清单缺失该字段时按 `auto` 处理，列表和详情 JSON 始终补出有效默认值。`auto` 使用代理内核自身默认行为，且不会继承 [`network ip-policy`](network-settings.md#4-ip-地址族偏好) 的系统策略。其他策略通过节点专属直连出站和入站标签路由实现：
 

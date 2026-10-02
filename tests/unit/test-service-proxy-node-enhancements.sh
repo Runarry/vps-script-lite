@@ -251,9 +251,9 @@ assert_json "$(<"${TEST_TEMP}/config-xray.json")" \
     '.inbounds[] | select(.port == 30210) | .streamSettings.finalmask.quicParams.bbrProfile == "conservative" and .streamSettings.finalmask.quicParams.brutalUp == "10000000000"' 'Xray BBR profile coexists with unchanged bandwidth defaults'
 feature_identity="$(jq -Sc '{credentials,tls}' <<<"$feature_node")"
 uri="$(proxy_node_render_uri_json "$feature_node")"
-[[ "$uri" == *'@[2001:db8::10]:30210,30300-30304?'* && "$uri" == *'pinSHA256='* ]] || fail 'multiport IPv6 URI must retain brackets, base port and TLS pin'
+[[ "$uri" == *'@[2001:db8::10]:30210?'* && "$uri" == *'mport=30210%2C30300-30304'* && "$uri" == *'pinSHA256='* ]] || fail 'multiport IPv6 URI must retain numeric base port, hopping set and TLS pin'
 sb_feature="$(jq '.core="sing-box"' <<<"$feature_node")"
-assert_equal "$uri" "$(proxy_node_render_uri_json "$sb_feature")" 'both cores share the same HY2 multiport authority and authentication'
+assert_equal "$uri" "$(proxy_node_render_uri_json "$sb_feature")" 'both cores share the same compatible HY2 hopping URI and authentication'
 reject_without_writes proxy_node_edit --id "$feature_id" --obfs gecko
 TEST_XRAY_VERSION=26.6.0
 reject_without_writes proxy_node_edit --id "$feature_id" --obfs gecko

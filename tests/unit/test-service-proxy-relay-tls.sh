@@ -171,7 +171,7 @@ proxy_relay_exit_edit --id exit-0000000000000001 --hop-ports '24445,24443-24444'
     --bandwidth-mode manual --up-mbps 17 --down-mbps 31 --bbr-profile conservative
 hy2="$(jq -c '.exits[0]' "$PROXY_RELAY_FILE")"
 assert_json "$hy2" ".endpoint == {host:\"relay.example\",port:24443,ports:\"24443-24445\"} and .descriptor.endpoint == .endpoint and .client_options.tls_spki_sha256 == \"$wrong_spki\" and .client_options.hop_interval == \"5-10\" and .client_options.up_mbps == 17 and .client_options.down_mbps == 31" 'port-only edit synchronizes descriptor and preserves trust'
-assert_json "$hy2" '.uri | contains(":24443-24445?") and (test("bandwidth|up_mbps|down_mbps|interval|bbr|chrome") | not)' 'local HY2 settings stay out of URI'
+assert_json "$hy2" '.uri | contains(":24443?") and contains("mport=24443-24445") and (test("bandwidth|up_mbps|down_mbps|interval|bbr|chrome") | not)' 'compatible URI keeps hopping but excludes local HY2 settings'
 proxy_relay_exit_edit --id exit-0000000000000001 --up-mbps 21
 assert_json "$(cat "$PROXY_RELAY_FILE")" '.exits[0].client_options | .up_mbps == 21 and .down_mbps == 31' 'manual bandwidth supports one-sided edit'
 proxy_relay_exit_edit --id exit-0000000000000001 --hop-interval default --chrome-parrot default --bbr-profile default --bandwidth-mode auto

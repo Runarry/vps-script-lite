@@ -274,7 +274,7 @@ _proxy_relay_parse_ss_plugin() {
 
 proxy_relay_uri_parse() {
     local uri="${1-}" requested_profile="${2-}" scheme rest body query='' fragment='' name=''
-    local userinfo authority endpoint host port ports='' query_json='{}' profile='' cores_json
+    local userinfo authority endpoint host port ports='' mport query_json='{}' profile='' cores_json
     local security type encryption flow sni public_key short_id path service_name ws_host grpc_authority mode
     local username='' password='' uuid='' method='' plugin='' plugin_json='{}' shadowtls_password=''
     local tls_enabled='false' tls_mode='none' insecure='false' certificate_sha256='' alpn='[]'
@@ -402,6 +402,17 @@ proxy_relay_uri_parse() {
             [[ -n "$password" ]] || parse_valid='false'
             profile='hysteria2'
             sni="${sni:-$host}"
+            if jq -e 'has("mport")' <<<"$query_json" >/dev/null; then
+                mport="$(proxy_hy2_ports_normalize "$(_proxy_relay_query_value "$query_json" mport)")" || return 10
+                # Accept both native multi-port authorities and GUI mport links;
+                # two independently specified multi-port sets must agree.
+                [[ -z "$ports" || "$ports" == "$mport" ]] || {
+                    _proxy_relay_uri_error 'conflicting Hysteria2 port sets'; return 10;
+                }
+                ports="$mport"
+                port="$(proxy_hy2_ports_first "$ports")" || return 10
+                proxy_hy2_ports_multiple "$ports" || ports=''
+            fi
             network_hint='udp'
             tls_enabled='true'
             tls_mode='tls'
@@ -544,7 +555,7 @@ proxy_relay_uri_parse() {
         anytls-reality)
             _proxy_relay_query_keys_allowed "$query_json" security sni fp pbk sid type headerType || return 10 ;;
         hysteria2)
-            _proxy_relay_query_keys_allowed "$query_json" sni insecure obfs obfs-password pinSHA256 || return 10 ;;
+            _proxy_relay_query_keys_allowed "$query_json" sni insecure obfs obfs-password pinSHA256 mport || return 10 ;;
         tuic-v5)
             _proxy_relay_query_keys_allowed "$query_json" sni alpn congestion_control udp_relay_mode allow_insecure pinSHA256 || return 10 ;;
         shadowsocks-*)
@@ -940,6 +951,8 @@ proxy_relay_render_outbound() {
 proxy_relay_uri_rewrite() {
     local uri="${1-}" new_host="${2-}" new_port="${3-}"
     local scheme rest fragment='' query='' body authority userinfo new_authority decoded encoded parse_status=0
+    local hop_ports pair query_key
+    local -a query_parts=() kept_parts=()
     [[ $# -eq 3 && -n "$uri" ]] || { _proxy_relay_uri_error 'missing or extra argument'; return 2; }
     _proxy_relay_valid_host "$new_host" || { _proxy_relay_uri_error 'invalid replacement host'; return 2; }
     scheme="${uri%%://*}"
@@ -962,6 +975,23 @@ proxy_relay_uri_rewrite() {
     rest="${uri#*://}"
     if [[ "$rest" == *'#'* ]]; then fragment="#${rest#*#}"; rest="${rest%%#*}"; fi
     if [[ "$rest" == *'?'* ]]; then query="?${rest#*\?}"; body="${rest%%\?*}"; else body="$rest"; fi
+    if [[ "${scheme,,}" == hy2 || "${scheme,,}" == hysteria2 ]]; then
+        hop_ports="$new_port"
+        new_port="$(proxy_hy2_ports_first "$hop_ports")" || return $?
+        # Strip the old mport even for single-port forwards/off. Preserve all
+        # other query bytes, including TLS pins and encoded obfuscation secrets.
+        IFS='&' read -r -a query_parts <<<"${query#\?}"
+        for pair in "${query_parts[@]}"; do
+            query_key="$(_proxy_relay_uri_decode "${pair%%=*}")" || return 10
+            [[ "$query_key" == mport ]] || kept_parts+=("$pair")
+        done
+        if proxy_hy2_ports_multiple "$hop_ports"; then
+            encoded="$(jq -nr --arg ports "$hop_ports" '$ports | @uri')" || return 20
+            kept_parts+=("mport=$encoded")
+        fi
+        query="$(IFS='&'; printf '%s' "${kept_parts[*]}")"
+        [[ -z "$query" ]] || query="?$query"
+    fi
     new_authority="$(_proxy_relay_format_authority "$new_host" "$new_port")"
     if [[ "${scheme,,}" == ss && "$body" != *@* ]]; then
         decoded="$(_proxy_relay_b64_decode "$body")" || return 10
