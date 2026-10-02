@@ -28,7 +28,8 @@
 - [TLS 证书管理](docs/tls-management.md)：域名证书导入、ACME 申请与自动续期。
 - [服务器测试](docs/server-testing.md)：NodeQuality 与 TcpQuality 的上游来源、负载、报告上传、清理和退出码边界。
 - [优化评审与验收记录](docs/optimization-review-2026-09-30.md#当前处理状态)：已完成范围、剩余候选及各轮验证证据。
-- [v0.8.11 发布验收](docs/release-0.8.11-validation.md)：发布资产、实际升级、公开安装和测试环境恢复记录。
+- [v0.8.12 发布验收](docs/release-0.8.12-validation.md)：发布资产、实际升级、公开安装和测试环境恢复记录。
+- [v0.8.11 发布验收](docs/release-0.8.11-validation.md)：上一版发布资产与验收记录。
 
 ## 安装
 
