@@ -527,7 +527,7 @@ access_sshd_restore_backup_config() {
     if [[ "$present" == 1 ]]; then
         candidate="$backup_dir/managed.conf"
         [[ -f "$candidate" && ! -L "$candidate" ]] || return 30
-        access_sshd_install_candidate "$candidate"
+        access_sshd_install_candidate "$candidate" || return $?
     elif [[ "$present" == 0 ]]; then
         [[ "${VPSCTL_DRY_RUN:-0}" == 1 ]] || rm -f -- "$ACCESS_CONFIG" || return 20
     else
@@ -1658,7 +1658,7 @@ access_ssh_abort() {
         ufw_restore=1
     fi
     access_sshd_restore_backup_config "$backup_dir" || failed=1
-    access_sshd_reload || failed=1
+    ((failed)) || access_sshd_reload || failed=1
     if ((ufw_restore)); then
         ((failed)) || access_sshd_port_listening "$old_port" || failed=1
         if ((failed)); then
@@ -1667,14 +1667,14 @@ access_ssh_abort() {
             vps_ufw_commit || failed=1
             ((failed)) || access_firewall_ufw_restore_state "$backup_dir" || failed=1
         fi
-        if ((failed)); then
-            vps_cmd_unlock
-            vps_cmd_error "SSH/UFW 回滚未完成，已保留事务供重试；备份 ID：$backup_id"
-            access_sshd_print_recovery "$backup_dir"
-            return 30
-        fi
-    else
+    elif ((failed == 0)); then
         access_firewall_abort "$backend" "$new_port" "$added" "$previous_backend" "$previous_port" "$previous_mode" "$backup_dir" || failed=1
+    fi
+    if ((failed)); then
+        vps_cmd_unlock
+        vps_cmd_error "SSH 访问回滚未完成，已保留事务供重试；备份 ID：$backup_id"
+        access_sshd_print_recovery "$backup_dir"
+        return 30
     fi
     access_sshd_backup_mark "$backup_dir" aborted '' || failed=1
     access_sshd_transaction_mark "$state" aborted || failed=1

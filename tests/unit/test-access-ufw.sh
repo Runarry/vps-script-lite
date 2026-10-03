@@ -25,6 +25,9 @@ assert_before() {
     second="$(awk -v event="$2" '$0 == event {print NR; exit}' "$EVENTS")"
     [[ -n "$first" && -n "$second" && "$first" -lt "$second" ]] || fail "$1 must precede $2"
 }
+assert_no_event() {
+    if grep -Fxq -- "$1" "$EVENTS"; then fail "unexpected event: $1"; fi
+}
 assert_status() {
     local expected="$1" actual=0
     shift
@@ -95,6 +98,7 @@ access_sshd_install_candidate() {
 }
 access_sshd_restore_backup_config() {
     log_event ssh.restore
+    ((MOCK_RESTORE_FAIL == 0)) || return 20
     printf 'restored\n' >"$ACCESS_CONFIG"
 }
 access_sshd_reload() {
@@ -122,7 +126,7 @@ reset_fixture() {
     FIXTURE="$TEST_TEMP/$TEST_INDEX"
     EVENTS="$FIXTURE/events"
     export VPSCTL_TESTING=1 VPSCTL_SYSTEM_ROOT="$FIXTURE/system" VPSCTL_DRY_RUN=0 VPSCTL_NO_COLOR=1
-    MOCK_IPV6=1 MOCK_DETACHED=0 MOCK_BEGIN_FAIL=0 MOCK_COMMIT_FAIL=0 MOCK_RELOAD_FAIL=0 MOCK_LISTEN_FAIL=0 UFW_LOCKS=0
+    MOCK_IPV6=1 MOCK_DETACHED=0 MOCK_BEGIN_FAIL=0 MOCK_COMMIT_FAIL=0 MOCK_RESTORE_FAIL=0 MOCK_RELOAD_FAIL=0 MOCK_LISTEN_FAIL=0 UFW_LOCKS=0
     mkdir -p -- "$VPSCTL_SYSTEM_ROOT/etc/ssh/sshd_config.d"
     : >"$EVENTS"
     printf '[]\n' >"$FIXTURE/scope.json"
@@ -189,22 +193,55 @@ assert_before ssh.listen.22 ufw.commit
 assert_equal 0 "$(jq length "$FIXTURE/scope.json")" 'restore reinstates original scope'
 assert_equal 22 "$(access_kv_get "$ACCESS_FW_STATE" port)" 'restore preserves legacy state snapshot'
 
-reset_fixture
-assert_status 0 access_firewall_open ufw 2222 22 0 "$BACKUP_DIR"
-seed_transaction
-MOCK_RELOAD_FAIL=1
-: >"$EVENTS"
-assert_status 30 access_ssh_abort "$TX_ID"
-assert_before ufw.restore ssh.restore
-assert_before ssh.reload ufw.rollback
-assert_equal prepared "$(access_kv_get "$TX_DIR/state" status)" 'failed abort remains retryable'
-assert_equal '22,2222' "$(jq -r '[.[].port] | unique | join(",")' "$FIXTURE/scope.json")" 'failed rollback keeps both requirements'
-assert_equal 0 "$UFW_LOCKS" 'failed abort releases shared lock'
-MOCK_RELOAD_FAIL=0
-: >"$EVENTS"
-assert_status 0 access_ssh_abort "$TX_ID"
-assert_before ssh.listen.22 ufw.commit
-assert_equal aborted "$(access_kv_get "$TX_DIR/state" status)" 'successful retry aborts transaction'
+for failure in restore reload; do
+    reset_fixture
+    assert_status 0 access_firewall_open ufw 2222 22 0 "$BACKUP_DIR"
+    seed_transaction
+    state_sha="$(sha256sum "$TX_DIR/state")"
+    manifest_sha="$(sha256sum "$BACKUP_DIR/manifest")"
+    config_sha="$(sha256sum "$ACCESS_CONFIG")"
+    scope_sha="$(sha256sum "$FIXTURE/scope.json")"
+    firewall_sha="$(sha256sum "$ACCESS_FW_STATE")"
+    if [[ "$failure" == restore ]]; then MOCK_RESTORE_FAIL=1; else MOCK_RELOAD_FAIL=1; fi
+    : >"$EVENTS"
+    assert_status 30 access_ssh_abort "$TX_ID"
+    assert_before ufw.restore ssh.restore
+    if [[ "$failure" == restore ]]; then
+        assert_before ssh.restore ufw.rollback
+        assert_no_event ssh.reload
+        assert_equal "$config_sha" "$(sha256sum "$ACCESS_CONFIG")" 'failed restore keeps candidate config'
+    else
+        assert_before ssh.reload ufw.rollback
+    fi
+    assert_no_event ssh.listen.22
+    assert_no_event ufw.commit
+    assert_no_event timer.cancel
+    assert_before ufw.rollback security.unlock
+    assert_equal prepared "$(access_kv_get "$TX_DIR/state" status)" 'failed abort remains retryable'
+    assert_equal "$state_sha" "$(sha256sum "$TX_DIR/state")" 'failed abort preserves transaction metadata'
+    assert_equal prepared "$(access_kv_get "$BACKUP_DIR/manifest" lifecycle)" 'failed abort preserves backup lifecycle'
+    assert_equal "$manifest_sha" "$(sha256sum "$BACKUP_DIR/manifest")" 'failed abort preserves backup metadata'
+    assert_equal "$TX_ID" "$(cat -- "$ACCESS_STATE_DIR/active")" 'failed abort retains active transaction'
+    assert_equal '22,2222' "$(jq -r '[.[].port] | unique | join(",")' "$FIXTURE/scope.json")" 'failed rollback keeps both requirements'
+    assert_equal "$scope_sha" "$(sha256sum "$FIXTURE/scope.json")" 'failed abort rolls back shared scope changes'
+    assert_equal "$firewall_sha" "$(sha256sum "$ACCESS_FW_STATE")" 'failed abort preserves legacy firewall state'
+    assert_equal 0 "$UFW_LOCKS" 'failed abort releases shared lock'
+
+    MOCK_RESTORE_FAIL=0 MOCK_RELOAD_FAIL=0
+    : >"$EVENTS"
+    assert_status 0 access_ssh_abort "$TX_ID"
+    assert_before ssh.listen.22 ufw.commit
+    assert_before ufw.commit timer.cancel
+    assert_equal aborted "$(access_kv_get "$TX_DIR/state" status)" 'successful retry aborts transaction'
+    assert_equal aborted "$(access_kv_get "$BACKUP_DIR/manifest" lifecycle)" 'successful retry marks backup aborted'
+    assert_equal restored "$(cat -- "$ACCESS_CONFIG")" 'successful retry restores SSH config'
+    assert_equal 0 "$(jq length "$FIXTURE/scope.json")" 'successful retry restores original shared scope'
+    assert_equal 22 "$(access_kv_get "$ACCESS_FW_STATE" port)" 'successful retry restores legacy firewall state'
+    assert_equal 0 "$UFW_LOCKS" 'successful retry releases shared lock'
+    [[ ! -e "$ACCESS_STATE_DIR/active" ]] || fail 'successful retry retains active transaction'
+    assert_equal 1 "$(grep -Fc timer.cancel "$EVENTS")" 'successful retry cancels timer once'
+    assert_status 3 access_ssh_abort "$TX_ID"
+done
 
 reset_fixture
 before_state="$(cat -- "$ACCESS_FW_STATE")"

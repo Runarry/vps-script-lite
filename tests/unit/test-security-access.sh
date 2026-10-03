@@ -42,11 +42,20 @@ case "${1:-}" in
             exit 1
         fi
         ;;
+    stop)
+        printf "%s\n" "$*" >>"${VPSCTL_SYSTEM_ROOT}/run/systemctl.log"
+        for unit in "${@:2}"; do
+            [[ "$unit" != vpsctl-access-*.timer ]] || rm -f -- "${VPSCTL_SYSTEM_ROOT}/run/$unit"
+        done
+        ;;
     *) exit 0 ;;
 esac'
 
 make_mock systemd-run '
-printf "%s\n" "$*" >>"${VPSCTL_SYSTEM_ROOT}/run/systemd-run.log"'
+printf "%s\n" "$*" >>"${VPSCTL_SYSTEM_ROOT}/run/systemd-run.log"
+for arg in "$@"; do
+    [[ "$arg" != --unit=* ]] || : >"${VPSCTL_SYSTEM_ROOT}/run/${arg#--unit=}.timer"
+done'
 
 make_mock getent '
 case "${1:-}:${2:-}" in
@@ -65,6 +74,15 @@ make_mock passwd '
 printf "%s\n" "$*" >>"${VPSCTL_SYSTEM_ROOT}/run/passwd.log"'
 
 make_mock chown 'exit 0'
+
+# shellcheck disable=SC2016 # Variables are expanded when the generated mock runs.
+make_mock mv '
+if [[ "${!#}" == "${VPSCTL_SYSTEM_ROOT}/etc/ssh/sshd_config.d/00-vpsctl-access.conf" &&
+    -e "${VPSCTL_SYSTEM_ROOT}/run/fail-managed-write" ]]; then
+    printf "%s\n" "$*" >>"${VPSCTL_SYSTEM_ROOT}/run/managed-write-failed.log"
+    exit 1
+fi
+exec /usr/bin/mv "$@"'
 
 make_mock sudo '
 case "${1:-}" in
@@ -329,8 +347,9 @@ if [[ " $* " == *" --add-rich-rule="* ]]; then
     exit 0
 fi
 if [[ " $* " == *" --remove-rich-rule="* ]]; then
-    rm -f -- "${VPSCTL_SYSTEM_ROOT}/run/firewalld-vpsctl-${scope}"
     printf "%s\n" "$*" >>"${VPSCTL_SYSTEM_ROOT}/run/firewalld.log"
+    [[ ! -e "${VPSCTL_SYSTEM_ROOT}/run/fail-firewall-remove" ]] || exit 1
+    rm -f -- "${VPSCTL_SYSTEM_ROOT}/run/firewalld-vpsctl-${scope}"
     exit 0
 fi
 if [[ " $* " == *" --remove-port="* ]]; then : >"${VPSCTL_SYSTEM_ROOT}/run/firewalld-user-deleted"; exit 0; fi
@@ -930,6 +949,154 @@ test_abort_expiry_and_reload_rollback() {
     [[ ! -e "$TEST_SYSTEM_ROOT/var/lib/vpsctl/security/access/active" ]] || fail "reload failure left active transaction marker"
 }
 
+assert_abort_retryable() {
+    local tx="$1" state_sha="$2" manifest_sha="$3" backup_dir="$4"
+    local state="$TEST_SYSTEM_ROOT/var/lib/vpsctl/security/access/transactions/$tx/state"
+
+    assert_file_contains "$state" $'status\tprepared' "failed abort remains prepared"
+    assert_equal "$state_sha" "$(sha256sum "$state")" "failed abort preserves transaction metadata"
+    assert_file_contains "$backup_dir/manifest" $'lifecycle\tprepared' "failed abort preserves backup lifecycle"
+    assert_equal "$manifest_sha" "$(sha256sum "$backup_dir/manifest")" "failed abort preserves backup metadata"
+    assert_equal "$tx" "$(cat -- "$TEST_SYSTEM_ROOT/var/lib/vpsctl/security/access/active")" "failed abort retains active transaction"
+    [[ -e "$TEST_SYSTEM_ROOT/run/vpsctl-access-${tx}.timer" ]] || fail "failed abort canceled the rollback timer"
+    if grep -Fq -- "stop vpsctl-access-${tx}.timer" "$TEST_SYSTEM_ROOT/run/systemctl.log"; then
+        fail "failed abort tried to stop the rollback timer"
+    fi
+}
+
+assert_abort_finalized() {
+    local tx="$1" backup_dir="$2"
+    local state="$TEST_SYSTEM_ROOT/var/lib/vpsctl/security/access/transactions/$tx/state"
+
+    assert_file_contains "$state" $'status\taborted' "successful retry marks transaction aborted"
+    assert_file_contains "$backup_dir/manifest" $'lifecycle\taborted' "successful retry marks backup aborted"
+    [[ ! -e "$TEST_SYSTEM_ROOT/var/lib/vpsctl/security/access/active" ]] || fail "successful retry retained active transaction"
+    [[ ! -e "$TEST_SYSTEM_ROOT/run/vpsctl-access-${tx}.timer" ]] || fail "successful retry retained rollback timer"
+    assert_file_contains "$TEST_SYSTEM_ROOT/run/systemctl.log" "stop vpsctl-access-${tx}.timer" "successful retry stops rollback timer"
+    [[ ! -e "$TEST_SYSTEM_ROOT/run/firewalld-vpsctl-runtime" && ! -e "$TEST_SYSTEM_ROOT/run/firewalld-vpsctl-permanent" ]] || fail "successful retry retained candidate firewall rules"
+    assert_status 3 "successful abort rejects replay" run_access ssh abort --transaction "$tx"
+}
+
+test_abort_managed_write_failure() {
+    local count tx state backup backup_dir managed original_managed original_sources='' pending_sources=''
+    local pending_managed state_sha manifest_sha reload_sha rules_sha firewall_sha
+
+    for count in 0 2; do
+        reset_system
+        managed="$TEST_SYSTEM_ROOT/etc/ssh/sshd_config.d/00-vpsctl-access.conf"
+        printf '# Managed by vpsctl security access.\n# original managed configuration\nPort 22\nPermitRootLogin yes\nPasswordAuthentication yes\n' >"$managed"
+        original_managed="$(sha256sum "$managed")"
+        if [[ "$count" == 2 ]]; then
+            printf 'Include /etc/ssh/sshd_config.d/*.conf\n# original main configuration\nPort 22\n' >"$TEST_SYSTEM_ROOT/etc/ssh/sshd_config"
+            printf '# original vendor configuration\nPort 22\n' >"$TEST_SYSTEM_ROOT/etc/ssh/sshd_config.d/50-vendor.conf"
+            original_sources="$(sha256sum "$TEST_SYSTEM_ROOT/etc/ssh/sshd_config" "$TEST_SYSTEM_ROOT/etc/ssh/sshd_config.d/50-vendor.conf")"
+        fi
+        : >"$TEST_SYSTEM_ROOT/run/firewalld-active"
+        prepare_transaction 2204 --firewall auto
+        tx="$ACCESS_TEST_TX"
+        state="$TEST_SYSTEM_ROOT/var/lib/vpsctl/security/access/transactions/$tx/state"
+        backup="$(awk -F '\t' '$1 == "backup_id" {print $2}' "$state")"
+        backup_dir="$TEST_SYSTEM_ROOT/var/lib/vpsctl/backups/security/access/$backup"
+        assert_file_contains "$backup_dir/manifest" $'config_present\t1' "managed write failure has an existing config"
+        assert_file_contains "$backup_dir/manifest" "$(printf 'port_file_count\t%s' "$count")" "managed write failure Port source fixture"
+        pending_managed="$(sha256sum "$managed")"
+        state_sha="$(sha256sum "$state")"
+        manifest_sha="$(sha256sum "$backup_dir/manifest")"
+        reload_sha="$(sha256sum "$TEST_SYSTEM_ROOT/run/systemctl.log")"
+        rules_sha="$(sha256sum "$TEST_SYSTEM_ROOT/run/firewalld-vpsctl-runtime" "$TEST_SYSTEM_ROOT/run/firewalld-vpsctl-permanent")"
+        firewall_sha="$(sha256sum "$TEST_SYSTEM_ROOT/run/firewalld.log")"
+        [[ -e "$TEST_SYSTEM_ROOT/run/vpsctl-access-${tx}.timer" ]] || fail "prepare did not schedule rollback timer"
+        if [[ "$count" == 2 ]]; then
+            pending_sources="$(sha256sum "$TEST_SYSTEM_ROOT/etc/ssh/sshd_config" "$TEST_SYSTEM_ROOT/etc/ssh/sshd_config.d/50-vendor.conf")"
+            [[ "$pending_sources" != "$original_sources" ]] || fail "prepare did not normalize the Port sources"
+        fi
+        : >"$TEST_SYSTEM_ROOT/run/fail-managed-write"
+        # Match abort's conditional caller so errexit cannot hide a lost status.
+        # shellcheck disable=SC2016 # Expand variables in the child shell.
+        assert_status 20 "restore helper propagates managed write failure with $count Port sources" bash -c '
+            source "$1/commands/security/access.sh"
+            access_common_init
+            status=0
+            access_sshd_restore_backup_config "$2" || status=$?
+            exit "$status"
+        ' _ "$TEST_ROOT" "$backup_dir"
+        assert_equal "$pending_managed" "$(sha256sum "$managed")" "failed helper preserves candidate managed config"
+        if [[ "$count" == 2 ]]; then
+            assert_equal "$pending_sources" "$(sha256sum "$TEST_SYSTEM_ROOT/etc/ssh/sshd_config" "$TEST_SYSTEM_ROOT/etc/ssh/sshd_config.d/50-vendor.conf")" "failed helper stops before restoring Port sources"
+        fi
+        assert_status 30 "abort propagates managed write failure with $count Port sources" run_access ssh abort --transaction "$tx"
+        assert_contains "$ACCESS_TEST_OUTPUT" '已保留事务供重试' "failed abort reports retryable transaction"
+        assert_file_contains "$TEST_SYSTEM_ROOT/run/managed-write-failed.log" "$managed" "targeted atomic write failure was exercised"
+        assert_equal "$pending_managed" "$(sha256sum "$managed")" "failed abort preserves candidate managed config"
+        if [[ "$count" == 2 ]]; then
+            assert_equal "$pending_sources" "$(sha256sum "$TEST_SYSTEM_ROOT/etc/ssh/sshd_config" "$TEST_SYSTEM_ROOT/etc/ssh/sshd_config.d/50-vendor.conf")" "failed abort stops before restoring Port sources"
+        fi
+        assert_equal "$reload_sha" "$(sha256sum "$TEST_SYSTEM_ROOT/run/systemctl.log")" "failed restore skips SSH reload"
+        assert_equal "$firewall_sha" "$(sha256sum "$TEST_SYSTEM_ROOT/run/firewalld.log")" "failed restore skips firewall cleanup"
+        assert_equal "$rules_sha" "$(sha256sum "$TEST_SYSTEM_ROOT/run/firewalld-vpsctl-runtime" "$TEST_SYSTEM_ROOT/run/firewalld-vpsctl-permanent")" "failed restore retains candidate firewall rules"
+        assert_abort_retryable "$tx" "$state_sha" "$manifest_sha" "$backup_dir"
+
+        rm -f -- "$TEST_SYSTEM_ROOT/run/fail-managed-write"
+        assert_status 0 "retry abort after managed write failure with $count Port sources" run_access ssh abort --transaction "$tx"
+        assert_equal "$original_managed" "$(sha256sum "$managed")" "retry restores original managed config exactly"
+        if [[ "$count" == 2 ]]; then
+            assert_equal "$original_sources" "$(sha256sum "$TEST_SYSTEM_ROOT/etc/ssh/sshd_config" "$TEST_SYSTEM_ROOT/etc/ssh/sshd_config.d/50-vendor.conf")" "retry restores original Port sources exactly"
+        fi
+        assert_abort_finalized "$tx" "$backup_dir"
+    done
+}
+
+test_abort_stage_failures() {
+    local stage tx state backup backup_dir managed original_managed pending_managed
+    local state_sha manifest_sha reload_sha rules_sha firewall_sha
+
+    for stage in missing-backup reload firewall; do
+        reset_system
+        managed="$TEST_SYSTEM_ROOT/etc/ssh/sshd_config.d/00-vpsctl-access.conf"
+        printf '# Managed by vpsctl security access.\n# original managed configuration\nPort 22\nPermitRootLogin yes\nPasswordAuthentication yes\n' >"$managed"
+        original_managed="$(sha256sum "$managed")"
+        : >"$TEST_SYSTEM_ROOT/run/firewalld-active"
+        prepare_transaction 2205 --firewall auto
+        tx="$ACCESS_TEST_TX"
+        state="$TEST_SYSTEM_ROOT/var/lib/vpsctl/security/access/transactions/$tx/state"
+        backup="$(awk -F '\t' '$1 == "backup_id" {print $2}' "$state")"
+        backup_dir="$TEST_SYSTEM_ROOT/var/lib/vpsctl/backups/security/access/$backup"
+        pending_managed="$(sha256sum "$managed")"
+        state_sha="$(sha256sum "$state")"
+        manifest_sha="$(sha256sum "$backup_dir/manifest")"
+        reload_sha="$(sha256sum "$TEST_SYSTEM_ROOT/run/systemctl.log")"
+        rules_sha="$(sha256sum "$TEST_SYSTEM_ROOT/run/firewalld-vpsctl-runtime" "$TEST_SYSTEM_ROOT/run/firewalld-vpsctl-permanent")"
+        firewall_sha="$(sha256sum "$TEST_SYSTEM_ROOT/run/firewalld.log")"
+        case "$stage" in
+            missing-backup) mv -- "$backup_dir/managed.conf" "$backup_dir/managed.conf.saved" ;;
+            reload) : >"$TEST_SYSTEM_ROOT/run/fail-reload-once" ;;
+            firewall) : >"$TEST_SYSTEM_ROOT/run/fail-firewall-remove" ;;
+        esac
+        assert_status 30 "abort $stage failure remains retryable" run_access ssh abort --transaction "$tx"
+        assert_abort_retryable "$tx" "$state_sha" "$manifest_sha" "$backup_dir"
+        assert_equal "$rules_sha" "$(sha256sum "$TEST_SYSTEM_ROOT/run/firewalld-vpsctl-runtime" "$TEST_SYSTEM_ROOT/run/firewalld-vpsctl-permanent")" "abort $stage failure retains candidate firewall rules"
+        if [[ "$stage" == missing-backup ]]; then
+            assert_equal "$pending_managed" "$(sha256sum "$managed")" "missing backup leaves candidate config untouched"
+            assert_equal "$reload_sha" "$(sha256sum "$TEST_SYSTEM_ROOT/run/systemctl.log")" "missing backup skips reload"
+            mv -- "$backup_dir/managed.conf.saved" "$backup_dir/managed.conf"
+        else
+            assert_equal "$original_managed" "$(sha256sum "$managed")" "abort $stage failure restored original config"
+        fi
+        if [[ "$stage" == firewall ]]; then
+            assert_file_contains "$TEST_SYSTEM_ROOT/run/firewalld.log" '--remove-rich-rule=' "firewall deletion failure was exercised"
+            rm -f -- "$TEST_SYSTEM_ROOT/run/fail-firewall-remove"
+        else
+            assert_equal "$firewall_sha" "$(sha256sum "$TEST_SYSTEM_ROOT/run/firewalld.log")" "abort $stage failure skips firewall cleanup"
+        fi
+        if [[ "$stage" == reload ]]; then
+            [[ ! -e "$TEST_SYSTEM_ROOT/run/fail-reload-once" ]] || fail "abort did not exercise the reload fault"
+        fi
+        assert_status 0 "retry abort after $stage failure" run_access ssh abort --transaction "$tx"
+        assert_equal "$original_managed" "$(sha256sum "$managed")" "retry after $stage failure restores original config"
+        assert_abort_finalized "$tx" "$backup_dir"
+    done
+}
+
 test_verify_commit_replay_and_restore() {
     local tx backup state managed manifest command output status=0 managed_sha manifest_sha
 
@@ -1267,6 +1434,8 @@ test_key_file_sources
 test_key_pubkey_enable
 test_sshd_shape_and_firewall_rejections
 test_abort_expiry_and_reload_rollback
+test_abort_managed_write_failure
+test_abort_stage_failures
 test_verify_commit_replay_and_restore
 test_proof_and_configuration_integrity
 test_firewall_owned_rule_cleanup
