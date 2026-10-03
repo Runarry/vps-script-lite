@@ -677,8 +677,10 @@ _kernel_grub_apply_transaction() (
     }
 
     kernel_grub_load
-    if [[ "$KERNEL_GRUB_SUPPORTED" != 1 || "$KERNEL_GRUB_DEFAULT_RELEASE" != "$release" || -n "$KERNEL_GRUB_NEXT_ID" ]]; then
+    if [[ "$KERNEL_GRUB_SUPPORTED" != 1 || "$KERNEL_GRUB_DEFAULT_RELEASE" != "$release" || -n "$KERNEL_GRUB_NEXT_ID" ||
+        "$KERNEL_GRUB_RAW_DEFAULT" != "$target" || "$KERNEL_GRUB_DEFAULT_ID" != "$target" || "$KERNEL_GRUB_RAW_SAVEDEFAULT" != false ]]; then
         vps_cmd_error 'GRUB 更新后回读验证失败'
+        vps_cmd_error "预期 GRUB_DEFAULT='$target'、默认 ID='$target'、GRUB_SAVEDEFAULT=false；实际 GRUB_DEFAULT='$KERNEL_GRUB_RAW_DEFAULT'、默认 ID='$KERNEL_GRUB_DEFAULT_ID'、GRUB_SAVEDEFAULT='$KERNEL_GRUB_RAW_SAVEDEFAULT'"
         return 20
     fi
     _KERNEL_GRUB_TX_ACTIVE=0

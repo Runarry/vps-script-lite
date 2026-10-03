@@ -552,7 +552,28 @@ setup_dns_set_fixture() {
 
     record_dns_call() { local IFS=' '; printf '%s\n' "$*" >>"$DNS_TEST_CALLS"; }
     update_dns_runtime() {
-        printf '%s\n' "${VPS_DNS_SERVERS[@]}" >"$DNS_TEST_RUNTIME"
+        if [[ "$DNS_TEST_BACKEND" == systemd-resolved ]]; then
+            local file line value section=''
+            local -a servers=() values=()
+            for file in "$DNS_TEST_ROOT/etc/systemd/resolved.conf" "$DNS_TEST_ROOT/etc/systemd/resolved.conf.d/"*.conf; do
+                [[ -f "$file" ]] || continue
+                section=''
+                while IFS= read -r line || [[ -n "$line" ]]; do
+                    if [[ "$line" == '['*']' ]]; then section="$line"; fi
+                    [[ "$section" == '[Resolve]' && "$line" == DNS=* ]] || continue
+                    value="${line#DNS=}"
+                    if [[ -z "$value" ]]; then
+                        servers=()
+                    else
+                        IFS=' ' read -r -a values <<<"$value"
+                        servers+=("${values[@]}")
+                    fi
+                done <"$file"
+            done
+            printf '%s\n' "${servers[@]}" >"$DNS_TEST_RUNTIME"
+        else
+            printf '%s\n' "${VPS_DNS_SERVERS[@]}" >"$DNS_TEST_RUNTIME"
+        fi
         if [[ "$DNS_TEST_BACKEND" == openresolv || "$DNS_TEST_BACKEND" == networkmanager ]]; then
             vps_dns_plain_content >"$DNS_TEST_ROOT/etc/resolv.conf.next"
             mv -- "$DNS_TEST_ROOT/etc/resolv.conf.next" "$DNS_TEST_ROOT/etc/resolv.conf"
@@ -675,6 +696,27 @@ test_repeated_set_skips_all_four_backends() (
         vps_dns_set >"$DNS_TEST_ROOT/output" 2>&1
         assert_dns_set_skipped "$backend repeated set"
         [[ "$backend" == networkmanager ]] || assert_contains "$(<"$DNS_TEST_CALLS")" 'writable ' "$backend writable check"
+    ); done
+)
+
+test_resolved_replaces_inherited_global_servers() (
+    local origin file original
+    for origin in main dropin; do (
+        setup_dns_set_fixture systemd-resolved
+        mkdir -p "$DNS_TEST_ROOT/etc/systemd/resolved.conf.d"
+        case "$origin" in
+            main) file="$DNS_TEST_ROOT/etc/systemd/resolved.conf" ;;
+            dropin) file="$DNS_TEST_ROOT/etc/systemd/resolved.conf.d/10-existing.conf" ;;
+        esac
+        printf '[Resolve]\nDNS=192.0.2.53 2001:db8::54\n' >"$file"
+        original="$(<"$file")"
+        vps_dns_set >"$DNS_TEST_ROOT/output" 2>&1
+        assert_dns_set_applied "resolved $origin inherited servers"
+        assert_equal "$(printf '%s\n' "${VPS_DNS_SERVERS[@]}")" "$(<"$DNS_TEST_RUNTIME")" "resolved $origin runtime replaces inherited list"
+        assert_equal "$original" "$(<"$file")" "resolved $origin source is preserved"
+        : >"$DNS_TEST_CALLS"
+        vps_dns_set >"$DNS_TEST_ROOT/output" 2>&1
+        assert_dns_set_skipped "resolved $origin repeated set"
     ); done
 )
 
@@ -1116,6 +1158,7 @@ test_preflight_failure_does_not_write
 test_plain_replacement_preserves_directives
 test_openresolv_replacement
 test_repeated_set_skips_all_four_backends
+test_resolved_replaces_inherited_global_servers
 test_file_config_requires_exact_target_content
 test_file_writers_do_not_commit_failed_generation
 test_nm_compares_all_target_properties

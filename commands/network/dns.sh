@@ -589,7 +589,7 @@ vps_dns_write_plain() {
 vps_dns_resolved_content() {
     local joined
     joined="$(vps_dns_join_servers)"
-    printf '[Resolve]\nDNS=%s\nFallbackDNS=\nDomains=~.\n' "$joined"
+    printf '[Resolve]\nDNS=\nDNS=%s\nFallbackDNS=\nDomains=~.\n' "$joined"
 }
 
 vps_dns_write_resolved() {
