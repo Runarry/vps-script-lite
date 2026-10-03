@@ -37,8 +37,10 @@ PROXY_RELAY_FORWARD_CACHE="$TEST_TMP/cache.json"
 PROXY_RELAY_FORWARD_CACHE_LOGICAL="$PROXY_RELAY_FORWARD_CACHE"
 TEST_UFW_CURRENT='[]'
 TEST_UFW_STACK=()
+VPS_UFW_DEPTH=0
 TEST_UFW_FAIL_BEGIN=0
 TEST_UFW_FAIL_COMMIT=0
+TEST_UFW_FAIL_ROLLBACK=0
 TEST_NFT_FAIL=0
 TEST_CACHE_FAIL=0
 TEST_EVENTS="$TEST_TMP/events"
@@ -48,6 +50,7 @@ vps_ufw_begin() {
     printf 'begin:%s\n' "$1" >>"$TEST_EVENTS"
     [[ "$TEST_UFW_FAIL_BEGIN" == 0 ]] || return 20
     TEST_UFW_STACK+=("$TEST_UFW_CURRENT")
+    VPS_UFW_DEPTH=${#TEST_UFW_STACK[@]}
     TEST_UFW_CURRENT="$(cat -- "$2")"
 }
 vps_ufw_commit() {
@@ -55,6 +58,7 @@ vps_ufw_commit() {
     printf 'commit\n' >>"$TEST_EVENTS"
     ((index >= 0)) || return 70
     unset 'TEST_UFW_STACK[index]'
+    VPS_UFW_DEPTH=${#TEST_UFW_STACK[@]}
     [[ "$TEST_UFW_FAIL_COMMIT" == 0 ]] || return 30
 }
 vps_ufw_rollback() {
@@ -63,6 +67,8 @@ vps_ufw_rollback() {
     ((index >= 0)) || return 70
     TEST_UFW_CURRENT="${TEST_UFW_STACK[index]}"
     unset 'TEST_UFW_STACK[index]'
+    VPS_UFW_DEPTH=${#TEST_UFW_STACK[@]}
+    [[ "$TEST_UFW_FAIL_ROLLBACK" == 0 ]] || return 30
 }
 
 cat >"$PROXY_MANIFEST" <<'EOF'
@@ -213,5 +219,72 @@ test_nested_forward_apply() { proxy_relay_forward_apply; }
 proxy_ufw_relay_transaction test_nested_forward_apply
 jq -e 'length == 5' <<<"$TEST_UFW_CURRENT" >/dev/null || fail 'outer commit lost nested forward declarations'
 [[ "${#TEST_UFW_STACK[@]}" == 0 ]] || fail 'outer forward frame leaked'
+
+# A failed auto-apply can restore its files inside an existing node frame, which
+# is itself nested inside a relay frame. Clearing pending must wait for every
+# outer rollback/resync; an outer UFW failure must leave recovery retryable.
+TEST_PENDING_FILE="$TEST_TMP/pending-xray.json"
+cp "$PROXY_MANIFEST" "$TEST_TMP/restored-nodes.json"
+jq '(.nodes[] | select(.id == "tcp")).port=33000' "$PROXY_MANIFEST" >"$TEST_TMP/pending-candidate.json"
+proxy_core_pending_path() { printf '%s' "$TEST_PENDING_FILE"; }
+proxy_prepare_pending_restore() {
+    cp "$TEST_TMP/restored-nodes.json" "$2/nodes.json"
+    [[ "$TEST_PENDING_RUNTIME" == 0 ]] || cp "$PROXY_RELAY_FORWARD_CACHE" "$2/cache.json"
+}
+_proxy_restore_pending() {
+    printf 'pending-files-restored\n' >>"$TEST_EVENTS"
+    cp "$2/nodes.json" "$PROXY_MANIFEST"
+    [[ "$TEST_PENDING_RUNTIME" == 0 ]] || proxy_ufw_forwards_sync_cached
+}
+proxy_clear_pending() {
+    [[ "$VPS_UFW_DEPTH" == 0 && "${PROXY_UFW_TRANSACTION_DEPTH:-0}" -le 1 ]] || fail 'pending cleared inside unfinished UFW frame'
+    printf 'pending-clear:%s\n' "$1" >>"$TEST_EVENTS"
+    rm -f -- "$TEST_PENDING_FILE"
+}
+test_pending_outer_fault() {
+    case "$TEST_PENDING_FAULT" in
+        rollback) TEST_UFW_FAIL_ROLLBACK=1 ;;
+        resync) TEST_UFW_FAIL_COMMIT=1 ;;
+    esac
+}
+test_pending_autoapply_failure() {
+    cp "$TEST_TMP/pending-candidate.json" "$PROXY_MANIFEST"
+    proxy_ufw_restore_pending xray || return $?
+    [[ -f "$TEST_PENDING_FILE" && "$PROXY_UFW_PENDING_RESTORE_CORE" == xray ]] || fail 'inner restore cleared pending before outer cleanup'
+    [[ "$TEST_PENDING_WRAPPER" == relay ]] || test_pending_outer_fault
+    return 20
+}
+test_pending_relay_autoapply_failure() {
+    expect_status 20 proxy_ufw_nodes_transaction "$TEST_TMP/pending-candidate.json" test_pending_autoapply_failure
+    [[ -f "$TEST_PENDING_FILE" ]] || fail 'node frame cleared pending before outer relay cleanup'
+    test_pending_outer_fault
+    return 20
+}
+for TEST_PENDING_WRAPPER in node relay; do
+    for TEST_PENDING_FAULT in none rollback resync; do
+        printf 'TEST: nested pending restore wrapper=%s outer-fault=%s\n' "$TEST_PENDING_WRAPPER" "$TEST_PENDING_FAULT"
+        TEST_UFW_STACK=(); VPS_UFW_DEPTH=0
+        TEST_UFW_FAIL_ROLLBACK=0; TEST_UFW_FAIL_COMMIT=0
+        PROXY_UFW_PENDING_RESTORE_CORE=''
+        TEST_PENDING_RUNTIME=0; [[ "$TEST_PENDING_WRAPPER" != relay ]] || TEST_PENDING_RUNTIME=1
+        cp "$TEST_TMP/restored-nodes.json" "$PROXY_MANIFEST"
+        printf '{}\n' >"$TEST_PENDING_FILE"
+        : >"$TEST_EVENTS"
+        expected=20; [[ "$TEST_PENDING_FAULT" == none ]] || expected=30
+        if [[ "$TEST_PENDING_WRAPPER" == node ]]; then
+            expect_status "$expected" proxy_ufw_nodes_transaction "$TEST_TMP/pending-candidate.json" test_pending_autoapply_failure
+        else
+            expect_status "$expected" proxy_ufw_relay_transaction test_pending_relay_autoapply_failure
+        fi
+        [[ "$VPS_UFW_DEPTH" == 0 && "${#TEST_UFW_STACK[@]}" == 0 ]] || fail 'nested pending test leaked UFW frame'
+        if [[ "$TEST_PENDING_FAULT" == none ]]; then
+            [[ ! -e "$TEST_PENDING_FILE" && -z "$PROXY_UFW_PENDING_RESTORE_CORE" ]] || fail 'completed outer cleanup did not clear pending'
+            [[ "$(tail -n 1 "$TEST_EVENTS")" == pending-clear:xray ]] || fail 'pending cleared before final outer resync'
+        else
+            [[ -f "$TEST_PENDING_FILE" && "$PROXY_UFW_PENDING_RESTORE_CORE" == xray ]] || fail 'failed outer cleanup consumed retryable pending'
+            ! grep -Fq pending-clear "$TEST_EVENTS" || fail 'failed outer cleanup cleared pending'
+        fi
+    done
+done
 
 printf 'PASS: proxy UFW declarations and transaction boundaries\n'

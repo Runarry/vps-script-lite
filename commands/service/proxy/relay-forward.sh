@@ -985,7 +985,7 @@ proxy_relay_forward_apply() {
         cp -p -- "$PROXY_RELAY_FORWARD_CACHE" "$cache_backup" || { rm -rf -- "$tmp"; return 20; }
         cache_existed=1
     fi
-    proxy_relay_forward_refresh_cache "$PROXY_RELAY_FORWARD_MANIFEST" "$PROXY_RELAY_FORWARD_CACHE" "$cache_candidate" || { local rc=$?; rm -rf -- "$tmp"; return "$rc"; }
+    proxy_relay_forward_refresh_cache "$PROXY_RELAY_FORWARD_MANIFEST" "${PROXY_RELAY_FORWARD_RESTORE_CACHE:-$PROXY_RELAY_FORWARD_CACHE}" "$cache_candidate" || { local rc=$?; rm -rf -- "$tmp"; return "$rc"; }
     proxy_relay_forward_detect_loops "$PROXY_RELAY_FORWARD_MANIFEST" "$cache_candidate" || { local rc=$?; rm -rf -- "$tmp"; return "$rc"; }
     referenced_missing="$(jq -r --slurpfile manifest "$PROXY_RELAY_FORWARD_MANIFEST" '
         . as $cache |

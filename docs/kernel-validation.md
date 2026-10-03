@@ -82,3 +82,9 @@
 宿主检查日志位于 `/root/vpsctl-xanmod-compat-20260906/validation/`：`static-checks.log`、`providers-test.log`、`full-suite.log`、`debian13-real-apt-plan.log` 和 `source-sha256.txt`。Debian 12 环境与对照材料位于 `/root/vpsctl-kernel-bookworm-20260906/`。
 
 Debian 12 对照日志包括 `baseline-and-old-repro.log`、`old-postcheck.log`、`new-plan.log`、`install-and-postcheck.log`、`finish-postcheck.log` 和导出的 `evidence/validation/`。验收辅助脚本修正过提前结束管道及将实际 `xanmod:lts` 系列误写为 `xanmod` 的断言，项目安装未因此重复执行。虚拟机已正常关机，QEMU 进程及转发端口关闭，`qemu-img-check.log` 确认磁盘无错误；镜像、日志、基线和 `RESTORE.txt` 保留，宿主未增加临时 swap。
+
+## 2026-10-03：负优先级来源检查
+
+三处 APT policy 解析现同时识别带负号的版本优先级与来源优先级，汇总目标版本所有段落中的仓库。通过 `ssh host-vps-scripts` 在 `/tmp/vpsctl-kernel-source-fix.Ym8UzQ/source` 执行 provider 脚本和对应单元测试的 `bash -n`、`shellcheck -x`，以及 `bash tests/unit/test-system-kernel-providers.sh`，均通过。用例覆盖发行版/XanMod 候选、安装计划来源检查、同版本分段、负优先级来源、非目标版本段落边界和已安装状态行。
+
+真实隔离 APT 中，同版本第三方 `-1` 段排在可信 `500` 段之前时，两个候选解析均返回 `1`，安装计划拒绝并返回 `30`；直接下载夹具包仍取得第三方内容，证实来源绕过已在项目检查处被阻止。移除第三方源后，可信候选及计划通过。命令与结果保留在该远端目录的 `real-apt-acceptance.sh`、`real-apt-acceptance.log`。所有源、pin、索引和下载产物均隔离于其 `apt/` 目录，宿主 APT 配置未修改，dpkg 状态校验和未变，未安装内核或重启；未重跑全套内核安装验收。

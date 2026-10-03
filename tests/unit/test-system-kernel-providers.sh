@@ -542,6 +542,109 @@ test_xanmod_same_version_foreign_origin() (
     test_assert_equal 1 "$status" 'XanMod lower-priority same-version foreign rejection'
 )
 
+test_signed_priority_policy_sources() (
+    local provider policy_case package target_version trusted_description validation_mode
+    local version status candidate_status source_status
+    local distribution_description='http://security.debian.org/debian-security trixie-security/main amd64 Packages'
+    local xanmod_description='https://deb.xanmod.org trixie/main amd64 Packages'
+    local foreign_description='https://packages.example trixie/main amd64 Packages'
+    test_reset_platform
+    APT_INDEX_MODE=official
+
+    apt-cache() {
+        [[ "${1:-}" == policy && "${2:-}" == "$package" && $# == 2 ]] || return 2
+        printf '%s\n' \
+            "$package:" \
+            '  Installed: (none)' \
+            "  Candidate: $target_version" \
+            '  Version table:'
+        case "$policy_case" in
+            duplicate-negative-first)
+                printf '%s\n' \
+                    "     $target_version -1" \
+                    "         -1 $foreign_description" \
+                    "     $target_version 500" \
+                    "        500 $trusted_description"
+                ;;
+            duplicate-negative-last)
+                printf '%s\n' \
+                    "     $target_version 500" \
+                    "        500 $trusted_description" \
+                    "     $target_version -1" \
+                    "         -1 $foreign_description"
+                ;;
+            negative-header-positive-source)
+                printf '%s\n' \
+                    "     $target_version -1" \
+                    "        500 $foreign_description" \
+                    "     $target_version 500" \
+                    "        500 $trusted_description"
+                ;;
+            negative-source-same-stanza)
+                printf '%s\n' \
+                    "     $target_version 500" \
+                    "        500 $trusted_description" \
+                    "         -1 $foreign_description"
+                ;;
+            non-target-negative)
+                printf '%s\n' \
+                    "     $target_version 500" \
+                    "        500 $trusted_description" \
+                    '     0.9 -10' \
+                    "        500 $foreign_description" \
+                    "        -10 $foreign_description"
+                ;;
+            trusted-negative)
+                printf '%s\n' \
+                    "     $target_version -1" \
+                    "         -1 $trusted_description"
+                ;;
+            trusted-installed)
+                printf '%s\n' \
+                    " *** $target_version 500" \
+                    "        500 $trusted_description" \
+                    '        100 /var/lib/dpkg/status' \
+                    '         -1 /var/lib/dpkg/status'
+                ;;
+            *) return 99 ;;
+        esac
+    }
+
+    for provider in official xanmod; do
+        KERNEL_TYPE="$provider"
+        if [[ "$provider" == official ]]; then
+            package=linux-image-amd64
+            target_version=6.12.107-1
+            trusted_description="$distribution_description"
+            validation_mode=distribution
+        else
+            package=linux-xanmod-x64v3
+            target_version=7.1.11-xanmod1-0
+            trusted_description="$xanmod_description"
+            validation_mode=xanmod
+        fi
+        for policy_case in duplicate-negative-first duplicate-negative-last negative-header-positive-source negative-source-same-stanza non-target-negative trusted-negative trusted-installed; do
+            candidate_status=1
+            source_status=30
+            case "$policy_case" in
+                non-target-negative | trusted-negative | trusted-installed)
+                    candidate_status=0
+                    source_status=0
+                    ;;
+            esac
+            status=0
+            version="$(kernel_package_candidate_version "$package" 2>/dev/null)" || status=$?
+            test_assert_equal "$candidate_status" "$status" "$provider $policy_case candidate status"
+            if ((candidate_status == 0)); then
+                test_assert_equal "$target_version" "$version" "$provider $policy_case candidate version"
+            fi
+            status=0
+            _kernel_validate_policy_version_sources "$package" "$target_version" "$validation_mode" "$distribution_description" "$xanmod_description" >/dev/null 2>&1 || status=$?
+            test_assert_equal "$source_status" "$status" "$provider $policy_case install-plan source status"
+        done
+    done
+)
+
 test_install_plan_validation() (
     local status=0
     test_reset_platform
@@ -878,6 +981,7 @@ test_candidates_by_type
 test_distribution_candidate_origin
 test_ubuntu_pocket_suite_validation
 test_xanmod_same_version_foreign_origin
+test_signed_priority_policy_sources
 test_install_plan_validation
 test_ubuntu_install_plan_dependency_state
 test_xanmod_index_metadata

@@ -80,8 +80,18 @@ proxy_ufw_nodes_sync() {
     proxy_ufw_nodes_transaction "$PROXY_MANIFEST" true
 }
 
+# A pending restore can run inside an auto-apply transaction. Its outer frame
+# still has to reconcile the restored declarations before recovery is complete.
+proxy_ufw_finish_pending_restore() {
+    [[ -n "${PROXY_UFW_PENDING_RESTORE_CORE:-}" ]] || return 0
+    ((${PROXY_UFW_TRANSACTION_DEPTH:-0} <= 1 && ${VPS_UFW_DEPTH:-0} == 0)) || return 0
+    proxy_clear_pending "$PROXY_UFW_PENDING_RESTORE_CORE" || return 30
+    PROXY_UFW_PENDING_RESTORE_CORE=''
+}
+
 proxy_ufw_nodes_transaction() {
     local manifest="$1" desired actual status=0 cleanup_status=0
+    local PROXY_UFW_TRANSACTION_DEPTH=$(( ${PROXY_UFW_TRANSACTION_DEPTH:-0} + 1 ))
     shift
     if [[ "${VPSCTL_DRY_RUN:-0}" == 1 || "${PROXY_UFW_NODES_ACTIVE:-0}" == 1 ]]; then
         "$@"
@@ -131,6 +141,7 @@ proxy_ufw_nodes_transaction() {
         vps_cmd_error "代理配置与 UFW 同步未完整完成；新配置已提交时保留其放行需求，请重试防火墙同步"
         return 30
     fi
+    proxy_ufw_finish_pending_restore || return 30
     return "$status"
 }
 
@@ -156,6 +167,7 @@ proxy_ufw_forwards_sync_cached() {
 # old rules until the entire business transaction has succeeded.
 proxy_ufw_relay_transaction() {
     local desired status=0 cleanup_status=0
+    local PROXY_UFW_TRANSACTION_DEPTH=$(( ${PROXY_UFW_TRANSACTION_DEPTH:-0} + 1 ))
     if [[ "${VPSCTL_DRY_RUN:-0}" == 1 ]]; then
         "$@"
         return $?
@@ -187,30 +199,30 @@ proxy_ufw_relay_transaction() {
         vps_cmd_error "中转与 UFW 同步未完整完成；已提交的目标放行保留，请重试防火墙同步"
         return 30
     fi
+    proxy_ufw_finish_pending_restore || return 30
     return "$status"
 }
 
 proxy_ufw_restore_pending() {
-    local core="$1" pending manifest relay cache runtime=false status=0 cleanup_status=0
+    local core="$1" pending prepared status=0
     pending="$(proxy_core_pending_path "$core")" || return $?
     [[ -f "$pending" && ! -L "$pending" ]] || return 1
-    manifest="$(jq -r '.manifest_backup // ""' "$pending")" || return 30
-    manifest="${manifest:-$PROXY_MANIFEST}"
-    runtime="$(jq -r '.relay_runtime_touched // false' "$pending")" || return 30
-    if [[ "$runtime" != true || "${VPSCTL_DRY_RUN:-0}" == 1 ]]; then
-        proxy_ufw_nodes_transaction "$manifest" _proxy_restore_pending "$core"
-        return $?
-    fi
-    relay="$(jq -r '.relay_backup // ""' "$pending")" || return 30
-    cache="$(jq -r '.relay_cache_backup // ""' "$pending")" || return 30
-    proxy_ufw_forwards_begin "${relay:-$PROXY_RELAY_FILE}" "$cache" || return $?
-    proxy_ufw_nodes_transaction "$manifest" _proxy_restore_pending "$core" || status=$?
-    if ((status == 0)); then
-        vps_ufw_commit || cleanup_status=$?
+    [[ "${VPSCTL_DRY_RUN:-0}" != 1 ]] || return 0
+    prepared="$(mktemp -d "${PROXY_STATE_DIR}/.pending-restore.XXXXXX")" || return 30
+    if proxy_prepare_pending_restore "$core" "$prepared"; then
+        if [[ -f "$prepared/cache.json" ]]; then
+            proxy_ufw_relay_transaction proxy_ufw_nodes_transaction "$prepared/nodes.json" \
+                _proxy_restore_pending "$core" "$prepared" || status=$?
+        else
+            proxy_ufw_nodes_transaction "$prepared/nodes.json" _proxy_restore_pending "$core" "$prepared" || status=$?
+        fi
+        if ((status == 0)); then
+            PROXY_UFW_PENDING_RESTORE_CORE="$core"
+            proxy_ufw_finish_pending_restore || status=30
+        fi
     else
-        vps_ufw_rollback || cleanup_status=$?
-        if ((cleanup_status == 0)); then proxy_ufw_forwards_sync_cached || cleanup_status=$?; fi
+        status=$?
     fi
-    ((cleanup_status == 0)) || return 30
-    return "$status"
+    rm -rf -- "$prepared"
+    ((status == 0)) || return 30
 }

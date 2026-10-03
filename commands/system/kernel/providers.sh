@@ -439,13 +439,13 @@ _kernel_xanmod_candidate_version() {
     [[ -n "$candidate" && "$candidate" != '(none)' ]] || return 1
     while IFS= read -r line; do
         trimmed="$(vps_cmd_trim "$line")"
-        if [[ "$trimmed" =~ ^(\*\*\*[[:space:]]+)?([^[:space:]]+)[[:space:]]+([0-9]+)$ ]]; then
+        if [[ "$trimmed" =~ ^(\*\*\*[[:space:]]+)?([^[:space:]]+)[[:space:]]+(-?[0-9]+)$ ]]; then
             version="${BASH_REMATCH[2]}"
             [[ "$version" == "$candidate" ]] && in_candidate=1 || in_candidate=0
             continue
         fi
         ((in_candidate == 1)) || continue
-        if [[ "$trimmed" =~ ^([0-9]+)[[:space:]]+([^[:space:]]+) ]]; then
+        if [[ "$trimmed" =~ ^(-?[0-9]+)[[:space:]]+([^[:space:]]+) ]]; then
             source="${BASH_REMATCH[2]}"
             if [[ "$source" == "$KERNEL_XANMOD_REPO_URL" ]]; then
                 official_source=1
@@ -479,13 +479,13 @@ _kernel_distribution_candidate_version() {
     fi
     while IFS= read -r line; do
         trimmed="$(vps_cmd_trim "$line")"
-        if [[ "$trimmed" =~ ^(\*\*\*[[:space:]]+)?([^[:space:]]+)[[:space:]]+([0-9]+)$ ]]; then
+        if [[ "$trimmed" =~ ^(\*\*\*[[:space:]]+)?([^[:space:]]+)[[:space:]]+(-?[0-9]+)$ ]]; then
             version="${BASH_REMATCH[2]}"
             [[ "$version" == "$candidate" ]] && in_candidate=1 || in_candidate=0
             continue
         fi
         ((in_candidate == 1)) || continue
-        [[ "$trimmed" =~ ^[0-9]+[[:space:]]+(.+)$ ]] || continue
+        [[ "$trimmed" =~ ^-?[0-9]+[[:space:]]+(.+)$ ]] || continue
         descriptor="${BASH_REMATCH[1]}"
         [[ "$descriptor" == /var/lib/dpkg/status ]] && continue
         local allowed matched=0
@@ -558,13 +558,13 @@ _kernel_validate_policy_version_sources() {
     fi
     while IFS= read -r line; do
         trimmed="$(vps_cmd_trim "$line")"
-        if [[ "$trimmed" =~ ^(\*\*\*[[:space:]]+)?([^[:space:]]+)[[:space:]]+([0-9]+)$ ]]; then
+        if [[ "$trimmed" =~ ^(\*\*\*[[:space:]]+)?([^[:space:]]+)[[:space:]]+(-?[0-9]+)$ ]]; then
             version="${BASH_REMATCH[2]}"
             [[ "$version" == "$target_version" ]] && in_target=1 || in_target=0
             continue
         fi
         ((in_target == 1)) || continue
-        [[ "$trimmed" =~ ^[0-9]+[[:space:]]+(.+)$ ]] || continue
+        [[ "$trimmed" =~ ^-?[0-9]+[[:space:]]+(.+)$ ]] || continue
         descriptor="${BASH_REMATCH[1]}"
         [[ "$descriptor" == /var/lib/dpkg/status ]] && continue
         source_count=$((source_count + 1))

@@ -3564,11 +3564,269 @@ test_hy2_runtime_lifecycle() {
     [[ ! -e "${TEST_SYSTEM_ROOT}/run/mock-nft/ip-vpsctl_proxy_hy2_4" ]] || fail "purge retained hop table"
 }
 
+# Shared manifest rollback must restore the failed core without undoing later
+# successful work owned by the other core or standalone forwarding commands.
+core_pending_ok() {
+    run_proxy "$@"
+    assert_equal 0 "$RUN_STATUS" "core pending fixture: $*"
+}
+
+core_pending_update() {
+    local version=v26.3.27
+    [[ "$1" != sing-box ]] || version=v1.12.0
+    set_release_scenario default
+    core_pending_ok update --core "$1" --version "$version" --confirm-external-update
+}
+
+core_pending_files() {
+    sha256sum "${TEST_SYSTEM_ROOT}/etc/vpsctl/proxy/$1/config.json" \
+        "${TEST_SYSTEM_ROOT}/usr/bin/$1" \
+        "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/cores/$1.json"
+}
+
+core_pending_snapshot() {
+    local core
+    sha256sum "$(manifest_path)" \
+        "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/network/ufw/state.json"
+    [[ ! -f "$(relay_path)" ]] || sha256sum "$(relay_path)"
+    for core in xray sing-box; do
+        core_pending_files "$core"
+        [[ ! -f "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/pending/$core.json" ]] || \
+            sha256sum "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/pending/$core.json"
+    done
+}
+
+core_pending_owner() {
+    jq -Sc --arg owner "node:$1" '[.requirements[] | select(.owner == $owner)]' \
+        "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/network/ufw/state.json"
+}
+
+core_pending_restart_fails() {
+    touch "${TEST_SYSTEM_ROOT}/run/fail-service-restart-once"
+    run_proxy restart --core "$1" --confirm-disruptive
+    assert_equal "${2:-20}" "$RUN_STATUS" "$1 failed restart rollback"
+}
+
+test_core_pending_isolation() {
+    local a b both aid bid delete_id keep_id a_nodes a_files a_dns b_nodes b_files b_dns b_pending b_owner
+    for a in xray sing-box; do
+        b=sing-box; [[ "$a" != sing-box ]] || b=xray
+        for both in 0 1; do
+            printf 'TEST: pending isolation %s, other pending=%s\n' "$a" "$both"
+            reset_root
+            install_external xray
+            install_external sing-box 1.12.0
+            core_pending_ok node add --profile shadowsocks-aes-256-gcm --core "$a" --name a-original --port 19001 --address proxy.example
+            core_pending_ok node add --profile shadowsocks-aes-256-gcm --core "$b" --name b-edit --port 19002 --address proxy.example
+            core_pending_ok node add --profile shadowsocks-aes-256-gcm --core "$b" --name b-delete --port 19003 --address proxy.example
+            aid="$(node_id_by_name a-original)"; bid="$(node_id_by_name b-edit)"; delete_id="$(node_id_by_name b-delete)"
+            core_pending_ok dns set --core sing-box --mode udp --server 1.1.1.1
+            a_nodes="$(jq -Sc --arg core "$a" '[.nodes[] | select(.core == $core)]' "$(manifest_path)")"
+            a_dns="$(jq -Sc '.settings.sing_box // null' "$(manifest_path)")"
+            a_files="$(core_pending_files "$a")"
+            core_pending_update "$a"
+            core_pending_ok node edit --id "$aid" --name a-pending --port 19011
+            if [[ "$a" == sing-box ]]; then core_pending_ok dns set --mode tcp --server 9.9.9.9; fi
+            if ((both)); then core_pending_update "$b"; fi
+            core_pending_ok node edit --id "$bid" --name b-committed --port 19012
+            core_pending_ok node delete --id "$delete_id" --confirm-delete
+            core_pending_ok node add --profile shadowsocks-aes-256-gcm --core "$b" --name b-added --port 19004 --address proxy.example
+            keep_id="$(node_id_by_name b-added)"
+            if [[ "$b" == sing-box ]]; then core_pending_ok dns set --mode doh --server 1.0.0.1; fi
+            b_nodes="$(jq -Sc --arg core "$b" '[.nodes[] | select(.core == $core)]' "$(manifest_path)")"
+            b_dns="$(jq -Sc '.settings.sing_box // null' "$(manifest_path)")"
+            b_files="$(core_pending_files "$b")"
+            b_owner="$(core_pending_owner "$keep_id")"
+            b_pending=''; if ((both)); then b_pending="$(sha256sum "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/pending/$b.json")"; fi
+            core_pending_restart_fails "$a"
+            assert_equal "$a_nodes" "$(jq -Sc --arg core "$a" '[.nodes[] | select(.core == $core)]' "$(manifest_path)")" "$a original nodes restored"
+            assert_equal "$a_files" "$(core_pending_files "$a")" "$a config binary and metadata restored"
+            assert_equal "$b_nodes" "$(jq -Sc --arg core "$b" '[.nodes[] | select(.core == $core)]' "$(manifest_path)")" "$b later CRUD preserved"
+            assert_equal "$b_files" "$(core_pending_files "$b")" "$b files preserved"
+            assert_equal "$b_owner" "$(core_pending_owner "$keep_id")" "$b UFW owner preserved"
+            [[ "$b_owner" != '[]' ]] || fail 'later node has no UFW requirements'
+            if [[ "$a" == sing-box ]]; then
+                assert_equal "$a_dns" "$(jq -Sc '.settings.sing_box // null' "$(manifest_path)")" 'failed sing-box DNS restored'
+            else
+                assert_equal "$b_dns" "$(jq -Sc '.settings.sing_box // null' "$(manifest_path)")" 'later sing-box DNS preserved'
+            fi
+            [[ ! -e "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/pending/$a.json" ]] || fail 'successful rollback retained failed core pending'
+            if ((both)); then
+                assert_equal "$b_pending" "$(sha256sum "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/pending/$b.json")" 'other core pending preserved'
+            fi
+        done
+    done
+}
+
+test_core_pending_relay_merge() {
+    local a b aid bid uri aexit bexit direct forward before_forward later_relay b_files original_exit
+    for a in xray sing-box; do
+        b=sing-box; [[ "$a" != sing-box ]] || b=xray
+        printf 'TEST: pending shared relay merge %s\n' "$a"
+        reset_root
+        install_external "$a"; install_external "$b"
+        core_pending_ok node add --profile shadowsocks-aes-256-gcm --core "$a" --name relay-a --port 19101 --address proxy.example
+        core_pending_ok node add --profile shadowsocks-aes-256-gcm --core "$b" --name relay-b --port 19102 --address proxy.example
+        aid="$(node_id_by_name relay-a)"; bid="$(node_id_by_name relay-b)"
+        core_pending_ok node show --id "$aid" --uri; uri="$RUN_OUTPUT"
+        core_pending_ok relay exit add --name exit-a --uri "$uri" --profile shadowsocks-aes-256-gcm --core "$a"
+        aexit="$(jq -r '.exits[] | select(.name == "exit-a") | .id' "$(relay_path)")"
+        original_exit="$(jq -Sc --arg id "$aexit" '.exits[] | select(.id == $id)' "$(relay_path)")"
+        core_pending_update "$a"
+        core_pending_ok relay bind add --node-id "$aid" --exit-id "$aexit"
+        core_pending_ok relay exit edit --id "$aexit" --name a-stage --uri "${uri/proxy.example/stage.example}" --profile shadowsocks-aes-256-gcm --core "$a"
+        core_pending_ok relay exit edit --id "$aexit" --name a-pending --uri "${uri/proxy.example/pending.example}" --profile shadowsocks-aes-256-gcm --core "$a"
+        # The add/delete pair cancels; the replacement binding was also absent originally.
+        core_pending_ok relay bind delete --id "$(jq -r --arg id "$aid" '.bindings[] | select(.node_id == $id) | .id' "$(relay_path)")" --confirm-delete
+        core_pending_ok relay bind add --node-id "$aid" --exit-id "$aexit"
+        core_pending_ok node show --id "$bid" --uri; uri="$RUN_OUTPUT"
+        core_pending_ok relay exit add --name exit-b --uri "$uri" --profile shadowsocks-aes-256-gcm --core "$b"
+        bexit="$(jq -r '.exits[] | select(.name == "exit-b") | .id' "$(relay_path)")"
+        core_pending_ok relay bind add --node-id "$bid" --exit-id "$bexit"
+        core_pending_ok relay exit add --name standalone --target 198.51.100.50 --target-port 443
+        direct="$(jq -r '.exits[] | select(.name == "standalone") | .id' "$(relay_path)")"
+        core_pending_ok relay forward add --name later-forward --exit-id "$direct" --listen-ports 19200 --network tcp --address relay.example
+        later_relay="$(jq -Sc --arg id "$aid" --arg exit "$aexit" --argjson original "$original_exit" '.bindings |= map(select(.node_id != $id)) | (.exits[] | select(.id == $exit)) = $original' "$(relay_path)")"
+        b_files="$(core_pending_files "$b")"
+        core_pending_restart_fails "$a"
+        assert_equal "$later_relay" "$(jq -Sc . "$(relay_path)")" 'rollback removes only pending binding'
+        assert_equal "$b_files" "$(core_pending_files "$b")" 'other core bound config preserved'
+        assert_file_contains "${TEST_SYSTEM_ROOT}/run/last-nft.batch" 'tcp dport 19200' 'later standalone forward runtime preserved'
+
+        # A cascade deletion journals the exit, its binding, and its forward.
+        core_pending_ok relay bind add --node-id "$aid" --exit-id "$aexit"
+        printf '198.51.100.60\n' >"${TEST_SYSTEM_ROOT}/run/dns-ahostsv4-proxy.example"
+        core_pending_ok relay forward add --name affected-forward --exit-id "$aexit" --listen-ports 19210 --network tcp --address relay.example
+        forward="$(jq -r '.forwards[] | select(.name == "affected-forward") | .id' "$(relay_path)")"
+        before_forward="$(jq -Sc --arg id "$forward" '.forwards[] | select(.id == $id)' "$(relay_path)")"
+        core_pending_update "$a"
+        core_pending_ok relay exit delete --id "$aexit" --cascade --confirm-cascade
+        core_pending_ok relay forward edit --id "$(jq -r '.forwards[] | select(.name == "later-forward") | .id' "$(relay_path)")" --listen-ports 19201
+        # The restored hostname can use its matching pre-cascade DNS cache.
+        rm -f -- "${TEST_SYSTEM_ROOT}/run/dns-ahostsv4-proxy.example"
+        core_pending_restart_fails "$a"
+        assert_equal "$before_forward" "$(jq -Sc --arg id "$forward" '.forwards[] | select(.id == $id)' "$(relay_path)")" 'cascade forward restored'
+        jq -e --arg node "$aid" --arg exit "$aexit" 'any(.exits[]; .id == $exit) and any(.bindings[]; .node_id == $node and .exit_id == $exit) and any(.forwards[]; .name == "later-forward" and .listen_port_start == 19201)' "$(relay_path)" >/dev/null || fail 'cascade lost restored references or later independent forward edit'
+        assert_file_contains "${TEST_SYSTEM_ROOT}/run/last-nft.batch" 'tcp dport 19201' 'merged independent forward applied'
+        assert_file_contains "${TEST_SYSTEM_ROOT}/run/last-nft.batch" 'tcp dport 19210' 'restored cascade forward applied'
+        jq -e --arg id "$aexit" '.exits[$id].host == "proxy.example" and .exits[$id].ipv4 == "198.51.100.60"' "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/relay-resolved.json" >/dev/null || fail 'matching backup DNS cache not used'
+    done
+}
+
+test_core_pending_conflicts_and_legacy() {
+    local aid pending before exit_id uri
+    printf 'TEST: pending restored port conflict\n'
+    reset_root
+    install_external xray; install_external sing-box
+    core_pending_ok node add --profile shadowsocks-aes-256-gcm --core xray --name conflict-a --port 19300 --address proxy.example
+    aid="$(node_id_by_name conflict-a)"
+    core_pending_update xray
+    core_pending_ok node edit --id "$aid" --port 19301
+    core_pending_ok node add --profile shadowsocks-aes-256-gcm --core sing-box --name later-occupant --port 19300 --address proxy.example
+    before="$(core_pending_snapshot)"
+    core_pending_restart_fails xray 30
+    assert_equal "$before" "$(core_pending_snapshot)" 'port conflict must fail before writes'
+
+    printf 'TEST: legacy node-only pending merge\n'
+    core_pending_ok node delete --id "$(node_id_by_name later-occupant)" --confirm-delete
+    pending="${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/pending/xray.json"
+    jq '{schema_version,core,reason,manifest_backup,config_backup,binary_backup,meta_backup,created_at}' "$pending" >"${TEST_TEMP}/pending.json"; cp "${TEST_TEMP}/pending.json" "$pending"
+    core_pending_ok node add --profile shadowsocks-aes-256-gcm --core sing-box --name legacy-later --port 19302 --address proxy.example
+    core_pending_restart_fails xray
+    assert_equal 19300 "$(jq -r --arg id "$aid" '.nodes[] | select(.id == $id) | .port' "$(manifest_path)")" 'legacy pending restored target node'
+    [[ -n "$(node_id_by_name legacy-later)" ]] || fail 'legacy node-only pending removed other core node'
+
+    printf 'TEST: relay journal record conflict and unsafe legacy relay\n'
+    core_pending_ok node show --id "$aid" --uri; uri="$RUN_OUTPUT"
+    core_pending_ok relay exit add --name journal-exit --uri "$uri" --profile shadowsocks-aes-256-gcm --core xray
+    exit_id="$(jq -r '.exits[] | select(.name == "journal-exit") | .id' "$(relay_path)")"
+    core_pending_update xray
+    core_pending_ok relay bind add --node-id "$aid" --exit-id "$exit_id"
+    # Simulate another writer changing the same valid binding after its journal.
+    jq '(.bindings[0].updated_at) = "2026-09-30T00:00:00Z"' "$(relay_path)" >"${TEST_TEMP}/relay.json"
+    cp "${TEST_TEMP}/relay.json" "$(relay_path)"
+    before="$(core_pending_snapshot)"
+    core_pending_restart_fails xray 30
+    assert_equal "$before" "$(core_pending_snapshot)" 'journal conflict must fail before writes'
+    jq 'del(.relay_undo)' "$pending" >"${TEST_TEMP}/pending.json"; cp "${TEST_TEMP}/pending.json" "$pending"
+    before="$(core_pending_snapshot)"
+    core_pending_restart_fails xray 30
+    assert_equal "$before" "$(core_pending_snapshot)" 'legacy touched relay divergence must fail before writes'
+    printf 'TEST: safe legacy relay already equals backup\n'
+    cp "$(jq -r '.relay_backup' "$pending")" "$(relay_path)"
+    before="$(jq -Sc . "$(relay_path)")"
+    core_pending_restart_fails xray
+    assert_equal "$before" "$(jq -Sc . "$(relay_path)")" 'safe legacy relay declaration preserved'
+    [[ ! -e "$pending" ]] || fail 'safe legacy rollback retained pending'
+}
+
+test_core_pending_runtime_retry() {
+    local aid hop_id exit_id cache pending declaration b_files b_owner uri
+    printf 'TEST: merged runtime preserves later HY2/cache, failed restore retries\n'
+    reset_root
+    install_external xray; install_external sing-box
+    core_pending_ok node add --profile shadowsocks-aes-256-gcm --core xray --name runtime-a --port 19400 --address proxy.example
+    aid="$(node_id_by_name runtime-a)"
+    core_pending_ok node show --id "$aid" --uri; uri="$RUN_OUTPUT"
+    core_pending_ok relay exit add --name before --uri "$uri" --profile shadowsocks-aes-256-gcm --core xray
+    exit_id="$(jq -r '.exits[0].id' "$(relay_path)")"
+    core_pending_ok relay bind add --node-id "$aid" --exit-id "$exit_id"
+    printf '198.51.100.70\n' >"${TEST_SYSTEM_ROOT}/run/dns-ahostsv4-proxy.example"
+    core_pending_ok relay forward add --name before --exit-id "$exit_id" --listen-ports 19410 --network tcp --address relay.example
+    # An accepted older exit lacks its URI-derived descriptor. Updating the core
+    # normalizes relay declarations without taking a shared runtime snapshot.
+    jq 'del(.exits[].descriptor)' "$(relay_path)" >"${TEST_TEMP}/relay.json"
+    cp "${TEST_TEMP}/relay.json" "$(relay_path)"
+    core_pending_update xray
+    pending="${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/pending/xray.json"
+    jq -e '.relay_touched and (.relay_runtime_touched | not)' "$pending" >/dev/null || fail 'core normalization fixture must touch only relay declarations'
+    core_pending_ok node edit --id "$aid" --name runtime-pending
+    core_pending_ok relay exit edit --id "$exit_id" --name before-pending --uri "${uri/:19400/:19401}" --profile shadowsocks-aes-256-gcm --core xray
+    jq -e '.relay_runtime_touched and .relay_cache_existed and .relay_cache_backup != ""' "$pending" >/dev/null || fail 'later relay edit did not retain first runtime/cache snapshot'
+    core_pending_ok node add --profile hysteria2 --core sing-box --name later-hy2 --port 39400 --hop-ports 39500-39502 --address proxy.example --cert-mode self-signed
+    hop_id="$(node_id_by_name later-hy2)"
+    printf '198.51.100.71\n' >"${TEST_SYSTEM_ROOT}/run/dns-ahostsv4-later.example"
+    core_pending_ok relay exit add --name later-cache --target later.example --target-port 8443
+    exit_id="$(jq -r '.exits[] | select(.name == "later-cache") | .id' "$(relay_path)")"
+    core_pending_ok relay forward add --name later-cache --exit-id "$exit_id" --listen-ports 19411 --network tcp --address relay.example
+    cache="${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/relay-resolved.json"
+    # Later cache entries must survive even when DNS is unavailable at rollback.
+    rm -f -- "${TEST_SYSTEM_ROOT}/run/dns-ahostsv4-later.example"
+    b_files="$(core_pending_files sing-box)"; b_owner="$(core_pending_owner "$hop_id")"
+    rm -f -- "${TEST_SYSTEM_ROOT}/run/dns-ahostsv4-proxy.example"
+    touch "${TEST_SYSTEM_ROOT}/run/fail-nft-apply"
+    core_pending_restart_fails xray 30
+    [[ -f "$pending" ]] || fail 'runtime failure consumed pending rollback'
+    declaration="$(jq -Sc . "$(manifest_path)")"
+    rm -f -- "${TEST_SYSTEM_ROOT}/run/fail-nft-apply"
+    # Retry through the public lifecycle path, which must finish recovery first.
+    core_pending_ok restart --core xray --confirm-disruptive
+    assert_equal "$declaration" "$(jq -Sc . "$(manifest_path)")" 'retry restore changed merged declaration'
+    assert_equal runtime-a "$(jq -r --arg id "$aid" '.nodes[] | select(.id == $id) | .name' "$(manifest_path)")" 'retry restored original Xray node'
+    jq -e 'any(.exits[]; .name == "before") and all(.exits[]; .name != "before-pending")' "$(relay_path)" >/dev/null || fail 'retry failed to undo pending exit edit'
+    assert_equal "$b_files" "$(core_pending_files sing-box)" 'runtime rollback changed later sing-box files'
+    assert_equal "$b_owner" "$(core_pending_owner "$hop_id")" 'runtime rollback changed later HY2 UFW owner'
+    jq -e --arg id "$exit_id" '.exits[$id].host == "later.example" and .exits[$id].ipv4 == "198.51.100.71"' "$cache" >/dev/null || fail 'runtime rollback lost later DNS cache'
+    assert_file_contains "${TEST_SYSTEM_ROOT}/run/last-nft.batch" 'redirect to :39400' 'runtime rollback lost later HY2 rules'
+    assert_file_contains "${TEST_SYSTEM_ROOT}/run/last-nft.batch" 'tcp dport 19411' 'runtime rollback lost later forward rules'
+    [[ ! -e "$pending" ]] || fail 'successful runtime retry retained pending'
+    core_pending_ok restart --core xray --confirm-disruptive
+    assert_equal "$declaration" "$(jq -Sc . "$(manifest_path)")" 'repeat recovery must be idempotent'
+}
+
+test_core_pending() {
+    test_core_pending_isolation
+    test_core_pending_relay_merge
+    test_core_pending_conflicts_and_legacy
+    test_core_pending_runtime_retry
+}
+
 if [[ "${VPSCTL_PROXY_TEST_HARNESS_ONLY:-0}" == 1 ]]; then
     return 0 2>/dev/null || exit 0
 fi
 
 case "${VPSCTL_TEST_ONLY:-}" in
+    core-pending) test_core_pending; printf 'PASS: per-core pending rollback regressions\n'; exit 0 ;;
     hy2-runtime) test_hy2_runtime_lifecycle; printf 'PASS: HY2 runtime lifecycle tests\n'; exit 0 ;;
     core-install) test_core_install_autostart; printf 'PASS: proxy install autostart tests\n'; exit 0 ;;
     core-release) test_core_release_channels; printf 'PASS: proxy core release tests\n'; exit 0 ;;
@@ -3603,6 +3861,8 @@ printf 'TEST: proxy node list bindings and text fields\n'
 test_node_list_bindings_and_text
 printf 'TEST: proxy CRUD, pending and validation\n'
 test_core_choice_crud_pending_and_validation
+printf 'TEST: per-core pending rollback regressions\n'
+test_core_pending
 printf 'TEST: proxy core choice, ports and uninstall\n'
 test_overlap_port_ambiguity_and_uninstall
 printf 'TEST: proxy TLS certificate transactions\n'

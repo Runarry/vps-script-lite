@@ -22,6 +22,10 @@ source "${TEST_ROOT}/commands/service/proxy/common.sh"
 source "${TEST_ROOT}/commands/service/proxy/protocols-xray.sh"
 # shellcheck source=commands/service/proxy/core.sh
 source "${TEST_ROOT}/commands/service/proxy/core.sh"
+# shellcheck source=commands/service/proxy/relay.sh
+source "${TEST_ROOT}/commands/service/proxy/relay.sh"
+# shellcheck source=commands/service/proxy/ufw.sh
+source "${TEST_ROOT}/commands/service/proxy/ufw.sh"
 proxy_common_init
 PROXY_RELAY_LOGICAL="${PROXY_STATE_LOGICAL}/relay.json"
 PROXY_RELAY_FILE="${PROXY_STATE_DIR}/relay.json"
@@ -38,7 +42,10 @@ vps_cmd_unlock() { return 0; }
 proxy_ensure_mutation_tools() { return 0; }
 proxy_service_is_active() { [[ -f "${TEST_PROXY_ROOT}/active" ]]; }
 proxy_service_is_enabled() { return 1; }
-proxy_ufw_restore_pending() { _proxy_restore_pending "$@"; }
+proxy_ufw_nodes_transaction() { shift; "$@"; }
+proxy_ufw_relay_transaction() { "$@"; }
+proxy_relay_forward_init() { PROXY_RELAY_FORWARD_CACHE="${PROXY_STATE_DIR}/relay-resolved.json"; }
+proxy_relay_forward_sync() { return 0; }
 proxy_service_action() {
     printf '%s\n' "$2" >>"${TEST_PROXY_ROOT}/service.log"
     case "$2" in
@@ -55,8 +62,8 @@ proxy_service_action() {
 }
 proxy_relay_validate_file() { jq -e '.schema_version == 1' "$1" >/dev/null; }
 proxy_relay_normalize_file() {
-    [[ "${3:-}" == "$PROXY_MANIFEST" ]] || return 10
-    jq 'del(.legacy_cache)' "$1" >"$2"
+    [[ "${3:-}" == "$PROXY_MANIFEST" && "${4:-}" == xray ]] || return 10
+    jq 'del(.exits[] | select(.core == "xray") | .legacy_cache)' "$1" >"$2"
 }
 proxy_relay_render_outbound() {
     [[ "${3:-}" == "${PROXY_RENDER_CORE_VERSION:-}" ]] || return 10
@@ -134,8 +141,15 @@ generation_hash() {
     local path
     for path in "$(proxy_core_binary_path xray)" "$(proxy_core_config_path xray)" \
         "$(proxy_core_meta_path xray)" "$PROXY_MANIFEST" "$PROXY_RELAY_FILE" "$(proxy_core_pending_path xray)"; do
-        if [[ -f "$path" ]]; then sha256sum "$path"; else printf 'missing %s\n' "$path"; fi
+        if [[ "$path" == "$PROXY_RELAY_FILE" && -f "$path" ]]; then jq -Sc . "$path" | sha256sum
+        elif [[ -f "$path" ]]; then sha256sum "$path"
+        else printf 'missing %s\n' "$path"
+        fi
     done
+}
+
+write_legacy_relay_fixture() {
+    printf '{"schema_version":1,"exits":[{"id":"exit-0000000000000001","type":"protocol","core":"xray","endpoint":{"host":"proxy.example","port":443},"legacy_cache":true}],"bindings":[],"forwards":[]}' >"$PROXY_RELAY_FILE"
 }
 
 run_update() {
@@ -229,10 +243,10 @@ test_same_binary_migration() {
 
     reset_fixture
     register_fixture 26.9.8
-    printf '{"schema_version":1,"exits":[],"bindings":[],"forwards":[],"legacy_cache":true}' >"$PROXY_RELAY_FILE"
+    write_legacy_relay_fixture
     run_update
     assert_equal 0 "$RUN_STATUS" "same-binary relay-only migration: $RUN_OUTPUT"
-    assert_json "$PROXY_RELAY_FILE" 'has("legacy_cache") | not' 'relay-only migration committed'
+    assert_json "$PROXY_RELAY_FILE" '.exits[0] | has("legacy_cache") | not' 'relay-only migration committed'
     assert_json "$(proxy_core_pending_path xray)" '.relay_touched and .relay_existed and .relay_backup != ""' 'relay-only migration backup'
 }
 
@@ -240,7 +254,7 @@ test_rejection_and_midwrite_rollback() (
     local before original_write target
     reset_fixture
     register_fixture 26.5.3
-    printf '{"schema_version":1,"exits":[],"bindings":[],"forwards":[],"legacy_cache":true}' >"$PROXY_RELAY_FILE"
+    write_legacy_relay_fixture
     before="$(generation_hash)"
     touch "${TEST_PROXY_ROOT}/reject-config"
     run_update
@@ -273,11 +287,11 @@ test_repeated_update_and_start_rollback() {
     local before first_pending status=0
     reset_fixture
     register_fixture 26.5.3
-    printf '{"schema_version":1,"exits":[],"bindings":[],"forwards":[],"legacy_cache":true}' >"$PROXY_RELAY_FILE"
+    write_legacy_relay_fixture
     before="$(generation_hash)"
     run_update
     assert_equal 0 "$RUN_STATUS" "first update: $RUN_OUTPUT"
-    assert_json "$PROXY_RELAY_FILE" 'has("legacy_cache") | not' 'relay state migration committed'
+    assert_json "$PROXY_RELAY_FILE" '.exits[0] | has("legacy_cache") | not' 'relay state migration committed'
     first_pending="$(<"$(proxy_core_pending_path xray)")"
     run_update v26.5.3
     assert_equal 0 "$RUN_STATUS" "second update: $RUN_OUTPUT"

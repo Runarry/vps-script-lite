@@ -91,3 +91,22 @@ ENHANCEMENT_SCOPE=all bash tests/integration/test-service-proxy-protocol-enhance
 Xray 26.9.9 与 sing-box 1.15.0-alpha.3 的临时二进制均通过官方 Release 摘要校验，未替换机器已安装内核。协议与防偷验收使用临时配置和受控端口，退出时清理进程、恢复 hosts；IP 策略测试的地址与 hosts 修改隔离在命名空间中。nftables 测试清理专用表、网络接口及命名空间，恢复原转发开关。测试凭据、二进制和详细运行日志不提交仓库。
 
 既有 `trojan-grpc-reality` XFAIL 仍存在：26.9.9 的严格复验也出现相同 `server-preface` 关闭特征。未增加失败类型豁免；后续版本实际连通时，现有测试会以 XPASS 提醒移除对应豁免。
+
+## 2026-10-03：单核 pending 回滚隔离
+
+本次只修改待生效回滚及其必要的 UFW、中转归一化和缓存衔接，保留 CLI、schema 1 与 LKG 保存时机。节点按内核合并恢复，中转以记录的 before/after 逐项撤销；冲突先于文件写入拒绝。运行规则恢复失败保留 pending，下一次 start/restart 重试，嵌套 UFW 事务完成后才清理恢复记录。
+
+所有执行均经 `ssh host-vps-scripts`。新增 `VPSCTL_TEST_ONLY=core-pending` 分组在原代码上复现另一内核节点被覆盖；修复后按受影响场景分段验证，并复用仍有效的结果：
+
+| 验证范围 | 结果与证据 |
+| --- | --- |
+| 双向回滚、另一核 CRUD/DNS、双核 pending、配置/二进制/元数据和 UFW owner 保留 | PASS；`candidate1-core-pending.log` 的四项隔离场景。该轮后续中转场景发现的撤销记录合并错误已修复，不能将该整份日志标为通过。 |
+| 中转记录合并与抵消、级联恢复、独立 forward 保留、旧主机 DNS 缓存回退 | PASS；修复后 `candidate2-relay-merge.log`。 |
+| 端口及中转同记录冲突、旧节点 pending、旧中转 pending 的安全拒绝与等价状态接受 | PASS；`candidate1-conflicts-legacy.log`。 |
+| 先归一化中转、后首次修改转发运行状态；恢复失败、公开入口重试、HY2/缓存保留和幂等 | PASS；`candidate3-runtime-retry.log`。 |
+| UFW 节点/转发边界，以及外层 node/relay 的回滚失败和同步失败仍保留 pending | PASS；`candidate4-proxy-ufw.log`，包含六项新增嵌套场景。 |
+| 最终 UFW 包装逻辑下已有 Xray 自动应用失败恢复 | PASS；`candidate4-relay-xray.log`。 |
+
+以上证据位于专用主机 `/var/tmp/vpsctl-core-pending-regressions/`，各轮 `sha256` 清单记录代码身份。夹具使用临时系统根目录和可控的内核、服务、UFW、nft/DNS 替身；验证结束清理本轮夹具，诊断副本和日志保留。没有修改宿主实际代理服务或防火墙；这些结果不代表真实代理连通性验收。
+
+父任务在 `/var/tmp/vpsctl-p1-parent.kLhidA/source` 执行现有版本兼容/更新事务、DNS 以及 `hy2-runtime` 分组，全部通过，记录分别为其 `evidence/proxy-version.log`、`proxy-dns.log`、`proxy-hy2-runtime.log`。相关脚本的 `bash -n` 和 ShellCheck error 级别检查通过。五个修改的代理模块采用 `shellcheck -x -P SCRIPTDIR --extended-analysis=false` 全级别对照：基线与最终版均为 7 条既有诊断，无新增；因此不声称 ShellCheck 全级别零诊断或启用了扩展数据流分析。新增测试的语法和 error 级别检查亦通过。未运行全仓库套件或真实代理协议连接测试。

@@ -687,7 +687,7 @@ _proxy_core_recover_update_transaction() {
 proxy_core_update() (
     local core="${1:-}" release_channel=stable channel_set=0 requested_tag="" version_set=0 confirmed=0 arg meta binary_logical binary_path owned installed_at
     local tmp downloaded info config version tag sha old_sha binary_backup meta_backup active=0 failed=0 rc
-    local candidate_config candidate_relay config_backup relay_backup="" relay_touched=false
+    local candidate_config candidate_relay config_backup relay_backup="" relay_touched=false relay_undo='[]'
     local pending pending_backup="" pending_existed=false transaction_json metadata_same=false config_same=false
     local -a required_tools=(jq curl sha256sum)
     (($# >= 1)) || { vps_cmd_error "update 需要 CORE"; return 2; }
@@ -774,7 +774,7 @@ proxy_core_update() (
             _proxy_core_remove_tmp "$tmp"
             return 20
         fi
-        proxy_relay_normalize_file "$PROXY_RELAY_FILE" "$candidate_relay" "$PROXY_MANIFEST" || { rc=$?; _proxy_core_remove_tmp "$tmp"; return "$rc"; }
+        proxy_relay_normalize_file "$PROXY_RELAY_FILE" "$candidate_relay" "$PROXY_MANIFEST" "$core" || { rc=$?; _proxy_core_remove_tmp "$tmp"; return "$rc"; }
         if [[ "$(jq -Sc . "$candidate_relay")" != "$(jq -Sc . "$PROXY_RELAY_FILE")" ]]; then relay_touched=true; fi
     fi
     # A missing relay file remains missing; this path is only a render input.
@@ -796,6 +796,7 @@ proxy_core_update() (
     config_backup="$(proxy_backup_file "$core" "$(proxy_core_config_logical "$core")" config.json)" || { _proxy_core_remove_tmp "$tmp"; return 20; }
     if [[ "$relay_touched" == true ]]; then
         relay_backup="$(proxy_backup_file "$core" "$PROXY_RELAY_LOGICAL" relay.json)" || { _proxy_core_remove_tmp "$tmp"; return 20; }
+        relay_undo="$(proxy_pending_relay_delta "$relay_backup" "$candidate_relay")" || { _proxy_core_remove_tmp "$tmp"; return 30; }
     fi
     if [[ "$pending_existed" == true ]]; then
         pending_backup="$(proxy_backup_file "$core" "$(proxy_core_pending_logical "$core")" pending.json)" || { _proxy_core_remove_tmp "$tmp"; return 20; }
@@ -816,7 +817,7 @@ proxy_core_update() (
     fi
     ((failed)) || _proxy_core_write_meta "$core" "$binary_logical" "$owned" "$version" "$tag" "$sha" "$installed_at" || failed=1
     ((failed)) || proxy_mark_pending "$core" "core-update" "" "$config_backup" "$binary_backup" "$meta_backup" \
-        "$relay_backup" "$relay_touched" "$relay_touched" || failed=1
+        "$relay_backup" "$relay_touched" "$relay_touched" false "" false "" false '{}' "$relay_undo" || failed=1
     if ((failed)); then
         _proxy_core_recover_update_transaction || failed=2
         _proxy_core_remove_tmp "$tmp"
@@ -849,8 +850,12 @@ _proxy_core_confirm_restart() {
 }
 
 _proxy_core_validate_current_config() {
-    local core="$1" config
+    local core="$1" config pending
     proxy_recover_transaction || return $?
+    pending="$(proxy_core_pending_path "$core")" || return 30
+    if [[ -f "$pending" && ! -L "$pending" ]] && jq -e '.restoring // false' "$pending" >/dev/null; then
+        proxy_restore_pending "$core" || return 30
+    fi
     if declare -F proxy_cleanup_orphan_certs >/dev/null 2>&1; then
         proxy_cleanup_orphan_certs "$core" || return $?
     fi

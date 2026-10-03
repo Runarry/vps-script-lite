@@ -125,23 +125,24 @@ proxy_relay_validate_file() {
 }
 
 _proxy_relay_normalized_state() {
-    local source="$1" manifest="${2:-${PROXY_MANIFEST:-}}" state exit normalized
+    local source="$1" manifest="${2:-${PROXY_MANIFEST:-}}" core="${3:-}" state exit normalized
+    [[ -z "$core" ]] || proxy_core_valid "$core" || return 2
     proxy_relay_validate_file "$source" "$manifest" || return $?
     state="$(<"$source")"
     while IFS= read -r exit; do
         normalized="$(proxy_relay_normalize_exit "$exit" "$manifest")" || return $?
         state="$(jq -c --argjson item "$normalized" \
             '(.exits[] | select(.id == $item.id))=$item' <<<"$state")" || return 10
-    done < <(jq -c '.exits[] | select(.type == "protocol")' "$source")
+    done < <(jq -c --arg core "$core" '.exits[] | select(.type == "protocol" and ($core == "" or .core == $core))' "$source")
     printf '%s\n' "$state"
 }
 
 # A migration candidate is separate from the source, even during core updates.
 proxy_relay_normalize_file() (
-    local source="${1-}" destination="${2-}" manifest="${3:-${PROXY_MANIFEST:-}}" state
-    [[ $# -ge 2 && $# -le 3 && -n "$source" && -n "$destination" && "$source" != "$destination" &&
+    local source="${1-}" destination="${2-}" manifest="${3:-${PROXY_MANIFEST:-}}" core="${4:-}" state
+    [[ $# -ge 2 && $# -le 4 && -n "$source" && -n "$destination" && "$source" != "$destination" &&
         ! "$source" -ef "$destination" && ! -L "$destination" ]] || return 2
-    state="$(_proxy_relay_normalized_state "$source" "$manifest")" || return $?
+    state="$(_proxy_relay_normalized_state "$source" "$manifest" "$core")" || return $?
     umask 077
     printf '%s\n' "$state" >"$destination" || return 20
 )
@@ -288,7 +289,7 @@ proxy_relay_write_state_only() {
 proxy_relay_commit_candidate() {
     local normalized status=0
     normalized="$(proxy_relay_candidate_file normalized)" || return 20
-    proxy_relay_normalize_file "$1" "$normalized" || { status=$?; rm -f -- "$normalized"; return "$status"; }
+    proxy_relay_normalize_file "$1" "$normalized" "$PROXY_MANIFEST" "${3:-}" || { status=$?; rm -f -- "$normalized"; return "$status"; }
     shift
     if [[ "${3:-0}" == 1 ]]; then
         proxy_ufw_relay_transaction _proxy_relay_commit_candidate "$normalized" "$@" || status=$?
