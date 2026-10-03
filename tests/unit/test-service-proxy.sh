@@ -47,6 +47,12 @@ case "${1:-}" in
     [[ ! -e "${VPSCTL_SYSTEM_ROOT}/run/skip-service-start" ]] || exit 0
     touch "$state/active-${2}"
     [[ ! -e "${VPSCTL_SYSTEM_ROOT}/run/fail-service-start" && ! -e "${VPSCTL_SYSTEM_ROOT}/run/fail-start-${2}" ]] || exit 20
+    case "${2}" in
+      vpsctl-proxy-xray.service|vpsctl-proxy-sing-box.service)
+        core="${2#vpsctl-proxy-}"; core="${core%.service}"
+        cp -p -- "${VPSCTL_SYSTEM_ROOT}/etc/vpsctl/proxy/$core/config.json" "$state/loaded-$core.json"
+        ;;
+    esac
     ;;
   restart)
     if [[ -e "${VPSCTL_SYSTEM_ROOT}/run/fail-service-restart-once" ]]; then
@@ -54,6 +60,12 @@ case "${1:-}" in
       exit 20
     fi
     touch "$state/active-${2}"
+    case "${2}" in
+      vpsctl-proxy-xray.service|vpsctl-proxy-sing-box.service)
+        core="${2#vpsctl-proxy-}"; core="${core%.service}"
+        cp -p -- "${VPSCTL_SYSTEM_ROOT}/etc/vpsctl/proxy/$core/config.json" "$state/loaded-$core.json"
+        ;;
+    esac
     ;;
   stop)
     [[ ! -e "${VPSCTL_SYSTEM_ROOT}/run/fail-service-stop" ]] || exit 20
@@ -80,6 +92,12 @@ case "${2:-}" in
     [[ ! -e "${VPSCTL_SYSTEM_ROOT}/run/skip-service-start" ]] || exit 0
     touch "$state/active-${1}"
     [[ ! -e "${VPSCTL_SYSTEM_ROOT}/run/fail-service-start" ]] || exit 20
+    case "${1}" in
+      vpsctl-proxy-xray|vpsctl-proxy-sing-box)
+        core="${1#vpsctl-proxy-}"
+        cp -p -- "${VPSCTL_SYSTEM_ROOT}/etc/vpsctl/proxy/$core/config.json" "$state/loaded-$core.json"
+        ;;
+    esac
     ;;
   stop)
     [[ ! -e "${VPSCTL_SYSTEM_ROOT}/run/fail-service-stop" ]] || exit 20
@@ -1999,6 +2017,7 @@ test_relay_state_bindings_and_purge() {
 
 test_relay_xray_pending_and_validation() {
     local node1 node2 node3 node_uri new_uri exit_id direct_id forward_id config pending state_hash
+    local cache loaded lkg before lkg_before pending_before nft_line restart_line restart_before relay_before
     reset_root
     install_external xray
     run_proxy node add --profile shadowsocks-aes-256-gcm --core xray --name xray-entry-1 --port 32301 --address xray-entry.example
@@ -2038,6 +2057,9 @@ test_relay_xray_pending_and_validation() {
     grep -Fq 'restart vpsctl-proxy-xray.service' "$MOCK_LOG" || fail "shared relay binding did not restart automatically"
     [[ ! -e "$pending" ]] || fail "auto-applied shared relay binding left pending state"
     config="${TEST_SYSTEM_ROOT}/etc/vpsctl/proxy/xray/config.json"
+    cache="${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/relay-resolved.json"
+    loaded="${TEST_SYSTEM_ROOT}/run/mock-systemd/loaded-xray.json"
+    lkg="${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/lkg/xray"
     assert_equal 1 "$(jq -r '[.outbounds[] | select((.tag // "") | startswith("relay-exit-"))] | length' "$config")" "one shared Xray relay outbound"
     assert_equal 2 "$(jq -r '[.routing.rules[] | select((.outboundTag // "") | startswith("relay-exit-"))] | length' "$config")" "two Xray inboundTag rules"
     assert_equal 2 "$(jq -r '.bindings | length' "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/lkg/xray/relay.json")" "Xray relay LKG snapshot"
@@ -2053,7 +2075,36 @@ test_relay_xray_pending_and_validation() {
 
     new_uri="${node_uri/xray-entry.example/xray-new.example}"
     printf '198.51.100.81\n' >"${TEST_SYSTEM_ROOT}/run/dns-ahostsv4-xray-new.example"
+
+    before="$(sha256sum "$(manifest_path)" "$(relay_path)" "$config" "$loaded")"
+    lkg_before="$(sha256sum "$lkg"/*)"
+    : >"$MOCK_LOG"
+    touch "${TEST_SYSTEM_ROOT}/run/fail-nft-apply-once"
+    run_proxy relay exit edit --id "$exit_id" --uri "$new_uri" --profile shadowsocks-aes-256-gcm --core xray
+    assert_equal 20 "$RUN_STATUS" "joint relay edit nft failure"
+    assert_contains "$RUN_OUTPUT" '已恢复 relay 状态、核心配置与旧规则' "joint edit complete recovery diagnostic"
+    assert_equal "$before" "$(sha256sum "$(manifest_path)" "$(relay_path)" "$config" "$loaded")" "nft failure restores files without changing loaded config"
+    assert_equal "$lkg_before" "$(sha256sum "$lkg"/*)" "nft failure preserves LKG"
+    [[ ! -e "$pending" ]] || fail "nft failure leaked pending state"
+    [[ -f "${TEST_SYSTEM_ROOT}/run/mock-systemd/active-vpsctl-proxy-xray.service" ]] || fail "nft failure stopped core"
+    assert_not_contains "$(<"$MOCK_LOG")" 'systemctl restart vpsctl-proxy-xray.service' "nft failure restarted core"
+    assert_equal xray-entry.example "$(jq -r --arg id "$exit_id" '.exits[$id].host' "$cache")" "nft failure restores old DNS cache"
+    assert_file_contains "${TEST_SYSTEM_ROOT}/run/last-nft.batch" '198.51.100.80' "nft failure restores old forwarding target"
+
+    : >"$MOCK_LOG"
+    run_proxy --dry-run relay exit edit --id "$exit_id" --uri "$new_uri" --profile shadowsocks-aes-256-gcm --core xray
+    assert_equal 0 "$RUN_STATUS" "joint relay edit dry run"
+    assert_equal "$before" "$(sha256sum "$(manifest_path)" "$(relay_path)" "$config" "$loaded")" "joint dry run preserves files and loaded config"
+    assert_equal "$lkg_before" "$(sha256sum "$lkg"/*)" "joint dry run preserves LKG"
+    [[ ! -e "$pending" ]] || fail "joint dry run leaked pending state"
+    assert_not_contains "$(<"$MOCK_LOG")" 'systemctl restart vpsctl-proxy-xray.service' "joint dry run restarted core"
+    assert_not_contains "$(<"$MOCK_LOG")" 'nft -f ' "joint dry run applied forwarding"
+
+    # Once forwarding succeeds, a later core restart failure uses pending recovery.
+    restart_before="$(sha256sum "$(manifest_path)" "$config" "$loaded")"
+    relay_before="$(jq -Sc . "$(relay_path)")"
     rm -f -- "${TEST_SYSTEM_ROOT}/run/dns-ahostsv4-xray-entry.example"
+    : >"$MOCK_LOG"
     touch "${TEST_SYSTEM_ROOT}/run/fail-service-restart-once"
     run_proxy relay exit edit --id "$exit_id" --uri "$new_uri" --profile shadowsocks-aes-256-gcm --core xray
     assert_equal 20 "$RUN_STATUS" "failed auto-apply restores previous relay data plane"
@@ -2061,6 +2112,102 @@ test_relay_xray_pending_and_validation() {
     assert_equal "$node_uri" "$(jq -r --arg id "$exit_id" '.exits[] | select(.id == $id) | .uri' "$(relay_path)")" "failed auto-apply restored relay exit"
     assert_equal xray-entry.example "$(jq -r --arg id "$exit_id" '.exits[$id].host' "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/relay-resolved.json")" "failed auto-apply restored DNS cache"
     [[ -f "${TEST_SYSTEM_ROOT}/run/mock-nft/ip-vpsctl_proxy_forward4" ]] || fail "failed auto-apply did not restore managed nft table"
+    assert_equal "$restart_before" "$(sha256sum "$(manifest_path)" "$config" "$loaded")" "restart failure restores files and loaded core config"
+    assert_equal "$relay_before" "$(jq -Sc . "$(relay_path)")" "restart failure restores all relay records"
+    assert_equal "$lkg_before" "$(sha256sum "$lkg"/*)" "restart failure preserves LKG"
+    [[ -f "${TEST_SYSTEM_ROOT}/run/mock-systemd/active-vpsctl-proxy-xray.service" ]] || fail "restart failure did not recover active core"
+    assert_file_contains "${TEST_SYSTEM_ROOT}/run/last-nft.batch" '198.51.100.80' "restart failure restores old forwarding target without old DNS"
+    nft_line="$(grep -n '^nft -f ' "$MOCK_LOG" | head -n 1 | cut -d: -f1)"
+    restart_line="$(grep -nF 'systemctl restart vpsctl-proxy-xray.service' "$MOCK_LOG" | head -n 1 | cut -d: -f1)"
+    [[ -n "$nft_line" && -n "$restart_line" && "$nft_line" -lt "$restart_line" ]] || fail "failed restart preceded forwarding commit"
+
+    : >"$MOCK_LOG"
+    run_proxy relay exit edit --id "$exit_id" --uri "$new_uri" --profile shadowsocks-aes-256-gcm --core xray
+    assert_equal 0 "$RUN_STATUS" "successful joint relay edit"
+    assert_equal 1 "$(grep -Fc 'systemctl restart vpsctl-proxy-xray.service' "$MOCK_LOG")" "joint edit restarts core exactly once"
+    nft_line="$(grep -n '^nft -f ' "$MOCK_LOG" | head -n 1 | cut -d: -f1)"
+    restart_line="$(grep -nF 'systemctl restart vpsctl-proxy-xray.service' "$MOCK_LOG" | head -n 1 | cut -d: -f1)"
+    [[ -n "$nft_line" && -n "$restart_line" && "$nft_line" -lt "$restart_line" ]] || fail "successful joint edit restarted core before forwarding commit"
+    [[ ! -e "$pending" ]] || fail "successful joint edit left pending state"
+    cmp -s "$config" "$loaded" || fail "successful joint edit loaded config differs from disk"
+    cmp -s "$config" "$lkg/config.json" || fail "successful joint edit LKG config differs from disk"
+    cmp -s "$(relay_path)" "$lkg/relay.json" || fail "successful joint edit LKG relay differs from disk"
+    cmp -s "$cache" "$lkg/relay-resolved.json" || fail "successful joint edit LKG DNS cache differs from forwarding cache"
+    assert_equal "$new_uri" "$(jq -r --arg id "$exit_id" '.exits[] | select(.id == $id) | .uri' "$(relay_path)")" "successful joint edit commits new exit URI"
+    jq -e --arg tag "relay-exit-$exit_id" 'any(.outbounds[]; .tag == $tag and .settings.servers[0].address == "xray-new.example")' "$loaded" >/dev/null || fail "successful joint edit did not load new outbound target"
+    jq -e --arg id "$exit_id" '.exits[$id].host == "xray-new.example" and .exits[$id].ipv4 == "198.51.100.81"' "$cache" >/dev/null || fail "successful joint edit did not commit new DNS cache"
+    assert_file_contains "${TEST_SYSTEM_ROOT}/run/last-nft.batch" '198.51.100.81' "successful joint edit forwarding target"
+    assert_equal 2 "$(jq '.bindings | length' "$(relay_path)")" "joint edit preserves both shared bindings"
+
+    printf '198.51.100.80\n' >"${TEST_SYSTEM_ROOT}/run/dns-ahostsv4-xray-entry.example"
+    run_proxy stop --core xray
+    assert_equal 0 "$RUN_STATUS" "stop core before inactive joint edit"
+    lkg_before="$(sha256sum "$lkg"/* "$loaded")"
+    : >"$MOCK_LOG"
+    run_proxy relay exit edit --id "$exit_id" --uri "$node_uri" --profile shadowsocks-aes-256-gcm --core xray
+    assert_equal 0 "$RUN_STATUS" "inactive core joint edit"
+    [[ ! -e "$pending" ]] || fail "inactive joint edit created pending state"
+    [[ ! -e "${TEST_SYSTEM_ROOT}/run/mock-systemd/active-vpsctl-proxy-xray.service" ]] || fail "inactive joint edit started core"
+    assert_not_contains "$(<"$MOCK_LOG")" 'systemctl restart vpsctl-proxy-xray.service' "inactive joint edit restarted core"
+    assert_equal "$lkg_before" "$(sha256sum "$lkg"/* "$loaded")" "inactive joint edit changes loaded config or LKG"
+    assert_file_contains "${TEST_SYSTEM_ROOT}/run/last-nft.batch" '198.51.100.80' "inactive joint edit still updates forwarding"
+    run_proxy start --core xray
+    assert_equal 0 "$RUN_STATUS" "resume core before blocked pending edit"
+
+    mkdir -p "${pending%/*}"
+    jq -n '{
+        schema_version:1,core:"xray",reason:"core-update",
+        manifest_backup:"",config_backup:"",binary_backup:"",meta_backup:"",
+        relay_backup:"",relay_existed:false,relay_touched:false,
+        relay_runtime_touched:false,relay_cache_backup:"",relay_cache_existed:false,
+        relay_nft_backup:"",relay_nft_existed:false,created_at:"2026-01-01T00:00:00Z"
+    }' >"$pending"
+    before="$(sha256sum "$(manifest_path)" "$(relay_path)" "$config" "$loaded")"
+    lkg_before="$(sha256sum "$lkg"/*)"
+    pending_before="$(sha256sum "$pending")"
+    : >"$MOCK_LOG"
+    touch "${TEST_SYSTEM_ROOT}/run/fail-nft-apply-once"
+    run_proxy relay exit edit --id "$exit_id" --uri "$new_uri" --profile shadowsocks-aes-256-gcm --core xray
+    assert_equal 20 "$RUN_STATUS" "joint nft failure with existing pending"
+    assert_equal "$before" "$(sha256sum "$(manifest_path)" "$(relay_path)" "$config" "$loaded")" "joint nft failure preserves original files with pending"
+    assert_equal "$pending_before" "$(sha256sum "$pending")" "joint nft failure restores original pending bytes"
+    assert_equal "$lkg_before" "$(sha256sum "$lkg"/*)" "joint nft failure with pending preserves LKG"
+    assert_not_contains "$(<"$MOCK_LOG")" 'systemctl restart vpsctl-proxy-xray.service' "joint nft failure with pending restarted core"
+    : >"$MOCK_LOG"
+    run_proxy relay exit edit --id "$exit_id" --uri "$new_uri" --profile shadowsocks-aes-256-gcm --core xray
+    assert_equal 0 "$RUN_STATUS" "joint edit with core-update pending"
+    assert_contains "$RUN_OUTPUT" '请显式 restart 应用' "joint edit pending requires explicit restart"
+    jq -e '.reason | contains("core-update") and contains("relay-exit-edit")' "$pending" >/dev/null || fail "joint edit loses blocking pending reason"
+    assert_equal "$lkg_before" "$(sha256sum "$lkg"/*)" "blocked auto-apply preserves LKG"
+    cmp -s "$loaded" "$lkg/config.json" || fail "blocked auto-apply changed loaded config"
+    assert_not_contains "$(<"$MOCK_LOG")" 'systemctl restart vpsctl-proxy-xray.service' "blocking pending joint edit restarted core"
+    assert_file_contains "${TEST_SYSTEM_ROOT}/run/last-nft.batch" '198.51.100.81' "blocking pending joint edit still updates forwarding"
+    run_proxy restart --core xray --confirm-disruptive
+    assert_equal 0 "$RUN_STATUS" "explicit restart applies blocked joint edit"
+    [[ ! -e "$pending" ]] || fail "explicit restart leaves blocked joint pending"
+
+    before="$(sha256sum "$(manifest_path)" "$(relay_path)" "$config" "$loaded")"
+    lkg_before="$(sha256sum "$lkg"/*)"
+    : >"$MOCK_LOG"
+    touch "${TEST_SYSTEM_ROOT}/run/fail-nft-apply"
+    run_proxy relay exit edit --id "$exit_id" --uri "$node_uri" --profile shadowsocks-aes-256-gcm --core xray
+    assert_equal 30 "$RUN_STATUS" "joint edit old rule recovery failure"
+    assert_contains "$RUN_OUTPUT" '旧状态恢复不完整' "incomplete joint recovery diagnostic"
+    assert_not_contains "$RUN_OUTPUT" '已恢复 relay 状态、核心配置与旧规则' "incomplete recovery claims success"
+    assert_equal "$before" "$(sha256sum "$(manifest_path)" "$(relay_path)" "$config" "$loaded")" "incomplete rule recovery still restores files without core restart"
+    assert_equal "$lkg_before" "$(sha256sum "$lkg"/*)" "incomplete rule recovery preserves LKG"
+    [[ ! -e "$pending" ]] || fail "incomplete old rule recovery leaked pending state"
+    assert_not_contains "$(<"$MOCK_LOG")" 'systemctl restart vpsctl-proxy-xray.service' "incomplete old rule recovery restarted core"
+    rm -f -- "${TEST_SYSTEM_ROOT}/run/fail-nft-apply"
+
+    : >"$MOCK_LOG"
+    touch "${TEST_SYSTEM_ROOT}/run/fail-nft-apply-once"
+    run_proxy relay exit delete --id "$exit_id" --cascade --confirm-cascade
+    assert_equal 20 "$RUN_STATUS" "shared exit cascade delete nft failure"
+    assert_equal "$before" "$(sha256sum "$(manifest_path)" "$(relay_path)" "$config" "$loaded")" "failed cascade delete restores shared exit and bindings"
+    assert_equal "$lkg_before" "$(sha256sum "$lkg"/*)" "failed cascade delete preserves LKG"
+    [[ ! -e "$pending" ]] || fail "failed cascade delete leaked pending state"
+    assert_not_contains "$(<"$MOCK_LOG")" 'systemctl restart vpsctl-proxy-xray.service' "failed cascade delete restarted core"
     run_proxy relay forward delete --id "$forward_id" --confirm-delete
     assert_equal 0 "$RUN_STATUS" "Xray forward cleanup after restart rollback"
 }

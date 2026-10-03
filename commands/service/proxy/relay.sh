@@ -303,6 +303,7 @@ proxy_relay_commit_candidate() {
 _proxy_relay_commit_candidate() {
     local candidate="$1" reason="$2" core="${3:-}" sync_forward="${4:-0}"
     local candidate_config="" status=0 sync_status=0 rollback_failed=0 rollback_dir=""
+    local deferred_restart_var="" relay_restart_deferred=0
     local relay_existed=0 manifest_existed=0 config_existed=0 pending_existed=0
     local config_path="" config_logical="" pending_path="" pending_logical=""
     proxy_relay_validate_file "$candidate" || return $?
@@ -331,7 +332,9 @@ _proxy_relay_commit_candidate() {
         candidate_config="$(proxy_mktemp_json "$PROXY_STATE_DIR" relay.config)" || return 20
         proxy_render_config "$core" "$PROXY_MANIFEST" "$candidate" >"$candidate_config" || status=$?
         if ((status == 0)); then
-            proxy_commit_manifest_config "$core" "$PROXY_MANIFEST" "$candidate_config" "$reason" "$candidate" || status=$?
+            if [[ "$sync_forward" == 1 ]]; then deferred_restart_var=relay_restart_deferred; fi
+            proxy_commit_manifest_config "$core" "$PROXY_MANIFEST" "$candidate_config" "$reason" "$candidate" \
+                "$deferred_restart_var" || status=$?
         fi
         rm -f -- "$candidate_config"
     else
@@ -373,7 +376,15 @@ _proxy_relay_commit_candidate() {
         vps_cmd_error "中转运行规则提交失败，已恢复 relay 状态、核心配置与旧规则"
         return "$sync_status"
     fi
-    [[ -z "$rollback_dir" ]] || rm -rf -- "$rollback_dir"
+    # Keep the running core and LKG unchanged until forwarding has committed.
+    # Restart failures use pending recovery, not this command's file snapshot.
+    if ((relay_restart_deferred)); then
+        _proxy_core_restart_locked "$core" || status=$?
+    fi
+    if [[ -n "$rollback_dir" ]] && ! rm -rf -- "$rollback_dir"; then
+        ((status != 0)) || status=20
+    fi
+    return "$status"
 }
 
 proxy_relay_exit_references() {

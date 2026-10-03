@@ -1618,17 +1618,20 @@ proxy_pending_can_auto_apply() {
 }
 
 proxy_commit_manifest_config() {
+    # Optional sixth argument names a caller variable: defer an eligible automatic
+    # restart and set that variable to 1 so a surrounding transaction can finish.
     proxy_ufw_nodes_transaction "$2" _proxy_commit_manifest_config "$@"
 }
 
 _proxy_commit_manifest_config() {
     local core="$1" candidate_manifest="$2" candidate_config="$3" reason="$4"
-    local candidate_relay="${5:-}"
+    local candidate_relay="${5:-}" deferred_restart_var="${6:-}"
     local manifest_backup="" config_backup="" manifest_existed=false config_existed=false
     local relay_backup="" relay_existed=false relay_touched=false relay_undo='[]'
     local relay_runtime_touched=false relay_cache_backup="" relay_cache_existed=false
     local relay_nft_backup="" relay_nft_existed=false relay_nft_snapshot="" current_forward_count=0 candidate_forward_count=0 snapshot_status
     local config_logical config_path failed=0 pending_required=0 active=0 pending_path runtime='{}'
+    [[ -z "$deferred_restart_var" ]] || printf -v "$deferred_restart_var" '%s' 0 || return 2
     proxy_core_registered "$core" || {
         vps_cmd_error "请先安装或登记 $(proxy_core_label "$core") 内核"
         return 3
@@ -1720,7 +1723,11 @@ _proxy_commit_manifest_config() {
     if ((active)); then
         pending_path="$(proxy_core_pending_path "$core")" || return 30
         if proxy_pending_can_auto_apply "$pending_path"; then
-            _proxy_core_restart_locked "$core" || return $?
+            if [[ -n "$deferred_restart_var" ]]; then
+                printf -v "$deferred_restart_var" '%s' 1 || return 30
+            else
+                _proxy_core_restart_locked "$core" || return $?
+            fi
         else
             vps_cmd_warning "配置已校验并写入；$(proxy_core_label "$core") 正在运行，请显式 restart 应用"
         fi
