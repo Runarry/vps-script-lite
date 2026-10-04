@@ -32,17 +32,17 @@
 ```text
 vpsctl self status
 vpsctl self update [--version vX.Y.Z]
-vpsctl self uninstall [--purge] [--confirm-uninstall] [--confirm-purge]
+vpsctl [--yes] self uninstall [--purge] [--confirm-uninstall] [--confirm-purge]
 ```
 
 | 子命令 | 语义 |
 | --- | --- |
 | `status` | 只读显示本地运行模式、分发版本、受管路径和功能及共享库缓存状态；不检查远端更新 |
 | `update` | 用户显式触发更新；默认使用 latest，`--version vX.Y.Z` 固定目标 tag；校验完成并落盘后才原子切换 current，失败保留原版本 |
-| `uninstall` | 交互模式确认一次；非交互模式需要全局 `--yes` 或兼容的 `--confirm-uninstall`；移除快捷入口、current 和 vpsctl 分发文件，不卸载任何功能组件 |
-| `uninstall --purge` | 交互模式再次确认；非交互模式还需要 `--confirm-purge`；在普通卸载基础上只额外删除 `/var/lib/vpsctl/self/` 元数据 |
+| `uninstall` | 未预先授权时交互确认一次；全局 `--yes` 或兼容的 `--confirm-uninstall` 任一项可授权；移除快捷入口、current 和 vpsctl 分发文件，不卸载任何功能组件 |
+| `uninstall --purge` | 只扩大删除范围，在普通卸载基础上额外删除 `/var/lib/vpsctl/self/` 元数据；全局 `--yes`、`--confirm-uninstall` 或 `--confirm-purge` 任一项可授权，未预先授权时用一次交互提示确认完整范围 |
 
-普通卸载和 purge 均不得删除或修改 `/etc/vpsctl/`、功能状态与备份、功能安装的软件包/服务/规则/内核及 `/usr/local/libexec/`。`--yes` 不能替代非交互 purge 所需的两个 self 确认标志。该边界独立于各功能命令自己的 `uninstall` 或 `--purge`，后者仍按各自命令文档处理。
+普通卸载和 purge 均不得删除或修改 `/etc/vpsctl/`、功能状态与备份、功能安装的软件包/服务/规则/内核及 `/usr/local/libexec/`。`--confirm-purge` 必须与 `--purge` 一起使用，否则返回 `2`；旧的 `--purge --confirm-uninstall --confirm-purge` 组合继续有效。非交互未授权返回 `3`，交互取消返回 `130`。该边界独立于各功能命令自己的 `uninstall` 或 `--purge`，后者仍按各自命令文档处理。
 
 ## 3. 已登记命令清单
 

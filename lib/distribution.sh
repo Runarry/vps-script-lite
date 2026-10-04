@@ -869,11 +869,11 @@ vps_distribution_self_update() {
 }
 
 vps_distribution_self_uninstall_locked() {
-    local purge="${1:-0}"
+    local purge="${1:-0}" prompt='确认卸载受管 vpsctl（快捷入口、current 和分发版本目录）'
     vps_distribution_validate_managed_install || return $?
-    vps_distribution_confirm '确认卸载受管 vpsctl？' || return $?
+    [[ "$purge" != 1 ]] || prompt+='，并额外清除 vpsctl self 元数据（/var/lib/vpsctl/self/）'
+    vps_distribution_confirm "${prompt}？" || return $?
     if [[ "$purge" == 1 ]]; then
-        vps_distribution_confirm '确认额外清除 vpsctl self 状态？' || return $?
         vps_distribution_require_no_symlink_components "$VPSCTL_SELF_STATE_ROOT" || {
             vps_distribution_error 'self 状态路径包含符号链接或不安全组件'
             return 3

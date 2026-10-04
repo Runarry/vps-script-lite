@@ -121,10 +121,10 @@ vpsctl --version
 
 ```text
 vpsctl --yes self uninstall
-vpsctl self uninstall --purge --confirm-uninstall --confirm-purge
+vpsctl --yes self uninstall --purge
 ```
 
-普通卸载删除分发入口和已安装的分发文件，但不触碰 `/etc/vpsctl/`、功能状态与备份、各功能已经安装的组件或 `/usr/local/libexec/`。普通卸载在交互模式下确认一次，直接调用可用全局 `--yes` 或兼容的 `--confirm-uninstall` 授权。purge 的交互确认保持不变，非交互调用仍必须同时提供 `--confirm-uninstall --confirm-purge`，全局 `--yes` 不能替代这两个 purge 确认标志。`--purge` 具有相同的功能数据保护边界，只额外删除 `/var/lib/vpsctl/self/` 中的 self 元数据。
+普通卸载删除分发入口和已安装的分发文件，但不触碰 `/etc/vpsctl/`、功能状态与备份、各功能已经安装的组件或 `/usr/local/libexec/`。`--purge` 只扩大删除范围，额外删除 `/var/lib/vpsctl/self/` 中的 self 元数据。普通卸载和 purge 均只需一次授权：全局 `--yes`、兼容的 `--confirm-uninstall` 或 `--confirm-purge` 任一项即可；`--confirm-purge` 必须与 `--purge` 一起使用，否则返回 `2`。旧的 `--purge --confirm-uninstall --confirm-purge` 组合继续有效。未预先授权时，交互模式用一次提示说明并确认完整删除范围，非交互模式返回 `3`；交互取消返回 `130`。
 
 ## 从源码树运行主管理脚本
 

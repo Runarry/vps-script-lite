@@ -17,6 +17,12 @@
 # Errors are deliberately generic: none of the public functions writes URI,
 # credentials, or decoded userinfo to stderr.
 
+if ! declare -F _proxy_relay_forward_valid_ipv4 >/dev/null 2>&1 ||
+    ! declare -F _proxy_relay_forward_valid_ipv6 >/dev/null 2>&1; then
+    # shellcheck source=commands/service/proxy/address.sh
+    source "$(dirname -- "${BASH_SOURCE[0]}")/address.sh"
+fi
+
 if ! declare -F proxy_hy2_ports_normalize >/dev/null 2>&1; then
     # shellcheck source=commands/service/proxy/hysteria2.sh
     source "$(dirname -- "${BASH_SOURCE[0]}")/hysteria2.sh"
@@ -90,55 +96,15 @@ _proxy_relay_b64_encode_like() {
     printf '%s' "$encoded"
 }
 
-_proxy_relay_valid_ipv4() {
-    local address="${1-}" part
-    local -a parts=()
-    IFS='.' read -r -a parts <<<"$address"
-    ((${#parts[@]} == 4)) || return 1
-    for part in "${parts[@]}"; do
-        [[ "$part" =~ ^[0-9]{1,3}$ ]] || return 1
-        ((10#$part <= 255)) || return 1
-    done
-}
-
-_proxy_relay_valid_ipv6() {
-    local address="${1-}" left right item ipv4="" count=0
-    local -a left_parts=() right_parts=()
-    [[ "$address" =~ ^[0-9A-Fa-f:.]+$ && "$address" == *:* && "$address" != *:::* ]] || return 1
-    if [[ "$address" == *.* ]]; then
-        ipv4="${address##*:}"
-        _proxy_relay_valid_ipv4 "$ipv4" || return 1
-        address="${address%:*}:v4"
-    fi
-    if [[ "$address" == *::* ]]; then
-        [[ "${address#*::}" != *::* ]] || return 1
-        left="${address%%::*}"
-        right="${address#*::}"
-        [[ -z "$left" ]] || IFS=':' read -r -a left_parts <<<"$left"
-        [[ -z "$right" ]] || IFS=':' read -r -a right_parts <<<"$right"
-        count=$((${#left_parts[@]} + ${#right_parts[@]}))
-        [[ -z "$ipv4" ]] || count=$((count + 1))
-        ((count < 8)) || return 1
-    else
-        IFS=':' read -r -a left_parts <<<"$address"
-        count=${#left_parts[@]}
-        [[ -z "$ipv4" ]] || count=$((count + 1))
-        ((count == 8)) || return 1
-    fi
-    for item in "${left_parts[@]}" "${right_parts[@]}"; do
-        [[ -z "$item" || "$item" == v4 || "$item" =~ ^[0-9A-Fa-f]{1,4}$ ]] || return 1
-    done
-}
-
 _proxy_relay_valid_host() {
     local host="${1-}" label
     local -a labels=()
     [[ -n "$host" ]] && _proxy_relay_uri_no_control "$host" || return 1
     if [[ "$host" == *:* ]]; then
-        _proxy_relay_valid_ipv6 "$host"
+        _proxy_relay_forward_valid_ipv6 "$host"
         return
     fi
-    _proxy_relay_valid_ipv4 "$host" && return 0
+    _proxy_relay_forward_valid_ipv4 "$host" && return 0
     [[ ${#host} -le 253 && "$host" =~ ^[A-Za-z0-9._-]+$ && "$host" != .* && "$host" != *. && "$host" != *'..'* ]] || return 1
     IFS='.' read -r -a labels <<<"$host"
     for label in "${labels[@]}"; do
@@ -152,7 +118,7 @@ _proxy_relay_parse_authority() {
         if [[ "$authority" == \[* ]]; then
             [[ "$authority" =~ ^\[([^][]+)\](:([0-9,-]+))?$ ]] || return 10
             host="${BASH_REMATCH[1]}"; ports="${BASH_REMATCH[3]:-443}"
-            _proxy_relay_valid_ipv6 "$host" || return 10
+            _proxy_relay_forward_valid_ipv6 "$host" || return 10
         else
             [[ "$authority" =~ ^([^:@/?#]+)(:([0-9,-]+))?$ ]] || return 10
             host="${BASH_REMATCH[1]}"; ports="${BASH_REMATCH[3]:-443}"
@@ -168,7 +134,7 @@ _proxy_relay_parse_authority() {
         [[ "$authority" =~ ^\[([^][]+)\]:([0-9]+)$ ]] || return 10
         host="${BASH_REMATCH[1]}"
         port="${BASH_REMATCH[2]}"
-        _proxy_relay_valid_ipv6 "$host" || return 10
+        _proxy_relay_forward_valid_ipv6 "$host" || return 10
     else
         [[ "$authority" =~ ^([^:@/?#]+):([0-9]+)$ ]] || return 10
         host="${BASH_REMATCH[1]}"

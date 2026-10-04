@@ -401,17 +401,6 @@ bbr_file_is_unmanaged() {
     return 0
 }
 
-bbr_has_unmanaged_persistence() {
-    local path
-
-    for path in "$BBR_SYSCTL_FILE" "$BBR_MODULES_FILE"; do
-        if bbr_file_is_unmanaged "$path"; then
-            return 0
-        fi
-    done
-    return 1
-}
-
 bbr_backup_unmanaged_persistence() {
     local path logical_path
 
@@ -941,12 +930,39 @@ bbr_restore_saved_live_qdisc() {
     }
 }
 
+bbr_confirm_apply() {
+    local algorithm="$1" qdisc="$2" path
+    shift 2
+
+    printf '本次 BBR 变更：\n  TCP 算法：%s → %s\n  默认 qdisc：%s → %s\n' \
+        "$BBR_TX_ALGORITHM" "$algorithm" "$BBR_TX_QDISC" "$qdisc" >&2
+    for path in "$BBR_SYSCTL_FILE" "$BBR_MODULES_FILE"; do
+        printf '  持久化文件：%s\n' "$(bbr_logical_path "$path")" >&2
+    done
+    if (($# > 0)); then
+        vps_cmd_warning "检测到未受管的 BBR 持久化文件，将先备份再覆盖："
+        for path in "$@"; do
+            printf '  %s\n' "$(bbr_logical_path "$path")" >&2
+        done
+        printf '  备份目录：/var/lib/vpsctl/backups/network/bbr/\n' >&2
+    fi
+    if [[ "$BBR_APPLY_LIVE_QDISC" == "1" ]]; then
+        printf '  网卡 %s 的 root qdisc：%s → %s（立即应用）\n' \
+            "$BBR_TX_LIVE_INTERFACE" "$BBR_TX_LIVE_QDISC" "$qdisc" >&2
+        vps_cmd_warning "立即替换 root qdisc 可能造成短暂网络波动或连接中断。"
+    else
+        printf '  当前网卡的 root qdisc 保持不变。\n' >&2
+    fi
+    vps_cmd_confirm "是否应用以上 BBR 变更？"
+}
+
 bbr_apply_settings() {
     local algorithm="$1"
     local qdisc="$2"
     local status=0
     local locked=0
-    local unmanaged_confirmed=0
+    local path
+    local -A unmanaged_paths=()
 
     bbr_validate_name "$algorithm" || {
         vps_cmd_error "TCP 算法名称无效：${algorithm}"
@@ -961,34 +977,6 @@ bbr_apply_settings() {
         return 0
     fi
     vps_cmd_require_root || return $?
-    if [[ -e "$BBR_ORIGINAL_FILE" ]]; then
-        bbr_load_original || return $?
-    else
-        BBR_ORIGINAL_LOADED=0
-    fi
-    if bbr_has_unmanaged_persistence; then
-        vps_cmd_warning "检测到未受管的 vpsctl BBR 持久化文件，将先备份再覆盖"
-        if vps_cmd_confirm "是否备份并覆盖现有 BBR 持久化文件？"; then
-            unmanaged_confirmed=1
-        else
-            status=$?
-            if ((status == 1)); then
-                vps_cmd_info "未进行任何更改"
-                return 0
-            fi
-            return "$status"
-        fi
-    fi
-    if vps_cmd_confirm "是否应用 TCP 算法 '${algorithm}' 和默认 qdisc '${qdisc}'？"; then
-        :
-    else
-        status=$?
-        if ((status == 1)); then
-            vps_cmd_info "未进行任何更改"
-            return 0
-        fi
-        return "$status"
-    fi
     if [[ "$VPSCTL_DRY_RUN" != "1" ]]; then
         vps_cmd_lock network-bbr || return $?
         locked=1
@@ -1001,25 +989,48 @@ bbr_apply_settings() {
             BBR_ORIGINAL_LOADED=0
         fi
     fi
-    if ((status == 0)) && bbr_has_unmanaged_persistence; then
-        if ((unmanaged_confirmed == 0)); then
-            vps_cmd_error "确认后出现未受管持久化文件，请重新执行操作"
-            status=3
-        else
-            bbr_backup_unmanaged_persistence || status=$?
-        fi
-    fi
     if ((status == 0 && locked == 1)) && bbr_requested_state_matches "$algorithm" "$qdisc"; then
         vps_cmd_unlock || return $?
         vps_cmd_success "已处于请求状态，无需重复应用"
         return 0
     fi
     ((status != 0)) || bbr_begin_transaction || status=$?
-    ((status != 0)) || bbr_load_algorithm_module "$algorithm" || status=$?
-    ((status != 0)) || bbr_prepare_qdisc "$qdisc" || status=$?
     if ((status == 0)) && [[ "$BBR_APPLY_LIVE_QDISC" == "1" ]]; then
         bbr_capture_live_qdisc || status=$?
     fi
+    if ((status == 0)); then
+        for path in "$BBR_SYSCTL_FILE" "$BBR_MODULES_FILE"; do
+            if bbr_file_is_unmanaged "$path"; then
+                unmanaged_paths["$path"]=1
+            fi
+        done
+        if bbr_confirm_apply "$algorithm" "$qdisc" "${!unmanaged_paths[@]}"; then
+            :
+        else
+            status=$?
+            BBR_TX_ACTIVE=0
+            BBR_TX_ROLLBACK_NEEDED=0
+            ((locked == 0)) || vps_cmd_unlock
+            if ((status == 1)); then
+                vps_cmd_info "未进行任何更改"
+                return 0
+            fi
+            return "$status"
+        fi
+        bbr_validate_managed_paths || status=$?
+    fi
+    if ((status == 0)); then
+        for path in "$BBR_SYSCTL_FILE" "$BBR_MODULES_FILE"; do
+            if bbr_file_is_unmanaged "$path" && [[ -z "${unmanaged_paths[$path]+set}" ]]; then
+                vps_cmd_error "确认后出现未受管持久化文件，请重新执行操作：$(bbr_logical_path "$path")"
+                status=3
+                break
+            fi
+        done
+    fi
+    ((status != 0)) || bbr_backup_unmanaged_persistence || status=$?
+    ((status != 0)) || bbr_load_algorithm_module "$algorithm" || status=$?
+    ((status != 0)) || bbr_prepare_qdisc "$qdisc" || status=$?
     ((status != 0)) || bbr_mark_transaction_dirty || status=$?
     ((status != 0)) || bbr_prepare_directories || status=$?
     ((status != 0)) || bbr_save_original || status=$?
@@ -1168,7 +1179,7 @@ bbr_prompt_qdisc() {
 }
 
 bbr_prompt_live_qdisc() {
-    local choice status
+    local choice
 
     BBR_APPLY_LIVE_QDISC=0
     choice="$(vps_cmd_prompt_select \
@@ -1176,15 +1187,7 @@ bbr_prompt_live_qdisc() {
         keep "不立即应用（仅修改默认值）" \
         apply "立即应用 root qdisc")" || return $?
     [[ "$choice" == "apply" ]] || return 0
-    vps_cmd_warning "立即替换 root qdisc 可能造成短暂网络波动或连接中断。"
-    if vps_cmd_confirm "确认承担风险并立即替换 root qdisc？"; then
-        BBR_APPLY_LIVE_QDISC=1
-        return 0
-    else
-        status=$?
-    fi
-    ((status == 1)) && return 0
-    return "$status"
+    BBR_APPLY_LIVE_QDISC=1
 }
 
 bbr_menu_snapshot() {

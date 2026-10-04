@@ -15,6 +15,85 @@ expect_status() {
 }
 
 source "$TEST_ROOT/commands/service/proxy/relay-uri.sh"
+
+# Exercise the public URI APIs with only the standalone URI module loaded.
+(
+    base_uri='socks5://user%3Aname:pass%3Aword@relay.example:00443#host%20fixture'
+    baseline="$(proxy_relay_uri_parse "$base_uri")"
+    assert_json "$baseline" '.schema_version == 1 and .profile == "socks5" and .endpoint == {host:"relay.example",port:443} and .credentials.username == "user:name" and .credentials.password == "pass:word" and .name == "host fixture"' 'standalone URI parse preserves schema, credentials and port normalization'
+    while IFS='|' read -r host authority; do
+        parsed="$(proxy_relay_uri_parse "socks5://user%3Aname:pass%3Aword@${authority}:00443#host%20fixture")"
+        assert_json "$parsed" ".endpoint == {host:\"$host\",port:443}" "URI parse preserves accepted host $host"
+        rewritten="$(proxy_relay_uri_rewrite "$base_uri" "$host" 24443)"
+        [[ "$rewritten" == "socks5://user%3Aname:pass%3Aword@${authority}:24443#host%20fixture" ]] || fail "URI rewrite changed bytes outside the endpoint for $host"
+        after="$(proxy_relay_uri_parse "$rewritten")"
+        assert_json "$after" ".endpoint == {host:\"$host\",port:24443}" "URI rewrite preserves accepted host $host"
+        [[ "$(jq -c 'del(.endpoint)' <<<"$baseline")" == "$(jq -c 'del(.endpoint)' <<<"$after")" ]] || fail "URI rewrite changed descriptor fields outside the endpoint for $host"
+    done <<'HOSTS'
+192.0.2.1|192.0.2.1
+192.000.002.001|192.000.002.001
+2001:db8:0:1:2:3:4:5|[2001:db8:0:1:2:3:4:5]
+::|[::]
+::1|[::1]
+2001:db8::|[2001:db8::]
+2001:DB8::10|[2001:DB8::10]
+::ffff:192.0.2.1|[::ffff:192.0.2.1]
+1:2:3:4:5:6:192.0.2.1|[1:2:3:4:5:6:192.0.2.1]
+::ffff:192.000.002.001|[::ffff:192.000.002.001]
+relay_node.example|relay_node.example
+1234.0.2.1|1234.0.2.1
+256.0.2.1|256.0.2.1
+HOSTS
+
+    while IFS='|' read -r host authority; do
+        invalid_uri="socks5://user:pass@${authority}:443"
+        expect_status 10 proxy_relay_uri_parse "$invalid_uri"
+        expect_status 10 proxy_relay_uri_rewrite "$invalid_uri" relay.example 24443
+        expect_status 2 proxy_relay_uri_rewrite "$base_uri" "$host" 24443
+        expect_status 10 proxy_relay_uri_parse "hy2://pass@${authority}"
+    done <<'HOSTS'
+192.0.2.1.|192.0.2.1.
+::ffff:192.0.2.1.|[::ffff:192.0.2.1.]
+:1:2:3:4:5:6:7|[:1:2:3:4:5:6:7]
+1:2:3:4:5:6:7:8:|[1:2:3:4:5:6:7:8:]
+1:2:3:4:5:6:7|[1:2:3:4:5:6:7]
+1:2:3:4:5:6:7:8:9|[1:2:3:4:5:6:7:8:9]
+2001::db8::1|[2001::db8::1]
+::ffff:256.0.2.1|[::ffff:256.0.2.1]
+fe80::1%eth0|[fe80::1%eth0]
+relay.example.|relay.example.
+relay..example|relay..example
+-relay.example|-relay.example
+relay-.example|relay-.example
+HOSTS
+
+    for host in $'relay.example\t' $'relay.example\n' $'relay.example\x7f'; do
+        expect_status 10 proxy_relay_uri_parse "socks5://user:pass@${host}:443"
+        expect_status 2 proxy_relay_uri_rewrite "$base_uri" "$host" 24443
+    done
+    for control in 00 09 0A 7F; do
+        expect_status 10 proxy_relay_uri_parse "hy2://pass@relay.example?sni=relay%${control}example"
+    done
+    expect_status 10 proxy_relay_uri_parse 'socks5://user:pass@2001:db8::1:443'
+    expect_status 10 proxy_relay_uri_parse 'socks5://user:pass@[192.0.2.1]:443'
+    expect_status 10 proxy_relay_uri_parse 'socks5://user:pass@[2001:db8::1]'
+    for port in 0 65536; do
+        expect_status 10 proxy_relay_uri_parse "socks5://user:pass@[2001:db8::1]:$port"
+        expect_status 2 proxy_relay_uri_rewrite "$base_uri" 2001:db8::1 "$port"
+    done
+
+    for scheme in hy2 hysteria2; do
+        uri="$scheme://pass%3Aword@[::ffff:192.0.2.1]?sni=relay_node.example#host%20fixture"
+        parsed="$(proxy_relay_uri_parse "$uri")"
+        assert_json "$parsed" '.profile == "hysteria2" and .endpoint == {host:"::ffff:192.0.2.1",port:443}' 'Hysteria2 IPv6 authority keeps the default port'
+        rewritten="$(proxy_relay_uri_rewrite "$uri" 2001:db8::10 24443-24444)"
+        [[ "$rewritten" == "$scheme://pass%3Aword@[2001:db8::10]:24443?sni=relay_node.example&mport=24443-24444#host%20fixture" ]] || fail 'Hysteria2 rewrite changed scheme, credentials or query bytes'
+        after="$(proxy_relay_uri_parse "$rewritten")"
+        assert_json "$after" '.endpoint == {host:"2001:db8::10",port:24443,ports:"24443-24444"}' 'Hysteria2 rewrite preserves IPv6 brackets and the port range'
+        [[ "$(jq -c 'del(.endpoint)' <<<"$parsed")" == "$(jq -c 'del(.endpoint)' <<<"$after")" ]] || fail 'Hysteria2 rewrite changed protocol options'
+    done
+)
+
 source "$TEST_ROOT/commands/service/proxy/relay.sh"
 PROXY_MANIFEST="$TEST_TEMP/nodes.json"
 PROXY_STATE_DIR="$TEST_TEMP"

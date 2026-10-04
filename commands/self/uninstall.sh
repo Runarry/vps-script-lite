@@ -18,7 +18,9 @@ while (($# > 0)); do
         --confirm-purge) confirm_purge=1 ;;
         -h | --help)
             printf '用法：vpsctl [--yes] self uninstall [--purge] [--confirm-uninstall] [--confirm-purge]\n'
-            printf '普通卸载可用 --yes 或 --confirm-uninstall 确认；非交互 purge 仍需两个专用确认标志。\n'
+            printf '卸载受管入口、current 和分发版本目录；--purge 只额外删除 /var/lib/vpsctl/self/ 元数据。\n'
+            printf '使用 --yes、--confirm-uninstall 或 --confirm-purge 任一项授权；--confirm-purge 只能与 --purge 一起使用。\n'
+            printf '未预先授权时交互确认一次；非交互未授权返回 3。\n'
             exit 0
             ;;
         *) vps_distribution_error "未知 self uninstall 选项：$1"; exit 2 ;;
@@ -29,22 +31,9 @@ if [[ "$confirm_purge" == 1 && "$purge" != 1 ]]; then
     vps_distribution_error '--confirm-purge 只能与 --purge 一起使用'
     exit 2
 fi
-if [[ "$purge" == 0 ]]; then
-    # Preserve global --yes and accept the existing explicit authorization.
-    [[ "$confirm_uninstall" != 1 ]] || VPSCTL_ASSUME_YES=1
-elif [[ "${VPSCTL_NON_INTERACTIVE:-0}" == 1 || ! -t 0 || ! -t 1 ]]; then
-    [[ "$confirm_uninstall" == 1 ]] || {
-        vps_distribution_error '非交互卸载必须显式使用 --confirm-uninstall'
-        exit 3
-    }
-    [[ "$purge" != 1 || "$confirm_purge" == 1 ]] || {
-        vps_distribution_error '非交互 purge 必须显式使用 --confirm-purge'
-        exit 3
-    }
-    VPSCTL_ASSUME_YES=1
-else
+if [[ "$confirm_uninstall" == 1 || "$confirm_purge" == 1 ]]; then
     # The sourced distribution library consumes this process-local context.
     # shellcheck disable=SC2034
-    VPSCTL_ASSUME_YES=0
+    VPSCTL_ASSUME_YES=1
 fi
 vps_distribution_self_uninstall "$purge"

@@ -20,7 +20,7 @@
 | `vpsctl help` | 显示参数和调用说明 |
 | `vpsctl self status` | 只读显示本地运行模式、分发版本、受管路径和功能、共享库缓存状态 |
 | `vpsctl self update [--version vX.Y.Z]` | 显式更新到 latest 或指定分发版本 |
-| `vpsctl self uninstall [--purge] [--confirm-uninstall] [--confirm-purge]` | 卸载 vpsctl 分发文件；purge 只额外清除 self 元数据 |
+| `vpsctl [--yes] self uninstall [--purge] [--confirm-uninstall] [--confirm-purge]` | 卸载 vpsctl 分发文件；purge 只额外清除 self 元数据 |
 
 帮助和版本查询不会触发环境检测。`list` 会执行一次只读环境检测，并在每个登记项旁显示“可用”或“受限”。交互菜单不允许在 `--non-interactive` 或没有终端时运行，避免自动化任务意外等待输入。`self` 作为“脚本管理”领域固定登记，其实现由 core 常驻；源码树运行保持可用，`self status` 可说明当前运行模式，`self update` 与 `self uninstall` 只操作固定安装态。
 
@@ -142,14 +142,14 @@ UI 使用 ASCII 边框和可选 ANSI 语义色，适合普通 SSH 终端：青�
 
 交互菜单中跨版本更新完整成功后，重新进入新版本主菜单，保留 `--no-color`、`--no-clear`，不恢复子菜单位置。同版本更新、取消操作或旧安装仍可用的普通失败继续当前菜单；self 操作返回 `30`，或卸载已移除入口／current 时，结束旧菜单并保留退出码。版本已切换但新入口无法启动时明确报错并退出。
 
-普通卸载在交互菜单中确认一次；直接调用可用全局 `--yes` 或兼容的 `--confirm-uninstall` 授权，非交互未授权时立即失败。它删除 `/usr/local/bin/vpsctl`、vpsctl 分发版本目录和 current，但不得触碰：
+普通卸载和 purge 均只需一次授权；直接调用可用全局 `--yes`、兼容的 `--confirm-uninstall` 或 `--confirm-purge` 任一项授权。未预先授权时，交互模式用一次提示说明并确认完整删除范围，取消返回 `130`；非交互模式返回 `3`。普通卸载删除 `/usr/local/bin/vpsctl`、vpsctl 分发版本目录和 current，但不得触碰：
 
 - `/etc/vpsctl/` 下的配置；
 - `/var/lib/vpsctl/` 中除 self 元数据之外的功能状态和备份；
 - 各功能已经安装的内核、软件包、服务、规则或其他组件；
 - `/usr/local/libexec/` 及其中的外部二进制。
 
-`--purge` 仍遵守上述保护边界，只额外删除 `/var/lib/vpsctl/self/` 中的安装、自更新与分发缓存元数据；交互模式会再次确认，非交互模式要求同时提供 `--confirm-purge`。非交互 purge 仍要求 `--confirm-uninstall --confirm-purge`，`--yes` 不能替代这两个标志。self 卸载不同于 RFW、代理等功能自身的卸载或 purge；它绝不代替用户逐项卸载已安装组件。
+`--purge` 只扩大删除范围，仍遵守上述保护边界，只额外删除 `/var/lib/vpsctl/self/` 中的安装、自更新与分发缓存元数据；这部分范围会包含在同一次交互确认中。`--confirm-purge` 是授权别名，必须与 `--purge` 一起使用，否则返回 `2`；旧的 `--purge --confirm-uninstall --confirm-purge` 组合继续有效。self 卸载不同于 RFW、代理等功能自身的卸载或 purge；它绝不代替用户逐项卸载已安装组件。
 
 ## 5. 当前边界
 

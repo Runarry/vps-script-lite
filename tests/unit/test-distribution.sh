@@ -826,38 +826,101 @@ test_uninstall_preserves_feature_state() (
 )
 
 test_uninstall_confirmation_contract() (
-    local status authorization args command output release="$TEST_INSTALL_ROOT/releases/0.2.0"
-    for authorization in yes legacy; do
+    local status args command output answer purge assume_yes noninteractive mode prompt_count option
+    local release="$TEST_INSTALL_ROOT/releases/0.2.0"
+    local -a parsed=() scope=()
+
+    prepare_confirmation_install() {
+        rm -rf -- "$TEST_INSTALL_ROOT" "$TEST_SELF_ROOT"
         mkdir -p "$TEST_INSTALL_ROOT/releases" "$TEST_SELF_ROOT"
-        rm -f -- "$TEST_INSTALL_ROOT/current"
         prepare_managed_install "$release" 0.2.0
         cp -- "$TEST_ROOT/lib/distribution.sh" "$release/lib/distribution.sh"
         export VPSCTL_DISTRIBUTED=1 VPSCTL_PROJECT_ROOT="$release" VPSCTL_NON_INTERACTIVE=1
-        status=0
-        VPSCTL_ASSUME_YES=0 bash "$TEST_ROOT/commands/self/uninstall.sh" >/dev/null 2>&1 || status=$?
-        assert_equal 3 "$status" 'noninteractive uninstall requires authorization'
-        for args in '--purge' '--purge --confirm-uninstall' '--purge --confirm-purge'; do
-            local -a parsed=()
+    }
+
+    assert_uninstall_scope() {
+        [[ ! -e "$TEST_ENTRY" && ! -e "$TEST_INSTALL_ROOT/current" && ! -e "$TEST_INSTALL_ROOT/releases" ]] || fail 'authorized uninstall kept managed code'
+        if [[ "$purge" == 1 ]]; then
+            [[ ! -e "$TEST_SELF_ROOT" ]] || fail 'authorized purge kept self metadata'
+        else
+            [[ -f "$TEST_SELF_ROOT/manifest.tsv" ]] || fail 'normal uninstall removed self metadata'
+        fi
+        [[ ! -e "$TEST_INSTALL_ROOT/.self-update.lock" ]] || fail 'uninstall retained lock'
+    }
+
+    prepare_confirmation_install
+    for noninteractive in 0 1; do
+        for args in '' '--purge'; do
+            parsed=()
             IFS=' ' read -r -a parsed <<<"$args"
             status=0
-            VPSCTL_ASSUME_YES=1 bash "$TEST_ROOT/commands/self/uninstall.sh" "${parsed[@]}" >/dev/null 2>&1 || status=$?
-            assert_equal 3 "$status" 'global yes cannot replace purge confirmation flags'
+            VPSCTL_ASSUME_YES=0 VPSCTL_NON_INTERACTIVE="$noninteractive" \
+                bash "$TEST_ROOT/commands/self/uninstall.sh" "${parsed[@]}" </dev/null >/dev/null 2>&1 || status=$?
+            assert_equal 3 "$status" 'noninteractive uninstall requires one authorization'
         done
-        [[ -f "$TEST_ENTRY" ]] || fail 'unconfirmed uninstall changed installation'
-        if [[ "$authorization" == yes ]]; then
-            printf -v command 'env VPSCTL_ASSUME_YES=0 VPSCTL_NON_INTERACTIVE=0 bash %q' "$TEST_ROOT/commands/self/uninstall.sh"
+    done
+    for assume_yes in 0 1; do
+        for args in '--confirm-purge' '--confirm-uninstall --confirm-purge'; do
+            IFS=' ' read -r -a parsed <<<"$args"
             status=0
-            output="$(printf 'n\n' | script -q -e -c "$command" /dev/null 2>&1)" || status=$?
-            assert_equal 130 "$status" 'interactive uninstall cancellation'
+            VPSCTL_ASSUME_YES="$assume_yes" bash "$TEST_ROOT/commands/self/uninstall.sh" "${parsed[@]}" >/dev/null 2>&1 || status=$?
+            assert_equal 2 "$status" 'confirm-purge requires purge even with other authorization'
+        done
+    done
+    [[ -f "$TEST_ENTRY" && -L "$TEST_INSTALL_ROOT/current" && -d "$release" && -f "$TEST_SELF_ROOT/manifest.tsv" ]] || fail 'unconfirmed uninstall changed installation'
+    [[ ! -e "$TEST_INSTALL_ROOT/.self-update.lock" ]] || fail 'unconfirmed uninstall retained lock'
+
+    for purge in 0 1; do
+        prepare_confirmation_install
+        printf -v command 'env VPSCTL_ASSUME_YES=0 VPSCTL_NON_INTERACTIVE=0 bash %q' "$TEST_ROOT/commands/self/uninstall.sh"
+        [[ "$purge" != 1 ]] || command+=' --purge'
+        for answer in n y; do
+            status=0
+            output="$(printf '%s\n' "$answer" | script -q -e -c "$command" /dev/null 2>&1)" || status=$?
+            prompt_count="$(grep -Fo '[输入 y 确认]' <<<"$output" | wc -l)" || true
+            assert_equal 1 "$prompt_count" 'interactive uninstall asks exactly once'
             assert_contains "$output" '确认卸载受管 vpsctl' 'interactive uninstall prompt'
-            [[ -f "$TEST_ENTRY" && -d "$release" ]] || fail 'cancelled uninstall changed installation'
-        fi
-        if [[ "$authorization" == yes ]]; then
-            VPSCTL_ASSUME_YES=1 bash "$TEST_ROOT/commands/self/uninstall.sh" >/dev/null || fail 'global yes uninstall'
-        else
-            VPSCTL_ASSUME_YES=0 bash "$TEST_ROOT/commands/self/uninstall.sh" --confirm-uninstall >/dev/null || fail 'legacy uninstall flag'
-        fi
-        [[ ! -e "$TEST_ENTRY" ]] || fail 'authorized uninstall kept entry'
+            assert_contains "$output" '快捷入口、current 和分发版本目录' 'interactive uninstall removal scope'
+            if [[ "$purge" == 1 ]]; then
+                assert_contains "$output" '/var/lib/vpsctl/self/' 'interactive purge metadata scope'
+            else
+                [[ "$output" != *'/var/lib/vpsctl/self/'* ]] || fail 'normal uninstall prompt included purge scope'
+            fi
+            if [[ "$answer" == n ]]; then
+                assert_equal 130 "$status" 'interactive uninstall cancellation'
+                [[ -f "$TEST_ENTRY" && -L "$TEST_INSTALL_ROOT/current" && -d "$release" && -f "$TEST_SELF_ROOT/manifest.tsv" ]] || fail 'cancelled uninstall changed installation'
+                [[ ! -e "$TEST_INSTALL_ROOT/.self-update.lock" ]] || fail 'cancelled uninstall retained lock'
+            else
+                assert_equal 0 "$status" 'one interactive confirmation authorizes full uninstall'
+                assert_uninstall_scope
+            fi
+        done
+    done
+
+    for purge in 0 1; do
+        scope=()
+        [[ "$purge" != 1 ]] || scope=(--purge)
+        for assume_yes in 0 1; do
+            for args in '' '--confirm-uninstall' '--confirm-purge' '--confirm-uninstall --confirm-purge'; do
+                [[ "$assume_yes" == 1 || -n "$args" ]] || continue
+                [[ "$purge" == 1 || "$args" != *--confirm-purge* ]] || continue
+                IFS=' ' read -r -a parsed <<<"$args"
+                for mode in noninteractive tty; do
+                    prepare_confirmation_install
+                    if [[ "$mode" == noninteractive ]]; then
+                        output="$(VPSCTL_ASSUME_YES="$assume_yes" bash "$TEST_ROOT/commands/self/uninstall.sh" "${scope[@]}" "${parsed[@]}" 2>&1)" || fail "authorized uninstall failed: purge=$purge yes=$assume_yes $args"
+                    else
+                        printf -v command 'env VPSCTL_ASSUME_YES=%s VPSCTL_NON_INTERACTIVE=0 bash %q' "$assume_yes" "$TEST_ROOT/commands/self/uninstall.sh"
+                        for option in "${scope[@]}" "${parsed[@]}"; do
+                            printf -v command '%s %q' "$command" "$option"
+                        done
+                        output="$(printf 'n\n' | script -q -e -c "$command" /dev/null 2>&1)" || fail 'preauthorized TTY uninstall failed'
+                    fi
+                    [[ "$output" != *'[输入 y 确认]'* ]] || fail 'preauthorized uninstall prompted'
+                    assert_uninstall_scope
+                done
+            done
+        done
     done
 )
 

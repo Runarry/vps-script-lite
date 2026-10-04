@@ -319,8 +319,7 @@ test_interactive_menu() (
         printf cake
     }
     vps_cmd_confirm() {
-        test_assert_contains "$1" "确认承担风险" "live qdisc risk confirmation"
-        return 0
+        test_fail "parameter selection unexpectedly requested confirmation: $1"
     }
     bbr_apply_settings() {
         printf '%s|%s|%s\n' "$1" "$2" "$BBR_APPLY_LIVE_QDISC" >"${TEST_SYSTEM_ROOT}/bbr-menu-captured"
@@ -337,6 +336,125 @@ test_interactive_menu() (
     bbr_status() { return 3; }
     bbr_interactive_menu >/dev/null 2>&1 || status=$?
     test_assert_equal 3 "$status" "interactive BBR failure status propagation"
+)
+
+test_apply_confirmation() (
+    local sysctl_path="${TEST_SYSTEM_ROOT}/etc/sysctl.d/90-vpsctl-bbr.conf"
+    local modules_path="${TEST_SYSTEM_ROOT}/etc/modules-load.d/90-vpsctl-bbr.conf"
+    local original_path="${TEST_SYSTEM_ROOT}/var/lib/vpsctl/network/bbr/original.conf"
+    local backup_path="${TEST_SYSTEM_ROOT}/var/lib/vpsctl/backups/network/bbr"
+    local unmanaged live reply status confirmations=0 injected_path="" output
+
+    # shellcheck source=../../commands/network/bbr.sh
+    source "$TEST_BBR"
+    vps_cmd_init network-bbr "$BBR_PROJECT_ROOT"
+    BBR_SYSCTL_FILE="$sysctl_path"
+    BBR_MODULES_FILE="$modules_path"
+    BBR_ORIGINAL_FILE="$original_path"
+    vps_cmd_confirm() {
+        confirmations=$((confirmations + 1))
+        test_assert_equal "是否应用以上 BBR 变更？" "$1" "single complete confirmation"
+        [[ -n "${VPS_CMD_LOCK_FD:-}" ]] || test_fail "confirmation occurred outside the transaction lock"
+        test_assert_equal 1 "$BBR_TX_ACTIVE" "read-only snapshot before confirmation"
+        test_assert_no_bbr_effects "before confirmation"
+        [[ ! -e "$original_path" && ! -e "$backup_path" ]] || test_fail "confirmation already created recovery files"
+        if [[ -n "$injected_path" ]]; then
+            printf '# appeared during confirmation\n' >"$injected_path"
+        fi
+        return "$reply"
+    }
+
+    for unmanaged in 0 1; do
+        for live in 0 1; do
+            for reply in 0 1 130; do
+                rm -f -- "$sysctl_path" "$modules_path" "$original_path"
+                rm -rf -- "$backup_path"
+                printf 'cubic\n' >"${TEST_SYSTEM_ROOT}/proc/sys/net/ipv4/tcp_congestion_control"
+                printf 'fq_codel\n' >"${TEST_SYSTEM_ROOT}/proc/sys/net/core/default_qdisc"
+                printf 'fq_codel\n' >"${TEST_SYSTEM_ROOT}/tc-root-qdisc"
+                if ((unmanaged)); then
+                    printf '# original sysctl\n' >"$sysctl_path"
+                    printf '# original modules\n' >"$modules_path"
+                fi
+                reset_bbr_effect_logs
+                BBR_APPLY_LIVE_QDISC="$live"
+                confirmations=0
+                status=0
+                bbr_apply_settings bbr fq >"${TEST_TEMP}/confirmation-output" 2>&1 || status=$?
+                output="$(<"${TEST_TEMP}/confirmation-output")"
+                test_assert_equal 1 "$confirmations" "confirmation count for unmanaged=$unmanaged live=$live reply=$reply"
+                test_assert_contains "$output" 'cubic → bbr' "algorithm summary"
+                test_assert_contains "$output" 'fq_codel → fq' "default qdisc summary"
+                test_assert_contains "$output" '/etc/sysctl.d/90-vpsctl-bbr.conf' "sysctl path summary"
+                test_assert_contains "$output" '/etc/modules-load.d/90-vpsctl-bbr.conf' "modules path summary"
+                if ((unmanaged)); then
+                    test_assert_contains "$output" '先备份再覆盖' "unmanaged summary"
+                    test_assert_contains "$output" '/var/lib/vpsctl/backups/network/bbr/' "backup summary"
+                fi
+                if ((live)); then
+                    test_assert_contains "$output" '网卡 eth0 的 root qdisc：fq_codel → fq' "live qdisc summary"
+                    test_assert_contains "$output" '连接中断' "live network risk summary"
+                else
+                    test_assert_not_contains "$output" '连接中断' "non-live summary"
+                fi
+                [[ -z "${VPS_CMD_LOCK_FD:-}" ]] || test_fail "confirmation path retained transaction lock"
+                test_assert_equal 0 "$BBR_TX_ACTIVE" "confirmation path transaction cleanup"
+                if ((reply == 0)); then
+                    test_assert_equal 0 "$status" "confirmed apply status"
+                    [[ -f "$original_path" ]] || test_fail "confirmed apply omitted original record"
+                    test_assert_equal bbr "$(<"${TEST_SYSTEM_ROOT}/proc/sys/net/ipv4/tcp_congestion_control")" "confirmed apply runtime"
+                    if ((unmanaged)); then
+                        [[ -d "$backup_path" ]] || test_fail "confirmed overwrite omitted backup"
+                    fi
+                    reset_bbr_effect_logs
+                    bbr_apply_settings bbr fq >"${TEST_TEMP}/confirmation-output" 2>&1 || test_fail 'already matching apply failed'
+                    test_assert_equal 1 "$confirmations" "no-op does not ask again"
+                    test_assert_no_bbr_effects "already matching apply"
+                    [[ -z "${VPS_CMD_LOCK_FD:-}" ]] || test_fail "no-op retained transaction lock"
+                else
+                    if ((reply == 1)); then
+                        test_assert_equal 0 "$status" "cancelled apply status"
+                    else
+                        test_assert_equal 130 "$status" "interrupted confirmation status"
+                    fi
+                    test_assert_no_bbr_effects "cancelled or interrupted confirmation"
+                    [[ ! -e "$original_path" && ! -e "$backup_path" ]] || test_fail "cancelled apply created recovery files"
+                    if ((unmanaged)); then
+                        test_assert_equal '# original sysctl' "$(<"$sysctl_path")" "cancelled sysctl file"
+                        test_assert_equal '# original modules' "$(<"$modules_path")" "cancelled modules file"
+                    else
+                        [[ ! -e "$sysctl_path" && ! -e "$modules_path" ]] || test_fail "cancelled apply created persistence files"
+                    fi
+                fi
+            done
+        done
+    done
+
+    # Authorizing one unmanaged file must not silently authorize a second file
+    # that appeared while the user was reading the summary.
+    rm -f -- "$modules_path"
+    injected_path="$modules_path"
+    reply=0
+    confirmations=0
+    status=0
+    reset_bbr_effect_logs
+    bbr_apply_settings bbr fq >"${TEST_TEMP}/confirmation-output" 2>&1 || status=$?
+    test_assert_equal 3 "$status" "new unapproved persistence file status"
+    test_assert_contains "$(<"${TEST_TEMP}/confirmation-output")" '确认后出现未受管持久化文件' "new unapproved file error"
+    test_assert_equal '# appeared during confirmation' "$(<"$modules_path")" "new unapproved file preserved"
+    test_assert_no_bbr_effects "new unapproved persistence file"
+    [[ ! -e "$original_path" && ! -e "$backup_path" && -z "${VPS_CMD_LOCK_FD:-}" ]] || test_fail "new file refusal retained effects or lock"
+
+    injected_path=""
+    confirmations=0
+    status=0
+    : >"${TEST_SYSTEM_ROOT}/fail-live-qdisc-read"
+    bbr_apply_settings bbr fq >"${TEST_TEMP}/confirmation-output" 2>&1 || status=$?
+    test_assert_equal 3 "$status" "failed live preflight status"
+    test_assert_equal 0 "$confirmations" "failed preflight does not request authorization"
+    test_assert_no_bbr_effects "failed live preflight"
+    [[ -z "${VPS_CMD_LOCK_FD:-}" ]] || test_fail "failed preflight retained transaction lock"
+    rm -f -- "$sysctl_path" "$modules_path" "$original_path"
 )
 
 test_dry_run() {
@@ -775,6 +893,7 @@ test_persistence_and_restore() {
 test_status_and_arguments
 test_interactive_menu
 test_dry_run
+test_apply_confirmation
 test_symlink_guards
 test_unavailable_algorithm
 test_transaction_rollback

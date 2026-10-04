@@ -368,16 +368,25 @@ printf 'legacy installer\n' >"$SELF_ROOT/vpsctl.sh"
 [[ ! -e "$ENTRY" && ! -e "$INSTALL_ROOT/current" && ! -e "$INSTALL_ROOT/releases" ]] ||
     fail 'normal uninstall retained managed code'
 [[ -f "$SELF_ROOT/manifest.tsv" && "$(<"$SELF_ROOT/vpsctl.sh")" == 'legacy installer' ]] || fail 'normal uninstall changed self state or legacy installer file'
-[[ -f "$ETC_MARKER" && -f "$STATE_MARKER" && -f "$LIBEXEC_MARKER" ]] ||
+[[ -f "$ETC_MARKER" && -f "$STATE_MARKER" && -f "$LIBEXEC_MARKER" && -f "$BACKUP_MARKER" ]] ||
     fail 'normal uninstall removed protected feature data'
 
 PATH="$MOCK_BIN:$PATH" bash "$RELEASE_DIR/vpsctl.sh" \
     --verified-manifest "$RELEASE_DIR/vpsctl-manifest.tsv" --version >/dev/null
 [[ "$(<"$SELF_ROOT/vpsctl.sh")" == 'legacy installer' ]] || fail 'reinstall changed the legacy installer file'
+"$ENTRY" --yes --non-interactive self uninstall --purge >/dev/null
+[[ ! -e "$ENTRY" && ! -e "$INSTALL_ROOT/current" && ! -e "$INSTALL_ROOT/releases" && ! -e "$SELF_ROOT" ]] ||
+    fail 'global yes purge retained managed code or self metadata'
+[[ -f "$ETC_MARKER" && -f "$STATE_MARKER" && -f "$LIBEXEC_MARKER" && -f "$BACKUP_MARKER" ]] ||
+    fail 'global yes purge removed protected feature data'
+
+PATH="$MOCK_BIN:$PATH" bash "$RELEASE_DIR/vpsctl.sh" \
+    --verified-manifest "$RELEASE_DIR/vpsctl-manifest.tsv" --version >/dev/null
 "$ENTRY" --non-interactive self uninstall --purge --confirm-uninstall --confirm-purge >/dev/null
-[[ ! -e "$SELF_ROOT" ]] || fail 'purge retained self metadata'
-[[ -f "$ETC_MARKER" && -f "$STATE_MARKER" && -f "$LIBEXEC_MARKER" ]] ||
-    fail 'purge removed protected feature data'
+[[ ! -e "$ENTRY" && ! -e "$INSTALL_ROOT/current" && ! -e "$INSTALL_ROOT/releases" && ! -e "$SELF_ROOT" ]] ||
+    fail 'legacy purge retained managed code or self metadata'
+[[ -f "$ETC_MARKER" && -f "$STATE_MARKER" && -f "$LIBEXEC_MARKER" && -f "$BACKUP_MARKER" ]] ||
+    fail 'legacy purge removed protected feature data'
 
 # Run after the lazy-bundle assertions: each fresh install deliberately requests
 # the test bundle immediately. All upstream downloads remain local fixtures.
