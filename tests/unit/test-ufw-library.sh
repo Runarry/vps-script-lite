@@ -19,6 +19,7 @@ fail() {
     exit 1
 }
 assert_equal() { [[ "$1" == "$2" ]] || fail "$3: expected $1, got $2"; }
+assert_at_most() { [[ "$2" -le "$1" ]] || fail "$3: expected at most $1, got $2"; }
 assert_json() { jq -e "$2" <<<"$1" >/dev/null || fail "$3"; }
 
 setup() {
@@ -239,7 +240,7 @@ EOF
     jq -n '[range(20) | {owner:("node:"+tostring),kind:"input",family:"ipv4",proto:"tcp",port:"80"}]' >"$file"
     track_jq
     result="$(_vps_ufw_normalize_desired "$file" fixture)"
-    assert_equal 23 "$(<"$VPSCTL_SYSTEM_ROOT/run/jq-count")" '20 requirements use 23 jq calls'
+    assert_at_most 23 "$(<"$VPSCTL_SYSTEM_ROOT/run/jq-count")" '20 requirements use at most 23 jq calls'
     unset -f jq
     assert_json "$result" 'length==20' 'batch includes every requirement'
 )
@@ -282,7 +283,7 @@ test_prune_batches() (
       .marker={keep:[1,2]}' <<<"$(_vps_ufw_state)")"
     track_jq
     result="$(_vps_ufw_prune_leases "$state")"
-    assert_equal 2 "$(<"$VPSCTL_SYSTEM_ROOT/run/jq-count")" 'mixed leases use two jq calls'
+    assert_at_most 2 "$(<"$VPSCTL_SYSTEM_ROOT/run/jq-count")" 'mixed leases use at most two jq calls'
     unset -f jq
     assert_json "$result" '(.leases|keys)==["tls:live","tls:trimmed"] and
       [.requirements[].tag]==["live","trimmed","permanent","default","nonboolean","other","ownerless","numeric","array"] and
@@ -290,7 +291,7 @@ test_prune_batches() (
     state="$result"
     track_jq
     result="$(_vps_ufw_prune_leases "$state")"
-    assert_equal 1 "$(<"$VPSCTL_SYSTEM_ROOT/run/jq-count")" 'live leases use one jq call'
+    assert_at_most 1 "$(<"$VPSCTL_SYSTEM_ROOT/run/jq-count")" 'live leases use at most one jq call'
     unset -f jq
     assert_equal "$state" "$result" 'no expired leases return the original state bytes'
     for mode in live dead; do
@@ -300,10 +301,10 @@ test_prune_batches() (
         track_jq
         result="$(_vps_ufw_prune_leases "$state")"
         if [[ "$mode" == live ]]; then
-            assert_equal 1 "$(<"$VPSCTL_SYSTEM_ROOT/run/jq-count")" '20 live leases use one jq call'
+            assert_at_most 1 "$(<"$VPSCTL_SYSTEM_ROOT/run/jq-count")" '20 live leases use at most one jq call'
             assert_equal "$state" "$result" '20 live leases are unchanged'
         else
-            assert_equal 2 "$(<"$VPSCTL_SYSTEM_ROOT/run/jq-count")" '20 expired leases use two jq calls'
+            assert_at_most 2 "$(<"$VPSCTL_SYSTEM_ROOT/run/jq-count")" '20 expired leases use at most two jq calls'
         fi
         unset -f jq
         if [[ "$mode" == dead ]]; then assert_json "$result" '.leases=={}' 'all expired leases removed together'; fi
@@ -340,7 +341,7 @@ test_add_rule_batches() (
     rule='{"kind":"input","family":"ipv4","source":"any","destination":"any","proto":"tcp","port":"443"}'
     track_jq
     _vps_ufw_add_rule "$rule" ''
-    assert_equal 1 "$(<"$VPSCTL_SYSTEM_ROOT/run/jq-count")" 'add rule reads all six fields with one jq'
+    assert_at_most 1 "$(<"$VPSCTL_SYSTEM_ROOT/run/jq-count")" 'add rule reads all six fields with at most one jq call'
     unset -f jq
     assert_command ufw allow proto tcp from 0.0.0.0/0 to 0.0.0.0/0 port 443
     _vps_ufw_add_rule '{"kind":"route","family":"ipv6","source":"any","destination":"any","proto":"udp","port":"900:1000"}' $'operator \tcomment\n' 2

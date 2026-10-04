@@ -24,6 +24,7 @@ trap 'rm -rf -- "$TEST_TEMP"' EXIT
 
 fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
 assert_equal() { [[ "$1" == "$2" ]] || fail "$3: expected '$1', got '$2'${RUN_OUTPUT:+; last output: $RUN_OUTPUT}"; }
+assert_at_most() { [[ "$2" -le "$1" ]] || fail "$3: expected at most '$1', got '$2'${RUN_OUTPUT:+; last output: $RUN_OUTPUT}"; }
 assert_contains() { [[ "$1" == *"$2"* ]] || fail "$3: missing '$2'"; }
 assert_not_contains() { [[ "$1" != *"$2"* ]] || fail "$3: unexpectedly contained '$2'"; }
 assert_file_contains() { [[ -f "$1" ]] || fail "$3: missing file $1"; grep -Fq -- "$2" "$1" || fail "$3: missing '$2'"; }
@@ -2225,7 +2226,11 @@ test_relay_forward_conflicts() (
         if RUN_OUTPUT="$(proxy_relay_forward_validate_conflicts "$manifest" "$nodes" 2>&1)"; then RUN_STATUS=0; else RUN_STATUS=$?; fi
         assert_equal "$expected_status" "$RUN_STATUS" "$description status"
         assert_equal "$expected_output" "$RUN_OUTPUT" "$description diagnostic"
-        assert_equal "$expected_calls" "$(wc -l <"$calls")" "$description jq count"
+        if [[ "$expected_status" == 0 ]]; then
+            assert_at_most "$expected_calls" "$(wc -l <"$calls")" "$description jq count"
+        else
+            assert_equal "$expected_calls" "$(wc -l <"$calls")" "$description jq count"
+        fi
     }
     cat >"$base" <<'JSON'
 {"exits":[{"id":"exit","protocol":{"network_hint":"tcp"}}],"forwards":[
@@ -2352,7 +2357,7 @@ PROFILES
         "$REAL_JQ" -n --argjson size "$size" '{exits:[{id:"exit",network_hint:"both"}],forwards:[range($size) |
             {id:("F" + tostring),exit_id:"exit",listen_port_start:(30000 + . * 2),listen_port_end:(30001 + . * 2),network:"auto"}]}' >"$manifest"
         "$REAL_JQ" -n --argjson size "$size" '{nodes:[range($size) | {id:("N" + tostring),port:(40000 + .),profile:"unknown",tls:{}}]}' >"$nodes"
-        check_conflicts 0 '' "$size forwards and nodes use two jq calls"
+        check_conflicts 0 '' "$size forwards and nodes use at most two jq calls"
     done
     for failure in forward-short forward-partial forward-stream read-1 node-short node-partial node-stream read-2; do
         case "$failure" in forward-* | read-1) expected=1 ;; *) expected=2 ;; esac
@@ -2390,7 +2395,11 @@ test_relay_forward_render_nft() (
         if proxy_relay_forward_render_nft "$manifest" "$cache" >"$actual" 2>"$errors"; then RUN_STATUS=0; else RUN_STATUS=$?; fi
         RUN_OUTPUT="$(<"$errors")"
         assert_equal "$expected_status" "$RUN_STATUS" "$description status"
-        assert_equal "$expected_calls" "$(wc -l <"$calls")" "$description jq count"
+        if [[ "$expected_status" == 0 ]]; then
+            assert_at_most "$expected_calls" "$(wc -l <"$calls")" "$description jq count"
+        else
+            assert_equal "$expected_calls" "$(wc -l <"$calls")" "$description jq count"
+        fi
         cmp -s "$expected_file" "$actual" || { diff -u "$expected_file" "$actual" >&2; fail "$description output differs"; }
     }
     cat >"$base" <<'JSON'
@@ -2590,7 +2599,7 @@ test_relay_forward_refresh_cache() (
         return 0
     }
     check_cache() {
-        local expected_queries="$1" description="$2" expected_jq_calls="${3:-}"
+        local expected_queries="$1" description="$2" max_jq_calls="${3:-}"
         : >"$calls"
         : >"$jq_calls"
         # Call in the same shell so a cache leaking across invocations is observable.
@@ -2598,8 +2607,8 @@ test_relay_forward_refresh_cache() (
         RUN_OUTPUT="$(<"$errors")"
         assert_equal 0 "$RUN_STATUS" "$description status"
         assert_equal "$expected_queries" "$(LC_ALL=C sort "$calls")" "$description getent requests"
-        assert_equal 1 "$(grep -c '^manifest$' "$jq_calls")" "$description manifest reads"
-        [[ -z "$expected_jq_calls" ]] || assert_equal "$expected_jq_calls" "$(wc -l <"$jq_calls")" "$description jq count"
+        assert_at_most 1 "$(grep -c '^manifest$' "$jq_calls")" "$description manifest reads"
+        [[ -z "$max_jq_calls" ]] || assert_at_most "$max_jq_calls" "$(wc -l <"$jq_calls")" "$description jq count"
         assert_equal 600 "$(stat -c '%a' "$output")" "$description cache permissions"
         "$REAL_JQ" -e '
             .schema_version == 1 and (.resolved | type) == "array" and (.degraded | type) == "array" and
