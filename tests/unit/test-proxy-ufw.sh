@@ -7,6 +7,12 @@ IFS=$'\n\t'
 TEST_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 TEST_TMP="$(mktemp -d)"
 trap 'rm -rf -- "$TEST_TMP"' EXIT
+# shellcheck source=../../lib/ufw.sh
+source "$TEST_ROOT/lib/ufw.sh"
+# shellcheck source=../../commands/network/ufw/common.sh
+source "$TEST_ROOT/commands/network/ufw/common.sh"
+# shellcheck source=../../commands/network/ufw/inventory.sh
+source "$TEST_ROOT/commands/network/ufw/inventory.sh"
 # shellcheck source=../../commands/service/proxy/ufw.sh
 source "$TEST_ROOT/commands/service/proxy/ufw.sh"
 # shellcheck source=../../commands/service/proxy/relay-forward.sh
@@ -20,6 +26,13 @@ expect_status() {
     shift
     "$@" || actual=$?
     [[ "$actual" == "$expected" ]] || fail "expected status $expected, got $actual: $*"
+}
+expect_same_requirements() {
+    local expected="$1" actual
+    shift
+    actual="$("$@")" || fail "requirement conversion failed: $*"
+    jq -e --argjson expected "$expected" 'sort == ($expected | sort)' <<<"$actual" >/dev/null ||
+        fail "requirement sets differ: $*"
 }
 vps_cmd_error() { :; }
 vps_cmd_warning() { :; }
@@ -87,16 +100,35 @@ jq -e 'length == 8 and all(.[]; .port != "11000" and .port != "31004" and .port 
     ([.[] | select(.owner == "node:ss")] | length == 4) and
     any(.[]; .owner == "node:tuic" and .proto == "udp" and .destination == "203.0.113.7")' \
     "$TEST_TMP/nodes-desired.json" >/dev/null || fail 'node protocols, families, destinations or guard exclusion'
+expect_same_requirements "$(<"$TEST_TMP/nodes-desired.json")" ufw_cli_nodes_desired "$PROXY_MANIFEST"
 TEST_IPV6=0 proxy_ufw_nodes_desired "$PROXY_MANIFEST" >"$TEST_TMP/ipv4.json"
 jq -e 'length == 5 and all(.[]; .family == "ipv4")' "$TEST_TMP/ipv4.json" >/dev/null || fail 'IPv6-disabled dual listener'
+TEST_IPV6=0 expect_same_requirements "$(<"$TEST_TMP/ipv4.json")" ufw_cli_nodes_desired "$PROXY_MANIFEST"
 printf '{"nodes":[{"id":"v6","profile":"socks5","listen":"2001:db8::7","port":31000}]}' >"$TEST_TMP/ipv6.json"
 TEST_IPV6=0 proxy_ufw_nodes_desired "$TEST_TMP/ipv6.json" >"$TEST_TMP/explicit-ipv6.json"
 jq -e 'length == 1 and .[0].family == "ipv6"' "$TEST_TMP/explicit-ipv6.json" >/dev/null || fail 'inactive UFW must retain explicit IPv6 demand'
+TEST_IPV6=0 expect_same_requirements "$(<"$TEST_TMP/explicit-ipv6.json")" ufw_cli_nodes_desired "$TEST_TMP/ipv6.json"
 
 for profile in shadowsocks-aes-256-gcm shadowsocks-chacha20-poly1305 shadowsocks-2022 shadowsocks-2022-padding; do
     jq --arg profile "$profile" '.nodes=[.nodes[3] | .profile=$profile]' "$PROXY_MANIFEST" >"$TEST_TMP/profile.json"
     result="$(proxy_ufw_nodes_desired "$TEST_TMP/profile.json")"
     jq -e 'length == 4 and ([.[].proto] | unique) == ["tcp","udp"]' <<<"$result" >/dev/null || fail "$profile protocol mapping"
+    expect_same_requirements "$result" ufw_cli_nodes_desired "$TEST_TMP/profile.json"
+done
+
+# Entry-specific defaults and validation remain outside the shared converter.
+printf '{"nodes":[{"id":"defaults","profile":"socks5","listen":"","port":31000}]}' >"$TEST_TMP/defaults.json"
+result="$(ufw_cli_nodes_desired "$TEST_TMP/defaults.json")"
+jq -e 'length == 2 and all(.[]; .destination == "any")' <<<"$result" >/dev/null || fail 'global empty listener default changed'
+result="$(proxy_ufw_nodes_desired "$TEST_TMP/defaults.json")"
+jq -e 'length == 1 and .[0].family == "ipv4" and .[0].destination == ""' <<<"$result" >/dev/null || fail 'proxy empty listener default changed'
+jq 'del(.nodes[].listen)' "$TEST_TMP/defaults.json" >"$TEST_TMP/no-listen.json"
+expect_status 10 ufw_cli_nodes_desired "$TEST_TMP/no-listen.json"
+result="$(proxy_ufw_nodes_desired "$TEST_TMP/no-listen.json")"
+jq -e 'length == 2 and all(.[]; .destination == "any")' <<<"$result" >/dev/null || fail 'proxy missing listener default changed'
+for field in '.nodes[0].port=65536' '.nodes[0].listen="not-an-ip"' '.nodes[0].id="invalid id"' 'del(.nodes[0].profile)'; do
+    jq "$field" "$TEST_TMP/ipv6.json" >"$TEST_TMP/invalid-node.json"
+    expect_status 10 ufw_cli_nodes_desired "$TEST_TMP/invalid-node.json"
 done
 jq '.nodes |= map(.core="xray")' "$PROXY_MANIFEST" >"$TEST_TMP/switched.json"
 proxy_ufw_nodes_desired "$TEST_TMP/switched.json" >"$TEST_TMP/switched-desired.json"
@@ -138,9 +170,36 @@ jq -e 'length == 5 and all(.[]; .kind == "route" and .port == "443") and
     ([.[] | select(.owner == "forward:range")] | length == 4) and
     any(.[]; .owner == "forward:udp-only" and .family == "ipv4" and .proto == "udp")' \
     "$TEST_TMP/routes.json" >/dev/null || fail 'DNAT needs route target port, not input range'
+expect_same_requirements "$(<"$TEST_TMP/routes.json")" ufw_cli_forwards_desired "$PROXY_RELAY_FILE" "$PROXY_RELAY_FORWARD_CACHE"
 jq '.exits["exit-one"].host="stale.example"' "$PROXY_RELAY_FORWARD_CACHE" >"$TEST_TMP/stale.json"
 expect_status 10 proxy_ufw_forwards_desired "$PROXY_RELAY_FILE" "$TEST_TMP/stale.json"
+expect_status 3 ufw_cli_forwards_desired "$PROXY_RELAY_FILE" "$TEST_TMP/stale.json"
 expect_status 10 proxy_ufw_forwards_desired "$PROXY_RELAY_FILE" "$TEST_TMP/missing-cache.json"
+printf '{"exits":{"exit-one":{"host":"exit.example"}}}' >"$TEST_TMP/unresolved.json"
+expect_status 10 proxy_ufw_forwards_desired "$PROXY_RELAY_FILE" "$TEST_TMP/unresolved.json"
+expect_status 3 ufw_cli_forwards_desired "$PROXY_RELAY_FILE" "$TEST_TMP/unresolved.json"
+jq '.forwards=[.forwards[0] | .family="ipv6"]' "$PROXY_RELAY_FILE" >"$TEST_TMP/family.json"
+result="$(proxy_ufw_forwards_desired "$TEST_TMP/family.json" "$PROXY_RELAY_FORWARD_CACHE")"
+jq -e 'length == 2 and all(.[]; .family == "ipv6" and .destination == "2001:db8::10")' <<<"$result" >/dev/null || fail 'explicit IPv6 forward destination'
+expect_same_requirements "$result" ufw_cli_forwards_desired "$TEST_TMP/family.json" "$PROXY_RELAY_FORWARD_CACHE"
+jq 'del(.exits["exit-one"].ipv6)' "$PROXY_RELAY_FORWARD_CACHE" >"$TEST_TMP/ipv4-cache.json"
+expect_status 10 proxy_ufw_forwards_desired "$TEST_TMP/family.json" "$TEST_TMP/ipv4-cache.json"
+expect_status 3 ufw_cli_forwards_desired "$TEST_TMP/family.json" "$TEST_TMP/ipv4-cache.json"
+result="$(proxy_ufw_forwards_desired "$PROXY_RELAY_FILE" "$TEST_TMP/ipv4-cache.json")"
+jq -e 'length == 3 and all(.[]; .family == "ipv4")' <<<"$result" >/dev/null || fail 'dual forward lost available family'
+expect_same_requirements "$result" ufw_cli_forwards_desired "$PROXY_RELAY_FILE" "$TEST_TMP/ipv4-cache.json"
+for field in '.forwards[0].network="invalid"' '.forwards[0].family="invalid"' '.exits=[]'; do
+    jq "$field" "$PROXY_RELAY_FILE" >"$TEST_TMP/invalid-forward.json"
+    expect_status 10 proxy_ufw_forwards_desired "$TEST_TMP/invalid-forward.json" "$PROXY_RELAY_FORWARD_CACHE"
+    expect_status 10 ufw_cli_forwards_desired "$TEST_TMP/invalid-forward.json" "$PROXY_RELAY_FORWARD_CACHE"
+done
+jq 'del(.forwards[].family)' "$PROXY_RELAY_FILE" >"$TEST_TMP/default-family.json"
+result="$(proxy_ufw_forwards_desired "$TEST_TMP/default-family.json" "$PROXY_RELAY_FORWARD_CACHE")"
+expect_same_requirements "$result" ufw_cli_forwards_desired "$TEST_TMP/default-family.json" "$PROXY_RELAY_FORWARD_CACHE"
+jq 'del(.forwards[].network)' "$TEST_TMP/default-family.json" >"$TEST_TMP/default-network.json"
+expect_status 10 proxy_ufw_forwards_desired "$TEST_TMP/default-network.json" "$PROXY_RELAY_FORWARD_CACHE"
+result="$(ufw_cli_forwards_desired "$TEST_TMP/default-network.json" "$PROXY_RELAY_FORWARD_CACHE")"
+jq -e 'length == 8 and all(.[]; .port == "443")' <<<"$result" >/dev/null || fail 'global missing network default changed'
 
 # Exercise the real apply function with observable filesystem/nft boundaries.
 # shellcheck disable=SC2317

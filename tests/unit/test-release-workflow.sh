@@ -18,16 +18,6 @@ fail() {
     exit 1
 }
 
-# Extract the actual final workflow step, not a second copy of its shell logic.
-awk '
-    /^      - name: .*draft GitHub release$/ { step = 1; next }
-    step && /^        run: \|$/ { body = 1; next }
-    body && /^          / { sub(/^          /, ""); print; next }
-    body && /^[[:space:]]*$/ { print; next }
-    body { exit }
-' "${TEST_ROOT}/.github/workflows/release.yml" >"${TEST_TEMP}/release-step.sh"
-[[ -s "${TEST_TEMP}/release-step.sh" ]] || fail 'draft workflow step was not found'
-
 mkdir -p -- "${TEST_TEMP}/bin" "${WORKSPACE}/dist/release"
 # shellcheck source=../../lib/registry.sh
 source "${TEST_ROOT}/lib/registry.sh"
@@ -169,7 +159,7 @@ run_workflow() {
     if (
         cd -- "$WORKSPACE"
         PATH="${TEST_TEMP}/bin:${PATH}" GH_TOKEN=workflow-test-only GITHUB_REF_NAME="$RELEASE_TAG" \
-            GH_MOCK_ROOT="$CASE_ROOT" GH_MOCK_MODE="$mode" bash "${TEST_TEMP}/release-step.sh"
+            GH_MOCK_ROOT="$CASE_ROOT" GH_MOCK_MODE="$mode" bash "${TEST_ROOT}/scripts/prepare-draft-release.sh"
     ) >"${CASE_ROOT}/workflow.log" 2>&1; then RUN_STATUS=0; else RUN_STATUS=$?; fi
 }
 

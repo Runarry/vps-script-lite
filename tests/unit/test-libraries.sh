@@ -280,22 +280,23 @@ test_registry() {
 }
 
 test_ui_input() {
-    local output
+    local output domain command_key count line matched
 
     vps_registry_init
     output="$(vps_ui_main_menu)"
-    [[ "$output" == *"网络设置"* ]] || test_fail "registered network domain should be visible"
-    [[ "$output" == *"(5 个功能)"* ]] || test_fail "network domain command count should be visible"
-    [[ "$output" == *"系统管理"* ]] || test_fail "registered system domain should be visible"
-    [[ "$output" =~ 系统管理[^$'\n']*\(3\ 个功能\) ]] || test_fail "system domain command count should be visible"
-    [[ "$output" == *"安全与访问"* ]] || test_fail "registered security domain should be visible"
-    [[ "$output" == *"(2 个功能)"* ]] || test_fail "security domain command count should be visible"
-    [[ "$output" == *"服务管理"* ]] || test_fail "registered service domain should be visible"
-    [[ "$output" =~ 服务管理[^$'\n']*\(3\ 个功能\) ]] || test_fail "service domain command count should be visible"
-    [[ "$output" == *"服务器测试"* ]] || test_fail "registered server-test domain should be visible"
-    [[ "$output" == *"(2 个功能)"* ]] || test_fail "server-test domain command count should be visible"
-    [[ "$output" == *"脚本管理"* ]] || test_fail "registered self-management domain should be visible"
-    [[ "$output" == *"(3 个功能)"* ]] || test_fail "self-management domain command count should be visible"
+    for domain in "${VPS_DOMAIN_IDS[@]}"; do
+        count=0
+        for command_key in "${VPS_COMMAND_KEYS[@]}"; do
+            [[ "${VPS_COMMAND_DOMAIN[$command_key]}" != "$domain" ]] || count=$((count + 1))
+        done
+        matched=0
+        while IFS= read -r line; do
+            [[ "$line" == *"${VPS_DOMAIN_LABEL[$domain]}"* ]] || continue
+            [[ "$line" == *"($count 个功能)"* ]] || test_fail "$domain command count is incorrect on its menu row"
+            matched=1
+        done <<<"$output"
+        [[ "$matched" == 1 ]] || test_fail "$domain menu row is missing"
+    done
 
     VPS_UI_GREEN="<绿>"
     VPS_UI_YELLOW="<黄>"

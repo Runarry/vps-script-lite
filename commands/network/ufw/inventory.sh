@@ -91,54 +91,40 @@ ufw_cli_ssh_desired() {
     done | jq -s '.'
 }
 
-# Mirrors proxy's documented transport map; REALITY guard loopback ports are
-# deliberately absent. A wildcard IPv6 listener also accepts IPv4 on the proxy.
-ufw_cli_profile_protocols() {
-    case "$1" in
-        hysteria2 | tuic-v5) printf 'udp\n' ;;
-        shadowsocks-aes-256-gcm | shadowsocks-chacha20-poly1305 | shadowsocks-2022 | shadowsocks-2022-padding) printf 'tcp\nudp\n' ;;
-        *) printf 'tcp\n' ;;
-    esac
+ufw_cli_validate_requirements() {
+    local desired="$1" row port destination
+    while IFS= read -r row; do
+        port="$(jq -r '.port' <<<"$row")"
+        destination="$(jq -r '.destination' <<<"$row")"
+        ufw_cli_valid_port "$port" || {
+            vps_cmd_error "业务清单包含无效端口：$port"
+            return 10
+        }
+        ufw_cli_valid_address "$destination" || return 10
+    done < <(jq -c '.[]' <<<"$desired")
 }
 
 ufw_cli_nodes_desired() {
-    local manifest="$1" node id listen port profile family destination proto
-    local -a families=()
+    local manifest="$1" node id profile manifest_json desired ipv6=false
     jq -e '.nodes | type == "array"' "$manifest" >/dev/null || return 10
     while IFS= read -r node; do
         id="$(jq -r '.id' <<<"$node")"
-        listen="$(jq -r '.listen' <<<"$node")"
-        port="$(jq -r '.port' <<<"$node")"
         profile="$(jq -r '.profile' <<<"$node")"
         [[ "$id" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]*$ && "$profile" != null ]] || return 10
-        destination=any
-        case "$listen" in
-            127.* | ::1) continue ;;
-            0.0.0.0) families=(ipv4) ;;
-            :: | '')
-                families=(ipv4)
-                if vps_ufw_ipv6_available; then families+=(ipv6); fi
-                ;;
-            *:*)
-                families=(ipv6)
-                destination="$listen"
-                ;;
-            *)
-                families=(ipv4)
-                destination="$listen"
-                ;;
-        esac
-        for family in "${families[@]}"; do
-            while IFS= read -r proto; do
-                ufw_cli_requirement "node:$id" input "$family" "$proto" "$port" "$destination" || return $?
-            done < <(ufw_cli_profile_protocols "$profile")
-        done
-    done < <(jq -c '.nodes[]' "$manifest") | jq -s '.'
+    done < <(jq -c '.nodes[]' "$manifest")
+    # Unlike the proxy entry, this inventory accepts an empty listener as ::,
+    # but a missing listener stays invalid rather than taking that default.
+    manifest_json="$(jq '.nodes |= map(.id |= tostring |
+        .listen |= (if . == "" then "::" else tostring end))' "$manifest")" || return 10
+    vps_ufw_ipv6_available && ipv6=true
+    desired="$(vps_ufw_proxy_nodes_requirements "$manifest_json" "$ipv6")" || return 10
+    ufw_cli_validate_requirements "$desired" || return $?
+    printf '%s\n' "$desired"
 }
 
 ufw_cli_forwards_desired() {
-    local manifest="$1" cache="$2" forward exit id exit_id network wanted family destination port proto count host cached_host
-    local -a protocols=()
+    local manifest="$1" cache="$2" forward exit id exit_id wanted host cached_host
+    local manifest_json cache_json desired
     jq -e '(.forwards | type == "array") and (.exits | type == "array")' "$manifest" >/dev/null || return 10
     while IFS= read -r forward; do
         id="$(jq -r '.id' <<<"$forward")"
@@ -149,32 +135,25 @@ ufw_cli_forwards_desired() {
             vps_cmd_error "转发 $id 引用了不存在的出口"
             return 10
         }
-        port="$(jq -r '.endpoint.port' <<<"$exit")"
         host="$(jq -r '.endpoint.host' <<<"$exit")"
-        cached_host="$(jq -r --arg id "$exit_id" '.exits[$id].host // empty' "$cache")" || return 10
+        cache_json="$(<"$cache")" || return 10
+        cached_host="$(jq -r --arg id "$exit_id" '.exits[$id].host // empty' <<<"$cache_json")" || return 10
         [[ -n "$host" && "$host" != null && "$host" == "$cached_host" ]] || {
             vps_cmd_error "转发 $id 的解析缓存与当前出口不一致；请先刷新代理转发"
             return 3
         }
-        network="$(jq -r '.network // "auto"' <<<"$forward")"
-        [[ "$network" != auto ]] || network="$(jq -r '.protocol.network_hint // .network_hint // empty' <<<"$exit")"
-        case "$network" in tcp | udp) protocols=("$network") ;; both) protocols=(tcp udp) ;; *) return 10 ;; esac
         wanted="$(jq -r '.family // "dual"' <<<"$forward")"
         case "$wanted" in dual | ipv4 | ipv6) ;; *) return 10 ;; esac
-        count=0
-        for family in ipv4 ipv6; do
-            [[ "$wanted" == dual || "$wanted" == "$family" ]] || continue
-            destination="$(jq -r --arg id "$exit_id" --arg family "$family" '.exits[$id][$family] // empty' "$cache")" || return 10
-            [[ -n "$destination" ]] || continue
-            count=$((count + 1))
-            for proto in "${protocols[@]}"; do
-                ufw_cli_requirement "forward:$id" route "$family" "$proto" "$port" "$destination" || return $?
-            done
-        done
-        ((count > 0)) || {
+        manifest_json="$(jq -cn --argjson forward "$forward" --argjson exit "$exit" \
+            --arg id "$id" --arg family "$wanted" \
+            '{exits:[$exit],forwards:[$forward | .id=$id | .family=$family | .network //= "auto"]}')" || return 10
+        desired="$(vps_ufw_proxy_forwards_requirements "$manifest_json" "$cache_json")" || return 10
+        jq -e 'length > 0' <<<"$desired" >/dev/null || {
             vps_cmd_error "转发 $id 缺少已解析目标；请先刷新代理转发"
             return 3
         }
+        ufw_cli_validate_requirements "$desired" || return $?
+        jq -c '.[]' <<<"$desired"
     done < <(jq -c '.forwards[]' "$manifest") | jq -s '.'
 }
 

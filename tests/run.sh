@@ -38,6 +38,7 @@ for syntax_file in \
     "${TEST_ROOT}"/commands/self/*.sh \
     "${TEST_ROOT}"/commands/test/*.sh \
     "${TEST_ROOT}/scripts/build-release.sh" \
+    "${TEST_ROOT}/scripts/prepare-draft-release.sh" \
     "${TEST_ROOT}/tests/unit/test-libraries.sh" \
     "${TEST_ROOT}/tests/unit/test-command.sh" \
     "${TEST_ROOT}/tests/unit/test-distribution.sh" \

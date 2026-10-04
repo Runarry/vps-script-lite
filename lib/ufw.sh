@@ -63,6 +63,51 @@ vps_ufw_ipv6_available() {
 
 vps_ufw_ipv6_enabled() { vps_ufw_ipv6_available; }
 
+# Pure proxy inventory conversions. Callers supply JSON, normalize their own
+# defaults, validate inputs and handle errors before opening a UFW transaction.
+vps_ufw_proxy_nodes_requirements() {
+    local manifest_json="$1" ipv6="$2"
+    jq -e --argjson ipv6 "$ipv6" '
+        def protocols:
+            if . == "hysteria2" or . == "tuic-v5" then ["udp"]
+            elif . == "shadowsocks-aes-256-gcm" or . == "shadowsocks-chacha20-poly1305" or
+                 . == "shadowsocks-2022" or . == "shadowsocks-2022-padding" then ["tcp","udp"]
+            else ["tcp"] end;
+        [.nodes[] as $node | $node.listen as $listen |
+            # Only .port is public; REALITY guard listeners stay on loopback.
+            select(($listen | startswith("127.")) | not) | select($listen != "::1") |
+            (if $listen == "::" then
+                if $ipv6 then ["ipv4","ipv6"] else ["ipv4"] end
+             elif $listen | contains(":") then ["ipv6"]
+             else ["ipv4"] end)[] as $family |
+            ($node.profile | protocols)[] as $proto |
+            {owner:("node:" + $node.id),kind:"input",family:$family,proto:$proto,
+             port:($node.port | tostring),source:"any",
+             destination:(if $listen == "::" or $listen == "0.0.0.0" then "any" else $listen end),
+             temporary:false}]
+    ' <<<"$manifest_json"
+}
+
+vps_ufw_proxy_forwards_requirements() {
+    local manifest_json="$1" cache_json="$2"
+    jq -e --argjson cache "$cache_json" '
+        . as $root |
+        [.forwards[] as $forward |
+            ([$root.exits[] | select(.id == $forward.exit_id)][0]) as $exit |
+            (if $forward.network == "auto" then ($exit.protocol.network_hint // $exit.network_hint)
+             else $forward.network end) as $network |
+            (if $network == "both" then ["tcp","udp"]
+             elif $network == "tcp" or $network == "udp" then [$network]
+             else error("invalid forward protocol") end)[] as $proto |
+            (if $forward.family == "dual" then ["ipv4","ipv6"]
+             else [$forward.family] end)[] as $family |
+            ($cache.exits[$forward.exit_id][$family] // "") as $address |
+            select($address != "") |
+            {owner:("forward:" + $forward.id),kind:"route",family:$family,proto:$proto,
+             destination:$address,port:($exit.endpoint.port | tostring),source:"any",temporary:false}]
+    ' <<<"$manifest_json"
+}
+
 vps_ufw_lock() {
     vps_ufw_init || return $?
     if ((${VPS_UFW_LOCK_COUNT:-0} > 0)); then

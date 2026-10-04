@@ -3,7 +3,7 @@
 # and uninstalled cores. Callers hold the proxy lock before opening a UFW frame.
 
 proxy_ufw_nodes_desired() {
-    local manifest="$1" ipv6=false
+    local manifest="$1" ipv6=false manifest_json
     if [[ ! -e "$manifest" && ! -L "$manifest" ]]; then
         printf '[]\n'
         return 0
@@ -11,32 +11,15 @@ proxy_ufw_nodes_desired() {
     [[ -f "$manifest" && ! -L "$manifest" ]] || return 3
     vps_cmd_require_no_symlink_components "$manifest" || return $?
     vps_ufw_ipv6_available && ipv6=true
-    jq -e --argjson ipv6 "$ipv6" '
-        def protocols:
-            if . == "hysteria2" or . == "tuic-v5" then ["udp"]
-            elif . == "shadowsocks-aes-256-gcm" or . == "shadowsocks-chacha20-poly1305" or
-                 . == "shadowsocks-2022" or . == "shadowsocks-2022-padding" then ["tcp","udp"]
-            else ["tcp"] end;
-        [.nodes[] as $node | ($node.listen // "::") as $listen |
-            # REALITY guard listeners are deliberately absent: only .port is public.
-            select(($listen | startswith("127.")) | not) | select($listen != "::1") |
-            (if $listen == "::" then
-                if $ipv6 then ["ipv4","ipv6"] else ["ipv4"] end
-             elif $listen | contains(":") then ["ipv6"]
-             else ["ipv4"] end)[] as $family |
-            ($node.profile | protocols)[] as $proto |
-            {owner:("node:" + $node.id),kind:"input",family:$family,proto:$proto,
-             port:($node.port | tostring),source:"any",
-             destination:(if $listen == "::" or $listen == "0.0.0.0" then "any" else $listen end),
-             temporary:false}]
-    ' "$manifest" || {
+    if ! manifest_json="$(jq '.nodes |= map(.listen //= "::")' "$manifest")" ||
+        ! vps_ufw_proxy_nodes_requirements "$manifest_json" "$ipv6"; then
         vps_cmd_error "无法生成代理节点的 UFW 需求；请检查节点清单"
         return 3
-    }
+    fi
 }
 
 proxy_ufw_forwards_desired() {
-    local manifest="$1" cache="${2:-}" cache_json='{"exits":{}}'
+    local manifest="$1" cache="${2:-}" cache_json='{"exits":{}}' manifest_json
     if [[ ! -e "$manifest" && ! -L "$manifest" ]]; then
         printf '[]\n'
         return 0
@@ -48,31 +31,22 @@ proxy_ufw_forwards_desired() {
         vps_cmd_require_no_symlink_components "$cache" || return $?
         cache_json="$(<"$cache")"
     fi
-    jq -e --argjson cache "$cache_json" '
+    manifest_json="$(jq -e --argjson cache "$cache_json" '
         . as $root |
-        [.forwards[] as $forward |
+        .forwards |= map(.family //= "dual" |
+            . as $forward |
             ([$root.exits[] | select(.id == $forward.exit_id)][0]) as $exit |
             ($cache.exits[$forward.exit_id] // {}) as $resolved |
-            ($forward.family // "dual") as $wanted |
+            $forward.family as $wanted |
             if $exit == null or $resolved.host != $exit.endpoint.host then
                 error("forward DNS cache belongs to a different or missing host")
             elif (if $wanted == "ipv4" then ($resolved.ipv4 // "") == ""
                   elif $wanted == "ipv6" then ($resolved.ipv6 // "") == ""
                   elif $wanted == "dual" then ($resolved.ipv4 // "") == "" and ($resolved.ipv6 // "") == ""
                   else true end) then error("forward has no cached address for its family")
-            else . end |
-            (if $forward.network == "auto" then ($exit.protocol.network_hint // $exit.network_hint)
-             else $forward.network end) as $network |
-            (if $network == "both" then ["tcp","udp"]
-             elif $network == "tcp" or $network == "udp" then [$network]
-             else error("invalid forward protocol") end)[] as $proto |
-            (if ($forward.family // "dual") == "dual" then ["ipv4","ipv6"]
-             else [$forward.family] end)[] as $family |
-            ($cache.exits[$forward.exit_id][$family] // "") as $address |
-            select($address != "") |
-            {owner:("forward:" + $forward.id),kind:"route",family:$family,proto:$proto,
-             destination:$address,port:($exit.endpoint.port | tostring),source:"any",temporary:false}]
-    ' "$manifest" || return 10
+            else . end)
+    ' "$manifest")" || return 10
+    vps_ufw_proxy_forwards_requirements "$manifest_json" "$cache_json" || return 10
 }
 
 proxy_ufw_nodes_sync() {

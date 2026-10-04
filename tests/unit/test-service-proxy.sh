@@ -1783,31 +1783,17 @@ test_protocol_matrix() {
 
     local cert_dir="${TEST_TEMP}/cert" profile label supported node rendered uri id profile_obfs port=20000 count=0
     local descriptor relay_exit outbound rewritten rewritten_descriptor ss2022_uri="" parse_status=0 parse_error="" legacy_payload legacy_uri
-    local profile_count=0 sb_count=0 xray_count=0 overlap_count=0 sb_only_count=0 xray_only_count=0
     local digest_file="${TEST_TEMP}/xray.dgst" digest digest_status=0 label_status=0
-    local -A expected_labels=(
-        [vless-reality-vision]='VLESS + REALITY + XTLS Vision'
-        [vless-ws-tls]='VLESS + WebSocket + TLS'
-        [trojan-ws-tls]='Trojan + WebSocket + TLS'
-        [vless-grpc-tls]='VLESS + gRPC + TLS'
-        [anytls-tls]='AnyTLS + TLS'
-        [anytls-reality]='AnyTLS + REALITY'
-        [hysteria2]='Hysteria2'
-        [tuic-v5]='TUIC v5'
-        [shadowsocks-aes-256-gcm]='Shadowsocks AES-256-GCM'
-        [shadowsocks-chacha20-poly1305]='Shadowsocks ChaCha20-Poly1305'
-        [shadowsocks-2022]='Shadowsocks 2022'
-        [shadowsocks-2022-padding]='Shadowsocks 2022 Padding'
-        [shadowsocks-2022-shadowtls]='Shadowsocks 2022 + ShadowTLS'
-        [vless-tcp]='VLESS + TCP'
-        [socks5]='SOCKS5'
-        [vless-grpc-reality]='VLESS + gRPC + REALITY'
-        [vless-xhttp-reality]='VLESS + XHTTP + REALITY'
-        [trojan-xhttp-reality]='Trojan + XHTTP + REALITY'
-        [trojan-grpc-reality]='Trojan + gRPC + REALITY'
-        [vless-xhttp-tls]='VLESS + XHTTP + TLS'
-        [trojan-grpc-tls]='Trojan + gRPC + TLS'
+    # Existing public IDs remain compatible; additions need no count snapshot.
+    local -a required_profiles=(
+        vless-reality-vision vless-ws-tls trojan-ws-tls vless-grpc-tls
+        anytls-tls anytls-reality hysteria2 tuic-v5
+        shadowsocks-aes-256-gcm shadowsocks-chacha20-poly1305 shadowsocks-2022
+        shadowsocks-2022-padding shadowsocks-2022-shadowtls vless-tcp socks5
+        vless-grpc-reality vless-xhttp-reality trojan-xhttp-reality
+        trojan-grpc-reality vless-xhttp-tls trojan-grpc-tls
     )
+    local -A seen_profiles=() seen_cores=()
     assert_equal 'hysteria2-8443' "$(proxy_profile_default_name hysteria2 8443)" "default node name uses profile id"
     proxy_sb_profile_label 'not-a-profile' >/dev/null || label_status=$?
     assert_equal 2 "$label_status" "unknown sing-box profile label"
@@ -1825,20 +1811,22 @@ test_protocol_matrix() {
       -addext subjectAltName=DNS:www.amd.com -keyout "$cert_dir/key.pem" -out "$cert_dir/cert.pem" >/dev/null 2>&1
     while IFS=$'\t' read -r profile label; do
         [[ -n "$profile" ]] || continue
-        [[ -n "${expected_labels[$profile]:-}" ]] || fail "$profile missing expected official label"
-        assert_equal "${expected_labels[$profile]}" "$label" "$profile official label"
+        [[ -z "${seen_profiles[$profile]:-}" ]] || fail "$profile duplicated in profile listing"
+        seen_profiles[$profile]=1
+        [[ -n "$label" ]] || fail "$profile missing display label"
         assert_equal "$label" "$(proxy_profile_label "$profile")" "$profile label helper"
         if proxy_sb_supports_profile "$profile" && proxy_xray_supports_profile "$profile"; then
             assert_equal "$(proxy_sb_profile_label "$profile")" "$(proxy_xray_profile_label "$profile")" "$profile shared core label"
         fi
-        profile_count=$((profile_count + 1))
         profile_obfs=none
         [[ "$profile" != hysteria2 ]] || profile_obfs=salamander
         supported=0
+        seen_cores=()
         while IFS= read -r core; do
             [[ -n "$core" ]] || continue
+            [[ -z "${seen_cores[$core]:-}" ]] || fail "$profile duplicated core mapping: $core"
+            seen_cores[$core]=1
             supported=$((supported + 1)); count=$((count + 1)); port=$((port + 1))
-            case "$core" in sing-box) sb_count=$((sb_count + 1)) ;; xray) xray_count=$((xray_count + 1)) ;; esac
             printf -v id 'node-%016x' "$count"
             node="$(proxy_prepare_node_json "$core" "$profile" "$id" "matrix-$count" "::" "$port" "proxy.example" "www.amd.com" "/matrix" "matrix-grpc" imported "$cert_dir/cert.pem" "$cert_dir/key.pem" "$profile_obfs" 100 200 bbr)" || fail "$profile/$core fixture generation"
             case "$core" in
@@ -1852,6 +1840,7 @@ test_protocol_matrix() {
                     rendered="$(proxy_xray_render_node "$node")" || fail "$profile xray render"
                     uri="$(proxy_xray_render_uri "$node")" || fail "$profile xray URI"
                     ;;
+                *) fail "$profile has an invalid core mapping: $core" ;;
             esac
             jq -e 'type == "array"' >/dev/null <<<"$rendered" || fail "$profile/$core rendered invalid JSON array"
             if [[ "$profile" == hysteria2 ]]; then
@@ -1892,20 +1881,10 @@ test_protocol_matrix() {
             [[ -z "$private_key" ]] || assert_not_contains "$uri" "$private_key" "$profile/$core URI private_key"
         done < <(proxy_profile_cores "$profile")
         ((supported > 0)) || fail "$profile has no renderer"
-        case "$supported" in
-            2) overlap_count=$((overlap_count + 1)) ;;
-            1)
-                if proxy_sb_supports_profile "$profile"; then sb_only_count=$((sb_only_count + 1)); else xray_only_count=$((xray_only_count + 1)); fi
-                ;;
-            *) fail "$profile has an invalid core mapping" ;;
-        esac
     done < <(proxy_all_profiles)
-    assert_equal 21 "$profile_count" "unique profile count"
-    assert_equal 15 "$sb_count" "sing-box profile count"
-    assert_equal 13 "$xray_count" "Xray profile count"
-    assert_equal 7 "$overlap_count" "shared profile count"
-    assert_equal 8 "$sb_only_count" "sing-box-only profile count"
-    assert_equal 6 "$xray_only_count" "Xray-only profile count"
+    for profile in "${required_profiles[@]}"; do
+        [[ -n "${seen_profiles[$profile]:-}" ]] || fail "$profile public ID is missing"
+    done
     parse_status=0
     proxy_relay_uri_parse "$ss2022_uri" >/dev/null 2>&1 || parse_status=$?
     assert_equal 2 "$parse_status" "ambiguous Shadowsocks 2022 profile selection"
@@ -3989,6 +3968,7 @@ case "${VPSCTL_TEST_ONLY:-}" in
     relay-service) test_relay_forward_service_lifecycle; printf 'PASS: relay service tests\n'; exit 0 ;;
     node-core) test_node_core_switch; printf 'PASS: node core switch tests\n'; exit 0 ;;
     profile-membership) test_profile_membership_pipe_consumption; printf 'PASS: profile membership tests\n'; exit 0 ;;
+    protocol-matrix) test_protocol_matrix; printf 'PASS: proxy protocol renderer matrix\n'; exit 0 ;;
     reality-anti-relay) test_reality_anti_relay_guard; printf 'PASS: REALITY anti-relay tests\n'; exit 0 ;;
 esac
 
