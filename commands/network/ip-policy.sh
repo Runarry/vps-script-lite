@@ -56,6 +56,8 @@ ip_policy_usage() {
 
 本命令只影响使用 glibc getaddrinfo(3) 地址排序的程序，不修改接口地址、
 路由、DNS 服务器或内核 IPv6 开关。
+首次设置会先备份现有 /etc/gai.conf，再完整替换；确认默认取消，可用
+--yes 授权。后续切换保留首次备份，restore 恢复原始内容及权限。
 EOF
 }
 
@@ -244,22 +246,6 @@ ip_policy_file_has_marker() {
         [[ "$line" == "$IP_POLICY_MANAGED_MARKER" ]] && return 0
     done <"$IP_POLICY_GAI_FILE"
     return 1
-}
-
-ip_policy_original_is_safe_to_adopt() {
-    local line trimmed
-
-    [[ -e "$IP_POLICY_GAI_FILE" ]] || return 0
-    [[ -f "$IP_POLICY_GAI_FILE" && ! -L "$IP_POLICY_GAI_FILE" ]] || {
-        vps_cmd_error "/etc/gai.conf 不是安全的普通文件，拒绝接管"
-        return 3
-    }
-    while IFS= read -r line || [[ -n "$line" ]]; do
-        trimmed="$(vps_cmd_trim "$line")"
-        [[ -z "$trimmed" || "$trimmed" == \#* ]] && continue
-        vps_cmd_error "首次接管时 /etc/gai.conf 含有非空、非注释配置，拒绝覆盖"
-        return 3
-    done <"$IP_POLICY_GAI_FILE"
 }
 
 ip_policy_reset_state_variables() {
@@ -499,6 +485,7 @@ ip_policy_set() {
     local policy="$1" status=0 locked=0
     local original_present=0 original_mode="" backup_file="" backup_sha256=""
     local managed_sha256 old_policy="" new_state=0 managed_written=0
+    local confirm_prompt="是否将系统地址选择策略设置为 ${policy}？"
 
     [[ "$policy" == "prefer_ipv4" || "$policy" == "prefer_ipv6" ]] || {
         vps_cmd_error "无效策略：${policy}"
@@ -519,11 +506,13 @@ ip_policy_set() {
             return 0
         fi
     else
-        ip_policy_original_is_safe_to_adopt || return $?
         new_state=1
+        if [[ -f "$IP_POLICY_GAI_FILE" ]]; then
+            confirm_prompt="是否先备份并完整替换 /etc/gai.conf，将系统地址选择策略设置为 ${policy}？"
+        fi
     fi
 
-    if vps_cmd_confirm "是否将系统地址选择策略设置为 ${policy}？"; then
+    if vps_cmd_confirm "$confirm_prompt"; then
         :
     else
         status=$?
@@ -536,6 +525,9 @@ ip_policy_set() {
 
     managed_sha256="$(ip_policy_expected_hash "$policy")" || return $?
     if [[ "${VPSCTL_DRY_RUN:-0}" == "1" ]]; then
+        if [[ "$new_state" == "1" && -f "$IP_POLICY_GAI_FILE" ]]; then
+            vps_cmd_info "演练：将先原样备份 /etc/gai.conf 到 /var/lib/vpsctl/backups/network/ip-policy/，再完整替换"
+        fi
         ip_policy_prepare_directories || return $?
         ip_policy_write_managed "$policy" || return $?
         ip_policy_write_state 0 "" "" "" "$policy" "$managed_sha256" || return $?
@@ -551,7 +543,6 @@ ip_policy_set() {
             vps_cmd_error "获取锁后发现状态已变化，请重试"
             status=3
         }
-        ((status != 0)) || ip_policy_original_is_safe_to_adopt || status=$?
     elif ((status == 0)); then
         ip_policy_load_state || status=$?
         ((status != 0)) || ip_policy_validate_managed_ownership || status=$?

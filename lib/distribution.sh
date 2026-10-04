@@ -533,7 +533,7 @@ vps_distribution_validate_self_state_paths() {
         vps_distribution_error 'self 状态路径不是目录'
         return 3
     }
-    for path in "$VPSCTL_SELF_STATE_ROOT/vpsctl.sh" "$VPSCTL_SELF_STATE_ROOT/manifest.tsv" "$VPSCTL_SELF_STATE_ROOT/entry.sha256"; do
+    for path in "$VPSCTL_SELF_STATE_ROOT/manifest.tsv" "$VPSCTL_SELF_STATE_ROOT/entry.sha256"; do
         if [[ -L "$path" || (-e "$path" && ! -f "$path") ]]; then
             vps_distribution_error "self 缓存路径不是普通文件：$path"
             return 3
@@ -691,7 +691,7 @@ vps_distribution_cleanup_old_releases() {
 
 vps_distribution_self_update_locked() {
     local requested="${1:-}" work_root manifest launcher version release_target staging base_url status=0 current_tmp old_current
-    local entry_tmp state_launcher_tmp state_manifest_tmp state_sha_tmp rollback_ok=0
+    local entry_tmp state_manifest_tmp state_sha_tmp rollback_ok=0
     local old_state_launcher old_state_manifest old_state_sha
     vps_distribution_validate_managed_install || return $?
     vps_distribution_confirm '确认下载并切换 vpsctl release，成功后删除受管历史版本？' || return $?
@@ -722,7 +722,6 @@ vps_distribution_self_update_locked() {
     if [[ -e "$release_target" || -L "$release_target" ]]; then
         if [[ "$(cd -- "$release_target" 2>/dev/null && pwd -P)" == "$(cd -- "$VPSCTL_PROJECT_ROOT" && pwd -P)" ]]; then
             if ! mkdir -p -- "$VPSCTL_SELF_STATE_ROOT" ||
-                ! vps_distribution_atomic_install "$old_state_launcher" "$VPSCTL_SELF_STATE_ROOT/vpsctl.sh" 0755 ||
                 ! vps_distribution_atomic_install "$old_state_manifest" "$VPSCTL_SELF_STATE_ROOT/manifest.tsv" 0644 ||
                 ! vps_distribution_atomic_install "$old_state_sha" "$VPSCTL_SELF_STATE_ROOT/entry.sha256" 0600; then
                 rm -rf -- "$work_root"
@@ -799,52 +798,48 @@ vps_distribution_self_update_locked() {
         return 3
     }
     entry_tmp="${VPSCTL_MANAGED_ENTRY}.tmp.$$.${RANDOM}"
-    state_launcher_tmp="${VPSCTL_SELF_STATE_ROOT}/.vpsctl.sh.$$.${RANDOM}"
     state_manifest_tmp="${VPSCTL_SELF_STATE_ROOT}/.manifest.tsv.$$.${RANDOM}"
     state_sha_tmp="${VPSCTL_SELF_STATE_ROOT}/.entry.sha256.$$.${RANDOM}"
     if ! install -m 0755 -- "$launcher" "$entry_tmp" ||
-        ! install -m 0755 -- "$launcher" "$state_launcher_tmp" ||
         ! install -m 0644 -- "$manifest" "$state_manifest_tmp" ||
         ! printf '%s\n' "$VPS_DISTRIBUTION_LAUNCHER_SHA256" >"$state_sha_tmp" ||
         ! chmod 0600 "$state_sha_tmp"; then
-        rm -f -- "$entry_tmp" "$state_launcher_tmp" "$state_manifest_tmp" "$state_sha_tmp"
+        rm -f -- "$entry_tmp" "$state_manifest_tmp" "$state_sha_tmp"
         rm -rf -- "$staging" "$work_root"
         return 20
     fi
     mv -- "$staging" "$release_target" || {
-        rm -f -- "$entry_tmp" "$state_launcher_tmp" "$state_manifest_tmp" "$state_sha_tmp"
+        rm -f -- "$entry_tmp" "$state_manifest_tmp" "$state_sha_tmp"
         rm -rf -- "$staging" "$work_root"
         return 20
     }
     current_tmp="${VPSCTL_INSTALL_ROOT}/.current.$$.${RANDOM}"
     old_current="$(readlink "${VPSCTL_INSTALL_ROOT}/current")" || {
-        rm -f -- "$entry_tmp" "$state_launcher_tmp" "$state_manifest_tmp" "$state_sha_tmp"
+        rm -f -- "$entry_tmp" "$state_manifest_tmp" "$state_sha_tmp"
         rm -rf -- "$release_target" "$work_root"
         return 20
     }
     ln -s -- "$release_target" "$current_tmp" || {
-        rm -f -- "$entry_tmp" "$state_launcher_tmp" "$state_manifest_tmp" "$state_sha_tmp"
+        rm -f -- "$entry_tmp" "$state_manifest_tmp" "$state_sha_tmp"
         rm -rf -- "$release_target" "$work_root"
         return 20
     }
     if ! mv -Tf -- "$current_tmp" "${VPSCTL_INSTALL_ROOT}/current"; then
         rm -f -- "$current_tmp"
-        rm -f -- "$entry_tmp" "$state_launcher_tmp" "$state_manifest_tmp" "$state_sha_tmp"
+        rm -f -- "$entry_tmp" "$state_manifest_tmp" "$state_sha_tmp"
         rm -rf -- "$release_target" "$work_root"
         return 20
     fi
     if ! mv -f -- "$entry_tmp" "$VPSCTL_MANAGED_ENTRY" ||
         ! mv -f -- "$state_manifest_tmp" "${VPSCTL_SELF_STATE_ROOT}/manifest.tsv" ||
-        ! mv -f -- "$state_launcher_tmp" "${VPSCTL_SELF_STATE_ROOT}/vpsctl.sh" ||
         ! mv -f -- "$state_sha_tmp" "${VPSCTL_SELF_STATE_ROOT}/entry.sha256"; then
-        rm -f -- "$current_tmp" "$entry_tmp" "$state_launcher_tmp" "$state_manifest_tmp" "$state_sha_tmp"
+        rm -f -- "$current_tmp" "$entry_tmp" "$state_manifest_tmp" "$state_sha_tmp"
         if ln -s -- "$old_current" "$current_tmp" 2>/dev/null && mv -Tf -- "$current_tmp" "${VPSCTL_INSTALL_ROOT}/current" 2>/dev/null; then
             rollback_ok=1
         fi
         if [[ "$rollback_ok" == 1 ]]; then
             vps_distribution_atomic_install "$old_state_launcher" "$VPSCTL_MANAGED_ENTRY" 0755 || rollback_ok=0
             vps_distribution_atomic_install "$old_state_manifest" "$VPSCTL_SELF_STATE_ROOT/manifest.tsv" 0644 || rollback_ok=0
-            vps_distribution_atomic_install "$old_state_launcher" "$VPSCTL_SELF_STATE_ROOT/vpsctl.sh" 0755 || rollback_ok=0
             vps_distribution_atomic_install "$old_state_sha" "$VPSCTL_SELF_STATE_ROOT/entry.sha256" 0600 || rollback_ok=0
         fi
         if [[ "$rollback_ok" == 1 ]] && vps_distribution_validate_managed_install >/dev/null 2>&1; then

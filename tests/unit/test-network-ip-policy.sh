@@ -152,13 +152,37 @@ test_managed_tables_update_and_status() {
         >/dev/null <<<"$RUN_OUTPUT" || test_fail "verified status JSON fields"
 }
 
-test_adoption_refusal_and_external_modification() {
-    local state_hash changed_hash
+test_existing_configuration_confirmation() {
+    local original_hash reply command
     reset_root
     printf 'precedence ::ffff:0:0/96 100\n' >"$(gai_path)"
-    run_policy set --policy prefer_ipv4
-    test_assert_equal 3 "$RUN_STATUS" "active unmanaged gai.conf refusal"
-    [[ ! -e "$(state_path)" ]] || test_fail "active unmanaged refusal wrote state"
+    original_hash="$(sha256sum "$(gai_path)" | awk '{print $1}')"
+    VPSCTL_ASSUME_YES=0 run_policy --non-interactive set --policy prefer_ipv6
+    test_assert_equal 3 "$RUN_STATUS" "noninteractive adoption requires confirmation"
+    test_assert_contains "$RUN_OUTPUT" '--yes' "noninteractive authorization guidance"
+    test_assert_equal "$original_hash" "$(sha256sum "$(gai_path)" | awk '{print $1}')" "unauthorized file unchanged"
+    [[ ! -e "$(state_path)" && ! -e "$TEST_SYSTEM_ROOT/var/lib/vpsctl/backups/network/ip-policy" ]] ||
+        test_fail "unauthorized adoption wrote state or backup"
+
+    printf -v command 'env VPSCTL_ASSUME_YES=0 VPSCTL_NON_INTERACTIVE=0 bash %q set --policy prefer_ipv6' "$TEST_IP_POLICY"
+    for reply in '' n y; do
+        RUN_STATUS=0
+        RUN_OUTPUT="$(printf '%s\n' "$reply" | script -q -e -c "$command" /dev/null 2>&1)" || RUN_STATUS=$?
+        test_assert_equal 0 "$RUN_STATUS" "interactive adoption reply '$reply'"
+        test_assert_contains "$RUN_OUTPUT" '先备份并完整替换 /etc/gai.conf' "adoption impact explained"
+        test_assert_equal 1 "$(grep -c '输入 y 确认' <<<"$RUN_OUTPUT")" "single adoption confirmation"
+        if [[ "$reply" != y ]]; then
+            test_assert_equal "$original_hash" "$(sha256sum "$(gai_path)" | awk '{print $1}')" "cancelled adoption file unchanged"
+            [[ ! -e "$(state_path)" && ! -e "$TEST_SYSTEM_ROOT/var/lib/vpsctl/backups/network/ip-policy" ]] ||
+                test_fail "cancelled adoption wrote state or backup"
+        fi
+    done
+    test_assert_file_contains "$(gai_path)" 'precedence ::ffff:0:0/96 35' "interactive adoption applied"
+    test_assert_equal "$original_hash" "$(jq -r '.backup_sha256' "$(state_path)")" "interactive adoption backup"
+}
+
+test_external_modification_and_invalid_state() {
+    local state_hash changed_hash
 
     reset_root
     run_policy set --policy prefer_ipv4
@@ -173,16 +197,34 @@ test_adoption_refusal_and_external_modification() {
     run_policy restore
     test_assert_equal 3 "$RUN_STATUS" "external modification blocks restore"
     test_assert_equal "$changed_hash" "$(sha256sum "$(gai_path)" | awk '{print $1}')" "blocked restore file unchanged"
+
+    reset_root
+    run_policy set --policy prefer_ipv4
+    test_assert_equal 0 "$RUN_STATUS" "fixture for invalid state"
+    changed_hash="$(sha256sum "$(gai_path)" | awk '{print $1}')"
+    printf '{}\n' >"$(state_path)"
+    run_policy --yes set --policy prefer_ipv6
+    test_assert_equal 10 "$RUN_STATUS" "invalid state blocks authorized update"
+    test_assert_equal "$changed_hash" "$(sha256sum "$(gai_path)" | awk '{print $1}')" "invalid state file unchanged"
+    test_assert_equal '{}' "$(<"$(state_path)")" "invalid state not replaced"
 }
 
 test_exact_restore() {
-    local original_hash
+    local original_hash backup
     reset_root
-    printf '# original comment\n\n# retained exactly\n' >"$(gai_path)"
+    printf '# original IPv4 preference\n\nprecedence ::ffff:0:0/96 100\nlabel ::1/128 0\n' >"$(gai_path)"
     chmod 0640 "$(gai_path)"
     original_hash="$(sha256sum "$(gai_path)" | awk '{print $1}')"
-    run_policy set --policy prefer_ipv4
+    VPSCTL_ASSUME_YES=0 run_policy --yes set --policy prefer_ipv6
     test_assert_equal 0 "$RUN_STATUS" "set before existing-file restore"
+    test_assert_file_contains "$(gai_path)" 'precedence ::ffff:0:0/96 35' "adopt existing IPv4 preference as IPv6"
+    backup="$(jq -r '.backup_file' "$(state_path)")"
+    test_assert_equal "$original_hash" "$(sha256sum "${TEST_SYSTEM_ROOT}${backup}" | awk '{print $1}')" "active original backed up exactly"
+    test_assert_equal "$original_hash" "$(jq -r '.backup_sha256' "$(state_path)")" "active original backup digest"
+    test_assert_equal 640 "$(stat -c '%a' "${TEST_SYSTEM_ROOT}${backup}")" "active original backup mode"
+    run_policy set --policy prefer_ipv4
+    test_assert_equal 0 "$RUN_STATUS" "switch after adoption"
+    test_assert_equal "$backup" "$(jq -r '.backup_file' "$(state_path)")" "switch retains first active backup"
     run_policy restore
     test_assert_equal 0 "$RUN_STATUS" "restore existing gai.conf"
     test_assert_equal "$original_hash" "$(sha256sum "$(gai_path)" | awk '{print $1}')" "restored exact content"
@@ -199,16 +241,47 @@ test_exact_restore() {
     [[ ! -e "$(state_path)" ]] || test_fail "absent-original restore retained state"
 }
 
+test_adoption_failure_preserves_original() {
+    local failure original_hash backup
+    for failure in backup state; do
+        reset_root
+        printf '# administrator policy\nprecedence ::ffff:0:0/96 100\n' >"$(gai_path)"
+        chmod 0640 "$(gai_path)"
+        original_hash="$(sha256sum "$(gai_path)" | awk '{print $1}')"
+        RUN_STATUS=0
+        RUN_OUTPUT="$(
+            # shellcheck source=../../commands/network/ip-policy.sh
+            source "$TEST_IP_POLICY"
+            if [[ "$failure" == backup ]]; then
+                ip_policy_backup_original() { return 20; }
+            else
+                ip_policy_write_state() { return 20; }
+            fi
+            ip_policy_main --yes set --policy prefer_ipv6
+        )" || RUN_STATUS=$?
+        test_assert_equal 20 "$RUN_STATUS" "$failure failure status"
+        test_assert_equal "$original_hash" "$(sha256sum "$(gai_path)" | awk '{print $1}')" "$failure failure preserves original content"
+        test_assert_equal 640 "$(stat -c '%a' "$(gai_path)")" "$failure failure preserves original mode"
+        [[ ! -e "$(state_path)" ]] || test_fail "$failure failure wrote state"
+        if [[ "$failure" == state ]]; then
+            backup="$(find "$TEST_SYSTEM_ROOT/var/lib/vpsctl/backups/network/ip-policy" -type f -name gai.conf)"
+            test_assert_equal "$original_hash" "$(sha256sum "$backup" | awk '{print $1}')" "failed commit retained original backup"
+        fi
+    done
+}
+
 test_dry_run_and_symlink_refusal() {
     local before_hash
     reset_root
-    printf '# dry-run original\n' >"$(gai_path)"
+    printf '# dry-run original\nprecedence ::ffff:0:0/96 100\n' >"$(gai_path)"
     before_hash="$(sha256sum "$(gai_path)" | awk '{print $1}')"
     run_policy --dry-run set --policy prefer_ipv4
     test_assert_equal 0 "$RUN_STATUS" "set dry-run"
     test_assert_contains "$RUN_OUTPUT" '演练' "dry-run output"
+    test_assert_contains "$RUN_OUTPUT" '先原样备份 /etc/gai.conf' "dry-run backup plan"
     test_assert_equal "$before_hash" "$(sha256sum "$(gai_path)" | awk '{print $1}')" "dry-run gai.conf unchanged"
     [[ ! -e "$(state_path)" ]] || test_fail "dry-run wrote state"
+    [[ ! -e "$TEST_SYSTEM_ROOT/var/lib/vpsctl/backups/network/ip-policy" ]] || test_fail "dry-run wrote backup directory"
 
     reset_root
     printf '# symlink target\n' >"$TEST_SYSTEM_ROOT/etc/real-gai.conf"
@@ -222,8 +295,10 @@ test_dry_run_and_symlink_refusal() {
 test_arguments_and_unmanaged_status
 test_musl_platform_refusal
 test_managed_tables_update_and_status
-test_adoption_refusal_and_external_modification
+test_existing_configuration_confirmation
+test_external_modification_and_invalid_state
 test_exact_restore
+test_adoption_failure_preserves_original
 test_dry_run_and_symlink_refusal
 
 printf 'PASS: network ip-policy tests\n'

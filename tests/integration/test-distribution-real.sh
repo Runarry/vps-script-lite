@@ -177,6 +177,7 @@ if [[ -n "${VPSCTL_TEST_LEGACY_ASSET_DIR:-}" ]]; then
     [[ -f "$INSTALL_ROOT/current/.bundles/network.sha256" ]] || fail 'legacy domain cache missing'
     "$ENTRY" --non-interactive self uninstall --confirm-uninstall >/dev/null
     [[ ! -e "$ENTRY" && ! -e "$INSTALL_ROOT/releases" ]] || fail 'legacy normal uninstall left managed code'
+    rm -rf -- "$SELF_ROOT"
     export VPSCTL_TEST_ASSET_DIR="$RELEASE_DIR"
 fi
 
@@ -188,6 +189,7 @@ install_output="$(PATH="$MOCK_BIN:$PATH" bash "$RELEASE_DIR/vpsctl.sh" --version
     fail 'migration did not preserve business data'
 [[ "$install_output" == "vpsctl $RELEASE_VERSION" ]] || fail 'bootstrap did not enter the installed CLI'
 [[ -x "$ENTRY" && -L "$INSTALL_ROOT/current" ]] || fail 'managed launcher/current were not installed'
+[[ ! -e "$SELF_ROOT/vpsctl.sh" && ! -L "$SELF_ROOT/vpsctl.sh" ]] || fail 'fresh install created an installer copy'
 release_root="$(readlink -f -- "$INSTALL_ROOT/current")"
 [[ -f "$release_root/.bundles/core.sha256" ]] || fail 'core marker is missing'
 [[ -f "$release_root/lib/nested/bootstrap-helper.sh" ]] || fail 'bootstrap rejected new shared library'
@@ -305,10 +307,10 @@ MOCK_UFW
         fail "$cache_feature feature cache was not restored exactly after re-download"
 done
 
-rm -- "$SELF_ROOT/vpsctl.sh"
+ln -s "$TEST_TEMP/missing-legacy-installer" "$SELF_ROOT/vpsctl.sh"
 printf 'corrupt cache\n' >"$SELF_ROOT/manifest.tsv"
 PATH="$MOCK_BIN:$PATH" "$ENTRY" --yes --non-interactive self update >/dev/null
-cmp "$ENTRY" "$SELF_ROOT/vpsctl.sh" || fail 'same-version update did not repair cached launcher'
+[[ "$(readlink "$SELF_ROOT/vpsctl.sh")" == "$TEST_TEMP/missing-legacy-installer" ]] || fail 'same-version update changed the legacy installer symlink'
 cmp "$release_root/.release/manifest.tsv" "$SELF_ROOT/manifest.tsv" || fail 'same-version update did not repair cached manifest'
 su nobody -s /bin/bash -c "$ENTRY --version" | grep -Fx "vpsctl $RELEASE_VERSION" >/dev/null ||
     fail 'ordinary user could not execute the installed shortcut'
@@ -333,12 +335,16 @@ core_sha="$(sha256sum "$NEXT_ASSETS/vpsctl-core-${NEXT_VERSION}.tar.gz" | awk '{
 sed -i "s/^bundle\tcore\t.*/bundle\tcore\tvpsctl-core-${NEXT_VERSION}.tar.gz\t${core_sha}/" "$NEXT_ASSETS/vpsctl-manifest.tsv"
 export VPSCTL_TEST_ASSET_DIR="$NEXT_ASSETS"
 rm -rf -- "$SELF_ROOT"
+mkdir -p "$SELF_ROOT/vpsctl.sh"
+printf 'legacy installer\n' >"$SELF_ROOT/vpsctl.sh/keep"
 : >"$VPSCTL_TEST_DOWNLOAD_TRACE"
 PATH="$MOCK_BIN:$PATH" "$ENTRY" --yes --non-interactive self update --version "v$NEXT_VERSION" >/dev/null
 [[ "$(sort "$VPSCTL_TEST_DOWNLOAD_TRACE")" == "$(printf '%s\n' vpsctl.sh vpsctl-manifest.tsv "vpsctl-core-${NEXT_VERSION}.tar.gz" | sort)" ]] ||
     fail 'cross-version update prefetched feature/shared bundles'
 [[ -f "$INSTALL_ROOT/current/lib/nested/update-helper.sh" ]] || fail 'update rejected new shared library'
-cmp "$ENTRY" "$SELF_ROOT/vpsctl.sh" || fail 'versioned update did not restore cached launcher'
+[[ -d "$SELF_ROOT/vpsctl.sh" && "$(<"$SELF_ROOT/vpsctl.sh/keep")" == 'legacy installer' ]] || fail 'versioned update changed the legacy installer directory'
+cmp "$INSTALL_ROOT/current/.release/manifest.tsv" "$SELF_ROOT/manifest.tsv" || fail 'versioned update did not restore cached manifest'
+[[ "$(sha256sum "$ENTRY" | awk '{print $1}')" == "$(<"$SELF_ROOT/entry.sha256")" ]] || fail 'versioned update did not restore entry digest'
 [[ "$(readlink -f "$INSTALL_ROOT/current")" == "$INSTALL_ROOT/releases/$NEXT_VERSION" ]] || fail 'versioned update did not switch current'
 [[ ! -e "$release_root" && ! -L "$release_root" ]] || fail 'versioned update retained the previous release'
 [[ "$(find "$INSTALL_ROOT/releases" -mindepth 1 -maxdepth 1 -type d -printf '%f\n')" == "$NEXT_VERSION" ]] ||
@@ -356,16 +362,18 @@ export VPSCTL_TEST_ASSET_DIR="$RELEASE_DIR"
 
 mkdir -p -- "${ETC_MARKER%/*}" "${STATE_MARKER%/*}" "${LIBEXEC_MARKER%/*}"
 touch -- "$ETC_MARKER" "$STATE_MARKER" "$LIBEXEC_MARKER"
-rm -- "$SELF_ROOT/vpsctl.sh"
+rm -rf -- "$SELF_ROOT/vpsctl.sh"
+printf 'legacy installer\n' >"$SELF_ROOT/vpsctl.sh"
 "$ENTRY" --yes --non-interactive self uninstall >/dev/null
 [[ ! -e "$ENTRY" && ! -e "$INSTALL_ROOT/current" && ! -e "$INSTALL_ROOT/releases" ]] ||
     fail 'normal uninstall retained managed code'
-[[ -f "$SELF_ROOT/manifest.tsv" && ! -e "$SELF_ROOT/vpsctl.sh" ]] || fail 'normal uninstall changed self cache'
+[[ -f "$SELF_ROOT/manifest.tsv" && "$(<"$SELF_ROOT/vpsctl.sh")" == 'legacy installer' ]] || fail 'normal uninstall changed self state or legacy installer file'
 [[ -f "$ETC_MARKER" && -f "$STATE_MARKER" && -f "$LIBEXEC_MARKER" ]] ||
     fail 'normal uninstall removed protected feature data'
 
 PATH="$MOCK_BIN:$PATH" bash "$RELEASE_DIR/vpsctl.sh" \
     --verified-manifest "$RELEASE_DIR/vpsctl-manifest.tsv" --version >/dev/null
+[[ "$(<"$SELF_ROOT/vpsctl.sh")" == 'legacy installer' ]] || fail 'reinstall changed the legacy installer file'
 "$ENTRY" --non-interactive self uninstall --purge --confirm-uninstall --confirm-purge >/dev/null
 [[ ! -e "$SELF_ROOT" ]] || fail 'purge retained self metadata'
 [[ -f "$ETC_MARKER" && -f "$STATE_MARKER" && -f "$LIBEXEC_MARKER" ]] ||

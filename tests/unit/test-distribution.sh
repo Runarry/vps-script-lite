@@ -475,6 +475,7 @@ test_manual_update_is_atomic_and_versioned() (
     cp -- "$old_release/.release/manifest.tsv" "$TEST_ASSETS/vpsctl-manifest.tsv"
     vps_distribution_self_update 0.1.0 >/dev/null || fail 'same-version update failed'
     [[ -d "$old_release" && -f "$history/.vpsctl-managed-release" ]] || fail 'same-version update removed release history'
+    [[ ! -e "$TEST_SELF_ROOT/vpsctl.sh" && ! -L "$TEST_SELF_ROOT/vpsctl.sh" ]] || fail 'same-version update created an installer copy'
 
     prepare_update_assets 0.2.0
     launcher_sha="$(sha_file "$TEST_ASSETS/vpsctl.sh")"
@@ -496,8 +497,7 @@ test_manual_update_is_atomic_and_versioned() (
     unset -f chmod
 
     for failed_destination in "$TEST_INSTALL_ROOT/current" "$TEST_ENTRY" \
-        "$TEST_SELF_ROOT/manifest.tsv" "$TEST_SELF_ROOT/vpsctl.sh" "$TEST_SELF_ROOT/entry.sha256"; do
-        rm -f -- "$TEST_SELF_ROOT/vpsctl.sh"
+        "$TEST_SELF_ROOT/manifest.tsv" "$TEST_SELF_ROOT/entry.sha256"; do
         printf 'corrupt cache\n' >"$TEST_SELF_ROOT/manifest.tsv"
         status=0
         move_failed=0
@@ -514,6 +514,7 @@ test_manual_update_is_atomic_and_versioned() (
         [[ "$(readlink "$TEST_INSTALL_ROOT/current")" == "$old_release" ]] || fail 'activation failure changed current release'
         [[ -d "$old_release" && -f "$history/.vpsctl-managed-release" ]] || fail 'activation failure removed release history'
         [[ ! -e "$new_release" && ! -e "$TEST_INSTALL_ROOT/.self-update.lock" ]] || fail 'activation failure left release or lock'
+        [[ ! -e "$TEST_SELF_ROOT/vpsctl.sh" && ! -L "$TEST_SELF_ROOT/vpsctl.sh" ]] || fail 'rollback created an installer copy'
         vps_distribution_validate_managed_install || fail 'activation failure did not restore managed metadata'
         if [[ "$failed_destination" != "$TEST_INSTALL_ROOT/current" ]]; then
             assert_self_cache_matches
@@ -539,6 +540,7 @@ test_manual_update_is_atomic_and_versioned() (
     VPSCTL_PROJECT_ROOT="$new_release"
     vps_distribution_validate_managed_install || fail 'successful update left inconsistent metadata'
     assert_self_cache_matches
+    [[ ! -e "$TEST_SELF_ROOT/vpsctl.sh" && ! -L "$TEST_SELF_ROOT/vpsctl.sh" ]] || fail 'cross-version update created an installer copy'
     mkdir -p "$history"
     printf 'Runarry/vps-script-lite\t0.0.9\n' >"$history/.vpsctl-managed-release"
     prepare_update_assets 0.3.0
@@ -552,13 +554,28 @@ test_manual_update_is_atomic_and_versioned() (
     [[ -d "$new_release" && -f "$history/.vpsctl-managed-release" ]] || fail 'bundle verification failure removed release history'
     [[ ! -e "$TEST_INSTALL_ROOT/releases/0.3.0" && ! -e "$TEST_INSTALL_ROOT/.self-update.lock" ]] || fail 'failed update left active release or lock'
 
-    for next_version in 0.3.0 0.4.0; do
+    for next_version in 0.3.0 0.4.0 0.5.0; do
+        rm -rf -- "$TEST_SELF_ROOT/vpsctl.sh"
+        case "$next_version" in
+            0.3.0) printf 'legacy installer\n' >"$TEST_SELF_ROOT/vpsctl.sh" ;;
+            0.4.0) ln -s "$TEST_TEMP/missing-legacy-installer" "$TEST_SELF_ROOT/vpsctl.sh" ;;
+            0.5.0)
+                mkdir "$TEST_SELF_ROOT/vpsctl.sh"
+                printf 'legacy installer\n' >"$TEST_SELF_ROOT/vpsctl.sh/keep"
+                ;;
+        esac
         prepare_update_assets "$next_version"
         vps_distribution_self_update "$next_version" >/dev/null || fail 'consecutive update failed'
         VPSCTL_PROJECT_ROOT="$TEST_INSTALL_ROOT/releases/$next_version"
         assert_equal "$next_version" "$(find "$TEST_INSTALL_ROOT/releases" -mindepth 1 -maxdepth 1 -printf '%f\n')" 'consecutive updates accumulated release history'
         vps_distribution_validate_managed_install || fail 'consecutive update left inconsistent metadata'
         "$TEST_INSTALL_ROOT/current/bin/vpsctl" || fail 'consecutively updated entry point cannot execute'
+        case "$next_version" in
+            0.3.0) assert_equal 'legacy installer' "$(<"$TEST_SELF_ROOT/vpsctl.sh")" 'cross-version update preserved legacy installer file' ;;
+            0.4.0) assert_equal "$TEST_TEMP/missing-legacy-installer" "$(readlink "$TEST_SELF_ROOT/vpsctl.sh")" 'cross-version update preserved legacy installer symlink' ;;
+            0.5.0) assert_equal 'legacy installer' "$(<"$TEST_SELF_ROOT/vpsctl.sh/keep")" 'cross-version update preserved legacy installer directory' ;;
+        esac
+        assert_self_cache_matches
     done
 )
 
@@ -669,7 +686,6 @@ test_testing_root_cannot_target_production() (
 prepare_managed_install() {
     local release="$1" version="$2" launcher_sha network_sha
     printf '#!/usr/bin/env bash\nexit 0\n' >"$TEST_ENTRY"
-    cp -- "$TEST_ENTRY" "$TEST_SELF_ROOT/vpsctl.sh"
     launcher_sha="$(sha_file "$TEST_ENTRY")"
     make_feature_assets "$version"
     network_sha="$(sha_file "${TEST_ASSETS}/vpsctl-network-bbr-${version}.tar.gz")"
@@ -693,7 +709,6 @@ prepare_managed_install() {
 }
 
 assert_self_cache_matches() {
-    assert_equal "$(sha_file "$TEST_ENTRY")" "$(sha_file "$TEST_SELF_ROOT/vpsctl.sh")" 'cached launcher'
     assert_equal "$(sha_file "$VPSCTL_PROJECT_ROOT/.release/manifest.tsv")" "$(sha_file "$TEST_SELF_ROOT/manifest.tsv")" 'cached manifest'
     assert_equal "$(sha_file "$TEST_ENTRY")" "$(<"$TEST_SELF_ROOT/entry.sha256")" 'cached entry digest'
 }
@@ -711,10 +726,11 @@ test_self_cache_repair() (
     entry_sha="$(sha_file "$TEST_ENTRY")"
     cp -- "$release/.release/manifest.tsv" "$TEST_ASSETS/vpsctl-manifest.tsv"
     vps_distribution_download() { cp -- "${TEST_ASSETS}/${1##*/}" "$2"; }
-    for scenario in missing-root missing-launcher corrupt-manifest corrupt-digest; do
+    for scenario in missing-root missing-manifest missing-digest corrupt-manifest corrupt-digest; do
         case "$scenario" in
             missing-root) rm -rf -- "$TEST_SELF_ROOT" ;;
-            missing-launcher) rm -- "$TEST_SELF_ROOT/vpsctl.sh" ;;
+            missing-manifest) rm -- "$TEST_SELF_ROOT/manifest.tsv" ;;
+            missing-digest) rm -- "$TEST_SELF_ROOT/entry.sha256" ;;
             corrupt-manifest) printf 'corrupt\n' >"$TEST_SELF_ROOT/manifest.tsv" ;;
             corrupt-digest) printf 'corrupt\n' >"$TEST_SELF_ROOT/entry.sha256" ;;
         esac
@@ -723,8 +739,9 @@ test_self_cache_repair() (
         assert_equal "$release" "$(readlink "$TEST_INSTALL_ROOT/current")" 'cache repair current'
         assert_equal "$entry_sha" "$(sha_file "$TEST_ENTRY")" 'cache repair entry'
         [[ -f "$history/.vpsctl-managed-release" ]] || fail 'cache repair removed history'
+        [[ ! -e "$TEST_SELF_ROOT/vpsctl.sh" && ! -L "$TEST_SELF_ROOT/vpsctl.sh" ]] || fail 'cache repair created an installer copy'
     done
-    for path in vpsctl.sh manifest.tsv entry.sha256; do
+    for path in manifest.tsv entry.sha256; do
         rm -- "$TEST_SELF_ROOT/$path"
         status=0
         mv() {
@@ -740,7 +757,7 @@ test_self_cache_repair() (
         vps_distribution_self_update 0.1.0 >/dev/null || fail 'cache repair retry'
         assert_self_cache_matches
     done
-    for path in vpsctl.sh manifest.tsv entry.sha256; do
+    for path in manifest.tsv entry.sha256; do
         rm -- "$TEST_SELF_ROOT/$path"
         ln -s "$TEST_ENTRY" "$TEST_SELF_ROOT/$path"
         status=0
@@ -754,22 +771,57 @@ test_self_cache_repair() (
         rmdir "$TEST_SELF_ROOT/$path"
     done
     [[ -f "$TEST_ENTRY" ]] || fail 'unsafe cache check removed entry'
+    for scenario in file symlink directory; do
+        rm -rf -- "$TEST_SELF_ROOT/vpsctl.sh"
+        case "$scenario" in
+            file) printf 'legacy installer\n' >"$TEST_SELF_ROOT/vpsctl.sh" ;;
+            symlink) ln -s "$TEST_TEMP/missing-legacy-installer" "$TEST_SELF_ROOT/vpsctl.sh" ;;
+            directory)
+                mkdir "$TEST_SELF_ROOT/vpsctl.sh"
+                printf 'legacy installer\n' >"$TEST_SELF_ROOT/vpsctl.sh/keep"
+                ;;
+        esac
+        vps_distribution_self_update 0.1.0 >/dev/null || fail "same-version update with legacy installer $scenario"
+        assert_self_cache_matches
+        assert_equal "$release" "$(readlink "$TEST_INSTALL_ROOT/current")" 'legacy installer current'
+        assert_equal "$entry_sha" "$(sha_file "$TEST_ENTRY")" 'legacy installer entry'
+        case "$scenario" in
+            file) assert_equal 'legacy installer' "$(<"$TEST_SELF_ROOT/vpsctl.sh")" 'same-version update preserved legacy installer file' ;;
+            symlink) assert_equal "$TEST_TEMP/missing-legacy-installer" "$(readlink "$TEST_SELF_ROOT/vpsctl.sh")" 'same-version update preserved legacy installer symlink' ;;
+            directory) assert_equal 'legacy installer' "$(<"$TEST_SELF_ROOT/vpsctl.sh/keep")" 'same-version update preserved legacy installer directory' ;;
+        esac
+    done
 )
 
 test_uninstall_preserves_feature_state() (
-    local release="${TEST_INSTALL_ROOT}/releases/0.2.0"
-    rm -f -- "$TEST_INSTALL_ROOT/current"
-    prepare_managed_install "$release" 0.2.0
+    local release="${TEST_INSTALL_ROOT}/releases/0.2.0" scenario
     mkdir -p "$TEST_SYSTEM_ROOT/etc/vpsctl" "$TEST_SYSTEM_ROOT/var/lib/vpsctl/network" "$TEST_SYSTEM_ROOT/usr/local/libexec"
     touch "$TEST_SYSTEM_ROOT/etc/vpsctl/keep" "$TEST_SYSTEM_ROOT/var/lib/vpsctl/network/keep" "$TEST_SYSTEM_ROOT/usr/local/libexec/keep"
     VPSCTL_DISTRIBUTED=1
     VPSCTL_PROJECT_ROOT="$release"
-    rm -f -- "$TEST_SELF_ROOT/vpsctl.sh"
-    printf 'corrupt cache\n' >"$TEST_SELF_ROOT/manifest.tsv"
-    vps_distribution_self_uninstall 0 >/dev/null || fail 'normal uninstall failed'
-    [[ ! -e "$TEST_ENTRY" && ! -e "$TEST_INSTALL_ROOT/current" && ! -e "$TEST_INSTALL_ROOT/releases" ]] || fail 'managed install remained'
-    [[ ! -e "$TEST_SELF_ROOT/vpsctl.sh" ]] || fail 'normal uninstall repaired an unused cache'
-    assert_equal 'corrupt cache' "$(<"$TEST_SELF_ROOT/manifest.tsv")" 'normal uninstall preserves self state'
+    for scenario in absent file symlink directory; do
+        rm -rf -- "$TEST_INSTALL_ROOT" "$TEST_SELF_ROOT"
+        mkdir -p "$TEST_INSTALL_ROOT/releases" "$TEST_SELF_ROOT"
+        prepare_managed_install "$release" 0.2.0
+        case "$scenario" in
+            file) printf 'legacy installer\n' >"$TEST_SELF_ROOT/vpsctl.sh" ;;
+            symlink) ln -s "$TEST_TEMP/missing-legacy-installer" "$TEST_SELF_ROOT/vpsctl.sh" ;;
+            directory)
+                mkdir "$TEST_SELF_ROOT/vpsctl.sh"
+                printf 'legacy installer\n' >"$TEST_SELF_ROOT/vpsctl.sh/keep"
+                ;;
+        esac
+        printf 'corrupt cache\n' >"$TEST_SELF_ROOT/manifest.tsv"
+        vps_distribution_self_uninstall 0 >/dev/null || fail "normal uninstall with legacy installer $scenario"
+        [[ ! -e "$TEST_ENTRY" && ! -e "$TEST_INSTALL_ROOT/current" && ! -e "$TEST_INSTALL_ROOT/releases" ]] || fail 'managed install remained'
+        case "$scenario" in
+            absent) [[ ! -e "$TEST_SELF_ROOT/vpsctl.sh" && ! -L "$TEST_SELF_ROOT/vpsctl.sh" ]] || fail 'normal uninstall created an installer copy' ;;
+            file) assert_equal 'legacy installer' "$(<"$TEST_SELF_ROOT/vpsctl.sh")" 'normal uninstall preserved legacy installer file' ;;
+            symlink) assert_equal "$TEST_TEMP/missing-legacy-installer" "$(readlink "$TEST_SELF_ROOT/vpsctl.sh")" 'normal uninstall preserved legacy installer symlink' ;;
+            directory) assert_equal 'legacy installer' "$(<"$TEST_SELF_ROOT/vpsctl.sh/keep")" 'normal uninstall preserved legacy installer directory' ;;
+        esac
+        assert_equal 'corrupt cache' "$(<"$TEST_SELF_ROOT/manifest.tsv")" 'normal uninstall preserves self state'
+    done
     [[ -e "$TEST_SYSTEM_ROOT/etc/vpsctl/keep" && -e "$TEST_SYSTEM_ROOT/var/lib/vpsctl/network/keep" && -e "$TEST_SYSTEM_ROOT/usr/local/libexec/keep" ]] || fail 'normal uninstall removed preserved data'
 )
 
@@ -814,6 +866,8 @@ test_purge_removes_only_self_state() (
     mkdir -p "$TEST_INSTALL_ROOT/releases" "$TEST_SELF_ROOT"
     rm -f -- "$TEST_INSTALL_ROOT/current"
     prepare_managed_install "$release" 0.3.0
+    mkdir -p "$TEST_SELF_ROOT/vpsctl.sh"
+    printf 'legacy installer\n' >"$TEST_SELF_ROOT/vpsctl.sh/keep"
     mkdir -p "$TEST_SYSTEM_ROOT/etc/vpsctl" "$TEST_SYSTEM_ROOT/var/lib/vpsctl/security" "$TEST_SYSTEM_ROOT/usr/local/libexec"
     touch "$TEST_SYSTEM_ROOT/etc/vpsctl/purge-keep" "$TEST_SYSTEM_ROOT/var/lib/vpsctl/security/purge-keep" "$TEST_SYSTEM_ROOT/usr/local/libexec/purge-keep"
     VPSCTL_DISTRIBUTED=1

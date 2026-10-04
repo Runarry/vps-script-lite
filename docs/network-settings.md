@@ -125,7 +125,7 @@ bash bin/vpsctl network ip-policy restore
 
 该入口管理的是 glibc `getaddrinfo()` 返回多地址时的排序策略，作用域固定报告为 `glibc_getaddrinfo_order`。它不会禁用 IPv4 或 IPv6，不过滤字面量 IP，也不承诺影响 Go 自带解析器、应用内置 DNS、已缓存结果或显式指定地址族的 socket。系统级 `ipv4_only`/`ipv6_only` 不属于本入口；代理节点和纯端口转发的地址族策略见[代理管理](proxy-management.md)。
 
-命令将完整 RFC 6724 precedence 表写入 `/etc/gai.conf`。首次受管时，只要现有文件包含非空、非注释指令就安全拒绝，避免覆盖管理员策略；注释或空文件会原样备份。后续更新和恢复同时校验项目标记及 SHA-256，检测到外部修改后拒绝覆盖。状态写入 `/var/lib/vpsctl/network/ip-policy/state.json`，备份位于 `/var/lib/vpsctl/backups/network/ip-policy/`。写入使用锁、临时文件和原子替换；命令不重启长期运行进程，后者可能继续使用旧缓存。
+命令将完整 RFC 6724 precedence 表写入 `/etc/gai.conf`。首次受管时，现有文件无论包含有效指令、注释还是为空，都会在一次普通确认后先原样备份，再完整替换；确认默认取消，输入 `y` 或全局 `--yes` 可授权，非交互且未授权时拒绝执行。备份保存原始内容、权限和 SHA-256，后续策略切换保留首次备份，`restore` 恢复原始内容及权限。`--dry-run` 只展示备份和替换计划，不写配置、状态或备份。后续更新和恢复同时校验项目标记及 SHA-256，检测到外部修改或状态损坏后仍拒绝覆盖，`--yes` 不会绕过这些检查。状态写入 `/var/lib/vpsctl/network/ip-policy/state.json`，备份位于 `/var/lib/vpsctl/backups/network/ip-policy/`。写入使用锁、临时文件和原子替换；命令不重启长期运行进程，后者可能继续使用旧缓存。
 
 ## 5. RFW
 

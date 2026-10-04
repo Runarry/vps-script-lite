@@ -277,15 +277,11 @@ vpsctl_atomic_symlink() {
 
 vpsctl_record_self_state() {
     local manifest=$1
-    local launcher=$2
     local temporary=''
 
     temporary="${VPSCTL_SELF_STATE}/manifest.tsv.tmp.$$"
     install -m 0644 -- "$manifest" "$temporary"
     mv -Tf -- "$temporary" "${VPSCTL_SELF_STATE}/manifest.tsv"
-    temporary="${VPSCTL_SELF_STATE}/vpsctl.sh.tmp.$$"
-    install -m 0755 -- "$launcher" "$temporary"
-    mv -Tf -- "$temporary" "${VPSCTL_SELF_STATE}/vpsctl.sh"
     temporary="${VPSCTL_SELF_STATE}/entry.sha256.tmp.$$"
     printf '%s\n' "${VPSCTL_MANIFEST_HASHES[launcher]}" >"$temporary"
     chmod 0600 "$temporary"
@@ -368,7 +364,7 @@ vpsctl_install_core() {
 
     vpsctl_atomic_symlink "$release_dir" "$VPSCTL_CURRENT_LINK"
     vpsctl_install_launcher_entry "$launcher"
-    vpsctl_record_self_state "$manifest" "$launcher"
+    vpsctl_record_self_state "$manifest"
 }
 
 vpsctl_exec_current() {
