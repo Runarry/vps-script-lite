@@ -42,7 +42,7 @@ bash bin/vpsctl service proxy status --core all
 - 查看与输出：订阅、日志和支持的协议。
 - 系统工具：系统时间状态与同步。
 
-生命周期和服务动作会按实时状态筛选候选，例如安装只列出未安装内核，更新、卸载和日志只列出已经登记的内核，启动不会列出已经运行的内核，停止和重启只面向当前运行的内核。多个候选可供安装或更新时，交互界面还提供“全部”选择；随后用编号选择“使用最新稳定版（推荐）”“使用最新预发布版”或“输入精确 Release tag”。为“全部”输入精确 tag 时会分别询问两个项目的 tag。卸载和可能中断连接的服务动作仍逐个选择内核并执行相应确认。筛选只减少无效选项，不改变强确认、权限或待重启策略。
+生命周期和服务动作会按实时状态筛选候选，例如安装只列出未安装内核，更新、卸载和日志只列出已经登记的内核，启动不会列出已经运行的内核，停止和重启只面向当前运行的内核。多个候选可供安装或更新时，交互界面还提供“全部”选择。安装可用编号选择最新稳定版、最新预发布版或精确 Release tag；更新默认进行不降级的稳定更新，也提供显式切换稳定版（可能降级）、预发布版及精确 tag。为“全部”输入精确 tag 时会分别询问两个项目的 tag。卸载和可能中断连接的服务动作仍逐个选择内核并执行相应确认。筛选只减少无效选项，不改变强确认、权限或待重启策略。
 
 命令模式可单独查询相同状态：
 
@@ -82,7 +82,9 @@ Xray 与 sing-box 使用相同的命令模式生命周期接口：
 
 `CORE` 为 `sing-box` 或 `xray`。只有 `install` 和 `update` 接受 `all`；`install --core all` 处理两个内核，`update --core all` 只处理当前已经登记的内核。这与交互界面中安装/更新动作的“全部”选项对应。`--core all` 可以把同一个 `--release-channel` 转发给两个内核。两个项目的 tag 空间不同，因此它不能与单个 `--version` 共用。卸载、服务控制和日志必须解析到单个已经登记的内核。
 
-`--release-channel` 与 `--version` 互斥。默认或显式选择 `stable` 时，安装和更新从对应项目的 GitHub `latest` Release 选择当前稳定版本，并拒绝 draft 或被标记为 prerelease 的响应。选择 `prerelease` 时，命令分页读取 Releases 列表并选择返回顺序中首个非 draft 的预发布版本；如果没有可用预发布版本会明确失败，不回退稳定版。指定 `TAG` 时则精确请求该 tag，可接受稳定版或预发布版，但仍拒绝 draft、tag 回显不一致或无效格式，不会自动改选其他版本。安装通道不写入元数据，也不会由后续更新自动跟随；以后不带 `--release-channel` 或 `--version` 执行 `update` 仍选择最新稳定版。
+`--release-channel` 与 `--version` 互斥。默认或显式选择 `stable` 时，安装和更新从对应项目的 GitHub `latest` Release 查询当前稳定版本，并拒绝 draft 或被标记为 prerelease 的响应。选择 `prerelease` 时，命令分页读取 Releases 列表并选择返回顺序中首个非 draft 的预发布版本；如果没有可用预发布版本会明确失败，不回退稳定版。指定 `TAG` 时则精确请求该 tag，可接受稳定版或预发布版，但仍拒绝 draft、tag 回显不一致或无效格式，不会自动改选其他版本。安装通道不写入元数据，也不会由后续更新自动跟随。
+
+不带 `--release-channel` 或 `--version` 的 `update` 仍查询最新稳定版，但不会隐式降级：如果稳定版低于当前二进制版本，显示两个版本并成功跳过，在下载资产前停止，不修改配置、元数据或待重启记录；`--core all` 继续更新其他内核。无法可靠比较版本时返回前置条件错误。显式指定通道或精确 tag 可以回退，仍须通过候选版本的配置兼容校验。更新菜单默认选择“不降级的稳定更新”，也可选择明确允许回退的稳定版切换、最新预发布版或精确 tag。相同版本仍会继续重建配置和迁移状态。
 
 无论选择哪个通道或精确 tag，下载与替换仍执行相同的安全检查：只接受对应官方 GitHub HTTPS Release 的唯一匹配资产，动态取得并验证 digest 或 `.dgst` 中的 SHA-256，检查解压目标和二进制版本，再用候选二进制验证重建的配置后原子提交。摘要不是仓库内的固定版本或固定值。
 
@@ -172,7 +174,9 @@ vpsctl service proxy subscription [--core CORE|all]
 
 切核还校验 URI 不能表达的运行参数。Hysteria2 的带宽、跳跃端口、Gecko、BBR 档位及独占中转出口的客户端选项会保留并按目标内核转换；目标版本不支持时在写入前报错，不会自动丢弃选项。仅保存 SPKI 信任值而没有可供 Xray 使用的整证书指纹的出口，同样不能随节点切到 Xray。
 
-### XHTTP 与 Hysteria2 参数
+### AnyTLS、XHTTP 与 Hysteria2 参数
+
+AnyTLS 要求 sing-box `1.12+`。`anytls-tls` 不再覆盖 `padding_scheme`，`anytls-reality` 同样使用内核默认 padding。新旧节点在下一次正常配置重建时统一采用该行为，保留原有节点状态和凭据，并沿用配置校验、自动应用及回滚流程。这是默认策略统一，不代表已测得性能或抗识别能力提升。[sing-box AnyTLS 默认配置](https://sing-box.sagernet.org/configuration/inbound/anytls/#padding_scheme)
 
 `vless-xhttp-tls`、`vless-xhttp-reality` 和 `trojan-xhttp-reality` 支持 `auto`、`packet-up`、`stream-up`、`stream-one` 四种 XHTTP 模式。新建 TLS 节点默认 `auto`，新建 REALITY 节点默认 `stream-one`。`--host` 单独保存 HTTP Host，`--sni` 保存 TLS/REALITY 名称，`--path` 保存传输路径；这些基础连接参数在分享 URI、导入和中转渲染之间往返保留。
 
@@ -318,11 +322,15 @@ vpsctl service proxy relay bind delete --id BIND_ID [--confirm-delete]
 
 URI 层接受协议矩阵对应的标准 VLESS、Trojan、AnyTLS、Hysteria2/Hy2、TUIC、Shadowsocks/SIP002（含旧式整段 Base64）、ShadowTLS 插件和 SOCKS5 链接。VLESS TCP/REALITY 分享链接中常见的无操作参数 `headerType=none` 会被兼容接受，其他 header 类型仍会拒绝。未知或重复参数、矩阵外组合和无法渲染的变体会被拒绝；新版 Xray 已移除 `allowInsecure`，因此选择 Xray 的不安全 TLS URI 必须具有整证书指纹（URI 的 `pcs`/`pinSHA256`，或显式提供的证书），渲染时使用证书固定。sing-box 按 inbound tag 生成 `route` 动作，Xray 使用 `inboundTag`/`outboundTag`；每个被使用的出口只生成一份稳定 tag 的 outbound。
 
-sing-box 使用 `certificate_public_key_sha256` 固定证书公钥；URI 的 `pcs`/`pinSHA256` 仍表示整证书指纹，不能直接转码充当公钥指纹。创建或编辑证书 TLS 出口时，可提供 `--tls-cert-file` 的叶证书 PEM（有原指纹时先核对），或通过 `--tls-spki-sha256` 提供 Base64 编码、解码后为 32 字节的公钥 SHA-256；二者互斥。未提供时会按原指纹匹配当前受管节点引用的本地证书。公钥固定信息单独保存在出口 `client_options`，不加入标准分享 URI；即使 URI 带 `insecure=1`，也不能绕过已经配置的公钥固定。Xray 不能表达独立 SPKI 固定，只有保留原证书指纹的出口才能转为 Xray。
+sing-box 出口已有 `tls_spki_sha256` 时，始终使用 `certificate_public_key_sha256` 固定公钥，包括同时保存来源证书摘要的旧记录。创建或编辑证书 TLS 出口时，可提供 `--tls-cert-file` 的叶证书 PEM（有原指纹时先核对），或通过 `--tls-spki-sha256` 提供 Base64 编码、解码后为 32 字节的公钥 SHA-256；二者互斥。未提供时继续尝试按原指纹匹配当前受管节点引用的本地证书。公钥固定信息单独保存在出口 `client_options`，不加入标准分享 URI。
 
-旧中转描述是从 URI 派生的缓存，读取时在内存中重建，写入时才保存归一化结果。无法自动完成指纹迁移的旧出口仍可查看、编辑、删除，也可用于纯 nftables 转发；将其绑定为 sing-box 代理出站前必须补齐证书或公钥指纹。更换 URI 会重新确认绑定到服务器的证书信息，重命名保留已有设置。
+没有 SPKI、但 URI 含 `pcs`/`pinSHA256` 时，sing-box `1.15.0-alpha.7+` 可以直接使用原生 `certificate_sha256` 固定整证书，无须另交证书文件。URI 中的 64 位十六进制摘要先解码为 32 字节，再编码为 Base64；这不会变成公钥摘要。整证书固定与公钥固定只会输出实际采用的一种：同一公钥重新签发证书后，SPKI 固定仍匹配，旧整证书固定不再匹配。启用任一种固定时，URI 的 `insecure=1` 都不能绕过它；固定身份验证不承诺额外强制证书名称或 CA 链验证。出口详情显示当前采用的固定方式。[sing-box TLS 指纹字段](https://sing-box.sagernet.org/configuration/shared/tls/#certificate_sha256)
 
-Hysteria2 出口可用 `--chrome-parrot default|on|off` 控制 Chrome QUIC 模拟，用 `--bbr-profile default|standard|conservative|aggressive` 选择 BBR 档位；`default` 删除本地覆盖，省略选项则保留已有值。两者在 sing-box 上要求 `1.14+`；Xray 的版本门槛见上文。Ed25519 证书不兼容 sing-box `1.14+` 和 Xray `26.9.8+` 客户端默认的 Chrome QUIC 握手，可使用 RSA/ECDSA 证书或在相应出口关闭模拟。项目默认自签证书仍为 RSA。
+Xray 继续使用整证书指纹，不能表达独立 SPKI 固定，只有保留原证书指纹的出口才能转为 Xray。Xray `26.10.10+` 底层传输的 TLS/uTLS 客户端默认使用内核内置根证书，依赖系统私有 CA 的连接需留意上游 `useSystemCA` 选项；该变化不等于所有内部 HTTPS 请求都采用同一信任库。本命令未新增私有 CA 配置参数。[上游变更](https://github.com/XTLS/Xray-core/pull/7105)
+
+旧中转描述是从 URI 派生的缓存，读取时在内存中重建，写入时才保存归一化结果。无法自动完成指纹迁移的旧出口仍可查看、编辑、删除，也可用于纯 nftables 转发。将其绑定为不支持原生整证书固定的 sing-box 代理出站前，必须补齐证书或公钥指纹；新版本可以直接采用 URI 整证书指纹。更新和回退按候选内核版本校验，切核按目标内核版本校验，不兼容时在写入前拒绝。更换 URI 会清除旧的本地信任材料，重命名保留已有设置。
+
+Hysteria2 出口可用 `--chrome-parrot default|on|off` 控制 Chrome QUIC 模拟，用 `--bbr-profile default|standard|conservative|aggressive` 选择 BBR 档位；`default` 删除本地覆盖，省略选项则保留已有值。两者在 sing-box 上要求 `1.14+`；Xray 的版本门槛见上文。Ed25519 证书不兼容 sing-box `1.14+` 和 Xray `26.9.8+` 客户端默认的 Chrome QUIC 握手，优先使用 RSA/ECDSA 证书。关闭模拟不保证 UDP 可用，具体限制见下文。项目默认自签证书仍为 RSA。
 
 关闭 Chrome 模拟还需留意跨内核 UDP 兼容性：本轮确认 Xray `26.9.30` 客户端设置 `--chrome-parrot off`、连接 sing-box `1.14.2` 服务端时，TCP 可用但 UDP 回包报 `datagram support disabled`；保持默认 Chrome 模拟的无混淆、Salamander、Gecko 组合均通过持续 TCP/UDP 跳跃测试。Xray 的非 Chrome 路径在 `2026-09-01` 后省略 `max_datagram_frame_size`，sing-box 对应服务端依赖未兼容该行为；公开配置没有单独修复此参数的开关，脚本不会写入无效字段或自动换核。具体组合和替代路径见 [HY2 验收记录](proxy-hy2-validation.md)。[Xray 固定版本实现](https://github.com/XTLS/Xray-core/blob/v26.9.30/transport/internet/hysteria/dialer.go)、[sing-box 固定依赖实现](https://github.com/SagerNet/sing-quic/blob/6a3a24d65b99/hysteria2/service.go)。
 
@@ -381,6 +389,8 @@ nftables 规则只写入独立的 `ip vpsctl_proxy_forward4` 和 `ip6 vpsctl_pro
 | `trojan-grpc-tls` |  | 是 |
 
 其中 `vless-reality-vision`、`vless-grpc-tls`、`hysteria2`、`shadowsocks-aes-256-gcm`、`shadowsocks-chacha20-poly1305`、`shadowsocks-2022` 和 `shadowsocks-2022-padding` 由两个内核共同支持。Hysteria2 的 Gecko、BBR profile、Chrome QUIC 和客户端跳跃选项按具体内核版本开放。
+
+协议列表、添加节点的协议选择和节点详情提供 AnyTLS、HY2 与 Trojan/gRPC/REALITY 的简短兼容提示。Trojan/gRPC/REALITY 在 Xray `26.3.27`、`26.6.27`、`26.9.9` 下已有真实连接失败记录；其他版本需要单独验证，不能据此宣称同样失败或已经修复。提示不隐藏协议、不增加确认，也不改变机器可读输出。
 
 ## 7. 系统时间
 

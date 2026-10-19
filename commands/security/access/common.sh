@@ -31,36 +31,52 @@ access_cleanup_secret() {
     rmdir -- "$secret_dir" 2>/dev/null || true
 }
 
-access_require_platform() {
-    local os_id init
+access_detect_platform() {
+    local os_id init kernel
 
     if [[ "${VPSCTL_TESTING:-0}" == 1 ]]; then
         os_id="${VPSCTL_ENV_OS_ID:-ubuntu}"
         init="${VPSCTL_ENV_INIT:-systemd}"
+        kernel="${VPSCTL_ENV_KERNEL_NAME:-Linux}"
     else
         os_id="${VPSCTL_ENV_OS_ID:-}"
         init="${VPSCTL_ENV_INIT:-}"
+        kernel="$(uname -s 2>/dev/null || true)"
         if [[ -z "$os_id" && -r /etc/os-release ]]; then
             os_id="$(awk -F= '$1 == "ID" {gsub(/^\"|\"$/, "", $2); print tolower($2); exit}' /etc/os-release)"
         fi
-        if [[ -z "$init" ]] && [[ -d /run/systemd/system ]]; then
-            init=systemd
+        if [[ -z "$init" && -r /proc/1/comm ]]; then
+            IFS= read -r init </proc/1/comm || true
+            init="$(vps_cmd_trim "$init")"
+            [[ "$init" == init\(* ]] && init=init
         fi
     fi
-    case "$os_id" in
+    VPSCTL_ENV_OS_ID="$os_id"
+    VPSCTL_ENV_INIT="${init:-unknown}"
+    VPSCTL_ENV_KERNEL_NAME="$kernel"
+    access_sshd_init
+}
+
+access_require_linux() {
+    [[ "$VPSCTL_ENV_KERNEL_NAME" == Linux ]] || {
+        vps_cmd_error "security access 仅支持 Linux"
+        return 3
+    }
+}
+
+access_require_platform() {
+    access_require_linux || return $?
+    case "$VPSCTL_ENV_OS_ID" in
         debian | ubuntu | rhel | centos | rocky | almalinux | ol | fedora) ;;
         *)
-            vps_cmd_error "security access 仅支持 Debian/Ubuntu 与 RHEL 系发行版（当前：${os_id:-未知}）"
+            vps_cmd_error "security access 修改操作仅支持 Debian/Ubuntu 与 RHEL 系发行版（当前：${VPSCTL_ENV_OS_ID:-未知}）"
             return 3
             ;;
     esac
-    [[ "$init" == systemd ]] || {
-        vps_cmd_error "security access 仅支持 systemd；OpenRC 与其他 init 系统不受支持"
+    [[ "$VPSCTL_ENV_INIT" == systemd ]] || {
+        vps_cmd_error "security access 修改与事务操作仅支持 systemd；OpenRC 与其他 init 系统不受支持"
         return 3
     }
-    VPSCTL_ENV_OS_ID="$os_id"
-    VPSCTL_ENV_INIT="$init"
-    access_sshd_init || return $?
     command -v systemctl >/dev/null 2>&1 || {
         vps_cmd_error "未找到 systemctl，无法安全管理 SSH 服务"
         return 3

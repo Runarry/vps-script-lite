@@ -29,7 +29,12 @@ make_mock() {
 }
 
 make_mock systemctl '
+[[ -z "${ACCESS_TEST_SYSTEMCTL_TRACE:-}" ]] || printf "%s\n" "$*" >>"$ACCESS_TEST_SYSTEMCTL_TRACE"
 case "${1:-}" in
+    show)
+        [[ "${ACCESS_TEST_SYSTEMCTL_FAILURE:-0}" == 0 ]] || exit 1
+        printf "LoadState=%s\nActiveState=%s\n" "${ACCESS_TEST_SERVICE_LOAD:-loaded}" "${ACCESS_TEST_SERVICE_STATE-active}"
+        ;;
     is-active) exit 0 ;;
     is-enabled)
         [[ " $* " == *" nftables.service " && -e "${VPSCTL_SYSTEM_ROOT}/run/nft-persistent" ]] ||
@@ -130,7 +135,7 @@ printf "MOCK-PRIVATE-KEY\n" >"$key_file"
 printf "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGenerated vpsctl-generated\n" >"${key_file}.pub"'
 
 make_mock sshd '
-printf "%s\n" "$*" >>"${VPSCTL_SYSTEM_ROOT}/run/sshd.log"
+printf "%s\n" "$*" >>"${ACCESS_TEST_SSHD_TRACE:-${VPSCTL_SYSTEM_ROOT}/run/sshd.log}"
 if [[ " $* " == *" -t "* && -e "${VPSCTL_SYSTEM_ROOT}/run/fail-policy-validation-once" ]] &&
     grep -Eq "^PermitRootLogin[[:space:]]+no$" "${VPSCTL_SYSTEM_ROOT}/etc/ssh/sshd_config.d/00-vpsctl-access.conf" 2>/dev/null; then
     rm -f -- "${VPSCTL_SYSTEM_ROOT}/run/fail-policy-validation-once"
@@ -173,7 +178,7 @@ fi
 printf "LISTEN 0 128 0.0.0.0:%s 0.0.0.0:* users:((\\\"sshd\\\",pid=1,fd=3))\n" "$port"'
 
 make_mock nft '
-printf "%s\n" "$*" >>"${VPSCTL_SYSTEM_ROOT}/run/nft.log"
+printf "%s\n" "$*" >>"${ACCESS_TEST_NFT_TRACE:-${VPSCTL_SYSTEM_ROOT}/run/nft.log}"
 if [[ " $* " == *" list ruleset "* ]]; then
     family=inet
     [[ ! -f "${VPSCTL_SYSTEM_ROOT}/run/nft-family" ]] || family="$(<"${VPSCTL_SYSTEM_ROOT}/run/nft-family")"
@@ -570,6 +575,77 @@ test_cli_validation_and_status() {
 
     assert_status 0 "upper boundary port is accepted" run_access --dry-run ssh prepare --port 65535 --firewall manual
 }
+
+test_readonly_platforms() (
+    local output init state expected before after trace="$TEST_TEMP/status-systemctl.log"
+
+    reset_system
+    for state in active inactive failed ''; do
+        output="$(ACCESS_TEST_SERVICE_STATE="$state" run_access status --json)"
+        case "$state" in
+            active | inactive) expected="$state" ;;
+            *) expected=unknown ;;
+        esac
+        assert_contains "$output" "\"service_state\": \"$expected\"" "service state $state"
+    done
+    output="$(ACCESS_TEST_SYSTEMCTL_FAILURE=1 run_access status --json)"
+    assert_contains "$output" '"service_state": "unknown"' "failed systemd query is unknown"
+    output="$(ACCESS_TEST_SERVICE_LOAD=not-found ACCESS_TEST_SERVICE_STATE=inactive run_access status --json)"
+    assert_contains "$output" '"service_state": "unknown"' "missing systemd unit is not an inactive service"
+
+    output="$(bash -c '
+        source "$1/commands/security/access.sh"
+        command() {
+            if [[ "${1:-}" == -v && ( "${2:-}" == systemctl || "${2:-}" == sshd ) ]]; then return 1; fi
+            builtin command "$@"
+        }
+        access_main status --json
+    ' bash "$TEST_ROOT")"
+    assert_contains "$output" '"port": "unknown"' "status without sshd"
+    assert_contains "$output" '"service_state": "unknown"' "status without systemctl"
+
+    export ACCESS_TEST_SYSTEMCTL_TRACE="$trace"
+    export ACCESS_TEST_SSHD_TRACE="$TEST_TEMP/status-sshd.log" ACCESS_TEST_NFT_TRACE="$TEST_TEMP/status-nft.log"
+    for init in none openrc unknown; do
+        reset_system
+        export VPSCTL_ENV_INIT="$init" VPSCTL_ENV_OS_ID=alpine
+        before="$(
+            find "$TEST_SYSTEM_ROOT" -printf '%P %y %m %s %T@\n' | sort
+            find "$TEST_SYSTEM_ROOT" -type f -exec sha256sum {} + | sort
+        )"
+        output="$(run_access --install-deps status --user alice --json)"
+        assert_contains "$output" "\"platform\": \"$init\"" "readonly platform"
+        assert_contains "$output" '"service": "unknown", "service_state": "unknown"' "no systemd service assumption"
+        assert_contains "$output" '"port": "22"' "configuration remains readable without systemd"
+        assert_contains "$output" '"name": "alice"' "user status without systemd"
+        output="$(run_access)"
+        assert_contains "$output" 'unknown (unknown)' "noninteractive default is readonly status"
+        assert_status 0 "help without systemd" run_access --help
+        assert_status 2 "unknown status argument without systemd" run_access status --unknown
+        assert_status 2 "duplicate status argument without systemd" run_access status --json --json
+        assert_status 2 "missing status value without systemd" run_access status --user
+        assert_status 2 "invalid status user without systemd" run_access status --user 'Alice!'
+
+        export VPSCTL_ENV_OS_ID=debian
+        assert_status 3 "account changes still require systemd" run_access user add --name deploy
+        assert_status 3 "SSH apply still requires systemd" run_access --dry-run ssh apply --root-login deny
+        assert_status 3 "SSH prepare still requires systemd" run_access --dry-run ssh prepare --port 2222 --firewall manual
+        assert_status 3 "session verification still requires systemd" run_access session verify --transaction tx-test
+        if command -v script >/dev/null 2>&1; then
+            assert_status 3 "interactive menu still requires systemd" env VPSCTL_NON_INTERACTIVE=0 \
+                script -q -e -c "bash '$TEST_ROOT/commands/security/access.sh' --no-color" /dev/null </dev/null
+        fi
+        after="$(
+            find "$TEST_SYSTEM_ROOT" -printf '%P %y %m %s %T@\n' | sort
+            find "$TEST_SYSTEM_ROOT" -type f -exec sha256sum {} + | sort
+        )"
+        assert_equal "$before" "$after" "readonly queries and platform refusals leave system unchanged"
+    done
+    [[ ! -e "$trace" ]] || fail "non-systemd status or refused action called systemctl"
+    assert_status 3 "status still requires Linux" env VPSCTL_ENV_KERNEL_NAME=Darwin \
+        bash "$TEST_ROOT/commands/security/access.sh" status --json
+    printf 'PASS: access readonly platforms and service query failures\n'
+)
 
 test_user_password_and_keys() {
     local authorized key_file key_backup manifest lines mode command output status=0 authorized_sha manifest_sha
@@ -1427,6 +1503,7 @@ test_direct_ssh_policy_apply() {
 }
 
 test_cli_validation_and_status
+test_readonly_platforms
 test_direct_ssh_policy_apply
 test_target_login_policy
 test_user_password_and_keys

@@ -220,12 +220,14 @@ _proxy_core_resolve_release() {
 # Writes a verified, extracted executable to OUTPUT and release details to INFO.
 _proxy_core_fetch_release() {
     local core="$1" release_channel="$2" requested_tag="$3" output="$4" info="$5"
-    local release_json asset_json tag version asset url digest expected actual archive dgst_url dgst extract candidate="" member
+    local release_json="${6:-}" asset_json tag version asset url digest expected actual archive dgst_url dgst extract candidate="" member
     command -v curl >/dev/null 2>&1 || { vps_cmd_error "代理内核下载需要 curl"; return 3; }
     command -v jq >/dev/null 2>&1 || { vps_cmd_error "代理内核下载需要 jq"; return 3; }
     command -v sha256sum >/dev/null 2>&1 || { vps_cmd_error "代理内核下载需要 sha256sum"; return 3; }
-    release_json="${output}.release.json"
-    _proxy_core_resolve_release "$core" "$release_channel" "$requested_tag" "$release_json" || return $?
+    if [[ -z "$release_json" ]]; then
+        release_json="${output}.release.json"
+        _proxy_core_resolve_release "$core" "$release_channel" "$requested_tag" "$release_json" || return $?
+    fi
     tag="$(jq -r '.tag_name' "$release_json")"
     version="${tag#v}"
     [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([._+-][0-9A-Za-z.-]+)?$ ]] || {
@@ -687,6 +689,7 @@ _proxy_core_recover_update_transaction() {
 proxy_core_update() (
     local core="${1:-}" release_channel=stable channel_set=0 requested_tag="" version_set=0 confirmed=0 arg meta binary_logical binary_path owned installed_at
     local tmp downloaded info config version tag sha old_sha binary_backup meta_backup active=0 failed=0 rc
+    local release_json current_version
     local candidate_config candidate_relay config_backup relay_backup="" relay_touched=false relay_undo='[]'
     local pending pending_backup="" pending_existed=false transaction_json metadata_same=false config_same=false
     local -a required_tools=(jq curl sha256sum)
@@ -751,8 +754,10 @@ proxy_core_update() (
             vps_cmd_info "演练：下载并验证官方 Release tag $requested_tag 后原子更新 $binary_logical；不重启服务"
         elif [[ "$release_channel" == "prerelease" ]]; then
             vps_cmd_info "演练：查找并验证最新官方 Pre-release 后原子更新 $binary_logical（无可用版本时不回退稳定版）；不重启服务"
-        else
+        elif ((channel_set)); then
             vps_cmd_info "演练：下载并验证最新官方稳定 Release 后原子更新 $binary_logical；不重启服务"
+        else
+            vps_cmd_info "演练：查询最新官方稳定 Release，与当前版本比较；低于当前版本则跳过，无法比较则停止；不重启服务"
         fi
         vps_cmd_info "演练：按目标版本重建受管配置、归一化已有中转状态，并保存同代回滚点"
         return 0
@@ -760,7 +765,29 @@ proxy_core_update() (
     tmp="$(mktemp -d "${TMPDIR:-/tmp}/vpsctl-proxy.XXXXXX")" || return 20
     downloaded="${tmp}/${core}"; info="${tmp}/release-info.json"
     candidate_config="${tmp}/config.json"; candidate_relay="${tmp}/relay.json"
-    _proxy_core_fetch_release "$core" "$release_channel" "$requested_tag" "$downloaded" "$info" || { rc=$?; _proxy_core_remove_tmp "$tmp"; return "$rc"; }
+    release_json="${tmp}/release.json"
+    _proxy_core_resolve_release "$core" "$release_channel" "$requested_tag" "$release_json" || { rc=$?; _proxy_core_remove_tmp "$tmp"; return "$rc"; }
+    tag="$(jq -r '.tag_name' "$release_json")"
+    current_version="$(_proxy_core_binary_version "$core" "$binary_path" 2>/dev/null)" || current_version=""
+    if ((channel_set == 0 && version_set == 0)); then
+        rc=0
+        proxy_core_version_at_least "${tag#v}" "$current_version" || rc=$?
+        case "$rc" in
+            0) ;;
+            1)
+                vps_cmd_info "$(proxy_core_label "$core") 当前版本 $current_version，稳定版目标 $tag；目标低于当前版本，默认更新已跳过，避免隐式降级（可显式使用 --release-channel stable 或 --version TAG 切换）"
+                _proxy_core_remove_tmp "$tmp"
+                return 0
+                ;;
+            *)
+                vps_cmd_error "无法可靠比较 $(proxy_core_label "$core") 当前版本 ${current_version:-<无法识别>} 与稳定版目标 $tag；默认更新已停止，可显式指定 --release-channel 或 --version"
+                _proxy_core_remove_tmp "$tmp"
+                return 3
+                ;;
+        esac
+    fi
+    vps_cmd_info "$(proxy_core_label "$core") 版本：${current_version:-<无法识别>} → $tag"
+    _proxy_core_fetch_release "$core" "$release_channel" "$requested_tag" "$downloaded" "$info" "$release_json" || { rc=$?; _proxy_core_remove_tmp "$tmp"; return "$rc"; }
     version="$(jq -r '.version' "$info")"; tag="$(jq -r '.release_tag' "$info")"; sha="$(jq -r '.sha256' "$info")"
     proxy_manifest_validate_file "$PROXY_MANIFEST" || { rc=$?; _proxy_core_remove_tmp "$tmp"; return "$rc"; }
     if [[ -n "${PROXY_RELAY_FILE:-}" && ( -e "$PROXY_RELAY_FILE" || -L "$PROXY_RELAY_FILE" ) ]]; then

@@ -110,3 +110,48 @@ Xray 26.9.9 与 sing-box 1.15.0-alpha.3 的临时二进制均通过官方 Releas
 以上证据位于专用主机 `/var/tmp/vpsctl-core-pending-regressions/`，各轮 `sha256` 清单记录代码身份。夹具使用临时系统根目录和可控的内核、服务、UFW、nft/DNS 替身；验证结束清理本轮夹具，诊断副本和日志保留。没有修改宿主实际代理服务或防火墙；这些结果不代表真实代理连通性验收。
 
 父任务在 `/var/tmp/vpsctl-p1-parent.kLhidA/source` 执行现有版本兼容/更新事务、DNS 以及 `hy2-runtime` 分组，全部通过，记录分别为其 `evidence/proxy-version.log`、`proxy-dns.log`、`proxy-hy2-runtime.log`。相关脚本的 `bash -n` 和 ShellCheck error 级别检查通过。五个修改的代理模块采用 `shellcheck -x -P SCRIPTDIR --extended-analysis=false` 全级别对照：基线与最终版均为 7 条既有诊断，无新增；因此不声称 ShellCheck 全级别零诊断或启用了扩展数据流分析。新增测试的语法和 error 级别检查亦通过。未运行全仓库套件或真实代理协议连接测试。
+
+## 2026-10-19：第一批模板与兼容性优化
+
+基于提交 `3890e9e2afcc6c04e884b518d37c17ebef03f483` 加本轮工作区改动。范围为默认更新避免隐式降级、AnyTLS padding 跟随内核默认、sing-box 原生整证书固定及兼容提示；未增加 CLI 参数或状态 schema，也未修改默认安装通道。工作区原有访问管理修改保持原样。
+
+全部项目执行均通过 `ssh host-vps-scripts`。证据根目录为 `/var/tmp/vpsctl-proxy-batch1.oPQewQ`，各子目录保留对应源码快照和日志。sing-box `1.14.3`、`1.15.0-alpha.7`、`1.15.0-alpha.12` 从官方 Release 下载并验证资产 SHA-256，元数据及摘要位于 `cores/`；真实 TLS 服务端使用此前保存的 Xray `26.3.27`，未替换宿主已安装内核。
+
+| 验收范围 | 结果与证据（相对上述根目录） |
+| --- | --- |
+| Release 选择与更新菜单 | PASS；`update/evidence/core-release.log`、`arguments-menu.log`。包含默认跳过、显式稳定版/tag 回退、混合 `--core all`、Release 仅查询一次、更新四项菜单及安装菜单兼容。 |
+| 同版本重建与更新事务 | PASS；`update/evidence/version-compat.log`。包含 SemVer 预发布排序、无法比较返回 3、默认跳过返回 0、已有 pending 保留、同版本配置/状态迁移及原有写入失败回滚。 |
+| 整证书固定出口的候选降级 | PASS；`update/evidence/core-update-pin.log`。绑定仅含 URI 指纹的 sing-box 出口，先更新到 alpha.8 建立 pending，再显式降到 `1.14.3`/`alpha.6`，均在提交前拒绝，二进制、配置、元数据、relay、pending 和备份摘要不变。此项使用内核/服务替身。 |
+| TLS URI、版本边界和信任语义 | PASS；`tls/evidence/unit-tls-final.log`。包含 `1.14.3`、`alpha.6`、`alpha.7`、`alpha.12`，已有 SPKI 优先、含 NUL 的摘要字节编码、编码失败传播、URI 替换清理旧信任材料、按实际内核显示固定方式及不扩展状态字段。 |
+| 原生整证书固定真实链路 | PASS；`tls/evidence/alpha7.log`、`alpha12.log`，各 12 个链路用例。包含原有 SPKI/Xray 兼容，正确/错误整证书 pin，`insecure=false/true` 均不能绕过错误 pin，以及同公钥重签后 SPKI 成功、旧整证书 pin 失败。 |
+| 旧版 TLS 行为 | PASS；`tls/evidence/stable1143.log`。sing-box `1.14.3` 的既有 SPKI 正负链路、受管证书迁移和 Xray 整证书固定通过；无 SPKI 材料的 URI 整证书固定仍明确拒绝。 |
+| AnyTLS 默认 padding | PASS；`parent/evidence/anytls-tls-real.log`、`anytls-reality-real.log`。sing-box `1.14.3` 下两个 profile 各通过一个真实协议中转链路，并复用脚本附带的切核冒烟。未做性能或流量特征评测。 |
+| 节点与独占出口切核 | PASS；`acceptance/evidence/node-enhancements.log`。无本地证书/SPKI 时切到 `1.14.3`/`alpha.6` 拒绝且状态/写入记录不变，切到 `alpha.7` 生成原生指纹，反切 Xray 保留 hex 指纹及 relay 数据；此夹具替换提交/服务边界，不代表真实 systemd 验收。 |
+| 协议列表与原有节点回归 | PASS；`parent/evidence/node-enhancements.log`、`profiles.txt`。原有节点增强测试通过；协议列表可显示版本与已知组合提示。 |
+
+降级夹具第一轮因没有形成 pending 而失败，日志保存在 `update/evidence/core-update-pin-fixture-failure.log`。随后使用真实更新流程建立 pending，仅重跑受影响分组并通过，没有放宽状态保持断言。已通过且未受后续展示文案修改影响的真实链路结果直接复用。
+
+修改过的应用脚本和测试脚本均完成远端 `bash -n`。节点模块和 sing-box 模板通过 ShellCheck error 级别检查；更新相关四文件的非递归 warning 级检查报告 13 条既有 SC2034，关闭扩展分析后的 HEAD 对照结果一致，无新增诊断。TLS 和切核测试的定向检查仍有未修改行的既有诊断，不能称为全级别零告警。递归 ShellCheck 在专用机被资源限制终止，记录为未完成；未修复环境或抑制告警，原始结果与基线对照保存在各 `evidence/` 目录。
+
+最小复验命令（登录专用机并进入对应源码快照后执行）：
+
+```bash
+VPSCTL_TEST_ONLY=core-release bash tests/unit/test-service-proxy.sh
+VPSCTL_TEST_ONLY=arguments-menu bash tests/unit/test-service-proxy.sh
+VPSCTL_TEST_ONLY=core-update-pin bash tests/unit/test-service-proxy.sh
+bash tests/unit/test-service-proxy-version-compat.sh
+bash tests/unit/test-service-proxy-relay-tls.sh
+bash tests/unit/test-service-proxy-node-enhancements.sh
+
+export SING_BOX_BINARY=/var/tmp/vpsctl-proxy-batch1.oPQewQ/cores/sing-box-1.15.0-alpha.7
+export XRAY_OLD_BINARY=/root/vpsctl-core-compat.2MKdA2/cores/xray-26.3.27
+bash tests/integration/test-service-proxy-compat-real.sh --tls
+# 将 SING_BOX_BINARY 改为 alpha.12 或 1.14.3 可复验对应 TLS 分支。
+
+export SING_BOX_BINARY=/var/tmp/vpsctl-proxy-batch1.oPQewQ/cores/sing-box-1.14.3
+export XRAY_BINARY="$XRAY_OLD_BINARY"
+CONNECTIVITY_CORE=sing-box CONNECTIVITY_PROFILE=anytls-tls bash tests/integration/test-service-proxy-relay-connectivity-real.sh
+CONNECTIVITY_CORE=sing-box CONNECTIVITY_PROFILE=anytls-reality bash tests/integration/test-service-proxy-relay-connectivity-real.sh
+```
+
+真实验收使用临时证书、配置与受控端口，退出时清理测试进程和夹具；源码、已校验内核和必要证据保留。原生 TLS 配置和详细日志含测试凭据，仅保存在专用机，不提交仓库。未运行全仓库套件、完整协议矩阵、新增场景的真实 systemd 生命周期或吞吐量基准测试；历史 Trojan/gRPC/REALITY、HY2 Chrome off 限制仍按原验收版本描述，本轮没有据此推断新版本结果。

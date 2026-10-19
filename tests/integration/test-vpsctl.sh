@@ -174,12 +174,13 @@ test_entry_version() (
     chmod 0600 "$sandbox/VERSION"
 )
 
-test_dispatch_security() {
-    local sandbox output status marker menu_command download_marker core invalid option
-    local -a invalid_args=()
+test_dispatch_security() (
+    local sandbox output status marker menu_command download_marker expected direct direct_status feature
+    local -a feature_env=() reader=() manager_options=(--no-color --non-interactive)
 
     [[ "$(uname -s)" == "Linux" ]] || return 0
     sandbox="$(mktemp -d)"
+    trap 'rm -rf -- "$sandbox"' EXIT
     mkdir -p "$sandbox/bin" "$sandbox/lib" "$sandbox/commands/network" "$sandbox/commands/system" "$sandbox/commands/security" "$sandbox/commands/service/proxy" "$sandbox/commands/test"
     cp "$TEST_ROOT/bin/vpsctl" "$sandbox/bin/vpsctl"
     cp "$TEST_ROOT"/lib/*.sh "$sandbox/lib/"
@@ -201,15 +202,15 @@ vps_env_detect() {
     VPS_ENV[user]="fixture"
     VPS_ENV[session]="non-interactive"
     VPS_ENV[interactive]="no"
-    VPS_ENV[kernel_name]="Linux"
+    VPS_ENV[kernel_name]="${VPSCTL_FIXTURE_KERNEL:-Linux}"
     VPS_ENV[kernel_release]="fixture"
     VPS_ENV[architecture]="x86_64"
-    VPS_ENV[os_id]="fixture"
+    VPS_ENV[os_id]="${VPSCTL_FIXTURE_OS:-fixture}"
     VPS_ENV[os_id_like]=""
     VPS_ENV[os_version_id]="1"
     VPS_ENV[os_codename]="fixture"
     VPS_ENV[os_pretty_name]="Fixture Linux"
-    VPS_ENV[libc]="musl"
+    VPS_ENV[libc]="${VPSCTL_FIXTURE_LIBC:-musl}"
     VPS_ENV[bash_version]="${BASH_VERSION}"
     VPS_ENV[cpu_model]="fixture"
     VPS_ENV[cpu_cores]="1"
@@ -220,7 +221,7 @@ vps_env_detect() {
     VPS_ENV[root_disk_used_percent]="0%"
     VPS_ENV[ipv4]="192.0.2.1"
     VPS_ENV[ipv6]="unavailable"
-    VPS_ENV[init_system]="none"
+    VPS_ENV[init_system]="${VPSCTL_FIXTURE_INIT:-none}"
     VPS_ENV[service_manager]="none"
     VPS_ENV[package_manager]="unknown"
     VPS_ENV[timezone]="UTC"
@@ -232,15 +233,8 @@ vps_env_detect() {
     VPS_ENV[available_congestion_controls]="unknown"
     VPS_ENV[compatibility]="limited"
     VPS_ENV[compatibility_detail]="fixture"
-}
-
-vps_env_requirements_met() {
-    VPS_ENV_MISSING_REQUIREMENTS=""
-    if [[ "${1:-}" == "linux" ]]; then
-        return 0
-    fi
-    VPS_ENV_MISSING_REQUIREMENTS="${1:-unknown}"
-    return 1
+    VPS_CAPABILITY=()
+    [[ "${VPS_ENV[kernel_name]}" != Linux ]] || VPS_CAPABILITY[linux]=1
 }
 EOF
     cat >"$sandbox/commands/network/bbr.sh" <<'EOF'
@@ -253,29 +247,6 @@ printf 'bbr_args=%s\n' "$*"
 exit "${VPSCTL_DISPATCH_STATUS:-0}"
 EOF
     chmod 0644 "$sandbox/commands/network/bbr.sh"
-
-    cat >"$sandbox/commands/network/ip-policy.sh" <<'EOF'
-#!/usr/bin/env bash
-printf 'ip_policy_args=%s\n' "$*"
-[[ -z "${VPSCTL_DISPATCH_MARKER:-}" ]] || printf 'ip-policy:%s\n' "$*" >>"$VPSCTL_DISPATCH_MARKER"
-EOF
-    chmod 0644 "$sandbox/commands/network/ip-policy.sh"
-
-    cat >"$sandbox/commands/network/rfw.sh" <<'EOF'
-#!/usr/bin/env bash
-printf 'rfw_no_color=%s\n' "${VPSCTL_NO_COLOR:-missing}"
-printf 'rfw_args=%s\n' "$*"
-[[ -z "${VPSCTL_DISPATCH_MARKER:-}" ]] || printf 'rfw:%s\n' "$*" >>"$VPSCTL_DISPATCH_MARKER"
-EOF
-    chmod 0644 "$sandbox/commands/network/rfw.sh"
-
-    cat >"$sandbox/commands/system/kernel.sh" <<'EOF'
-#!/usr/bin/env bash
-printf 'kernel_no_color=%s\n' "${VPSCTL_NO_COLOR:-missing}"
-printf 'kernel_args=%s\n' "$*"
-[[ -z "${VPSCTL_DISPATCH_MARKER:-}" ]] || printf 'kernel:%s\n' "$*" >>"$VPSCTL_DISPATCH_MARKER"
-EOF
-    chmod 0644 "$sandbox/commands/system/kernel.sh"
 
     cat >"$sandbox/commands/system/reinstall.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -291,65 +262,12 @@ printf 'swap_no_color=%s\n' "${VPSCTL_NO_COLOR:-missing}"
 printf 'swap_dry_run=%s\n' "${VPSCTL_DRY_RUN:-missing}"
 printf 'swap_yes=%s\n' "${VPSCTL_ASSUME_YES:-missing}"
 printf 'swap_noninteractive=%s\n' "${VPSCTL_NON_INTERACTIVE:-missing}"
+printf 'swap_install_deps=%s quiet=%s verbose=%s clear=%s\n' "${VPSCTL_INSTALL_DEPS:-missing}" "${VPSCTL_QUIET:-missing}" "${VPSCTL_VERBOSE:-missing}" "${VPSCTL_CLEAR:-missing}"
 printf 'swap_arg=<%s>\n' "$@"
 [[ -z "${VPSCTL_DISPATCH_MARKER:-}" ]] || printf 'swap:%s\n' "$*" >>"$VPSCTL_DISPATCH_MARKER"
 exit "${VPSCTL_DISPATCH_STATUS:-0}"
 EOF
     chmod 0644 "$sandbox/commands/system/swap.sh"
-
-    cat >"$sandbox/commands/security/access.sh" <<'EOF'
-#!/usr/bin/env bash
-printf 'access_no_color=%s\n' "${VPSCTL_NO_COLOR:-missing}"
-printf 'access_args=%s\n' "$*"
-[[ -z "${VPSCTL_DISPATCH_MARKER:-}" ]] || printf 'access:%s\n' "$*" >>"$VPSCTL_DISPATCH_MARKER"
-EOF
-    chmod 0644 "$sandbox/commands/security/access.sh"
-
-    cat >"$sandbox/commands/security/fail2ban.sh" <<'EOF'
-#!/usr/bin/env bash
-printf 'fail2ban_no_color=%s\n' "${VPSCTL_NO_COLOR:-missing}"
-printf 'fail2ban_args=%s\n' "$*"
-[[ -z "${VPSCTL_DISPATCH_MARKER:-}" ]] || printf 'fail2ban:%s\n' "$*" >>"$VPSCTL_DISPATCH_MARKER"
-EOF
-    chmod 0644 "$sandbox/commands/security/fail2ban.sh"
-
-    cat >"$sandbox/commands/service/proxy.sh" <<'EOF'
-#!/usr/bin/env bash
-printf 'proxy_no_color=%s\n' "${VPSCTL_NO_COLOR:-missing}"
-printf 'proxy_args=%s\n' "$*"
-[[ -z "${VPSCTL_DISPATCH_MARKER:-}" ]] || printf 'proxy:%s\n' "$*" >>"$VPSCTL_DISPATCH_MARKER"
-EOF
-    for module in common protocols-sing-box protocols-xray nodes core time; do
-        printf '# safe proxy module fixture: %s\n' "$module" >"$sandbox/commands/service/proxy/${module}.sh"
-        chmod 0644 "$sandbox/commands/service/proxy/${module}.sh"
-    done
-    chmod 0644 "$sandbox/commands/service/proxy.sh"
-
-    cat >"$sandbox/commands/service/tcping.sh" <<'EOF'
-#!/usr/bin/env bash
-printf 'tcping_args=%s\n' "$*"
-[[ -z "${VPSCTL_DISPATCH_MARKER:-}" ]] || printf 'tcping:%s\n' "$*" >>"$VPSCTL_DISPATCH_MARKER"
-EOF
-    chmod 0644 "$sandbox/commands/service/tcping.sh"
-
-    cat >"$sandbox/commands/service/iperf3.sh" <<'EOF'
-#!/usr/bin/env bash
-printf 'iperf3_args=%s\n' "$*"
-[[ -z "${VPSCTL_DISPATCH_MARKER:-}" ]] || printf 'iperf3:%s\n' "$*" >>"$VPSCTL_DISPATCH_MARKER"
-EOF
-    chmod 0644 "$sandbox/commands/service/iperf3.sh"
-
-    cat >"$sandbox/commands/test/nodequality.sh" <<'EOF'
-#!/usr/bin/env bash
-printf 'nodequality_args=%s\n' "$*"
-[[ -z "${VPSCTL_DISPATCH_MARKER:-}" ]] || printf 'nodequality:%s\n' "$*" >>"$VPSCTL_DISPATCH_MARKER"
-EOF
-    cat >"$sandbox/commands/test/tcpquality.sh" <<'EOF'
-#!/usr/bin/env bash
-printf 'tcpquality_args=%s\n' "$*"
-[[ -z "${VPSCTL_DISPATCH_MARKER:-}" ]] || printf 'tcpquality:%s\n' "$*" >>"$VPSCTL_DISPATCH_MARKER"
-EOF
-    chmod 0644 "$sandbox/commands/test/nodequality.sh" "$sandbox/commands/test/tcpquality.sh"
 
     output="$(bash "$sandbox/bin/vpsctl" --no-color network bbr status)"
     test_contains "$output" "no_color=1" "no-color child context"
@@ -380,193 +298,154 @@ EOF
 
     marker="$sandbox/executed"
     download_marker="$sandbox/downloaded"
-    output="$(VPSCTL_DOWNLOAD_MARKER="$download_marker" VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" network ip-policy --help)"
-    test_contains "$output" "ip_policy_args=--help" "IP policy help dispatch without glibc capability"
-    [[ -f "$download_marker" ]] || test_fail 'allowed help did not load its command bundle'
-    rm -f -- "$marker" "$download_marker"
-    status=0
-    VPSCTL_DOWNLOAD_MARKER="$download_marker" VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" network ip-policy status >/dev/null 2>&1 || status=$?
-    [[ "$status" == "3" ]] || test_fail "IP policy status without glibc capability should return 3, got ${status}"
-    [[ ! -e "$download_marker" ]] || test_fail 'unsupported platform loaded a command bundle before rejection'
-    [[ ! -e "$marker" ]] || test_fail "IP policy status bypassed the glibc capability gate"
 
-    output="$(VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" --no-color network rfw --help)"
-    test_contains "$output" "rfw_args=--help" "RFW global help dispatch without init capability"
-    output="$(VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" network rfw help)"
-    test_contains "$output" "rfw_args=help" "RFW help dispatch without init capability"
-    output="$(VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" network rfw status)"
-    test_contains "$output" "rfw_args=status" "RFW status dispatch without init capability"
-
-    output="$(VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" --no-color system kernel status)"
-    test_contains "$output" "kernel_no_color=1" "kernel no-color child context"
-    test_contains "$output" "kernel_args=status" "kernel status dispatch"
+    # Check complete argv boundaries, including empty and newline arguments.
+    # shellcheck disable=SC2016 # Forward shell metacharacters literally.
+    output="$(bash "$sandbox/bin/vpsctl" --no-color --no-clear --dry-run --install-deps --yes --non-interactive --quiet --verbose system swap set --size '2 G' '' $'line one\nline two' 'a $b; c' '*')"
+    # shellcheck disable=SC2016 # This literal is the expected argv serialization.
+    expected=$'swap_arg=<set>\nswap_arg=<--size>\nswap_arg=<2 G>\nswap_arg=<>\nswap_arg=<line one\nline two>\nswap_arg=<a $b; c>\nswap_arg=<*>'
+    [[ "${output#*swap_install_deps=1 quiet=1 verbose=1 clear=0$'\n'}" == "$expected" ]] || test_fail "dispatch changed argv boundaries: $output"
+    test_contains "$output" 'swap_no_color=1' 'display child context'
+    test_contains "$output" 'swap_dry_run=1' 'dry-run child context'
+    test_contains "$output" 'swap_yes=1' 'confirmation child context'
+    test_contains "$output" 'swap_noninteractive=1' 'noninteractive child context'
+    test_contains "$output" 'swap_install_deps=1 quiet=1 verbose=1 clear=0' 'remaining global child context'
     output="$(bash "$sandbox/bin/vpsctl" --non-interactive system reinstall run -- windows --image-name 'Windows 11 Enterprise LTSC 2024' --iso 'https://example.invalid/a.iso?x=1&y=two' --password 'a $b; c')"
-    test_contains "$output" 'reinstall_noninteractive=1' "reinstall global context"
-    test_contains "$output" 'reinstall_arg=<-->' "reinstall upstream separator"
-    test_contains "$output" 'reinstall_arg=<Windows 11 Enterprise LTSC 2024>' "reinstall spaced argument"
-    test_contains "$output" 'reinstall_arg=<https://example.invalid/a.iso?x=1&y=two>' "reinstall URL argument"
-    # shellcheck disable=SC2016 # The dollar sign must remain literal in forwarded arguments.
-    test_contains "$output" 'reinstall_arg=<a $b; c>' "reinstall literal shell characters"
-    status=0
-    VPSCTL_DISPATCH_STATUS=17 bash "$sandbox/bin/vpsctl" system reinstall run dd >/dev/null 2>&1 || status=$?
-    [[ "$status" == 17 ]] || test_fail "reinstall exit status was not preserved: $status"
-
-    output="$(bash "$sandbox/bin/vpsctl" --no-color system swap status)"
-    test_contains "$output" 'swap_no_color=1' 'swap no-color child context'
-    test_contains "$output" 'swap_arg=<status>' 'swap status dispatch without root or init capability'
-    output="$(bash "$sandbox/bin/vpsctl" --dry-run --yes --non-interactive system swap set --size 2G)"
-    test_contains "$output" 'swap_dry_run=1' 'swap dry-run child context'
-    test_contains "$output" 'swap_yes=1' 'swap confirmation child context'
-    test_contains "$output" 'swap_noninteractive=1' 'swap noninteractive child context'
-    test_contains "$output" 'swap_arg=<set>' 'swap set dispatch'
-    test_contains "$output" 'swap_arg=<--size>' 'swap size option dispatch'
-    test_contains "$output" 'swap_arg=<2G>' 'swap size value dispatch'
-    status=0
-    VPSCTL_DISPATCH_STATUS=30 bash "$sandbox/bin/vpsctl" system swap disable >/dev/null 2>&1 || status=$?
-    [[ "$status" == 30 ]] || test_fail "swap partial completion exit status was not preserved: $status"
-    rm -f -- "$marker"
-    status=0
-    VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" --dry-run system kernel install >/dev/null 2>&1 || status=$?
-    [[ "$status" == "3" ]] || test_fail "kernel install outside Debian family should return 3, got ${status}"
-    [[ ! -e "$marker" ]] || test_fail "kernel install bypassed the Debian-family capability gate"
-
-    output="$(VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" --no-color security access status)"
-    test_contains "$output" "access_no_color=1" "access no-color child context"
-    test_contains "$output" "access_args=status" "access status dispatch"
-    output="$(VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" security access status --user alice --json)"
-    test_contains "$output" "access_args=status --user alice --json" "access parameterized status dispatch without init capability"
-    output="$(VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" security access session verify --transaction tx-test)"
-    test_contains "$output" "access_args=session verify --transaction tx-test" "access proof dispatch without init capability"
-    output="$(VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" security access --help)"
-    test_contains "$output" "access_args=--help" "access help dispatch without init capability"
-
-    output="$(VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" --no-color security fail2ban status)"
-    test_contains "$output" "fail2ban_no_color=1" "Fail2ban no-color child context"
-    test_contains "$output" "fail2ban_args=status" "Fail2ban status dispatch"
-    output="$(VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" security fail2ban status --json)"
-    test_contains "$output" "fail2ban_args=status --json" "Fail2ban JSON status dispatch without init capability"
-    output="$(VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" security fail2ban --help)"
-    test_contains "$output" "fail2ban_args=--help" "Fail2ban help dispatch without init capability"
-
-    output="$(VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" --no-color service proxy status)"
-    test_contains "$output" "proxy_no_color=1" "proxy no-color child context"
-    output="$(VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" service proxy status --json)"
-    test_contains "$output" 'proxy_args=status --json' 'proxy JSON status without service capability'
-    for core in all sing-box xray; do
-        output="$(bash "$sandbox/bin/vpsctl" service proxy status --core "$core")"
-        test_contains "$output" "proxy_args=status --core $core" 'proxy selected-core status without service capability'
-        output="$(bash "$sandbox/bin/vpsctl" service proxy status --core "$core" --json)"
-        test_contains "$output" "proxy_args=status --core $core --json" 'proxy selected-core JSON status without service capability'
-        output="$(bash "$sandbox/bin/vpsctl" service proxy status --json --core "$core")"
-        test_contains "$output" "proxy_args=status --json --core $core" 'proxy reordered JSON status without service capability'
-    done
-    output="$(VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" service proxy --help)"
-    test_contains "$output" "proxy_args=--help" "proxy global help dispatch without service capability"
-    output="$(VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" service proxy help)"
-    test_contains "$output" "proxy_args=help" "proxy help dispatch without service capability"
-    output="$(VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" service proxy profiles)"
-    test_contains "$output" "proxy_args=profiles" "proxy profiles dispatch without service capability"
-    output="$(VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" service proxy time status)"
-    test_contains "$output" "proxy_args=time status" "proxy time status dispatch without service capability"
-    output="$(VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" service proxy time status --json)"
-    test_contains "$output" "proxy_args=time status --json" "proxy JSON time status dispatch without service capability"
-
-    output="$(VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" service tcping --help)"
-    test_contains "$output" "tcping_args=--help" "tcping help dispatch without service capability"
-    output="$(VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" service tcping status)"
-    test_contains "$output" "tcping_args=status" "tcping status dispatch without service capability"
-    for option in help -h --help status; do
-        output="$(VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" service iperf3 "$option")"
-        test_contains "$output" "iperf3_args=$option" "iperf3 $option dispatch without service capability"
+    test_contains "$output" 'reinstall_noninteractive=1' 'reinstall global context'
+    test_contains "$output" 'reinstall_arg=<-->' 'upstream separator'
+    test_contains "$output" 'reinstall_arg=<Windows 11 Enterprise LTSC 2024>' 'spaced upstream argument'
+    test_contains "$output" 'reinstall_arg=<https://example.invalid/a.iso?x=1&y=two>' 'URL upstream argument'
+    # shellcheck disable=SC2016 # Forward shell metacharacters literally.
+    test_contains "$output" 'reinstall_arg=<a $b; c>' 'literal upstream argument'
+    for status in 7 17 30; do
+        direct_status=0
+        VPSCTL_DISPATCH_STATUS="$status" bash "$sandbox/bin/vpsctl" system swap arbitrary >/dev/null 2>&1 || direct_status=$?
+        [[ "$direct_status" == "$status" ]] || test_fail "dispatch lost child exit status $status: $direct_status"
     done
 
-    output="$(VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" test nodequality help)"
-    test_contains "$output" "nodequality_args=help" "NodeQuality help dispatch without root capability"
-    output="$(VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" test tcpquality --help)"
-    test_contains "$output" "tcpquality_args=--help" "TCPQuality help dispatch without root capability"
-
-    rm -f -- "$marker"
-    status=0
-    VPSCTL_DOWNLOAD_MARKER="$download_marker" VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" test nodequality >/dev/null 2>&1 || status=$?
-    [[ "$status" == "4" ]] || test_fail "NodeQuality execution without root capability should return 4, got ${status}"
-    [[ ! -e "$marker" ]] || test_fail "NodeQuality execution bypassed the root capability gate"
-    [[ ! -e "$download_marker" ]] || test_fail 'unprivileged execution loaded a bundle before rejection'
-    status=0
-    VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" test tcpquality help extra >/dev/null 2>&1 || status=$?
-    [[ "$status" == "4" ]] || test_fail "malformed TCPQuality help without root capability should return 4, got ${status}"
-    [[ ! -e "$marker" ]] || test_fail "malformed TCPQuality help bypassed the root capability gate"
+    # Inject startup hooks after manager startup; they must not reach its child.
+    printf 'touch %q\n' "$marker" >"$sandbox/startup-hook"
+    cat >>"$sandbox/lib/distribution.sh" <<'EOF'
+vps_distribution_ensure_command() {
+    [[ -z "${VPSCTL_DOWNLOAD_MARKER:-}" ]] || printf '%s\n' "$1" >>"$VPSCTL_DOWNLOAD_MARKER"
+    export BASH_ENV="${VPSCTL_TEST_STARTUP_HOOK:-}" ENV="${VPSCTL_TEST_STARTUP_HOOK:-}"
+}
+EOF
+    output="$(VPSCTL_TEST_STARTUP_HOOK="$sandbox/startup-hook" bash "$sandbox/bin/vpsctl" network bbr status)"
+    test_contains "$output" 'bbr_args=status' 'child runs with startup hooks removed'
+    [[ ! -e "$marker" ]] || test_fail 'child executed BASH_ENV or ENV startup hook'
 
     status=0
-    VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" --dry-run network rfw install >/dev/null 2>&1 || status=$?
-    [[ "$status" == "3" ]] || test_fail "RFW dry-run install without init capability should return 3, got ${status}"
-    [[ ! -e "$marker" ]] || test_fail "RFW dry-run install bypassed the capability gate"
+    output="$(VPSCTL_DOWNLOAD_MARKER="$download_marker" bash "$sandbox/bin/vpsctl" system missing 2>&1)" || status=$?
+    [[ "$status" == 2 && ! -e "$download_marker" ]] || test_fail 'unknown command was loaded or did not return 2'
+    test_contains "$output" '未知命令' 'unknown command diagnostic'
     status=0
-    VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" network rfw status extra >/dev/null 2>&1 || status=$?
-    [[ "$status" == "3" ]] || test_fail "RFW malformed status without init capability should return 3, got ${status}"
-    [[ ! -e "$marker" ]] || test_fail "RFW malformed status bypassed the capability gate"
-    status=0
-    output="$(VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" security access 2>&1)" || status=$?
-    [[ "$status" == "3" ]] || test_fail "access menu without init capability should return 3, got ${status}"
-    test_not_contains "$output" "unbound variable" "access menu without subcommand"
-    test_contains "$output" "init:systemd" "access menu retains init capability requirement"
-    [[ ! -e "$marker" ]] || test_fail "access menu bypassed the capability gate"
-    status=0
-    VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" security access status --unknown >/dev/null 2>&1 || status=$?
-    [[ "$status" == "3" ]] || test_fail "access malformed status without init capability should return 3, got ${status}"
-    [[ ! -e "$marker" ]] || test_fail "access malformed status bypassed the capability gate"
-    status=0
-    VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" security fail2ban status --unknown >/dev/null 2>&1 || status=$?
-    [[ "$status" == "3" ]] || test_fail "Fail2ban malformed status without init capability should return 3, got ${status}"
-    [[ ! -e "$marker" ]] || test_fail "Fail2ban malformed status bypassed the capability gate"
-    status=0
-    VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" --dry-run security fail2ban install >/dev/null 2>&1 || status=$?
-    [[ "$status" == "3" ]] || test_fail "Fail2ban install without init capability should return 3, got ${status}"
-    [[ ! -e "$marker" ]] || test_fail "Fail2ban install bypassed the capability gate"
-    status=0
-    VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" --dry-run security access ssh prepare --port 2222 --firewall manual >/dev/null 2>&1 || status=$?
-    [[ "$status" == "3" ]] || test_fail "access prepare without init capability should return 3, got ${status}"
-    [[ ! -e "$marker" ]] || test_fail "access prepare bypassed the capability gate"
-    status=0
-    VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" --dry-run service proxy update >/dev/null 2>&1 || status=$?
-    [[ "$status" == "3" ]] || test_fail "proxy dry-run update without service capability should return 3, got ${status}"
-    [[ ! -e "$marker" ]] || test_fail "proxy dry-run update bypassed the capability gate"
-    status=0
-    VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" --dry-run service proxy install >/dev/null 2>&1 || status=$?
-    [[ "$status" == "3" ]] || test_fail "proxy dry-run install without service capability should return 3, got ${status}"
-    [[ ! -e "$marker" ]] || test_fail "proxy dry-run install bypassed the capability gate"
-    status=0
-    VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" service proxy start >/dev/null 2>&1 || status=$?
-    [[ "$status" == "3" ]] || test_fail "proxy start without service capability should return 3, got ${status}"
-    [[ ! -e "$marker" ]] || test_fail "proxy start bypassed the capability gate"
-    for invalid in '--json --json' '--core xray --core all' '--core' '--core --json' '--core unknown' '--json extra' '--unknown'; do
-        IFS=' ' read -r -a invalid_args <<<"$invalid"
+    output="$(VPSCTL_FIXTURE_KERNEL=Darwin VPSCTL_DOWNLOAD_MARKER="$download_marker" VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" network bbr --help 2>&1)" || status=$?
+    [[ "$status" == 3 ]] || test_fail "non-Linux dispatch should return 3: $status $output"
+    test_contains "$output" 'linux' 'Linux requirement diagnostic'
+    [[ ! -e "$marker" && ! -e "$download_marker" ]] || test_fail 'non-Linux dispatch loaded or executed a bundle'
+
+    # The same transport now runs real feature entrypoints. Only environment
+    # detection and distribution are fixtures; business guards remain real.
+    cp -a "$TEST_ROOT/commands/." "$sandbox/commands/"
+    mkdir -p "$sandbox/system" "$sandbox/tools"
+    feature_env=(env VPSCTL_TESTING=1 VPSCTL_SYSTEM_ROOT="$sandbox/system" VPSCTL_NO_COLOR=1
+        VPSCTL_NON_INTERACTIVE=1 VPSCTL_ENV_OS_ID=fixture VPSCTL_ENV_LIBC=musl
+        VPSCTL_ENV_INIT=none VPSCTL_ENV_PACKAGE_MANAGER=unknown VPSCTL_ENV_ARCH=x86_64
+        VPSCTL_ENV_VIRTUALIZATION=unknown)
+
+    assert_feature_result() {
+        local wanted_status="$1" wanted_output="$2" domain="$3" action="$4"
+        shift 4
         status=0
-        VPSCTL_DOWNLOAD_MARKER="$download_marker" VPSCTL_DISPATCH_MARKER="$marker" \
-            bash "$sandbox/bin/vpsctl" service proxy status "${invalid_args[@]}" >/dev/null 2>&1 || status=$?
-        [[ "$status" == 3 ]] || test_fail "malformed proxy status bypassed service capability: $invalid (rc=$status)"
-        [[ ! -e "$marker" && ! -e "$download_marker" ]] || test_fail "malformed proxy status loaded or ran a command: $invalid"
-    done
-    status=0
-    VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" service proxy profiles extra >/dev/null 2>&1 || status=$?
-    [[ "$status" == "3" ]] || test_fail "proxy malformed profiles without service capability should return 3, got ${status}"
-    [[ ! -e "$marker" ]] || test_fail "proxy malformed profiles bypassed the capability gate"
-    status=0
-    VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" service tcping install >/dev/null 2>&1 || status=$?
-    [[ "$status" == "3" ]] || test_fail "tcping install without service capability should return 3, got ${status}"
-    [[ ! -e "$marker" ]] || test_fail "tcping install bypassed the capability gate"
-    status=0
-    VPSCTL_DISPATCH_MARKER="$marker" bash "$sandbox/bin/vpsctl" service tcping status extra >/dev/null 2>&1 || status=$?
-    [[ "$status" == "3" ]] || test_fail "tcping malformed status without service capability should return 3, got ${status}"
-    [[ ! -e "$marker" ]] || test_fail "tcping malformed status bypassed the capability gate"
-    for invalid in 'install' 'start' 'uninstall' 'status extra' 'status --json' 'help extra' '--help extra'; do
-        IFS=' ' read -r -a invalid_args <<<"$invalid"
-        status=0
-        VPSCTL_DOWNLOAD_MARKER="$download_marker" VPSCTL_DISPATCH_MARKER="$marker" \
-            bash "$sandbox/bin/vpsctl" service iperf3 "${invalid_args[@]}" >/dev/null 2>&1 || status=$?
-        [[ "$status" == 3 ]] || test_fail "iperf3 capability gate accepted $invalid (rc=$status)"
-        [[ ! -e "$marker" && ! -e "$download_marker" ]] || test_fail "iperf3 capability rejection loaded or ran a command: $invalid"
-    done
+        output="$("${reader[@]}" "${feature_env[@]}" bash "$sandbox/bin/vpsctl" "${manager_options[@]}" "$domain" "$action" "$@" 2>&1)" || status=$?
+        direct_status=0
+        direct="$("${reader[@]}" "${feature_env[@]}" bash "$sandbox/commands/$domain/$action.sh" "$@" 2>&1)" || direct_status=$?
+        [[ "$status" == "$wanted_status" ]] || test_fail "$domain $action $*: expected $wanted_status, got $status: $output"
+        [[ "$status" == "$direct_status" && "$output" == "$direct" ]] || test_fail "$domain $action $*: manager/direct differ (rc=$status/$direct_status): $output / $direct"
+        test_contains "$output" "$wanted_output" "$domain $action real entrypoint"
+        printf 'PASS: manager/direct %s %s (rc=%s, %s)\n' "$domain" "$action $*" "$status" "$wanted_output"
+    }
 
+    assert_feature_result 3 'glibc' network ip-policy status
+    assert_feature_result 3 'Debian/Ubuntu' system kernel install --type official
+    assert_feature_result 3 'systemd' security fail2ban install
+    assert_feature_result 3 'systemd 或 OpenRC' service iperf3 start
+    assert_feature_result 3 'systemd 或 OpenRC' service tcping start
+    assert_feature_result 3 'systemd' network rfw install
+    assert_feature_result 3 'systemd 或 OpenRC' service proxy install --core sing-box
+    assert_feature_result 2 '未知' service iperf3 status --unknown
+    assert_feature_result 2 '不接受参数' test tcpquality help extra
+
+    cat >"$sandbox/tools/systemctl" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$VPSCTL_SYSTEMCTL_MARKER"
+exit 99
+EOF
+    chmod 0755 "$sandbox/tools/systemctl"
+    feature_env+=(PATH="$sandbox/tools:$PATH" VPSCTL_SYSTEMCTL_MARKER="$sandbox/systemctl-called")
+    for feature in none openrc; do
+        feature_env+=(VPSCTL_FIXTURE_INIT="$feature" VPSCTL_ENV_INIT="$feature")
+        assert_feature_result 0 "\"platform\": \"$feature\"" security access status --json
+        test_contains "$output" '"service": "unknown"' 'non-systemd SSH service is unknown'
+        test_contains "$output" '"service_state": "unknown"' 'non-systemd SSH service state is unknown'
+        [[ ! -e "$sandbox/systemctl-called" ]] || test_fail 'Access non-systemd status invoked systemctl'
+        assert_feature_result 0 'SSH 服务' security access status
+        expected="$output"
+        assert_feature_result 0 'SSH 服务' security access
+        [[ "$output" == "$expected" ]] || test_fail 'noninteractive Access default differs from status'
+        assert_feature_result 0 '用法' security access --help
+        assert_feature_result 2 '未知' security access status --unknown
+        assert_feature_result 3 'Debian/Ubuntu' security access ssh prepare --port 2222 --firewall manual
+        assert_feature_result 3 'Debian/Ubuntu' security access session verify --transaction tx-test
+        [[ ! -e "$sandbox/systemctl-called" ]] || test_fail 'Access unsupported platform invoked systemctl'
+    done
+    # A supported OS still requires systemd for writes, and unsupported OS
+    # status remains readable while its writes keep the OS-family guard.
+    feature_env+=(VPSCTL_FIXTURE_OS=ubuntu VPSCTL_ENV_OS_ID=ubuntu)
+    assert_feature_result 3 'systemd' security access ssh prepare --port 2222 --firewall manual
+    assert_feature_result 3 'systemd' security access session verify --transaction tx-test
+    if command -v script >/dev/null 2>&1; then
+        # With a TTY, an absent Access action still enters the strict menu gate.
+        feature_env+=(VPSCTL_NON_INTERACTIVE=0)
+        printf -v menu_command '%q ' "${feature_env[@]}" bash "$sandbox/bin/vpsctl" --no-color security access
+        status=0
+        output="$(printf 'q\n' | script -q -e -f -c "$menu_command" /dev/null 2>&1)" || status=$?
+        [[ "$status" == 3 ]] || test_fail "Access TTY menu without systemd should return 3: $status $output"
+        test_contains "$output" 'systemd' 'real Access menu platform gate'
+        feature_env+=(VPSCTL_NON_INTERACTIVE=1)
+    else
+        printf 'SKIP: Access TTY menu test requires script\n'
+    fi
+    feature_env+=(VPSCTL_FIXTURE_OS=fixture VPSCTL_ENV_OS_ID=fixture VPSCTL_FIXTURE_INIT=systemd VPSCTL_ENV_INIT=systemd)
+    assert_feature_result 3 'Debian/Ubuntu' security access ssh prepare --port 2222 --firewall manual
+
+    # Root is tested with an actual unprivileged process, not capability flags.
+    feature_env=(env VPSCTL_TESTING=0 VPSCTL_NO_COLOR=1 VPSCTL_NON_INTERACTIVE=0)
+    manager_options=(--no-color)
+    if ((EUID == 0)); then
+        command -v setpriv >/dev/null 2>&1 || test_fail 'real non-root dispatch test requires setpriv'
+        chmod 0755 "$sandbox"
+        reader=(setpriv --reuid=65534 --regid=65534 --clear-groups)
+    fi
+    assert_feature_result 4 'root' test nodequality
+    assert_feature_result 2 '不接受参数' test tcpquality help extra
+    manager_options=(--no-color --non-interactive)
+    feature_env=(env VPSCTL_TESTING=0 VPSCTL_NO_COLOR=1
+        VPSCTL_NON_INTERACTIVE=1 VPSCTL_ENV_OS_ID=ubuntu VPSCTL_FIXTURE_OS=ubuntu
+        VPSCTL_ENV_INIT=none VPSCTL_FIXTURE_INIT=none)
+    assert_feature_result 0 '"platform": "none"' security access status --json
+    test_contains "$output" '"service_state": "unknown"' 'actual non-root Access status'
+    reader=()
+
+    rm -f -- "$marker"
+    mkdir -p "$sandbox/outside"
+    printf 'touch %q\n' "$marker" >"$sandbox/outside/bbr.sh"
+    rm -- "$sandbox/commands/network/bbr.sh"
+    ln -s ../../outside/bbr.sh "$sandbox/commands/network/bbr.sh"
+    status=0
+    bash "$sandbox/bin/vpsctl" network bbr status >/dev/null 2>&1 || status=$?
+    [[ "$status" == 3 && ! -e "$marker" ]] || test_fail 'symlinked command file was not safely rejected'
     rm -rf -- "$sandbox/commands/network"
     mkdir -p "$sandbox/outside"
     cat >"$sandbox/outside/bbr.sh" <<EOF
@@ -578,8 +457,7 @@ EOF
     bash "$sandbox/bin/vpsctl" network bbr status >/dev/null 2>&1 || status=$?
     [[ "$status" == "3" ]] || test_fail "symlinked command ancestor should return 3, got ${status}"
     [[ ! -e "$marker" ]] || test_fail "symlinked command ancestor was executed"
-    rm -rf -- "$sandbox"
-}
+)
 
 test_menu_self_lifecycle() (
     [[ "$(uname -s)" == Linux ]] || return 0
@@ -688,6 +566,12 @@ EOF
         fi
     done
 )
+
+if [[ "${VPSCTL_TEST_ONLY:-}" == dispatch ]]; then
+    test_dispatch_security
+    printf 'PASS: vpsctl dispatch tests\n'
+    exit 0
+fi
 
 if [[ "${VPSCTL_TEST_ONLY:-}" == entry-version ]]; then
     test_entry_version

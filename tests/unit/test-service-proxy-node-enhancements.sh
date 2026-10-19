@@ -212,7 +212,7 @@ assert_json "$(<"${TEST_TEMP}/config-sing-box.json")" \
 # checked against the target before staging certificates or changing either state.
 # This synthetic full-certificate pin checks state/config preservation only;
 # this unit does not create the remote certificate or perform a TLS handshake.
-relay_cert_pin=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+relay_cert_pin=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
 relay_uri="hysteria2://relay-password@relay.example:443?sni=relay.example&insecure=1&pinSHA256=${relay_cert_pin}&obfs=salamander&obfs-password=relay-obfs#relay"
 descriptor="$(proxy_relay_uri_parse "$relay_uri" hysteria2)"
 jq -n --arg node "$hy_id" --arg uri "$relay_uri" --argjson descriptor "$descriptor" '{schema_version:1,
@@ -235,6 +235,38 @@ assert_json "$(<"$PROXY_RELAY_FILE")" '.exits[0].core == "xray" and (.exits[0].d
 assert_json "$(<"${TEST_TEMP}/config-xray.json")" \
     ".outbounds[] | select(.protocol == \"hysteria\") | .streamSettings.tlsSettings.pinnedPeerCertSha256 == \"$relay_cert_pin\"" 'exclusive exit retains full-certificate pin in Xray configuration'
 assert_json "$(proxy_manifest_node "$hy_id")" '.ip_strategy == "ipv6_only" and .options.up_mbps == 123 and .options.down_mbps == 456' 'bound-node switch retains temporarily inactive direct policy and bandwidth'
+
+# A URI-only whole-certificate pin cannot migrate to an older sing-box. Neither
+# local PEM discovery nor cached SPKI is available in this fixture.
+assert_json "$(<"$PROXY_RELAY_FILE")" '.schema_version == 1 and .exits[0].client_options == {}' 'URI-only exit has no cached SPKI or schema extension'
+if _proxy_relay_find_certificate_pins "$relay_cert_pin" "$PROXY_MANIFEST" >/dev/null; then
+    fail 'URI-only switch fixture unexpectedly resolved a local certificate'
+fi
+pin_switch_node="$(proxy_manifest_node "$hy_id")"
+pin_switch_relay="$(<"$PROXY_RELAY_FILE")"
+for old_version in 1.14.3 1.15.0-alpha.6; do
+    TEST_SB_VERSION="$old_version"
+    pin_switch_configs="$(sha256sum "${TEST_TEMP}/config-xray.json" "${TEST_TEMP}/config-sing-box.json")"
+    reject_without_writes proxy_node_core_set --id "$hy_id" --core sing-box --confirm-disruptive
+    [[ "$(<"${TEST_TEMP}/output")" == *'1.15.0-alpha.7'* ]] || fail 'rejected switch must explain the native whole-certificate pin boundary'
+    assert_equal "$pin_switch_configs" "$(sha256sum "${TEST_TEMP}/config-xray.json" "${TEST_TEMP}/config-sing-box.json")" 'rejected whole-pin switch retains both installed configurations'
+done
+
+# The first supported version migrates the exclusive exit and emits digest bytes
+# as Base64 while retaining URI/state data; switching back preserves the hex pin.
+TEST_SB_VERSION=1.15.0-alpha.7
+run_ok proxy_node_core_set --id "$hy_id" --core sing-box --confirm-disruptive
+assert_json "$(<"${TEST_TEMP}/config-sing-box.json")" \
+    '.outbounds[] | select(.tag == "relay-exit-exit-aaaaaaaaaaaaaaaa") | .tls | .certificate_sha256 == ["AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="] and .insecure == false and (has("certificate_public_key_sha256") | not)' 'alpha.7 switch renders native whole-certificate pin without weakening TLS'
+assert_equal "$(jq -Sc 'del(.core,.updated_at,.tls.certificate_path,.tls.key_path)' <<<"$pin_switch_node")" \
+    "$(jq -Sc 'del(.core,.updated_at,.tls.certificate_path,.tls.key_path)' <<<"$(proxy_manifest_node "$hy_id")")" 'native-pin switch retains every non-path node runtime field'
+assert_json "$(<"$PROXY_RELAY_FILE")" '.exits[0].core == "sing-box" and .schema_version == 1 and .exits[0].client_options == {}' 'native-pin switch adds no stored pin fields or schema changes'
+run_ok proxy_node_core_set --id "$hy_id" --core xray --confirm-disruptive
+assert_json "$(<"${TEST_TEMP}/config-xray.json")" \
+    ".outbounds[] | select(.protocol == \"hysteria\") | .streamSettings.tlsSettings.pinnedPeerCertSha256 == \"$relay_cert_pin\"" 'native-pin reverse switch restores Xray whole-certificate hex pin'
+assert_equal "$(jq -Sc '.exits |= map(del(.updated_at))' <<<"$pin_switch_relay")" \
+    "$(jq -Sc '.exits |= map(del(.updated_at))' "$PROXY_RELAY_FILE")" 'native-pin round trip retains relay URI, descriptor, options and binding'
+TEST_SB_VERSION=1.14.0
 
 run_ok proxy_node_add --profile hysteria2 --core xray --name hy-xray --port 30202 --address proxy.example
 assert_json "$(node_named hy-xray)" '.core == "xray" and .options.obfs_type == "none" and .options.up_mbps == 10000 and .options.down_mbps == 10000 and (.options | has("bbr_profile") | not)' 'Xray Hysteria2 CLI retains original bandwidth defaults without sing-box options'

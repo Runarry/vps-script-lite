@@ -11,10 +11,10 @@
 | 风险 | `disruptive` |
 | 权限 | `optional-root`；帮助、公开状态和第二会话证明可由普通用户执行，所有变更要求 root |
 | 演练 | `supported` |
-| 能力要求 | `linux,init:systemd` |
+| 能力要求 | 状态查询要求 `linux`；修改、交互菜单与事务操作要求 `linux,init:systemd` |
 | 生命周期 | `experimental` |
 
-当前 SSH 服务编排只支持 systemd。项目其他功能对 OpenRC 的支持不代表本命令支持 OpenRC；在 OpenRC、SysV、WSL、容器或无法唯一确定 SSH systemd unit 的环境中，不应尝试 SSH 应用、准备、提交、中止或恢复。功能脚本还会检查账户工具、OpenSSH 服务端、`sshd -t` 等动作实际需要的前置条件。
+状态查询在 Linux 上尽力读取可获得的信息，不要求 systemd 或特定发行版。当前修改、交互菜单与事务操作仍只支持 Debian/Ubuntu 与 RHEL 系的 systemd 环境，不提供 OpenRC 服务管理；在 OpenRC、SysV、WSL、容器或无法唯一确定 SSH systemd unit 的环境中，不应尝试 SSH 应用、准备、提交、中止或恢复。功能脚本还会检查账户工具、OpenSSH 服务端、`sshd -t` 等动作实际需要的前置条件。
 
 本命令只管理本机账户、密码、`authorized_keys` 和自己的 SSH drop-in。它不管理云安全组、托管防火墙、路由器端口映射、堡垒机策略、PAM/LDAP/SSSD 身份源、SELinux 自定义端口标签或发行版之外的 SSH 守护进程。
 
@@ -163,6 +163,8 @@ prepare 先放行候选端口；commit 在新会话证明通过后才移除本�
 
 `status [--user USER]` 显示 SSH 服务、受管配置、有效端口、实际监听、防火墙后端与显式端口规则、待处理事务；指定用户时附加账户和公钥状态。防火墙字段不把云安全组、默认策略或复杂规则集猜测成“可达”，外部可达性仍由第二会话验证。`--json` 输出同一状态的机器可读表示，但不得包含密码、私钥、公钥正文或一次性证明秘密。
 
+无终端或指定 `--non-interactive` 时，不带子命令也执行同一状态查询。状态查询不会安装依赖、修改配置或操作服务，指定 `--install-deps` 也不会改变这一点；缺少工具或读取权限时仅返回可获得的信息。JSON 保留 `schema_version: 1` 和现有字段类型，`platform` 为实际探测到的 init 值，无法识别时为 `unknown`。非 systemd 环境不调用 `systemctl`，`sshd.service` 与 `sshd.service_state` 均为 `unknown`；systemd 查询失败或处于未确定状态时，`service_state` 也为 `unknown`，只有确认停止时才为 `inactive`。
+
 `restore --backup ID` 根据备份类型恢复一次直接登录策略应用（`ssh-policy`）、一次 SSH 事务（`ssh`：受管配置、被迁移的 Port 来源文件和 vpsctl 自有防火墙状态）或一次 `authorized_keys` 修改。直接策略备份恢复不调整端口或防火墙。恢复是中断性动作，要求 root、强确认与当前内容哈希漂移检查；它不是账户数据库、密码哈希、全部公钥或外部防火墙的全机快照。存在待处理 SSH 事务时优先使用对应 `ssh abort`，不要用历史 restore 跨过活动事务。
 
 建议恢复顺序：
@@ -181,7 +183,7 @@ prepare 先放行候选端口；commit 在新会话证明通过后才移除本�
 
 常见退出码遵循项目统一约定：`2` 参数错误，`3` 前置条件或依赖不满足，`4` 权限不足，`10` 配置或输入校验失败，`20` 外部命令或服务操作失败，`30` 部分完成或需要人工恢复，`130` 用户中断。发生 `30` 时应立即保留当前会话并按命令输出的事务/备份路径恢复。
 
-所有验证必须通过 `ssh host-vps-scripts` 在专用真实环境执行，不得在当前系统或 WSL 运行项目代码。至少覆盖：普通用户/root 权限、用户和密码失败后的部分完成、公钥去重与权限、dry-run 零写入、登录策略直接应用及失败恢复、策略备份恢复、复杂配置写前拒绝、双端口监听、新非 root 会话证明、证明过期/复用/错误端口拒绝、commit 后旧端口收敛、abort、历史 restore、防火墙自动与手工模式，以及断开原会话后仍可从候选会话恢复。OpenRC 只验证入口明确拒绝，不作为支持平台验收。
+所有验证必须通过 `ssh host-vps-scripts` 在专用真实环境执行，不得在当前系统或 WSL 运行项目代码。至少覆盖：普通用户/root 权限、用户和密码失败后的部分完成、公钥去重与权限、dry-run 零写入、登录策略直接应用及失败恢复、策略备份恢复、复杂配置写前拒绝、双端口监听、新非 root 会话证明、证明过期/复用/错误端口拒绝、commit 后旧端口收敛、abort、历史 restore、防火墙自动与手工模式，以及断开原会话后仍可从候选会话恢复。OpenRC 验证状态查询可用且修改、交互菜单与事务操作明确拒绝，不作为 SSH 服务管理的支持平台验收。
 
 仓库提供不纳入默认测试套件的显式真实验收脚本 `tests/integration/test-security-access-real.sh`。它只应在专用主机以 `VPSCTL_REAL_ACCESS_TEST=1` 启用，并要求调用方提供可登录管理员、私钥路径、该用户可读的项目副本和空闲候选端口；脚本在同一持续 root 会话内完成双端口 prepare、无 TTY 的 publickey 第二会话证明、root-only 证明权限检查、abort 与配置哈希复原检查。`VPSCTL_REAL_ACCESS_USER=root` 验证纯端口修改；非 root 管理员则验证禁用密码后的公钥登录，并需免密 sudo。
 

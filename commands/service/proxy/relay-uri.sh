@@ -701,23 +701,42 @@ proxy_relay_normalize_exit() {
     printf '%s' "$exit_json"
 }
 
-_proxy_relay_require_sb_version() {
-    local version="${1-}" minimum="$2" major minor required_minor
-    [[ -n "$version" ]] || return 0
+_proxy_relay_sb_version_at_least() {
+    local version="${1-}" minimum="$2"
     if declare -F proxy_core_version_at_least >/dev/null 2>&1; then
-        proxy_core_version_at_least "$version" "$minimum" && return 0
-    elif [[ "$version" =~ ^v?([0-9]+)\.([0-9]+)\.([0-9]+) ]]; then
-        major="${BASH_REMATCH[1]}"; minor="${BASH_REMATCH[2]}"
-        required_minor="${minimum#*.}"; required_minor="${required_minor%%.*}"
-        ((10#$major > 1 || (10#$major == 1 && 10#$minor >= 10#$required_minor))) && return 0
+        proxy_core_version_at_least "$version" "$minimum"
+    else
+        # Keep the standalone URI renderer's ordering equal to common.sh.
+        jq -en --arg version "$version" --arg minimum "$minimum" '
+            def rank:
+                capture("^v?(?<major>[0-9]+)\\.(?<minor>[0-9]+)\\.(?<patch>[0-9]+)(?:-(?<pre>[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*))?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$") |
+                [(.major | tonumber), (.minor | tonumber), (.patch | tonumber),
+                 (if .pre == null then 1 else 0 end),
+                 ((.pre // "") | split(".") | map(if test("^[0-9]+$") then [0,tonumber] else [1,.] end))];
+            ($version | rank) >= ($minimum | rank)
+        ' >/dev/null 2>&1
     fi
+}
+
+_proxy_relay_require_sb_version() {
+    local version="${1-}" minimum="$2"
+    [[ -n "$version" ]] || return 0
+    _proxy_relay_sb_version_at_least "$version" "$minimum" && return 0
     _proxy_relay_uri_error "selected client options require sing-box >= ${minimum}"
     return 10
 }
 
+_proxy_relay_certificate_pin_base64() {
+    local pin="${1-}" escaped='' index
+    [[ "$pin" =~ ^[0-9A-Fa-f]{64}$ ]] || return 10
+    for ((index = 0; index < 64; index += 2)); do escaped+="\\x${pin:index:2}"; done
+    # Decode directly into the pipe: shell variables cannot retain NUL bytes.
+    (set -o pipefail; printf '%b' "$escaped" | base64 | tr -d '\r\n')
+}
+
 _proxy_relay_render_outbound_from_uri() {
     local core="${1-}" exit_id="${2-}" uri="${3-}" profile="${4-}" client_options="${5-}" version="${6:-${PROXY_RENDER_CORE_VERSION:-}}" node tag spki cert
-    local hop_mask=false interval feature
+    local hop_mask=false interval feature certificate_pin=''
     [[ $# -ge 3 && $# -le 6 ]] || { _proxy_relay_uri_error 'missing or extra argument'; return 2; }
     [[ -n "$client_options" ]] || client_options='{}'
     [[ "$core" == sing-box || "$core" == xray ]] || { _proxy_relay_uri_error 'unsupported core'; return 2; }
@@ -727,7 +746,7 @@ _proxy_relay_render_outbound_from_uri() {
         _proxy_relay_uri_error 'profile is not supported by selected core'
         return 10
     }
-    if [[ "$(jq -r '.profile' <<<"$node")" == hysteria2 && -z "$version" ]] &&
+    if [[ -z "$version" ]] &&
         declare -F proxy_core_config_version >/dev/null 2>&1; then
         version="$(proxy_core_config_version "$core")" || return $?
     fi
@@ -737,8 +756,11 @@ _proxy_relay_render_outbound_from_uri() {
         if [[ -n "$spki" ]]; then
             _proxy_relay_require_sb_version "$version" 1.13.0 || return $?
         elif [[ "$(jq -r '.tls.certificate_sha256' <<<"$node")" != '' ]]; then
-            _proxy_relay_uri_error 'certificate pin requires --tls-cert-file or --tls-spki-sha256 before proxy outbound use'
-            return 10
+            if ! _proxy_relay_sb_version_at_least "$version" 1.15.0-alpha.7; then
+                _proxy_relay_uri_error 'URI certificate pin requires sing-box >= 1.15.0-alpha.7; older or unknown versions need --tls-cert-file or --tls-spki-sha256 before proxy outbound use (plain forwarding remains available)'
+                return 10
+            fi
+            certificate_pin="$(_proxy_relay_certificate_pin_base64 "$(jq -r '.tls.certificate_sha256' <<<"$node")")" || return 10
         fi
     elif [[ -n "$spki" && -z "$cert" ]]; then
         _proxy_relay_uri_error 'Xray cannot express an SPKI-only pin; supply --tls-cert-file'
@@ -777,12 +799,13 @@ _proxy_relay_render_outbound_from_uri() {
     fi
     tag="relay-exit-$exit_id"
     if [[ "$core" == sing-box ]]; then
-        jq -cn --argjson n "$node" --argjson client "$client_options" --arg tag "$tag" '
+        jq -cn --argjson n "$node" --argjson client "$client_options" --arg tag "$tag" --arg certificate_pin "$certificate_pin" '
             def tls:
                 {enabled:true,server_name:$n.tls.server_name,
-                    insecure:(if $client | has("tls_spki_sha256") then false else $n.tls.insecure end)} +
+                    insecure:(if ($client | has("tls_spki_sha256")) or $certificate_pin != "" then false else $n.tls.insecure end)} +
                 (if $client | has("tls_spki_sha256") then
-                    {certificate_public_key_sha256:[$client.tls_spki_sha256]} else {} end) +
+                    {certificate_public_key_sha256:[$client.tls_spki_sha256]}
+                 elif $certificate_pin != "" then {certificate_sha256:[$certificate_pin]} else {} end) +
                 (if ($n.tls.alpn|length)>0 then {alpn:$n.tls.alpn} else {} end);
             def reality_tls:
                 tls + {utls:{enabled:true,fingerprint:"chrome"},reality:{enabled:true,

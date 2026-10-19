@@ -84,6 +84,8 @@ access_usage() {
 
 权限：
   status 与 session verify 可由非 root 执行；其他写操作需要 root。
+  status 在 Linux 上尽力读取状态，不要求 systemd，也不安装依赖。
+  无 systemd 或无法查询服务时，服务状态为 unknown；修改与事务操作仍要求 systemd。
 EOF
 }
 
@@ -141,6 +143,7 @@ access_status_user_fields() {
 access_status() {
     local user="$1" json="$2" port=unknown root_login=unknown password_login=unknown pubkey=unknown managed=false
     local active='' tx_status='' expires='' service_state=unknown strict=invalid listening=false
+    local service=unknown active_state=unknown load_state=unknown service_properties name value
     local firewall_backend=unknown firewall_port_rule=null firewall_managed=false firewall_mode=unmanaged
 
     if access_sshd_validate_standard >/dev/null 2>&1; then
@@ -150,7 +153,21 @@ access_status() {
         password_login="$(access_sshd_effective_value passwordauthentication 2>/dev/null || printf unknown)"
         pubkey="$(access_sshd_effective_value pubkeyauthentication 2>/dev/null || printf unknown)"
     fi
-    systemctl is-active --quiet "$ACCESS_SSH_SERVICE" >/dev/null 2>&1 && service_state=active || service_state=inactive
+    if [[ "$VPSCTL_ENV_INIT" == systemd ]]; then
+        service="$ACCESS_SSH_SERVICE"
+        if command -v systemctl >/dev/null 2>&1 &&
+            service_properties="$(systemctl show --property=LoadState --property=ActiveState "$service" 2>/dev/null)"; then
+            while IFS='=' read -r name value; do
+                case "$name" in
+                    LoadState) load_state="$value" ;;
+                    ActiveState) active_state="$value" ;;
+                esac
+            done <<<"$service_properties"
+            case "$load_state:$active_state" in
+                loaded:active | loaded:inactive) service_state="$active_state" ;;
+            esac
+        fi
+    fi
     if access_validate_port "$port" && access_sshd_port_listening "$port"; then
         listening=true
     fi
@@ -174,9 +191,9 @@ access_status() {
     if [[ "$json" == 1 ]]; then
         printf '{\n'
         printf '  "schema_version": 1,\n'
-        printf '  "platform": "systemd",\n'
+        printf '  "platform": "%s",\n' "$(access_json_escape "$VPSCTL_ENV_INIT")"
         printf '  "sshd": {"service": "%s", "service_state": "%s", "config_shape": "%s", "port": "%s", "listening": %s, "permit_root_login": "%s", "password_authentication": "%s", "pubkey_authentication": "%s", "managed": %s},\n' \
-            "$(access_json_escape "$ACCESS_SSH_SERVICE")" "$service_state" "$strict" "$port" "$listening" "$root_login" "$password_login" "$pubkey" "$managed"
+            "$(access_json_escape "$service")" "$service_state" "$strict" "$port" "$listening" "$root_login" "$password_login" "$pubkey" "$managed"
         printf '  "firewall": {"backend": "%s", "port_rule_present": %s, "managed": %s, "mode": "%s"},\n' \
             "$(access_json_escape "$firewall_backend")" "$firewall_port_rule" "$firewall_managed" "$(access_json_escape "$firewall_mode")"
         if [[ -n "$active" ]]; then
@@ -194,7 +211,11 @@ access_status() {
         printf '}\n'
         return 0
     fi
-    vps_cmd_status "SSH 服务" "$ACCESS_SSH_SERVICE ($service_state)" "$([[ "$service_state" == active ]] && printf success || printf error)"
+    case "$service_state" in
+        active) vps_cmd_status "SSH 服务" "$service ($service_state)" success ;;
+        inactive) vps_cmd_status "SSH 服务" "$service ($service_state)" error ;;
+        *) vps_cmd_status "SSH 服务" "$service ($service_state)" warning ;;
+    esac
     vps_cmd_status "配置结构" "$strict" "$([[ "$strict" == standard ]] && printf success || printf warning)"
     vps_cmd_status "监听端口" "$port" emphasis
     vps_cmd_status "端口监听" "$listening" "$([[ "$listening" == true ]] && printf success || printf error)"
@@ -251,6 +272,7 @@ access_dispatch_status() {
         vps_cmd_error "无效用户名：$user"
         return 2
     }
+    access_require_linux || return $?
     access_status "$user" "$json"
 }
 
@@ -763,7 +785,6 @@ access_main() {
     fi
     access_common_init || return $?
     access_firewall_init || return $?
-    access_sshd_init || return $?
     ACCESS_ENTRY_SCRIPT="${ACCESS_PROJECT_ROOT}/commands/security/access.sh"
     set -- "${ACCESS_ARGS[@]}"
     action="${1:-}"
@@ -775,14 +796,23 @@ access_main() {
         access_usage
         return 0
     fi
+    access_detect_platform || return $?
+    if [[ "$action" == status ]]; then
+        shift
+        access_dispatch_status "$@"
+        return $?
+    fi
+    if [[ -z "$action" ]] && ! vps_cmd_is_interactive; then
+        access_dispatch_status
+        return $?
+    fi
     access_require_platform || return $?
     if [[ -z "$action" ]]; then
-        if vps_cmd_is_interactive; then access_menu; else access_status '' 0; fi
+        access_menu
         return $?
     fi
     shift
     case "$action" in
-        status) access_dispatch_status "$@" ;;
         user) access_dispatch_user "$@" ;;
         password) access_dispatch_password "$@" ;;
         key) access_dispatch_key "$@" ;;

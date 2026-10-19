@@ -82,6 +82,34 @@ normalized="$(jq -c '.exits[0]' "$TEST_TEMP/normalized.json")"
 assert_json "$normalized" '.descriptor.schema_version == 1 and .descriptor.tls.certificate_sha256 != "" and .client_options == null' 'legacy descriptor rebuild and unresolved pin retention'
 expect_failure proxy_relay_normalize_file "$PROXY_RELAY_FILE" "$PROXY_RELAY_FILE"
 expect_failure proxy_relay_render_outbound sing-box "$normalized" 1.14.0
+for old_version in 1.14.3 1.15.0-alpha.6; do
+    expect_failure proxy_relay_render_outbound sing-box "$normalized" "$old_version"
+    grep -Fq '1.15.0-alpha.7' "$TEST_TEMP/rejected.stderr" || fail 'old version error must explain the native pin boundary'
+done
+cert_base64="$(openssl x509 -in "$TEST_TEMP/cert-a.pem" -outform DER | openssl dgst -sha256 -binary | base64 | tr -d '\n')"
+for native_version in 1.15.0-alpha.7 1.15.0-alpha.12; do
+    rendered="$(proxy_relay_render_outbound sing-box "$normalized" "$native_version")"
+    assert_json "$rendered" ".outbounds[0].tls | .certificate_sha256 == [\"$cert_base64\"] and .insecure == false and (has(\"certificate_public_key_sha256\") | not)" 'URI whole-certificate pin is encoded from digest bytes and overrides insecure'
+done
+(
+    set +o pipefail
+    base64() { return 9; }
+    expect_failure proxy_relay_render_outbound sing-box "$normalized" 1.15.0-alpha.7
+)
+binary_pin=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
+binary_exit="$(make_exit "${empty_uri}&pinSHA256=${binary_pin^^}")"
+rendered="$(PROXY_RENDER_CORE_VERSION=1.15.0-alpha.12 proxy_relay_render_outbound sing-box "$binary_exit")"
+assert_json "$rendered" '.outbounds[0].tls.certificate_sha256 == ["AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="]' 'uppercase hex and NUL digest bytes survive conversion'
+PROXY_RENDER_CORE_VERSION=1.15.0-alpha.12 expect_failure proxy_relay_render_outbound sing-box "$binary_exit" 1.14.3
+pcs_uri="vless://11111111-1111-4111-8111-111111111111@relay.example:443?security=tls&type=grpc&serviceName=relay&sni=relay.example&insecure=1&pcs=$binary_pin"
+proxy_core_config_version() { printf '%s' "${TLS_TEST_VERSION:-}"; }
+rendered="$(TLS_TEST_VERSION=1.15.0-alpha.7 proxy_relay_render_outbound sing-box "$(make_exit "$pcs_uri")")"
+assert_json "$rendered" '.outbounds[0].tls.certificate_sha256 == ["AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="] and .outbounds[0].tls.insecure == false' 'non-HY2 pcs uses the installed version when none is explicit'
+TLS_TEST_VERSION=1.14.3 proxy_relay_exit_show --id exit-0000000000000001 >"$TEST_TEMP/old-pin-details"
+grep -Fq '尚需证书或 SPKI' "$TEST_TEMP/old-pin-details" || fail 'old version pin details'
+TLS_TEST_VERSION=1.15.0-alpha.7 proxy_relay_exit_show --id exit-0000000000000001 >"$TEST_TEMP/native-pin-details"
+grep -Fq 'TLS 整证书 SHA256' "$TEST_TEMP/native-pin-details" || fail 'native pin details'
+unset -f proxy_core_config_version
 proxy_relay_exit_list --json >"$TEST_TEMP/list.json"
 proxy_relay_exit_show --id exit-0000000000000001 >"$TEST_TEMP/show.txt"
 cmp -s "$PROXY_RELAY_FILE" "$TEST_TEMP/original.json" || fail 'read commands modified legacy state'
@@ -99,6 +127,10 @@ cp "$TEST_TEMP/chain.pem" "$(vps_cmd_system_path "$managed")"
 jq -n --arg cert "$managed" '{nodes:[{tls:{certificate_path:$cert}}]}' >"$PROXY_MANIFEST"
 normalized="$(proxy_relay_normalize_exit "$legacy")"
 assert_json "$normalized" ".client_options.tls_spki_sha256 == \"$spki\" and .client_options.tls_cert_sha256 == \"$cert_pin\"" 'resolve matching leaf certificate and public key from current manifest'
+for pin_version in 1.14.3 1.15.0-alpha.7 1.15.0-alpha.12; do
+    rendered="$(proxy_relay_render_outbound sing-box "$normalized" "$pin_version")"
+    assert_json "$rendered" ".outbounds[0].tls | .certificate_public_key_sha256 == [\"$spki\"] and .insecure == false and (has(\"certificate_sha256\") | not)" 'existing SPKI with source certificate hash retains SPKI semantics'
+done
 proxy_relay_normalize_file "$PROXY_RELAY_FILE" "$TEST_TEMP/normalized.json" "$PROXY_MANIFEST"
 cmp -s "$PROXY_RELAY_FILE" "$TEST_TEMP/original.json" || fail 'automatic migration modified source'
 
@@ -106,6 +138,8 @@ explicit="$(proxy_relay_apply_client_options "$legacy" '' "$wrong_spki" off)"
 assert_json "$(proxy_relay_normalize_exit "$explicit")" ".client_options.tls_spki_sha256 == \"$wrong_spki\" and .client_options.chrome_parrot == false and (.client_options | has(\"tls_cert_sha256\") | not)" 'preserve canonical explicit trust and false Chrome setting'
 rendered="$(proxy_relay_render_outbound sing-box "$explicit" 1.14.0)"
 assert_json "$rendered" ".outbounds[0].tls.certificate_public_key_sha256 == [\"$wrong_spki\"] and .outbounds[0].tls.insecure == false and .outbounds[0].disable_chrome_parrot == true" 'explicit pin cannot be bypassed by URI insecure and Chrome off is rendered'
+rendered="$(proxy_relay_render_outbound sing-box "$explicit" 1.15.0-alpha.12)"
+assert_json "$rendered" ".outbounds[0].tls | .certificate_public_key_sha256 == [\"$wrong_spki\"] and (has(\"certificate_sha256\") | not)" 'explicit SPKI remains authoritative over a different URI certificate pin'
 expect_failure proxy_relay_render_outbound sing-box "$explicit" 1.13.9
 expect_failure proxy_relay_render_outbound sing-box "$explicit" 1.14.0-alpha.1
 expect_failure proxy_relay_render_outbound sing-box "$normalized" 1.12.9
@@ -136,9 +170,21 @@ xray="$(make_exit "vless://11111111-1111-4111-8111-111111111111@relay.example:44
 expect_failure proxy_relay_apply_client_options "$xray" '' "$spki" ''
 rendered="$(proxy_relay_render_outbound xray "$xray")"
 assert_json "$rendered" ".outbounds[0].streamSettings.tlsSettings.pinnedPeerCertSha256 == \"$cert_pin\"" 'Xray keeps the whole certificate hash'
+write_state "$xray"
+proxy_relay_exit_show --id exit-0000000000000001 >"$TEST_TEMP/xray-pin-details"
+grep -Fq 'TLS 整证书 SHA256 固定' "$TEST_TEMP/xray-pin-details" || fail 'Xray managed certificate details must describe whole-certificate pin'
+write_state "$(jq --arg spki "$spki" '.client_options={tls_spki_sha256:$spki}' <<<"$xray")"
+proxy_relay_exit_show --id exit-0000000000000001 >"$TEST_TEMP/xray-pin-details"
+grep -Fq 'Xray 不能仅使用 SPKI' "$TEST_TEMP/xray-pin-details" || fail 'Xray SPKI-only with URI pin must request a certificate'
 xray="$(proxy_relay_apply_client_options "$(make_exit 'vless://11111111-1111-4111-8111-111111111111@relay.example:443?security=tls&type=grpc&serviceName=relay&sni=relay.example' xray)" "$TEST_TEMP/cert-a.pem" '' '')"
 rendered="$(proxy_relay_render_outbound xray "$xray")"
 assert_json "$rendered" ".outbounds[0].streamSettings.tlsSettings.pinnedPeerCertSha256 == \"$cert_pin\"" 'Xray can express a PEM certificate pin without pcs in the URI'
+write_state "$xray"
+proxy_relay_exit_show --id exit-0000000000000001 >"$TEST_TEMP/xray-pin-details"
+grep -Fq "TLS 整证书 SHA256 固定：$cert_pin" "$TEST_TEMP/xray-pin-details" || fail 'Xray PEM without URI pin details'
+write_state "$(jq 'del(.client_options.tls_cert_sha256)' <<<"$xray")"
+proxy_relay_exit_show --id exit-0000000000000001 >"$TEST_TEMP/xray-pin-details"
+grep -Fq 'Xray 不能仅使用 SPKI' "$TEST_TEMP/xray-pin-details" || fail 'Xray SPKI-only without URI pin must request a certificate'
 
 # CLI edits keep explicit options on a rename, discard old TLS trust on a new
 # URI, and apply newly supplied TLS parameters only to that new URI.
@@ -148,6 +194,10 @@ proxy_relay_exit_edit --id exit-0000000000000001 --name renamed
 assert_json "$(cat "$PROXY_RELAY_FILE")" ".exits[0].client_options.tls_spki_sha256 == \"$wrong_spki\" and .exits[0].client_options.chrome_parrot == false" 'rename preserves canonical client options'
 proxy_relay_exit_edit --id exit-0000000000000001 --uri "$empty_uri"
 assert_json "$(cat "$PROXY_RELAY_FILE")" '(.exits[0].client_options | has("tls_spki_sha256") | not) and (.exits[0].client_options | has("tls_cert_sha256") | not)' 'new URI clears old TLS trust'
+proxy_relay_exit_edit --id exit-0000000000000001 --uri "${empty_uri}&pinSHA256=$binary_pin"
+replaced="$(jq -c '.exits[0]' "$PROXY_RELAY_FILE")"
+rendered="$(proxy_relay_render_outbound sing-box "$replaced" 1.15.0-alpha.7)"
+assert_json "$rendered" '.outbounds[0].tls | .certificate_sha256 == ["AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="] and (has("certificate_public_key_sha256") | not)' 'replacement URI uses its own whole-certificate pin'
 proxy_relay_exit_edit --id exit-0000000000000001 --uri "$uri" --tls-spki-sha256 "$spki" --chrome-parrot on
 assert_json "$(cat "$PROXY_RELAY_FILE")" ".exits[0].client_options.tls_spki_sha256 == \"$spki\" and .exits[0].client_options.chrome_parrot == true" 'new explicit options apply to new URI'
 cp "$PROXY_RELAY_FILE" "$TEST_TEMP/before-rejection.json"
@@ -280,6 +330,7 @@ grep -Fq '随机 5-10 秒' "$TEST_TEMP/hop-details" || fail 'random interval det
     if grep -Eq '^(Chrome QUIC|BBR Profile)$' "$TEST_TEMP/add-prompts"; then fail 'old sing-box add menu exposed unsupported options'; fi
     : >"$TEST_TEMP/add-prompts"
     MENU_INSTALLED=1 MENU_VERSION=1.14.0 proxy_relay_exit_add --name new-menu-add --uri "$empty_uri" --core sing-box
+    grep -Fxq 'TLS 证书验证' "$TEST_TEMP/add-prompts" || fail 'TLS verification menu heading'
     grep -Fxq 'Chrome QUIC' "$TEST_TEMP/add-prompts" || fail 'new sing-box add menu missing Chrome'
     grep -Fxq 'BBR Profile' "$TEST_TEMP/add-prompts" || fail 'new sing-box add menu missing BBR'
 )

@@ -4,6 +4,8 @@
 # The test intentionally stays out of tests/run.sh. It starts project-rendered
 # server/client configurations against real core binaries and performs actual
 # TCP/UDP requests. Xray policy checks run in a private network+mount namespace.
+# Pass --tls for only TLS pin acceptance; XRAY_NEW_BINARY is then unnecessary.
+# COMPAT_EVIDENCE_DIR retains generated configs and logs after cleanup.
 
 set -Eeuo pipefail
 IFS=$'\n\t'
@@ -20,7 +22,7 @@ PHASE="${PHASE:-1}"
     printf 'FAIL: this revision implements PHASE=1 only\n' >&2
     exit 2
 }
-case "$INTERNAL_MODE" in '' | --internal-xray-policy) ;; *)
+case "$INTERNAL_MODE" in '' | --tls | --internal-xray-policy) ;; *)
     printf 'FAIL: unsupported internal mode\n' >&2
     exit 2
     ;;
@@ -49,6 +51,11 @@ cleanup() {
         wait "$TARGET_PID" >/dev/null 2>&1 || true
     fi
     if [[ "$HOSTS_MOUNTED" == 1 ]]; then umount /etc/hosts >/dev/null 2>&1 || true; fi
+    if [[ -n "${COMPAT_EVIDENCE_DIR:-}" ]]; then
+        mkdir -p -- "$COMPAT_EVIDENCE_DIR"
+        find "$TEST_TEMP" -maxdepth 1 -type f \( -name '*.json' -o -name '*.log' -o -name '*.check' \) \
+            -exec cp -- {} "$COMPAT_EVIDENCE_DIR/" \;
+    fi
     rm -rf -- "$TEST_TEMP"
 }
 trap cleanup EXIT
@@ -67,14 +74,23 @@ XRAY_OLD_BINARY="${XRAY_OLD_BINARY:-$(command -v xray 2>/dev/null || true)}"
 XRAY_NEW_BINARY="${XRAY_NEW_BINARY:-}"
 [[ -x "$SING_BOX_BINARY" ]] || fail 'SING_BOX_BINARY is not executable'
 [[ -x "$XRAY_OLD_BINARY" ]] || fail 'XRAY_OLD_BINARY is not executable'
-[[ -x "$XRAY_NEW_BINARY" ]] || fail 'XRAY_NEW_BINARY is not executable'
+if [[ "$INTERNAL_MODE" != --tls ]]; then
+    [[ -x "$XRAY_NEW_BINARY" ]] || fail 'XRAY_NEW_BINARY is not executable'
+fi
 
 sing_version_output="$($SING_BOX_BINARY version 2>/dev/null)" || fail 'could not read sing-box version'
 xray_old_version_output="$($XRAY_OLD_BINARY version 2>/dev/null)" || fail 'could not read old Xray version'
-xray_new_version_output="$($XRAY_NEW_BINARY version 2>/dev/null)" || fail 'could not read new Xray version'
-[[ "$sing_version_output" == *'sing-box version 1.14.0'* ]] || fail 'expected sing-box 1.14.0'
-[[ "$xray_old_version_output" == *'Xray 26.3.27 '* ]] || fail 'expected Xray 26.3.27'
-[[ "$xray_new_version_output" == *'Xray 26.9.9 '* ]] || fail 'expected Xray 26.9.9'
+[[ "$sing_version_output" =~ sing-box\ version\ ([^[:space:]]+) ]] || fail 'invalid sing-box version output'
+SING_BOX_VERSION="${BASH_REMATCH[1]}"
+[[ "$xray_old_version_output" =~ Xray\ ([^[:space:]]+) ]] || fail 'invalid old Xray version output'
+XRAY_OLD_VERSION="${BASH_REMATCH[1]}"
+XRAY_NEW_VERSION=''
+if [[ "$INTERNAL_MODE" != --tls ]]; then
+    xray_new_version_output="$($XRAY_NEW_BINARY version 2>/dev/null)" || fail 'could not read new Xray version'
+    [[ "$xray_new_version_output" =~ Xray\ ([^[:space:]]+) ]] || fail 'invalid new Xray version output'
+    XRAY_NEW_VERSION="${BASH_REMATCH[1]}"
+fi
+printf 'Core versions: sing-box=%s Xray=%s/%s\n' "$SING_BOX_VERSION" "$XRAY_OLD_VERSION" "$XRAY_NEW_VERSION"
 
 export VPSCTL_TESTING=1
 export VPSCTL_SYSTEM_ROOT="$TEST_SYSTEM_ROOT"
@@ -222,7 +238,7 @@ ThreadingHTTPServer(("127.0.0.1",54450),Handler).serve_forever()'
 }
 
 run_tls_pin_case() {
-    local core="$1" label="$2" expect="$3" exit_json="$4" version="$5"
+    local core="$1" label="$2" expect="$3" exit_json="$4" version="$5" pin_kind="${6:-spki}"
     local binary bundle config log socks_port pid
     case "$core" in
         sing-box)
@@ -236,9 +252,12 @@ run_tls_pin_case() {
     esac
     bundle="$(proxy_relay_render_outbound "$core" "$exit_json" "$version")" || fail "$label outbound render"
     if [[ "$core" == sing-box ]]; then
-        jq -e '.outbounds[0].tls.insecure == false and
-            (.outbounds[0].tls.certificate_public_key_sha256 | length) == 1' \
-            <<<"$bundle" >/dev/null || fail "$label did not enforce SPKI with strict TLS"
+        jq -e --arg kind "$pin_kind" '.outbounds[0].tls |
+            .insecure == false and
+            (if $kind == "spki" then
+                (.certificate_public_key_sha256 | length) == 1 and (has("certificate_sha256") | not)
+             else (.certificate_sha256 | length) == 1 and (has("certificate_public_key_sha256") | not) end)' \
+            <<<"$bundle" >/dev/null || fail "$label did not enforce exactly one TLS pin"
     else
         jq -e '.outbounds[0].streamSettings.tlsSettings.pinnedPeerCertSha256 != "" and
             (.outbounds[0].streamSettings.tlsSettings | has("allowInsecure") | not)' \
@@ -258,12 +277,14 @@ run_tls_pin_case() {
     fi
     kill "$pid" >/dev/null 2>&1 || true
     wait "$pid" >/dev/null 2>&1 || true
-    CORE_PIDS=()
+    unset 'CORE_PIDS[-1]'
+    printf 'PASS: %s (%s %s)\n' "$label" "$core" "$version"
 }
 
 run_tls_pin_acceptance() {
     local cert key wrong_cert wrong_key logical_node server_node server_manifest server_config
     local legacy_node legacy_uri pinless_node pinless_uri pins wrong_pins options exit_json normalized server_pid
+    local insecure native_uri wrong_uri resigned_cert resigned_pins
     cert="${TEST_TEMP}/spki-cert.pem"
     key="${TEST_TEMP}/spki-key.pem"
     wrong_cert="${TEST_TEMP}/wrong-cert.pem"
@@ -285,7 +306,7 @@ run_tls_pin_acceptance() {
     server_manifest="${TEST_TEMP}/spki-server-manifest.json"
     server_config="${TEST_TEMP}/spki-server.json"
     jq -n --argjson node "$server_node" '{schema_version:1,nodes:[$node]}' >"$server_manifest"
-    proxy_render_config xray "$server_manifest" "$PROXY_RELAY_FILE" 26.3.27 >"$server_config" || fail 'render TLS pin server'
+    proxy_render_config xray "$server_manifest" "$PROXY_RELAY_FILE" "$XRAY_OLD_VERSION" >"$server_config" || fail 'render TLS pin server'
     validate_config xray "$XRAY_OLD_BINARY" "$server_config" "${TEST_TEMP}/spki-server.check"
     start_core xray "$XRAY_OLD_BINARY" "$server_config" "${TEST_TEMP}/spki-server.log"
     server_pid="${CORE_PIDS[-1]}"
@@ -298,28 +319,66 @@ run_tls_pin_acceptance() {
 
     options="$(jq -c '{tls_spki_sha256,tls_cert_sha256}' <<<"$pins")"
     exit_json="$(make_exit sing-box exit-0000000000000001 vless-grpc-tls "$pinless_uri" "$options")" || fail 'sing-box correct exit'
-    run_tls_pin_case sing-box spki-sing-correct success "$exit_json" 1.14.0
+    run_tls_pin_case sing-box spki-sing-correct success "$exit_json" "$SING_BOX_VERSION"
     exit_json="$(make_exit xray exit-0000000000000002 vless-grpc-tls "$pinless_uri" "$options")" || fail 'Xray correct exit'
-    run_tls_pin_case xray spki-xray-correct success "$exit_json" 26.3.27
+    run_tls_pin_case xray spki-xray-correct success "$exit_json" "$XRAY_OLD_VERSION"
 
     options="$(jq -c '{tls_spki_sha256,tls_cert_sha256}' <<<"$wrong_pins")"
     exit_json="$(make_exit sing-box exit-0000000000000003 vless-grpc-tls "$pinless_uri" "$options")" || fail 'sing-box wrong exit'
-    run_tls_pin_case sing-box spki-sing-wrong failure "$exit_json" 1.14.0
+    run_tls_pin_case sing-box spki-sing-wrong failure "$exit_json" "$SING_BOX_VERSION"
     exit_json="$(make_exit xray exit-0000000000000004 vless-grpc-tls "$pinless_uri" "$options")" || fail 'Xray wrong exit'
-    run_tls_pin_case xray spki-xray-wrong failure "$exit_json" 26.3.27
+    run_tls_pin_case xray spki-xray-wrong failure "$exit_json" "$XRAY_OLD_VERSION"
 
     exit_json="$(make_exit sing-box exit-0000000000000005 vless-grpc-tls "$legacy_uri")" || fail 'sing-box legacy exit'
     normalized="$(proxy_relay_normalize_exit "$exit_json" "$PROXY_MANIFEST")" || fail 'sing-box legacy pin migration'
     jq -e --arg spki "$(jq -r '.tls_spki_sha256' <<<"$pins")" \
         '.client_options.tls_spki_sha256 == $spki and (.client_options.tls_cert_sha256 | length) == 64' \
         <<<"$normalized" >/dev/null || fail 'legacy URI did not migrate to SPKI'
-    run_tls_pin_case sing-box spki-sing-legacy success "$exit_json" 1.14.0
+    run_tls_pin_case sing-box spki-sing-legacy success "$exit_json" "$SING_BOX_VERSION"
     exit_json="$(make_exit xray exit-0000000000000006 vless-grpc-tls "$legacy_uri")" || fail 'Xray legacy exit'
-    run_tls_pin_case xray spki-xray-legacy success "$exit_json" 26.3.27
+    run_tls_pin_case xray spki-xray-legacy success "$exit_json" "$XRAY_OLD_VERSION"
+
+    # No managed certificate may silently convert these URI-only cases to SPKI.
+    proxy_manifest_default >"$PROXY_MANIFEST"
+    if proxy_core_version_at_least "$SING_BOX_VERSION" 1.15.0-alpha.7; then
+        for insecure in false true; do
+            native_uri="$(proxy_xray_render_uri "$(jq --argjson insecure "$insecure" '.tls.insecure=$insecure' <<<"$logical_node")")"
+            wrong_uri="$(proxy_xray_render_uri "$(jq --argjson insecure "$insecure" --arg pin "$(jq -r '.tls_cert_sha256' <<<"$wrong_pins")" \
+                '.tls.insecure=$insecure | .tls.certificate_sha256=$pin' <<<"$logical_node")")"
+            exit_json="$(make_exit sing-box exit-0000000000000007 vless-grpc-tls "$native_uri")"
+            run_tls_pin_case sing-box "cert-sing-correct-insecure-${insecure}" success "$exit_json" "$SING_BOX_VERSION" certificate
+            exit_json="$(make_exit sing-box exit-0000000000000008 vless-grpc-tls "$wrong_uri")"
+            run_tls_pin_case sing-box "cert-sing-wrong-insecure-${insecure}" failure "$exit_json" "$SING_BOX_VERSION" certificate
+        done
+    else
+        exit_json="$(make_exit sing-box exit-0000000000000007 vless-grpc-tls "$legacy_uri")"
+        if proxy_relay_render_outbound sing-box "$exit_json" "$SING_BOX_VERSION" >"${TEST_TEMP}/cert-unsupported.log" 2>&1; then
+            fail 'old sing-box accepted a URI certificate pin without SPKI material'
+        fi
+        printf 'PASS: sing-box %s rejects unsupported URI certificate pin\n' "$SING_BOX_VERSION"
+    fi
 
     kill "$server_pid" >/dev/null 2>&1 || true
     wait "$server_pid" >/dev/null 2>&1 || true
     CORE_PIDS=()
+    if proxy_core_version_at_least "$SING_BOX_VERSION" 1.15.0-alpha.7; then
+        resigned_cert="${TEST_TEMP}/same-key-resigned.pem"
+        openssl req -x509 -key "$key" -days 2 -set_serial 42 -subj '/CN=spki.compat.test' \
+            -addext 'subjectAltName=DNS:spki.compat.test' -out "$resigned_cert" >/dev/null 2>&1
+        resigned_pins="$(_proxy_relay_certificate_pins "$resigned_cert")"
+        [[ "$(jq -r '.tls_spki_sha256' <<<"$pins")" == "$(jq -r '.tls_spki_sha256' <<<"$resigned_pins")" && \
+            "$(jq -r '.tls_cert_sha256' <<<"$pins")" != "$(jq -r '.tls_cert_sha256' <<<"$resigned_pins")" ]] || fail 'same-key certificate fixture did not change only certificate identity'
+        cp -- "$resigned_cert" "$(jq -r '.tls.certificate_path' <<<"$server_node")"
+        start_core xray "$XRAY_OLD_BINARY" "$server_config" "${TEST_TEMP}/resigned-server.log"
+        server_pid="${CORE_PIDS[-1]}"
+        wait_listener tcp 127.0.0.1 54431 "$server_pid"
+        options="$(jq -c '{tls_spki_sha256,tls_cert_sha256}' <<<"$pins")"
+        exit_json="$(make_exit sing-box exit-0000000000000009 vless-grpc-tls "$legacy_uri" "$options")"
+        run_tls_pin_case sing-box spki-sing-same-key-resigned success "$exit_json" "$SING_BOX_VERSION"
+        exit_json="$(make_exit sing-box exit-0000000000000010 vless-grpc-tls "$legacy_uri")"
+        run_tls_pin_case sing-box cert-sing-same-key-resigned failure "$exit_json" "$SING_BOX_VERSION" certificate
+        stop_cores
+    fi
     printf 'PASS: real TLS pinning (correct, wrong, insecure-bypass rejection, legacy URI migration; sing-box/Xray)\n'
 }
 
@@ -341,7 +400,7 @@ run_hysteria_ed25519_acceptance() {
     server_manifest="${TEST_TEMP}/hy-server-manifest.json"
     server_config="${TEST_TEMP}/hy-server.json"
     jq -n --argjson node "$server_node" '{schema_version:1,nodes:[$node]}' >"$server_manifest"
-    proxy_render_config sing-box "$server_manifest" "$PROXY_RELAY_FILE" 1.14.0 >"$server_config" || fail 'render Hysteria2 server'
+    proxy_render_config sing-box "$server_manifest" "$PROXY_RELAY_FILE" "$SING_BOX_VERSION" >"$server_config" || fail 'render Hysteria2 server'
     validate_config sing-box "$SING_BOX_BINARY" "$server_config" "${TEST_TEMP}/hy-server.check"
     start_core sing-box "$SING_BOX_BINARY" "$server_config" "${TEST_TEMP}/hy-server.log"
     server_pid="${CORE_PIDS[-1]}"
@@ -351,7 +410,7 @@ run_hysteria_ed25519_acceptance() {
         if [[ "$chrome" == true ]]; then socks_port=54442; else socks_port=54443; fi
         options="$(jq -c --argjson chrome "$chrome" '{tls_spki_sha256,tls_cert_sha256,chrome_parrot:$chrome}' <<<"$pins")"
         exit_json="$(make_exit sing-box exit-0000000000000011 hysteria2 "$uri" "$options")" || fail "prepare Hysteria2 chrome=$chrome exit"
-        bundle="$(proxy_relay_render_outbound sing-box "$exit_json" 1.14.0)" || fail "render Hysteria2 chrome=$chrome outbound"
+        bundle="$(proxy_relay_render_outbound sing-box "$exit_json" "$SING_BOX_VERSION")" || fail "render Hysteria2 chrome=$chrome outbound"
         jq -e --argjson chrome "$chrome" '.outbounds[0].disable_chrome_parrot == ($chrome | not)' \
             <<<"$bundle" >/dev/null || fail "Hysteria2 chrome=$chrome renderer"
         config="${TEST_TEMP}/hy-client-${chrome}.json"
@@ -504,7 +563,7 @@ render_policy_client() {
         uri="$(proxy_xray_render_uri "$node")" || fail 'render policy client URI'
         printf -v tag 'exit-%016x' "$((index + 101))"
         exit_json="$(make_exit sing-box "$tag" shadowsocks-aes-256-gcm "$uri")" || fail 'prepare policy client exit'
-        bundle="$(proxy_relay_render_outbound sing-box "$exit_json" 1.14.0)" || fail 'render policy client outbound'
+        bundle="$(proxy_relay_render_outbound sing-box "$exit_json" "$SING_BOX_VERSION")" || fail 'render policy client outbound'
         port=$((55400 + index))
         outbounds="$(jq -c --argjson current "$outbounds" --argjson add "$(jq -c '.outbounds' <<<"$bundle")" '$current+$add' <<<null)"
         rules="$(jq -c --argjson current "$rules" --arg inbound "policy-client-${index}" --arg outbound "$(jq -r '.target_tag' <<<"$bundle")" \
@@ -529,7 +588,7 @@ run_xray_policy_version() {
     POLICY_CLIENT_LOG="$client_log"
     export POLICY_SERVER_LOG POLICY_CLIENT_LOG
     proxy_render_config xray "$manifest" "$PROXY_RELAY_FILE" "$version" >"$server_config" || fail "render Xray $version policy server"
-    if [[ "$version" == 26.3.27 ]]; then
+    if ! proxy_core_version_at_least "$version" 26.9.8; then
         jq -e 'all(.outbounds[] | select(.tag | startswith("direct-node-"));
             (.settings.domainStrategy | IN("UseIPv4v6","UseIPv6v4","ForceIPv4","ForceIPv6")) and
             (.streamSettings | not))' "$server_config" >/dev/null || fail 'old Xray policy compatibility shape'
@@ -613,8 +672,8 @@ run_xray_policy_acceptance() {
     proxy_manifest_validate_file "$manifest" || fail 'policy manifest validation'
     client_config="${TEST_TEMP}/policy-client.json"
     render_policy_client "$manifest" "$client_config"
-    run_xray_policy_version 26.3.27 "$XRAY_OLD_BINARY" "$manifest" "$client_config"
-    run_xray_policy_version 26.9.9 "$XRAY_NEW_BINARY" "$manifest" "$client_config"
+    run_xray_policy_version "$XRAY_OLD_VERSION" "$XRAY_OLD_BINARY" "$manifest" "$client_config"
+    run_xray_policy_version "$XRAY_NEW_VERSION" "$XRAY_NEW_BINARY" "$manifest" "$client_config"
 }
 
 if [[ "$INTERNAL_MODE" == --internal-xray-policy ]]; then
@@ -624,6 +683,10 @@ fi
 
 start_http_target
 run_tls_pin_acceptance
+if [[ "$INTERNAL_MODE" == --tls ]]; then
+    printf 'PASS: targeted TLS compatibility real acceptance\n'
+    exit 0
+fi
 run_hysteria_ed25519_acceptance
 
 command -v unshare >/dev/null 2>&1 || fail 'missing required tool: unshare'

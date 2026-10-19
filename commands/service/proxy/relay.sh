@@ -455,7 +455,7 @@ proxy_relay_exit_list() {
 }
 
 proxy_relay_exit_show() {
-    local id="" show_uri=0 arg exit interval interval_mode
+    local id="" show_uri=0 arg exit interval interval_mode version core pin
     while (($#)); do
         arg="$1"
         case "$arg" in
@@ -477,11 +477,28 @@ proxy_relay_exit_show() {
     printf '出口详情\n  名称：%s\n  ID：%s\n  类型：%s\n' \
         "$(jq -r '.name' <<<"$exit")" "$id" "$([[ "$(jq -r '.type' <<<"$exit")" == protocol ]] && printf '协议' || printf '直连')"
     if [[ "$(jq -r '.type' <<<"$exit")" == protocol ]]; then
-        printf '  内核：%s\n  Profile：%s\n' "$(jq -r '.core' <<<"$exit")" "$(jq -r '.profile' <<<"$exit")"
-        if [[ "$(jq -r '.client_options.tls_spki_sha256 // empty' <<<"$exit")" != '' ]]; then
-            printf '  TLS SPKI SHA256：%s\n' "$(jq -r '.client_options.tls_spki_sha256' <<<"$exit")"
-        elif [[ "$(jq -r '.descriptor.tls.certificate_sha256 // empty' <<<"$exit")" != '' && "$(jq -r '.core' <<<"$exit")" == sing-box ]]; then
-            printf '  TLS pin：尚需证书或 SPKI（纯端口转发可用）\n'
+        core="$(jq -r '.core' <<<"$exit")"
+        pin="$(jq -r 'if .core == "xray" then .client_options.tls_cert_sha256 // .descriptor.tls.certificate_sha256 // empty else .descriptor.tls.certificate_sha256 // empty end' <<<"$exit")"
+        printf '  内核：%s\n  Profile：%s\n' "$core" "$(jq -r '.profile' <<<"$exit")"
+        if [[ "$core" == sing-box && "$(jq -r '.client_options.tls_spki_sha256 // empty' <<<"$exit")" != '' ]]; then
+            printf '  TLS SPKI SHA256 固定：%s\n' "$(jq -r '.client_options.tls_spki_sha256' <<<"$exit")"
+        elif [[ "$core" == xray && "$(jq -r '.client_options.tls_spki_sha256 // empty' <<<"$exit")" != '' && \
+            "$(jq -r '.client_options.tls_cert_sha256 // empty' <<<"$exit")" == '' ]]; then
+            printf '  TLS pin：Xray 不能仅使用 SPKI，尚需 PEM 证书\n'
+        elif [[ -n "$pin" ]]; then
+            version=''
+            if [[ "$core" == xray ]]; then
+                printf '  TLS 整证书 SHA256 固定：%s\n' "$pin"
+            else
+                if declare -F proxy_core_config_version >/dev/null 2>&1; then
+                    version="$(proxy_core_config_version sing-box)" || return $?
+                fi
+                if _proxy_relay_sb_version_at_least "$version" 1.15.0-alpha.7; then
+                    printf '  TLS 整证书 SHA256 固定：%s（sing-box 原生 pin）\n' "$pin"
+                else
+                    printf '  TLS pin：尚需证书或 SPKI，或升级至 sing-box >= 1.15.0-alpha.7（当前版本：%s；纯端口转发可用）\n' "${version:-未知}"
+                fi
+            fi
         fi
         if [[ "$(jq -r '.profile' <<<"$exit")" == hysteria2 ]]; then
             printf '  跳跃端口：%s\n' "$(jq -r '.endpoint.ports // "off"' <<<"$exit")"
@@ -497,6 +514,9 @@ proxy_relay_exit_show() {
                 printf '  本地带宽设置：auto（由内核协商）\n'
             fi
             printf '  Chrome QUIC：%s\n' "$(jq -r 'if (.client_options // {} | has("chrome_parrot")) then (if .client_options.chrome_parrot then "on" else "off" end) else "default" end' <<<"$exit")"
+            if jq -e '.client_options.chrome_parrot == false' <<<"$exit" >/dev/null; then
+                _proxy_relay_chrome_off_notice
+            fi
             printf '  BBR Profile：%s（仅协商回退 BBR 时生效）\n' "$(jq -r '.client_options.bbr_profile // "default"' <<<"$exit")"
         fi
         if proxy_core_registered "$(jq -r '.core' <<<"$exit")"; then printf '  二进制验证：可用\n'; else printf '  二进制验证：尚未验证（建立关联前需安装内核）\n'; fi
@@ -612,6 +632,10 @@ _proxy_relay_hy2_menu_capable() {
     proxy_hy2_capable "$core" "$version" "$feature"
 }
 
+_proxy_relay_chrome_off_notice() {
+    printf '兼容性提示：已验证 Xray 26.9.30 客户端 → sing-box 1.14.2 服务端在 Chrome QUIC off 时 UDP 转发受限；其他版本组合需实测。\n' >&2
+}
+
 _proxy_relay_prompt_hop_interval() {
     local core="$1" current="${2:-default}" value prompt
     if _proxy_relay_hy2_menu_capable "$core" hop-random; then
@@ -683,7 +707,7 @@ proxy_relay_exit_add() (
         profile="$(jq -r '.profile' <<<"$descriptor")" || return 10
         if proxy_is_interactive; then
             if [[ "$(jq -r '.tls.mode' <<<"$descriptor")" == tls && -z "$tls_cert_file$tls_spki_sha256" ]]; then
-                tls_source="$(proxy_prompt_select "TLS 公钥固定" auto auto "自动查找本机证书／保留 URI 设置" cert "提供 PEM 证书" spki "提供可信 SPKI SHA256")" || return $?
+                tls_source="$(proxy_prompt_select "TLS 证书验证" auto auto "保留 URI 设置／自动匹配本机证书" cert "提供 PEM 证书" spki "提供可信 SPKI SHA256")" || return $?
                 case "$tls_source" in
                     cert) tls_cert_file="$(proxy_prompt_value "PEM 证书路径" "")" || return $? ;;
                     spki) tls_spki_sha256="$(proxy_prompt_value "SPKI SHA256（Base64）" "")" || return $? ;;
@@ -707,6 +731,7 @@ proxy_relay_exit_add() (
             if [[ "$profile" == hysteria2 && -z "$chrome_parrot" ]] && _proxy_relay_hy2_menu_capable "$core" chrome-parrot; then
                 chrome_parrot="$(proxy_prompt_select "Chrome QUIC" default default "核心默认" on "开启" off "关闭")" || return $?
                 [[ "$chrome_parrot" != default ]] || chrome_parrot=""
+                [[ "$chrome_parrot" != off ]] || _proxy_relay_chrome_off_notice
             fi
             if [[ "$profile" == hysteria2 && -z "$bbr_profile" ]] && _proxy_relay_hy2_menu_capable "$core" bbr-profile; then
                 printf 'BBR Profile 仅在协商回退 BBR 时生效，可与手动带宽共存。\n' >&2
@@ -1660,6 +1685,7 @@ proxy_relay_menu_exit_edit() {
             if _proxy_relay_hy2_menu_capable "$core" chrome-parrot; then
                 value="$(proxy_prompt_select "Chrome QUIC" default default "核心默认" on "开启" off "关闭")" || return $?
             fi
+            [[ "$value" != off ]] || _proxy_relay_chrome_off_notice
             proxy_relay_exit_edit --id "$id" --chrome-parrot "$value"
             ;;
         bbr-profile)

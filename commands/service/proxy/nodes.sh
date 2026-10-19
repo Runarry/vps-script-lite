@@ -12,8 +12,22 @@ proxy_all_profiles() {
     done < <({ proxy_sb_profiles; proxy_xray_profiles; })
 }
 
+proxy_profile_compatibility_note() {
+    case "${1:-}" in
+        anytls-tls | anytls-reality)
+            printf '%s' 'sing-box 1.12+；padding 使用内核默认'
+            ;;
+        hysteria2)
+            printf '%s' 'Chrome QUIC 优先使用 RSA/ECDSA 证书；关闭模拟有已知跨核 UDP 限制'
+            ;;
+        trojan-grpc-reality)
+            printf '%s' 'Xray 26.3.27/26.6.27/26.9.9 实测连接失败；其他版本需单独验证'
+            ;;
+    esac
+}
+
 proxy_profiles_show() {
-    local profile label cores joined core
+    local profile label cores joined core note
     printf '支持的代理节点配置\n'
     while IFS=$'\t' read -r profile label; do
         cores=""
@@ -23,6 +37,8 @@ proxy_profiles_show() {
         done < <(proxy_profile_cores "$profile")
         joined="${cores:-无}"
         printf '  %-34s %-32s [%s]\n' "$profile" "$label" "$joined"
+        note="$(proxy_profile_compatibility_note "$profile")"
+        [[ -z "$note" ]] || printf '    提示：%s\n' "$note"
     done < <(proxy_all_profiles)
 }
 
@@ -244,10 +260,11 @@ proxy_choose_core_for_profile() {
 }
 
 proxy_prompt_profile() {
-    local profile label
+    local profile label note
     local -a choices=()
     while IFS=$'\t' read -r profile label; do
-        choices+=("$profile" "${label}（${profile}）")
+        note="$(proxy_profile_compatibility_note "$profile")"
+        choices+=("$profile" "${label}（${profile}）${note:+；$note}")
     done < <(proxy_all_profiles)
     ((${#choices[@]} > 0)) || {
         vps_cmd_error "当前没有可用的节点配置"
@@ -486,7 +503,7 @@ proxy_warn_hysteria2_certificate() {
     command -v openssl >/dev/null 2>&1 || return 0
     details="$(openssl x509 -in "$certificate" -noout -text 2>/dev/null)" || return 0
     if [[ "${details^^}" == *"PUBLIC KEY ALGORITHM: ED25519"* ]]; then
-        vps_cmd_warning "Hysteria2 使用 Ed25519 证书；sing-box 1.14+ 和 Xray 26.9.8+ 客户端默认 Chrome QUIC 握手不支持该算法。可使用 RSA/ECDSA 证书，或在中转出口设置 --chrome-parrot off。" >&2
+        vps_cmd_warning "Hysteria2 使用 Ed25519 证书；sing-box 1.14+ 和 Xray 26.9.8+ 客户端默认 Chrome QUIC 握手不支持该算法，优先使用 RSA/ECDSA 证书。关闭模拟并不保证 UDP 可用：已实测 Xray 26.9.30 客户端 --chrome-parrot off 连接 sing-box 1.14.2 服务端仍有 UDP 回包限制；其他版本需单独验证。" >&2
     fi
 }
 
@@ -1567,7 +1584,7 @@ proxy_node_core_set() (
 )
 
 proxy_node_details_print() {
-    local node="$1" profile transport ip_strategy core core_version bbr_profile relay_bound=0 strategy_suffix=""
+    local node="$1" profile transport ip_strategy core core_version bbr_profile note relay_bound=0 strategy_suffix=""
     profile="$(jq -r '.profile' <<<"$node")"
     transport="$(proxy_profile_default_transport "$profile")"
     printf '节点详情\n'
@@ -1575,6 +1592,8 @@ proxy_node_details_print() {
     printf '  ID：%s\n' "$(jq -r '.id' <<<"$node")"
     printf '  内核：%s\n' "$(proxy_core_label "$(jq -r '.core' <<<"$node")")"
     printf '  配置：%s（%s）\n' "$(proxy_profile_label "$profile" 2>/dev/null || printf '%s' "$profile")" "$profile"
+    note="$(proxy_profile_compatibility_note "$profile")"
+    [[ -z "$note" ]] || printf '  兼容提示：%s\n' "$note"
     printf '  监听：%s:%s\n' "$(jq -r '.listen' <<<"$node")" "$(jq -r '.port' <<<"$node")"
     printf '  连接地址：%s\n' "$(jq -r '.address' <<<"$node")"
     ip_strategy="$(jq -r '.ip_strategy // "auto"' <<<"$node")"

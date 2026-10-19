@@ -179,159 +179,20 @@ vpsctl_export_context() {
     export VPSCTL_ENV_VIRTUALIZATION="${VPS_ENV[virtualization]}"
 }
 
-vpsctl_invocation_may_omit_requirement() {
-    local command_key="$1"
-    local requirement="$2"
-    local core_seen=0 json_seen=0
-    shift 2
-
-    case "${command_key}:${requirement}" in
-        network:ip-policy:libc:glibc)
-            (($# == 1)) || return 1
-            case "$1" in
-                help | -h | --help) return 0 ;;
-            esac
-            ;;
-        system:kernel:os:debian-family)
-            (($# == 1)) || return 1
-            case "$1" in
-                help | -h | --help | status) return 0 ;;
-            esac
-            ;;
-        test:nodequality:root | test:tcpquality:root)
-            (($# == 1)) || return 1
-            case "$1" in
-                help | -h | --help) return 0 ;;
-            esac
-            ;;
-        network:rfw:init:systemd)
-            (($# == 1)) || return 1
-            case "$1" in
-                help | -h | --help | status) return 0 ;;
-            esac
-            ;;
-        security:access:init:systemd)
-            if (($# == 1)); then
-                case "$1" in
-                    help | -h | --help | status) return 0 ;;
-                esac
-            elif (($# > 1)) && [[ "$1" == "status" ]]; then
-                shift
-                while (($# > 0)); do
-                    case "$1" in
-                        --json) shift ;;
-                        --user)
-                            (($# >= 2)) || return 1
-                            shift 2
-                            ;;
-                        *) return 1 ;;
-                    esac
-                done
-                return 0
-            elif (($# == 4)) && [[ "$1" == "session" && "$2" == "verify" && "$3" == "--transaction" && -n "$4" ]]; then
-                return 0
-            fi
-            ;;
-        security:fail2ban:init:systemd)
-            if (($# == 1)); then
-                case "$1" in
-                    help | -h | --help | status) return 0 ;;
-                esac
-            elif (($# == 2)) && [[ "$1" == "status" && "$2" == "--json" ]]; then
-                return 0
-            fi
-            ;;
-        service:proxy:service:any)
-            if (($# == 1)); then
-                case "$1" in
-                    help | -h | --help | profiles | status) return 0 ;;
-                esac
-            elif (($# > 1)) && [[ "$1" == "status" ]]; then
-                shift
-                while (($# > 0)); do
-                    case "$1" in
-                        --json)
-                            ((json_seen == 0)) || return 1
-                            json_seen=1
-                            shift
-                            ;;
-                        --core)
-                            (($# >= 2 && core_seen == 0)) || return 1
-                            case "$2" in
-                                all | sing-box | xray) ;;
-                                *) return 1 ;;
-                            esac
-                            core_seen=1
-                            shift 2
-                            ;;
-                        *) return 1 ;;
-                    esac
-                done
-                return 0
-            elif (($# == 2)) && [[ "$1" == "time" && "$2" == "status" ]]; then
-                return 0
-            elif (($# == 3)) && [[ "$1" == "time" && "$2" == "status" && "$3" == "--json" ]]; then
-                return 0
-            fi
-            ;;
-        service:tcping:service:any | service:iperf3:service:any)
-            (($# == 1)) || return 1
-            case "$1" in
-                help | -h | --help | status) return 0 ;;
-            esac
-            ;;
-    esac
-    return 1
-}
-
-vpsctl_invocation_requirements() {
-    local command_key="$1"
-    shift
-
-    local registered_requirements requirement joined=""
-    local -a requirement_list=()
-
-    registered_requirements="${VPS_COMMAND_REQUIREMENTS[$command_key]}"
-    if [[ -z "$registered_requirements" || "$registered_requirements" == "none" ]]; then
-        printf 'none'
-        return 0
-    fi
-
-    local old_ifs="$IFS"
-    IFS=','
-    read -r -a requirement_list <<<"$registered_requirements"
-    IFS="$old_ifs"
-
-    for requirement in "${requirement_list[@]}"; do
-        requirement="$(vps_env_trim "$requirement")"
-        [[ -n "$requirement" ]] || continue
-        if vpsctl_invocation_may_omit_requirement "$command_key" "$requirement" "$@"; then
-            continue
-        fi
-        [[ -n "$joined" ]] && joined+=","
-        joined+="$requirement"
-    done
-    printf '%s' "${joined:-none}"
-}
-
 vpsctl_validate_command_ready() {
     local command_key="$1"
-    shift
-    local privilege requirements
 
-    privilege="${VPS_COMMAND_PRIVILEGE[$command_key]}"
-    requirements="$(vpsctl_invocation_requirements "$command_key" "$@")"
-
-    if [[ "$privilege" == "root" && "${VPS_ENV[is_root]}" != "yes" ]] &&
-        ! vpsctl_invocation_may_omit_requirement "$command_key" root "$@"; then
-        vpsctl_error "${command_key} 需要 root 权限"
-        return 4
-    fi
-
-    if ! vps_env_requirements_met "$requirements"; then
-        vpsctl_error "${command_key} 当前不可用；缺少能力：${VPS_ENV_MISSING_REQUIREMENTS}"
-        return 3
-    fi
+    # Registry metadata describes the feature as a whole; each entry owns its
+    # action-specific platform and privilege checks.
+    case ",${VPS_COMMAND_REQUIREMENTS[$command_key]}," in
+        *,linux,*)
+            if ! vps_env_requirements_met linux; then
+                vpsctl_error "${command_key} 当前不可用；缺少能力：${VPS_ENV_MISSING_REQUIREMENTS}"
+                return 3
+            fi
+            ;;
+    esac
+    return 0
 }
 
 vpsctl_dispatch() {
@@ -348,7 +209,7 @@ vpsctl_dispatch() {
         return 2
     fi
 
-    if vpsctl_validate_command_ready "$command_key" "$@"; then
+    if vpsctl_validate_command_ready "$command_key"; then
         :
     else
         validation_status=$?

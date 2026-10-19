@@ -95,9 +95,18 @@ EOF
     chmod 0755 -- "$output"
 }
 
+_proxy_core_resolve_release() {
+    printf 'resolve\n' >>"${TEST_PROXY_ROOT}/release.log"
+    jq -n --arg tag "${3:-${TEST_RELEASE_TAG:-v26.9.8}}" \
+        '{tag_name:$tag,draft:false,prerelease:false,assets:[]}' >"$4"
+}
+
 _proxy_core_fetch_release() {
-    local core="$1" version="${3:-v26.9.8}" output="$4" info="$5" sha
+    local core="$1" version output="$4" info="$5" sha
     [[ "$core" == xray ]] || return 2
+    [[ -f "${6:-}" ]] || fail 'update did not pass its resolved release to downloader'
+    printf 'fetch\n' >>"${TEST_PROXY_ROOT}/release.log"
+    version="$(jq -r '.tag_name' "$6")"
     version="${version#v}"
     write_binary "$output" "$version"
     sha="$(_proxy_core_sha256 "$output")"
@@ -109,6 +118,7 @@ reset_fixture() {
     [[ "$VPSCTL_SYSTEM_ROOT" == "$TEST_TEMP/root" ]] || fail 'unsafe fixture root'
     rm -rf -- "$VPSCTL_SYSTEM_ROOT"
     mkdir -p "$VPSCTL_SYSTEM_ROOT/usr/local/bin"
+    TEST_RELEASE_TAG=v26.9.8
     proxy_ensure_layout
     mkdir -p "$(dirname -- "$(proxy_core_config_path xray)")"
     jq -n '
@@ -154,7 +164,11 @@ write_legacy_relay_fixture() {
 
 run_update() {
     RUN_STATUS=0
-    proxy_core_update xray --version "${1:-v26.9.8}" >"${TEST_TEMP}/output" 2>&1 || RUN_STATUS=$?
+    if [[ "${1:-}" == default ]]; then
+        proxy_core_update xray >"${TEST_TEMP}/output" 2>&1 || RUN_STATUS=$?
+    else
+        proxy_core_update xray --version "${1:-v26.9.8}" >"${TEST_TEMP}/output" 2>&1 || RUN_STATUS=$?
+    fi
     RUN_OUTPUT="$(<"${TEST_TEMP}/output")"
 }
 
@@ -227,7 +241,7 @@ test_same_binary_migration() {
     reset_fixture
     register_fixture 26.9.8 26.3.27
     binary_hash="$(_proxy_core_sha256 "$(proxy_core_binary_path xray)")"
-    run_update
+    run_update default
     assert_equal 0 "$RUN_STATUS" "same-binary migration: $RUN_OUTPUT"
     assert_equal "$binary_hash" "$(_proxy_core_sha256 "$(proxy_core_binary_path xray)")" 'same binary digest'
     assert_json "$(proxy_core_config_path xray)" '.outbounds[0].settings.finalRules == [{action:"allow"}]' 'same-binary config migration'
@@ -236,7 +250,7 @@ test_same_binary_migration() {
     [[ ! -e "${TEST_PROXY_ROOT}/service.log" ]] || fail 'update performed a service action'
     first_pending="$(<"$(proxy_core_pending_path xray)")"
     before="$(generation_hash)"
-    run_update
+    run_update default
     assert_equal 0 "$RUN_STATUS" "same-state no-op: $RUN_OUTPUT"
     assert_equal "$before" "$(generation_hash)" 'no-op preserves all files'
     assert_equal "$first_pending" "$(<"$(proxy_core_pending_path xray)")" 'no-op preserves pending'
@@ -244,10 +258,56 @@ test_same_binary_migration() {
     reset_fixture
     register_fixture 26.9.8
     write_legacy_relay_fixture
-    run_update
+    run_update default
     assert_equal 0 "$RUN_STATUS" "same-binary relay-only migration: $RUN_OUTPUT"
     assert_json "$PROXY_RELAY_FILE" '.exits[0] | has("legacy_cache") | not' 'relay-only migration committed'
     assert_json "$(proxy_core_pending_path xray)" '.relay_touched and .relay_existed and .relay_backup != ""' 'relay-only migration backup'
+}
+
+test_default_update_policy() {
+    local before version target expected
+    while IFS=' ' read -r version target expected; do
+        reset_fixture
+        register_fixture "$version"
+        write_legacy_relay_fixture
+        TEST_RELEASE_TAG="$target"
+        before="$(generation_hash)"
+        run_update default
+        assert_equal "$expected" "$RUN_STATUS" "default update $version -> $target: $RUN_OUTPUT"
+        assert_equal "$before" "$(generation_hash)" 'default rejection preserves all state'
+        assert_equal resolve "$(<"${TEST_PROXY_ROOT}/release.log")" 'default rejection only resolves release'
+        [[ ! -e "$PROXY_TRANSACTION" ]] || fail 'default rejection created a transaction'
+        [[ "$RUN_OUTPUT" == *"$target"* ]] || fail 'default rejection omitted target version'
+    done <<'EOF'
+26.10.1 v26.9.8 0
+26.9.8 v26.9.8-rc.1 0
+26.9.8-rc.10 v26.9.8-rc.2 0
+26.9.8-beta.1 v26.9.8-alpha.10 0
+26.9.8-alpha.1 v26.9.8-alpha 0
+26.9.8_custom v26.9.8 3
+legacy v26.9.8 3
+26.9.8 stable-latest 3
+EOF
+
+    reset_fixture
+    register_fixture 26.5.3
+    run_update
+    assert_equal 0 "$RUN_STATUS" 'create existing pending update'
+    before="$(generation_hash)"
+    : >"${TEST_PROXY_ROOT}/release.log"
+    TEST_RELEASE_TAG=v26.5.3
+    run_update default
+    assert_equal 0 "$RUN_STATUS" 'default lower stable is a successful skip'
+    assert_equal "$before" "$(generation_hash)" 'default skip retains pending generation'
+    assert_equal resolve "$(<"${TEST_PROXY_ROOT}/release.log")" 'skip does not fetch candidate'
+    [[ "$RUN_OUTPUT" == *26.9.8* && "$RUN_OUTPUT" == *避免隐式降级* ]] || fail 'skip omitted current version or reason'
+
+    reset_fixture
+    register_fixture 26.9.8-rc.1
+    run_update default
+    assert_equal 0 "$RUN_STATUS" 'same triple stable upgrades prerelease'
+    assert_json "$(proxy_core_meta_path xray)" '.version == "26.9.8"' 'stable upgrade committed'
+    assert_equal $'resolve\nfetch' "$(<"${TEST_PROXY_ROOT}/release.log")" 'release resolved once then reused'
 }
 
 test_rejection_and_midwrite_rollback() (
@@ -377,6 +437,8 @@ test_version_order
 test_render_versions
 printf 'TEST: same-binary migration and all-content no-op\n'
 test_same_binary_migration
+printf 'TEST: default update skips downgrades without side effects\n'
+test_default_update_policy
 printf 'TEST: candidate rejection and every write boundary rollback\n'
 test_rejection_and_midwrite_rollback
 printf 'TEST: repeated updates preserve initial start rollback\n'

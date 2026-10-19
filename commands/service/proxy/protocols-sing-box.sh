@@ -188,7 +188,6 @@ proxy_sb_render_node() {
             jq -n --argjson n "$node" '[{
                 type:"anytls", tag:$n.id, listen:($n.listen // "::"), listen_port:$n.port,
                 users:[{name:"default", password:$n.credentials.password}],
-                padding_scheme:["stop=2", "0=100-200", "1=100-200"],
                 tls:{enabled:true, server_name:$n.tls.server_name, alpn:["http/1.1"],
                      certificate_path:$n.tls.certificate_path, key_path:$n.tls.key_path}
             }]'

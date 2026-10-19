@@ -573,8 +573,20 @@ test_arguments_dry_run_and_time() {
     assert_equal 0 "$RUN_STATUS" "external Xray version matches unprefixed tag"
 }
 
+core_release_state_hash() {
+    if [[ -n "${1:-}" ]]; then
+        "$REAL_SHA256SUM" "${TEST_SYSTEM_ROOT}/usr/local/bin/$1" \
+            "${TEST_SYSTEM_ROOT}/etc/vpsctl/proxy/$1/config.json" \
+            "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/cores/$1.json" \
+            "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/pending/$1.json"
+        return $?
+    fi
+    find "${TEST_SYSTEM_ROOT}/etc/vpsctl/proxy" "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy" \
+        "${TEST_SYSTEM_ROOT}/usr/local/bin" -type f -exec "$REAL_SHA256SUM" '{}' + | sort
+}
+
 test_core_release_channels() {
-    local sing_meta xray_meta core meta
+    local sing_meta xray_meta core meta before
     sing_meta="${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/cores/sing-box.json"
     xray_meta="${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/cores/xray.json"
 
@@ -683,15 +695,43 @@ test_core_release_channels() {
     jq -e '.release_tag == "v25.2.0-rc.1"' "$xray_meta" >/dev/null || fail "repeated Xray prerelease tag"
 
     : >"$MOCK_LOG"
+    before="$(core_release_state_hash)"
     run_proxy update --core all
-    assert_equal 0 "$RUN_STATUS" "default update returns to stable channel"
-    jq -e '.release_tag == "v1.11.0"' "$sing_meta" >/dev/null || fail "default sing-box update stable tag"
-    jq -e '.release_tag == "v25.1.1"' "$xray_meta" >/dev/null || fail "default Xray update stable tag"
+    assert_equal 0 "$RUN_STATUS" "default update skips lower stable releases"
+    assert_equal "$before" "$(core_release_state_hash)" "default skip preserves files and backups"
+    assert_contains "$RUN_OUTPUT" "1.12.0-beta.1" "default skip shows sing-box current version"
+    assert_contains "$RUN_OUTPUT" "v25.1.1" "default skip shows Xray target version"
+    assert_contains "$RUN_OUTPUT" "避免隐式降级" "default skip gives reason"
     assert_file_contains "$MOCK_LOG" "/SagerNet/sing-box/releases/latest" "default sing-box update stable endpoint"
     assert_file_contains "$MOCK_LOG" "/XTLS/Xray-core/releases/latest" "default Xray update stable endpoint"
     assert_not_contains "$(<"$MOCK_LOG")" "/releases?per_page=" "default update does not follow prior channel"
+    assert_not_contains "$(<"$MOCK_LOG")" "/releases/download/" "default skip downloads no assets"
     assert_not_contains "$(<"$MOCK_LOG")" 'systemctl restart ' "core update must preserve explicit restart contract"
     assert_not_contains "$(<"$MOCK_LOG")" 'systemctl start ' "core update must not start services"
+
+    : >"$MOCK_LOG"
+    run_proxy update --core all --release-channel stable
+    assert_equal 0 "$RUN_STATUS" "explicit stable channel allows downgrade"
+    jq -e '.release_tag == "v1.11.0"' "$sing_meta" >/dev/null || fail "explicit stable sing-box downgrade"
+    jq -e '.release_tag == "v25.1.1"' "$xray_meta" >/dev/null || fail "explicit stable Xray downgrade"
+    assert_equal 1 "$(grep -c '/SagerNet/sing-box/releases/latest' "$MOCK_LOG")" "sing-box release queried once"
+    assert_equal 1 "$(grep -c '/XTLS/Xray-core/releases/latest' "$MOCK_LOG")" "Xray release queried once"
+    assert_file_contains "$MOCK_LOG" 'downloaded sing-box check -c' "explicit downgrade candidate config check"
+    assert_file_contains "$MOCK_LOG" 'downloaded xray run -test -c' "explicit Xray downgrade candidate config check"
+
+    run_proxy update --core sing-box --release-channel prerelease
+    assert_equal 0 "$RUN_STATUS" "mixed update prerelease fixture"
+    run_proxy update --core xray --version v25.0.0
+    assert_equal 0 "$RUN_STATUS" "exact tag allows downgrade"
+    jq -e '.release_tag == "v25.0.0"' "$xray_meta" >/dev/null || fail "explicit tag downgrade committed"
+    before="$(core_release_state_hash sing-box)"
+    : >"$MOCK_LOG"
+    run_proxy update --core all
+    assert_equal 0 "$RUN_STATUS" "all cores continue after first core skips"
+    assert_equal "$before" "$(core_release_state_hash sing-box)" "mixed update leaves skipped core intact"
+    jq -e '.release_tag == "v25.1.1"' "$xray_meta" >/dev/null || fail "mixed update upgrades Xray"
+    assert_not_contains "$(<"$MOCK_LOG")" '/sing-box/releases/download/' "mixed update skips sing-box asset"
+    assert_file_contains "$MOCK_LOG" '/Xray-core/releases/download/' "mixed update downloads Xray asset"
 
     for core in sing-box xray; do
         case "$core" in sing-box) meta="$sing_meta" ;; xray) meta="$xray_meta" ;; esac
@@ -777,6 +817,38 @@ test_core_release_channels() {
     assert_equal 0 "$RUN_STATUS" "confirmed external prerelease update"
     jq -e '.owned == false and .version == "1.12.0-beta.1" and .release_tag == "v1.12.0-beta.1"' \
         "$sing_meta" >/dev/null || fail "confirmed external prerelease update metadata"
+}
+
+test_core_update_certificate_pin_downgrade() {
+    local node_id exit_id before version
+    reset_root
+    set_release_scenario default
+    run_proxy install --core sing-box --version v1.15.0-alpha.7
+    assert_equal 0 "$RUN_STATUS" 'certificate pin current core install'
+    run_proxy stop --core sing-box
+    assert_equal 0 "$RUN_STATUS" 'stop current core to retain pending state'
+    run_proxy node add --profile shadowsocks-aes-256-gcm --core sing-box --name pin-entry \
+        --port 32109 --address entry.example
+    assert_equal 0 "$RUN_STATUS" 'certificate pin entry node'
+    node_id="$(node_id_by_name pin-entry)"
+    run_proxy relay exit add --name pin-only --core sing-box \
+        --uri 'hysteria2://fixture-secret@proxy.example:443?sni=proxy.example&pinSHA256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
+    assert_equal 0 "$RUN_STATUS" 'URI certificate pin exit on supported version'
+    exit_id="$(jq -r '.exits[] | select(.name == "pin-only") | .id' "$(relay_path)")"
+    run_proxy relay bind add --node-id "$node_id" --exit-id "$exit_id"
+    assert_equal 0 "$RUN_STATUS" 'bind URI-only certificate pin exit'
+    jq -e '.exits[] | select(.name == "pin-only") | (.client_options.tls_spki_sha256 // "") == ""' \
+        "$(relay_path)" >/dev/null || fail 'pin-only fixture unexpectedly gained SPKI material'
+    run_proxy update --core sing-box --version v1.15.0-alpha.8
+    assert_equal 0 "$RUN_STATUS" 'create pending generation before rejected downgrade'
+    [[ -f "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/pending/sing-box.json" ]] || fail 'pin fixture must retain pending state'
+    before="$(core_release_state_hash)"
+    for version in v1.14.3 v1.15.0-alpha.6; do
+        run_proxy update --core sing-box --version "$version"
+        assert_equal 10 "$RUN_STATUS" "certificate pin downgrade rejected at $version"
+        assert_contains "$RUN_OUTPUT" '1.15.0-alpha.7' 'downgrade explains certificate pin version requirement'
+        assert_equal "$before" "$(core_release_state_hash)" 'rejected downgrade preserves binary/config/meta/relay/pending and backups'
+    done
 }
 
 test_dependency_install_plans() {
@@ -1386,8 +1458,20 @@ test_unified_interactive_api() (
     assert_contains "$output" "输入精确 Release tag" "interactive exact tag choice"
 
     PROXY_FORWARD_ARGS=()
-    proxy_prompt_release_options update xray <<< $'3\nv25.2.0-rc.1' 2>"$release_stderr"
+    proxy_prompt_release_options update xray <<< $'4\nv25.2.0-rc.1' 2>"$release_stderr"
     assert_equal $'--version\nv25.2.0-rc.1' "$(printf '%s\n' "${PROXY_FORWARD_ARGS[@]}")" "interactive exact tag forwarding"
+    output="$(<"$release_stderr")"
+    assert_contains "$output" "不降级的稳定更新（推荐）" "interactive default update choice"
+    assert_contains "$output" "显式切换最新稳定版（可能降级）" "interactive stable switch choice"
+    PROXY_FORWARD_ARGS=()
+    proxy_prompt_release_options update xray <<<2 2>"$release_stderr"
+    assert_equal $'--release-channel\nstable' "$(printf '%s\n' "${PROXY_FORWARD_ARGS[@]}")" "interactive explicit stable forwarding"
+    PROXY_FORWARD_ARGS=()
+    proxy_prompt_release_options update xray <<<3 2>"$release_stderr"
+    assert_equal $'--release-channel\nprerelease' "$(printf '%s\n' "${PROXY_FORWARD_ARGS[@]}")" "interactive update prerelease forwarding"
+    PROXY_FORWARD_ARGS=()
+    proxy_prompt_release_options update xray <<<'' 2>"$release_stderr"
+    assert_equal '' "$(printf '%s' "${PROXY_FORWARD_ARGS[*]}")" "interactive default update has no explicit channel"
     PROXY_FORWARD_ARGS=()
     proxy_prompt_release_options install sing-box <<<1 2>"$release_stderr"
     assert_equal '' "$(printf '%s' "${PROXY_FORWARD_ARGS[*]}")" "interactive stable release default"
@@ -3961,10 +4045,12 @@ if [[ "${VPSCTL_PROXY_TEST_HARNESS_ONLY:-0}" == 1 ]]; then
 fi
 
 case "${VPSCTL_TEST_ONLY:-}" in
+    arguments-menu) test_arguments_dry_run_and_time; test_unified_interactive_api; printf 'PASS: proxy arguments and menus\n'; exit 0 ;;
     core-pending) test_core_pending; printf 'PASS: per-core pending rollback regressions\n'; exit 0 ;;
     hy2-runtime) test_hy2_runtime_lifecycle; printf 'PASS: HY2 runtime lifecycle tests\n'; exit 0 ;;
     core-install) test_core_install_autostart; printf 'PASS: proxy install autostart tests\n'; exit 0 ;;
     core-release) test_core_release_channels; printf 'PASS: proxy core release tests\n'; exit 0 ;;
+    core-update-pin) test_core_update_certificate_pin_downgrade; printf 'PASS: proxy certificate pin downgrade rejection\n'; exit 0 ;;
     node-list) test_node_list_bindings_and_text; printf 'PASS: proxy node list tests\n'; exit 0 ;;
     node-ip-policy) test_node_ip_strategy_and_batch; printf 'PASS: node IP policy tests\n'; exit 0 ;;
     relay-state) test_relay_state_bindings_and_purge; printf 'PASS: relay state tests\n'; exit 0 ;;
@@ -3987,6 +4073,8 @@ printf 'TEST: HY2 runtime lifecycle\n'
 test_hy2_runtime_lifecycle
 printf 'TEST: proxy core release channels\n'
 test_core_release_channels
+printf 'TEST: proxy certificate pin downgrade rejection\n'
+test_core_update_certificate_pin_downgrade
 printf 'TEST: proxy install autostart and rollback\n'
 test_core_install_autostart
 printf 'TEST: proxy dependency installation plans\n'

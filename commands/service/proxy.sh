@@ -137,18 +137,24 @@ REALITY 防偷：仅适用于 REALITY 配置，新增默认 on；已有节点保
   relay forward delete --id FORWARD_ID [--confirm-delete]
   relay forward refresh [--id FORWARD_ID]
 
-证书 TLS 出口可提供证书或 Base64 公钥 SHA-256 固定值。sing-box 无法仅凭
-整证书指纹固定公钥；受管证书可自动匹配，否则需补充上述材料后绑定节点。
+证书 TLS 出口可提供证书或 Base64 公钥 SHA-256 固定值。sing-box >=
+1.15.0-alpha.7 可直接使用整证书 SHA-256 指纹；旧版需证书或公钥固定值，
+受管证书可自动匹配。整证书指纹和公钥指纹不能互换。
 Hysteria2：Xray 要求 26.3.27+；BBR 档位要求 26.4.13+，Gecko 要求
 26.6.1+，Chrome QUIC 开关要求 26.9.8+。sing-box 的上述扩展要求 1.14+。
 BBR 档位仅在协商进入 BBR 时生效；Chrome 开关仅用于出口客户端。
 default 删除本地覆盖并恢复内核默认。--congestion-control 仅适用于 TUIC。
+已知 Xray 26.9.30 → sing-box 1.14.2 的 Hysteria2 出口在 Chrome QUIC
+off 时存在 UDP 转发限制；开关 default 跟随核心默认，不推断其他版本。
 跳跃端口支持 20000-20100,21000 等集合；节点通过本机 UDP 映射接入，
 --port 仍为实际监听端口。出口间隔使用秒数或 MIN-MAX，至少 5 秒，
 默认 30 秒；sing-box 随机间隔要求 1.14+。间隔不写入分享链接。
 出口自动带宽省略带宽字段；manual 首次要求上/下行正整数 Mbps，使用
 正常 Brutal/BBR 协商。节点的上/下行以服务器为参照，出口以本机为参照。
 新建 TLS XHTTP 默认 auto，REALITY XHTTP 默认 stream-one；仅支持 HTTP/2。
+AnyTLS padding 跟随内核默认。Xray 26.3.27、26.6.27、
+26.9.9 已知 Trojan/gRPC/REALITY 组合失败；未据此判定更新版本。
+Xray 26.10.10+ 底层 TLS/uTLS 客户端默认使用内置根 CA；系统私有 CA 需留意。
 
 系统时间：
   time status [--json]
@@ -175,11 +181,15 @@ restart 使用普通确认，可用全局 --yes 或 --confirm-disruptive 跳过�
 --core CORE，install/update 还支持 --core all。非交互模式存在多个候选
 时必须显式指定 --core。
 
-安装和更新默认使用最新稳定版；--release-channel prerelease 选择最新
-预发布版，--version TAG 精确选择稳定或预发布 Release。两个选项互斥。
+安装默认使用最新稳定版；update 默认查询稳定版，目标低于当前版本则
+跳过（返回 0），无法可靠比较则停止（返回 3）；同版本仍重建并校验配置。
+显式 --release-channel stable|prerelease 或 --version TAG 可切换及回退，
+仍需通过候选配置校验。prerelease 选择最新预发布版，TAG 精确选择稳定或
+预发布 Release。两个选项互斥；版本变化会显示，不另加确认。
 首次安装或登记外部内核后立即启动并启用开机启动；重复安装保留服务状态。
 --core all 可共用 release channel，但不能共用一个 --version。选择的通道
-不会保存；后续不带版本选项的 update 仍使用稳定版，且更新后不自动重启。
+不会保存；后续不带版本选项的 update 仍进行不降级的稳定更新，且更新后
+不自动重启。外部二进制更新仍需 --confirm-external-update 授权。
 
 全局选项 --dry-run、--install-deps、--yes、--non-interactive、--quiet、
 --verbose、--no-color 应放在 service 之前；直接执行本脚本时也可放在
@@ -368,12 +378,24 @@ proxy_prompt_release_options() {
     else
         label="$(proxy_core_label "$core")"
     fi
-    mode="$(proxy_prompt_select "${label} ${action} 版本：" stable \
-        stable "使用最新稳定版（推荐）" \
-        prerelease "使用最新预发布版" \
-        tag "输入精确 Release tag")" || return $?
+    if [[ "$action" == update ]]; then
+        mode="$(proxy_prompt_select "${label} ${action} 版本：" default \
+            default "不降级的稳定更新（推荐）" \
+            stable "显式切换最新稳定版（可能降级）" \
+            prerelease "使用最新预发布版" \
+            tag "输入精确 Release tag")" || return $?
+    else
+        mode="$(proxy_prompt_select "${label} ${action} 版本：" stable \
+            stable "使用最新稳定版（推荐）" \
+            prerelease "使用最新预发布版" \
+            tag "输入精确 Release tag")" || return $?
+    fi
     case "$mode" in
-        stable) return 0 ;;
+        default) return 0 ;;
+        stable)
+            if [[ "$action" == update ]]; then PROXY_FORWARD_ARGS+=(--release-channel stable); fi
+            return 0
+            ;;
         prerelease)
             PROXY_FORWARD_ARGS+=(--release-channel prerelease)
             return 0
