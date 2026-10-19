@@ -4,9 +4,9 @@
 
 项目采用“一个管理入口、多个独立命令”的结构：管理入口只负责参数解析、固定命令登记、公共上下文和分发；每项实际功能原则上由一个公开入口脚本实现，复杂入口可拆为不单独分发的私有子模块。这样既能通过统一入口使用，也能单独运行、测试和排错。
 
-> 当前版本为 0.8.14，提供网络、系统内核、重装与 DD、Swap、访问、TLS 证书、代理、TCPing 探测监听、iperf3 测速服务端与服务器测试入口。支持演练的系统变更命令应先使用 `--dry-run` 并阅读对应恢复说明；内核变更需提前确认带外控制台或救援入口可用。重装与服务器测试会下载并运行第三方代码，不支持演练；重装在重启后可清除目标磁盘数据，服务器测试会产生明显 CPU/磁盘/网络负载。
+> 当前版本为 0.8.15，提供网络、系统内核、重装与 DD、Swap、访问、TLS 证书、代理、TCPing 探测监听、iperf3 测速服务端与服务器测试入口。支持演练的系统变更命令应先使用 `--dry-run` 并阅读对应恢复说明；内核变更需提前确认带外控制台或救援入口可用。重装与服务器测试会下载并运行第三方代码，不支持演练；重装在重启后可清除目标磁盘数据，服务器测试会产生明显 CPU/磁盘/网络负载。
 
-应用、功能与 GitHub Release 分发统一使用 `0.8.14`。仓库根 `VERSION` 是规范版本源，tag 为 `v0.8.14`；发布资产、安装目录、`vpsctl self` 与命令行版本展示均使用同一版本号。
+应用、功能与 GitHub Release 分发统一使用 `0.8.15`。仓库根 `VERSION` 是规范版本源，tag 为 `v0.8.15`；发布资产、安装目录、`vpsctl self` 与命令行版本展示均使用同一版本号。
 
 ## 文档
 
@@ -21,6 +21,7 @@
 - [系统重装与 DD](docs/reinstall-management.md)：Linux、Windows 与 RAW DD 快捷菜单、上游参数透传、取消重装及工具缓存清理。
 - [Swap 管理](docs/swap-management.md)：内存与 Swap 状态、自动容量、磁盘 Swap 替换和关闭、开机配置及失败恢复。
 - [代理管理](docs/proxy-management.md)：Xray/sing-box 内核、节点、出口关联、端口转发、订阅、证书、日志与时间同步。
+- [代理机器接口](docs/proxy-machine-api.md)：可信本机 Agent 的 JSON 快照、版本冲突检查、原生变更与请求回执。
 - [TCPing 测试站点](docs/tcping-management.md)：按需管理独立的 TCP 探测监听服务及其端口。
 - [iperf3 测速服务端](docs/iperf3-management.md)：安装、更新、启停及卸载 TCP/UDP 测速服务，联动 UFW。
 - [访问管理](docs/access-management.md)：用户、密码、公钥与 SSH 双端口验证事务、防火墙协同和恢复。
@@ -68,7 +69,7 @@ curl -fsSL https://github.com/Runarry/vps-script-lite/releases/latest/download/v
 
 仓库 `master` 的 `vpsctl.sh` 也会安装最新已发布版本，不会安装未发布的源码功能。它先读取 Release 清单、校验并运行同一版本的安装器，再由该安装器校验对应的包格式。若旧源码入口报 `unsupported manifest schema`，请改用上面的 Release 地址；该报错可能只是源码与已发布清单格式不同，不需要先卸载。
 
-**自 v0.8.10 起采用 manifest schema 2，与 v0.8.9 按领域打包的 schema 1 不兼容。** v0.8.10 及之后的 schema 2 版本可通过 `vpsctl self update` 升级到 v0.8.14。从 v0.8.9 迁移时，请先下载并校验 v0.8.14 的安装器和 manifest，再运行 `vpsctl --non-interactive self uninstall --confirm-uninstall`（不加 `--purge`），然后执行新安装器。直接重跑安装器只会启动已有管理器；不要用旧版 `self update` 跨格式升级。普通卸载保留已部署服务、配置、功能状态和备份；反向迁移也使用普通卸载再安装。
+**自 v0.8.10 起采用 manifest schema 2，与 v0.8.9 按领域打包的 schema 1 不兼容。** v0.8.10 及之后的 schema 2 版本可通过 `vpsctl self update` 升级到 v0.8.15。从 v0.8.9 迁移时，请先下载并校验 v0.8.15 的安装器和 manifest，再运行 `vpsctl --non-interactive self uninstall --confirm-uninstall`（不加 `--purge`），然后执行新安装器。直接重跑安装器只会启动已有管理器；不要用旧版 `self update` 跨格式升级。普通卸载保留已部署服务、配置、功能状态和备份；反向迁移也使用普通卸载再安装。
 
 安装后使用快捷命令 `vpsctl`。启动 `vpsctl` 只读取本地已安装内容，不联网检查更新；完成上述首次迁移后，需要查看或执行同格式分发更新时显式运行：
 
@@ -82,8 +83,8 @@ vpsctl self update --version vX.Y.Z  # 替换为已发布的同格式版本
 
 ```bash
 tmp_dir="$(mktemp -d)"
-# v0.8.14 使用 schema 2；从 v0.8.9 迁移时先校验本版本安装器和清单。
-base_url="https://github.com/Runarry/vps-script-lite/releases/download/v0.8.14"
+# v0.8.15 使用 schema 2；从 v0.8.9 迁移时先校验本版本安装器和清单。
+base_url="https://github.com/Runarry/vps-script-lite/releases/download/v0.8.15"
 curl -fL "$base_url/vpsctl.sh" -o "$tmp_dir/vpsctl.sh"
 curl -fL "$base_url/vpsctl-manifest.tsv" -o "$tmp_dir/vpsctl-manifest.tsv"
 awk -F '\t' '$1 == "asset" && $2 == "launcher" { print $4 "  vpsctl.sh" }' \
@@ -233,7 +234,7 @@ bash bin/vpsctl service proxy update --core xray --version vX.Y.Z
 
 - 规范：已建立。
 - 目录骨架：已建立。
-- 当前版本：0.8.14。
+- 当前版本：0.8.15。
 - 管理入口：提供环境检测、终端 UI、固定注册表和安全分发。
 - 功能命令：提供 `network bbr`、`network dns`、`network ip-policy`、`network ufw`、`network rfw`、`system kernel`、`system reinstall`、`system swap`、`security access`、`security fail2ban`、`security tls`、`service proxy`、`service tcping`、`service iperf3`、`test nodequality` 和 `test tcpquality`；均处于 `experimental` 生命周期。
 - UFW：主菜单提供简洁端口管理，进阶功能放在“高级规则管理”。启用后自动维护 SSH、代理节点、中转转发及 HTTP-01 临时端口；支持等价已有规则接管、共享引用和按服务解除联动。安装默认不启用，服务停止但配置保留时规则继续保留。接口和恢复说明见 [UFW 管理](docs/ufw-management.md)。
