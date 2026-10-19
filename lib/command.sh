@@ -225,6 +225,8 @@ vps_cmd_init() {
     fi
     VPS_CMD_LOCK_FD=""
     VPS_CMD_LOCK_PATH=""
+    _VPS_CMD_INHERITED_LOCK_FD=""
+    _VPS_CMD_INHERITED_LOCK_PATH=""
     VPS_CMD_DEPENDENCIES_PLANNED=0
     vps_ui_init
 }
@@ -802,6 +804,12 @@ vps_cmd_lock() {
         vps_cmd_error "命令锁需要 flock"
         return 3
     }
+    # A caller may retain its lock while a private subshell runs an existing
+    # command. Borrow only that exact lock; other domains still lock normally.
+    if [[ -n "${_VPS_CMD_INHERITED_LOCK_FD:-}" &&
+        "${_VPS_CMD_INHERITED_LOCK_PATH:-}" == "$(vps_cmd_system_path /run/vpsctl)/${feature}.lock" ]]; then
+        return 0
+    fi
     [[ -z "${VPS_CMD_LOCK_FD:-}" ]] || {
         vps_cmd_error "当前已持有命令锁: ${VPS_CMD_LOCK_PATH:-未知}"
         return 70
@@ -824,6 +832,21 @@ vps_cmd_lock() {
     fi
 }
 
+# Intentional subshell isolation: the caller retains its lock variables.
+# shellcheck disable=SC2030
+vps_cmd_with_inherited_lock() (
+    [[ -n "${VPS_CMD_LOCK_FD:-}" && -n "${VPS_CMD_LOCK_PATH:-}" ]] || return 70
+    _VPS_CMD_INHERITED_LOCK_FD="$VPS_CMD_LOCK_FD"
+    _VPS_CMD_INHERITED_LOCK_PATH="$VPS_CMD_LOCK_PATH"
+    VPS_CMD_LOCK_FD=""
+    VPS_CMD_LOCK_PATH=""
+    # Keep the inherited descriptor open. Native EXIT cleanup may release a
+    # different lock, but must never unlock the caller's open file description.
+    "$@"
+)
+
+# The inherited-lock wrapper deliberately leaves the parent's descriptor intact.
+# shellcheck disable=SC2031
 vps_cmd_unlock() {
     if [[ -n "${VPS_CMD_LOCK_FD:-}" ]]; then
         flock -u "$VPS_CMD_LOCK_FD" >/dev/null 2>&1 || true

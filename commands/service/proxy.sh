@@ -76,6 +76,12 @@ proxy_usage() {
 用法：
   vpsctl [global-options] service proxy [action] [options]
 
+机器接口（root，JSON schemaVersion=1，不支持 --dry-run）：
+  machine snapshot
+  machine apply                 # 从 stdin 读取单个 MachineCommand JSON
+  machine result --id UUID
+  快照包含完整节点凭据，仅供可信 Agent；机器变更复用原命令及危险确认标志。
+
 核心：
   status [--core CORE|all] [--json]
   install [--release-channel stable|prerelease] [--version TAG]
@@ -730,6 +736,10 @@ proxy_dispatch() {
     fi
     shift
     case "$action" in
+        machine)
+            proxy_load_module machine.sh || return $?
+            proxy_machine_dispatch "$@"
+            ;;
         status)
             proxy_extract_core "$@" || return $?
             proxy_core_status "${PROXY_SELECTED_CORE:-all}" "${PROXY_FORWARD_ARGS[@]}"
