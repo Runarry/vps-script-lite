@@ -1,0 +1,61 @@
+#!/usr/sbin/nft -f
+# ============================================================
+# PO0 中转机 nftables 规则
+# 生成时间: 2026-10-01 12:00:00
+# ============================================================
+flush ruleset
+
+define RELAY_LAN_IP = 192.0.2.1
+define DEST_IP_1   = 198.51.100.2
+define DEST_PORT_1 = 443
+define PORT_IN_1   = 20001
+
+# --- 防火墙 ---
+table inet filter {
+    chain input {
+        type filter hook input priority 0; policy drop;
+        ct state { established, related } accept
+        iif "lo" accept
+        ip protocol icmp accept
+
+        # SSH 防扫描: 新连接限速 10/分钟
+        tcp dport 22 ct state new limit rate 10/minute burst 5 packets accept
+        tcp dport 22 ct state established accept
+
+        # 中转端口
+        iifname "wan0" meta l4proto { tcp, udp } th dport { $PORT_IN_1 } accept
+    }
+
+    chain forward {
+        type filter hook forward priority 0; policy drop;
+        ct state { established, related } accept
+        ip daddr $DEST_IP_1 meta l4proto { tcp, udp } th dport $DEST_PORT_1 accept
+    }
+
+    chain output {
+        type filter hook output priority 0; policy accept;
+    }
+}
+
+# --- NAT 转发 ---
+table ip nat {
+    chain prerouting {
+        type nat hook prerouting priority dstnat; policy accept;
+        # [默认线路]
+        meta l4proto { tcp, udp } th dport $PORT_IN_1 dnat to $DEST_IP_1:$DEST_PORT_1
+    }
+
+    chain postrouting {
+        type nat hook postrouting priority srcnat; policy accept;
+        # [默认线路]
+        ip daddr $DEST_IP_1 meta l4proto { tcp, udp } th dport $DEST_PORT_1 snat to $RELAY_LAN_IP
+    }
+}
+
+# --- MSS 优化 (防止 MTU 不匹配导致断流) ---
+table ip mangle {
+    chain forward {
+        type filter hook forward priority mangle; policy accept;
+        ip daddr $DEST_IP_1 tcp flags syn tcp option maxseg size set 1452
+    }
+}

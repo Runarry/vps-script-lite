@@ -39,6 +39,9 @@ for syntax_file in \
     "${TEST_ROOT}"/commands/test/*.sh \
     "${TEST_ROOT}/scripts/build-release.sh" \
     "${TEST_ROOT}/scripts/prepare-draft-release.sh" \
+    "${TEST_ROOT}/scripts/po0-relay.sh" \
+    "${TEST_ROOT}/tests/unit/test-po0-relay.sh" \
+    "${TEST_ROOT}/tests/integration/test-po0-relay-real.sh" \
     "${TEST_ROOT}/tests/unit/test-libraries.sh" \
     "${TEST_ROOT}/tests/unit/test-command.sh" \
     "${TEST_ROOT}/tests/unit/test-distribution.sh" \
@@ -104,6 +107,7 @@ bash "${TEST_ROOT}/tests/unit/test-command.sh"
 bash "${TEST_ROOT}/tests/unit/test-distribution.sh"
 bash "${TEST_ROOT}/tests/unit/test-release-build.sh"
 bash "${TEST_ROOT}/tests/unit/test-release-workflow.sh"
+bash "${TEST_ROOT}/tests/unit/test-po0-relay.sh"
 bash "${TEST_ROOT}/tests/unit/test-network-bbr.sh"
 bash "${TEST_ROOT}/tests/unit/test-network-dns.sh"
 bash "${TEST_ROOT}/tests/unit/test-network-ip-policy.sh"

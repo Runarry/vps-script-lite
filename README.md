@@ -230,6 +230,10 @@ bash bin/vpsctl service proxy update --core xray --version vX.Y.Z
 
 依赖检查按用户当前选择的动作延迟执行：只有该动作实际缺少可安装工具时，真实执行的交互流程才询问是否安装，不会为其他菜单动作预装依赖；真实非交互安装仍必须显式提供 `--install-deps`；`--dry-run` 会直接展示缺失依赖和安装计划，无需该授权且不询问。该授权支持 `apt-get`、`dnf5`、`dnf`、`yum`、`apk`、`pacman` 和 `zypper`，实际安装需要 root，也不会绕过 Linux、init 系统、CPU 架构、内核版本、XDP/BPF 或功能本体等平台门禁。它与 `--dry-run` 组合时只展示固定的软件包安装命令，不实际安装，部分动作会在依赖计划后安全停止并提示安装后重跑。上例中的 `--core` 是直接命令和非交互调用保留的高级消歧参数：只有一个符合条件的内核时通常可自动解析，存在多个候选时应显式指定。
 
+## PO0 独立中转脚本
+
+内网 PO0 可单独复制 [po0-relay.sh](scripts/po0-relay.sh)，运行 `sudo bash po0-relay.sh`，通过编号菜单管理多条 IPv4 TCP／UDP 端口转发。支持单端口、端口区间，以及原 PO0 脚本生成配置的自动导入；不需要安装 vpsctl。使用和恢复说明见 [PO0 中转管理](docs/po0-relay.md)。
+
 ## 当前状态
 
 - 规范：已建立。
