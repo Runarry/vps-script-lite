@@ -171,13 +171,8 @@ tcping_service_active() {
 }
 
 tcping_service_enabled() {
-    local load_state
     case "$TCPING_INIT" in
-        systemd)
-            load_state="$(systemctl show --property=LoadState --value "$TCPING_SERVICE.service")" || return $?
-            [[ "$load_state" != not-found ]] || return 1
-            systemctl is-enabled --quiet "$TCPING_SERVICE.service"
-            ;;
+        systemd) vps_cmd_systemd_unit_enabled "$TCPING_SERVICE.service" ;;
         openrc) [[ -L "$(vps_cmd_system_path "/etc/runlevels/default/$TCPING_SERVICE")" ]] ;;
         *) return 1 ;;
     esac

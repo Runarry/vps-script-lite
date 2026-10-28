@@ -41,9 +41,24 @@ make_mock() {
 make_mock systemctl '
 printf "systemctl %s\n" "$*" >>"$MOCK_LOG"
 state="${VPSCTL_SYSTEM_ROOT}/run/mock-systemd"; mkdir -p "$state"
+unit_present() {
+  [[ -f "$state/active-$1" || -f "$state/enabled-$1" || -f "${VPSCTL_SYSTEM_ROOT}/etc/systemd/system/$1" ]]
+}
 case "${1:-}" in
+  show)
+    if [[ "${2:-}" == --property=LoadState && "${3:-}" == --value ]]; then
+      if unit_present "${*: -1}"; then printf "loaded\n"; else printf "not-found\n"; fi
+    fi
+    ;;
   is-active) [[ -f "$state/active-${*: -1}" ]] ;;
-  is-enabled) [[ -f "$state/enabled-${*: -1}" ]] ;;
+  is-enabled)
+    unit="${*: -1}"
+    if ! unit_present "$unit"; then
+      printf "Failed to get unit file state for %s: No such file or directory\n" "$unit" >&2
+      exit 1
+    fi
+    [[ -f "$state/enabled-$unit" ]]
+    ;;
   start)
     [[ ! -e "${VPSCTL_SYSTEM_ROOT}/run/skip-service-start" ]] || exit 0
     touch "$state/active-${2}"
@@ -416,6 +431,7 @@ test_core_install_autostart() {
                 run_proxy install --core "$core"
                 assert_equal 0 "$RUN_STATUS" "$init $ownership $core install"
                 assert_contains "$RUN_OUTPUT" '已安装、启动并启用开机启动' "install success state"
+                assert_not_contains "$RUN_OUTPUT" 'Failed to get unit file state' "$init $ownership $core first install missing-unit diagnostic"
                 [[ -f "$state/active-$unit" && -f "$state/enabled-$unit" ]] || fail "$init $core install service defaults"
                 [[ -f "$lkg/config.json" && -f "$lkg/core.json" && -f "$lkg/binary" ]] || fail "$init $core install LKG missing"
                 cmp -s "$config" "$lkg/config.json" || fail "$core LKG config mismatch"
@@ -3099,8 +3115,16 @@ test_relay_forward_family_modes() {
 }
 
 test_relay_forward_service_lifecycle() {
-    local exit_id forward_id
+    local exit_id forward_id RUN_STATUS=0 RUN_OUTPUT=""
     reset_root
+    run_proxy relay status --json
+    assert_equal 0 "$RUN_STATUS" "uninstalled relay runtime status"
+    assert_not_contains "$RUN_OUTPUT" 'Failed to get unit file state' "uninstalled relay missing-unit diagnostic"
+    assert_equal false "$(jq -r '.forward_runtime.installed' <<<"$RUN_OUTPUT")" "uninstalled relay runtime installed state"
+    assert_equal false "$(jq -r '.forward_runtime.enabled' <<<"$RUN_OUTPUT")" "uninstalled relay runtime enabled state"
+    assert_file_contains "$MOCK_LOG" 'systemctl show --property=LoadState --value vpsctl-proxy-forward.service' "uninstalled relay unit load query"
+    assert_not_contains "$(<"$MOCK_LOG")" 'systemctl is-enabled --quiet vpsctl-proxy-forward.service' "uninstalled relay unit enabled query"
+
     run_proxy relay exit add --name lifecycle-direct --target 198.51.100.60 --target-port 8443
     assert_equal 0 "$RUN_STATUS" "lifecycle direct exit"
     exit_id="$(jq -r '.exits[0].id' "$(relay_path)")"
@@ -3118,6 +3142,12 @@ test_relay_forward_service_lifecycle() {
     assert_file_contains "${TEST_SYSTEM_ROOT}/etc/systemd/system/vpsctl-proxy-forward.service" 'ExecStart=/usr/local/libexec/vpsctl-proxy-forward-refresh watch' "systemd DNS watcher"
     assert_file_contains "${TEST_SYSTEM_ROOT}/usr/local/libexec/vpsctl-proxy-forward-refresh" 'sleep 300' "five minute DNS refresh"
     [[ -f "${TEST_SYSTEM_ROOT}/usr/local/libexec/vpsctl-proxy-runtime/lib/ui.sh" ]] || fail "relay runtime UI dependency missing"
+    : >"$MOCK_LOG"
+    run_proxy relay status --json
+    assert_equal 0 "$RUN_STATUS" "installed relay runtime status"
+    assert_equal true "$(jq -r '.forward_runtime.installed' <<<"$RUN_OUTPUT")" "installed relay runtime installed state"
+    assert_equal true "$(jq -r '.forward_runtime.enabled' <<<"$RUN_OUTPUT")" "installed relay runtime enabled state"
+    assert_file_contains "$MOCK_LOG" 'systemctl is-enabled --quiet vpsctl-proxy-forward.service' "loaded relay unit enabled query"
     run_proxy relay forward delete --id "$forward_id" --confirm-delete
     assert_equal 0 "$RUN_STATUS" "systemd relay last delete"
     [[ ! -e "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/service/proxy/relay-resolved.json" ]] || fail "last delete retained DNS cache"

@@ -100,6 +100,8 @@ vps-script-lite/
 
 `lib/` 仅存放稳定且至少被两个组件复用的基础能力，例如日志格式、平台检测、权限检查、锁和安全的文件替换。
 
+`lib/command.sh` 的 `vps_cmd_systemd_unit_enabled UNIT` 用于单元可能尚未安装的 systemd 自启查询。TCPing、iperf3、代理核心和代理中转共用此函数：LoadState 为 `not-found` 时返回 1 且不查询单元文件自启状态，其他情况保留 systemctl 原有结果和诊断。OpenRC 继续使用各功能的现有查询。
+
 `lib/ufw.sh` 提供网络管理、SSH、代理、TCP 探测监听、iperf3 和 TLS 共用的规则归属、服务需求与事务接口，随 `shared-ufw` 按需下载。各业务提交声明，UFW 入口通过已知持久数据契约采集存量，不加载其他功能的私有模块。独立 UFW 锁在业务锁之后获取，跨命令同步按访问管理、代理、TLS、TCP 探测监听、iperf3 的固定顺序获取业务锁。中转后台运行时复制同版本共享库，避免升级或重启后丢失端口联动能力。
 
 公共库不得：

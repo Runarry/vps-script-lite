@@ -52,9 +52,18 @@ printf 'systemctl %s\n' "$*" >>"$MOCK_LOG"
 root="$VPSCTL_SYSTEM_ROOT"
 case "${1:-}" in
     is-active) [[ -e "$root/run/iperf3-active" ]] ;;
-    is-enabled) [[ -e "$root/run/iperf3-enabled" ]] ;;
+    is-enabled)
+        if [[ ! -f "$root/etc/systemd/system/vpsctl-iperf3.service" ]]; then
+            printf 'Failed to get unit file state for vpsctl-iperf3.service: No such file or directory\n' >&2
+            exit 1
+        fi
+        [[ -e "$root/run/iperf3-enabled" ]]
+        ;;
     show)
-        if [[ -e "$root/run/iperf3-active" ]]; then printf '%s\n' "$MOCK_LIVE_PID"; else printf '0\n'; fi
+        if [[ "${2:-}" == --property=LoadState ]]; then
+            if [[ -f "$root/etc/systemd/system/vpsctl-iperf3.service" ]]; then printf 'loaded\n'; else printf 'not-found\n'; fi
+        elif [[ -e "$root/run/iperf3-active" ]]; then printf '%s\n' "$MOCK_LIVE_PID"
+        else printf '0\n'; fi
         ;;
     daemon-reload) exit 0 ;;
     start|restart)
@@ -145,6 +154,7 @@ for action in help status stop logs ''; do
     if [[ -n "$action" ]]; then
         assert_status 0 bash "$TEST_COMMAND" --install-deps "$action"
     else assert_status 0 bash "$TEST_COMMAND"; fi
+    ! grep -Fq 'Failed to get unit file state' "$TEST_TEMP/output" || fail 'uninstalled query emitted a missing-unit warning'
 done
 [[ ! -e "$state" && ! -e "$unit" ]] || fail 'read-only/empty stop deployed files'
 ! grep -Fq 'apt-get ' "$TEST_LOG" || fail 'read-only/empty stop installed dependencies'
@@ -198,6 +208,7 @@ assert_status 0 bash "$TEST_TEMP/dependencies.sh" --dry-run --install-deps start
 [[ ! -e "$state" && ! -e "$unit" && ! -e "$TEST_SYSTEM_ROOT/run/dependency-installed" ]] || fail 'dependency dry run mutated system'
 : >"$TEST_LOG"
 assert_status 0 bash "$TEST_TEMP/dependencies.sh" --install-deps start
+! grep -Fq 'Failed to get unit file state' "$TEST_TEMP/output" || fail 'first start emitted a missing-unit warning'
 grep -Eq '^apt-get install .*iperf3' "$TEST_LOG" || fail 'explicit dependency permission did not install iperf3'
 grep -Eq '^debconf: iperf3 iperf3/start_daemon boolean false' "$TEST_LOG" || fail 'Debian default daemon was not suppressed before install'
 debconf_line="$(grep -n '^debconf:' "$TEST_LOG" | head -1 | cut -d: -f1)"
@@ -306,6 +317,7 @@ binary_before="$(sha256sum "$TEST_FAKE_BIN/iperf3")"
 mkdir -p "$TEST_SYSTEM_ROOT/var/log/vpsctl"
 printf 'test log\n' >"$TEST_SYSTEM_ROOT/var/log/vpsctl/iperf3.log"
 assert_status 0 bash "$TEST_COMMAND" --yes uninstall
+! grep -Fq 'Failed to get unit file state' "$TEST_TEMP/output" || fail 'uninstall emitted a missing-unit warning'
 [[ ! -e "$state" && ! -e "$unit" && ! -e "$TEST_SYSTEM_ROOT/var/log/vpsctl/iperf3.log" ]] || fail 'uninstall left owned files'
 [[ "$(sha256sum "$TEST_FAKE_BIN/iperf3")" == "$binary_before" ]] || fail 'uninstall removed/changed system binary'
 ! grep -Eq '^apt-get (remove|purge|autoremove)' "$TEST_LOG" || fail 'uninstall removed system packages'

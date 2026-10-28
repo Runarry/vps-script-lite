@@ -1095,7 +1095,7 @@ _proxy_relay_forward_runtime_active() {
 _proxy_relay_forward_runtime_enabled() {
     [[ "${VPSCTL_TESTING:-0}" != 1 || "${PROXY_RELAY_FORWARD_ALLOW_TEST_RUNTIME:-0}" == 1 ]] || return 1
     case "${PROXY_INIT_SYSTEM:-unknown}" in
-        systemd) systemctl is-enabled --quiet vpsctl-proxy-forward.service ;;
+        systemd) vps_cmd_systemd_unit_enabled vpsctl-proxy-forward.service ;;
         openrc)
             rc-update show default 2>/dev/null |
                 awk '$1 == "vpsctl-proxy-forward" { found=1 } END { exit(found ? 0 : 1) }'

@@ -749,7 +749,7 @@ proxy_service_is_enabled() {
     local core="$1" service
     service="$(proxy_core_service_name "$core")" || return 2
     case "$PROXY_INIT_SYSTEM" in
-        systemd) systemctl is-enabled --quiet "${service}.service" ;;
+        systemd) vps_cmd_systemd_unit_enabled "${service}.service" ;;
         openrc)
             rc-update show default 2>/dev/null |
                 awk -v wanted="$service" '$1 == wanted { found=1 } END { exit(found ? 0 : 1) }'

@@ -532,6 +532,66 @@ test_lock_backup_and_atomic_write() {
     test_assert_equal "first value" "$(<"$target_path")" "target after rejected atomic write"
 }
 
+test_systemd_unit_enabled() (
+    local mock_unit='example.service' mock_load_state=not-found mock_show_status=0 mock_enabled_status=0 mock_enabled_error=''
+    local status=0 log="$TEST_TEMP/systemctl.log" output="$TEST_TEMP/systemctl.stdout" error="$TEST_TEMP/systemctl.stderr"
+    # The sourced helper invokes this replacement.
+    # shellcheck disable=SC2317
+    systemctl() {
+        [[ "${*: -1}" == "$mock_unit" ]] || return 99
+        printf '%s\n' "$1" >>"$log"
+        case "$1" in
+            show)
+                if ((mock_show_status != 0)); then
+                    printf 'service-manager query failed\n' >&2
+                    return "$mock_show_status"
+                fi
+                printf '%s\n' "$mock_load_state"
+                ;;
+            is-enabled)
+                [[ -z "$mock_enabled_error" ]] || printf '%s\n' "$mock_enabled_error" >&2
+                return "$mock_enabled_status"
+                ;;
+            *) return 98 ;;
+        esac
+    }
+
+    : >"$log"
+    vps_cmd_systemd_unit_enabled "$mock_unit" >"$output" 2>"$error" || status=$?
+    test_assert_equal 1 "$status" "missing unit enablement"
+    test_assert_equal show "$(<"$log")" "missing unit avoids is-enabled"
+    [[ ! -s "$output" && ! -s "$error" ]] || test_fail "missing unit emitted output"
+
+    for mock_load_state in loaded masked; do
+        for mock_enabled_status in 0 1; do
+            status=0
+            : >"$log"
+            vps_cmd_systemd_unit_enabled "$mock_unit" >"$output" 2>"$error" || status=$?
+            test_assert_equal "$mock_enabled_status" "$status" "$mock_load_state enablement semantics"
+            test_assert_equal $'show\nis-enabled' "$(<"$log")" "$mock_load_state queries enablement"
+            [[ ! -s "$output" && ! -s "$error" ]] || test_fail "enablement query emitted unexpected output"
+        done
+    done
+
+    mock_load_state=not-found
+    mock_show_status=42
+    status=0
+    : >"$log"
+    vps_cmd_systemd_unit_enabled "$mock_unit" >"$output" 2>"$error" || status=$?
+    test_assert_equal 42 "$status" "load-state query failure status"
+    test_assert_equal 'service-manager query failed' "$(<"$error")" "load-state query failure diagnostic"
+    test_assert_equal show "$(<"$log")" "failed load-state query avoids is-enabled"
+
+    mock_load_state=loaded
+    mock_show_status=0
+    mock_enabled_status=43
+    mock_enabled_error='enablement query failed'
+    status=0
+    vps_cmd_systemd_unit_enabled "$mock_unit" >"$output" 2>"$error" || status=$?
+    test_assert_equal 43 "$status" "enablement query failure status"
+    test_assert_equal "$mock_enabled_error" "$(<"$error")" "enablement query failure diagnostic"
+)
+
 test_internal_symlink_component_guard() {
     local etc_path="${TEST_TEMP}/system/etc"
     local saved_path="${TEST_TEMP}/system/etc.saved"
@@ -557,6 +617,7 @@ test_apt_refresh_reuse
 test_prompt_helpers
 test_standard_system_paths
 test_logging_and_run
+test_systemd_unit_enabled
 test_confirmation_guards
 test_lock_backup_and_atomic_write
 test_internal_symlink_component_guard

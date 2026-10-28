@@ -408,6 +408,15 @@ vps_cmd_status() {
     printf '  %s%s%s：%s%s%s\n' "$label_color" "$(vps_ui_pad "$label" "$VPS_UI_KV_WIDTH")" "$reset" "$value_color" "$value" "$reset"
 }
 
+# Units may not exist before their first installation or after removal.
+vps_cmd_systemd_unit_enabled() {
+    local unit="$1" load_state
+
+    load_state="$(systemctl show --property=LoadState --value "$unit")" || return $?
+    [[ "$load_state" != not-found ]] || return 1
+    systemctl is-enabled --quiet "$unit"
+}
+
 vps_cmd_run() {
     local argument
     local rendered=""

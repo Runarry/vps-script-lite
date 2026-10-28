@@ -184,7 +184,7 @@ iperf3_service_active() {
 
 iperf3_service_enabled() {
     case "$IPERF3_INIT" in
-        systemd) systemctl is-enabled --quiet "$IPERF3_SERVICE.service" ;;
+        systemd) vps_cmd_systemd_unit_enabled "$IPERF3_SERVICE.service" ;;
         openrc) [[ -L "$(vps_cmd_system_path "/etc/runlevels/default/$IPERF3_SERVICE")" ]] ;;
         *) return 1 ;;
     esac
