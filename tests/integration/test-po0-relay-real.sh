@@ -116,6 +116,20 @@ PY
     while [[ ! -e "$work/initial.probed" ]]; do sleep 0.1; done
     ok 'initial apply writes persistent files and preserves foreign nft table'
 
+    # Exercise the real URI add prompts and real commit, then let the client
+    # consume the exported endpoint rather than hard-coding its incoming port.
+    po0_action_add <<<$'vless://acceptance-id@198.51.100.2:443?security=tls&sni=upstream.example#URI%20Netns\n\n23001-23003\n\n192.0.2.1\ny' >"$work/uri-add.log" 2>&1 || fail 'URI action creation and apply'
+    po0_load_current || fail 'load URI-created rule'
+    [[ ${PO0_URI[3]-} == *acceptance-id* && $PO0_PUBLIC_IP == 192.0.2.1 ]] || fail 'URI creation metadata not persisted'
+    po0_share_uri 3 >"$work/exported-uri"
+    po0_uri parse "$(cat "$work/exported-uri")" >"$work/exported-endpoint"
+    [[ $(sed -n '1p' "$work/exported-endpoint") == 192.0.2.1 ]] || fail 'exported public endpoint'
+    [[ $(sed -n '2p' "$work/exported-endpoint") == 23001 ]] || fail 'exported range first endpoint'
+    [[ $(cat "$work/exported-uri") == *sni=upstream.example* ]] || fail 'export lost original TLS name'
+    touch "$work/uri.ready"
+    while [[ ! -e "$work/uri.probed" ]]; do sleep 0.1; done
+    ok 'URI-created rule persists and exported endpoint forwards real TCP and UDP'
+
     po0_load_current
     first="${PO0_IDS[0]}" second="${PO0_IDS[1]}"
     PO0_PROTO[$first]=tcp PO0_PROTO[$second]=udp PO0_PORT[$second]=20001
@@ -151,6 +165,9 @@ PY
     nft -s list ruleset >"$work/rollback-runtime.before"
     po0_load_current
     PO0_DEST_PORT[$second]=443
+    PO0_PUBLIC_IP=203.0.113.88
+    PO0_URI[3]='trojan://rollback-secret@198.51.100.3:8443?sni=rollback.example#Changed'
+    PO0_DEST_IP[3]=198.51.100.3 PO0_DEST_PORT[3]=8443
     printf 'disabled\n' >"$work/service-state"
     SERVICE_FAIL=1
     if po0_apply; then fail 'service failure was reported as success'; fi
@@ -159,6 +176,8 @@ PY
     if cmp -s "$work/rollback-state.before" "$work/rollback-state.at-enable"; then fail 'failure occurred before desired state was written'; fi
     [[ "$(cat "$work/service-state")" == disabled ]] || fail 'failed apply changes service enable state'
     cmp -s "$PO0_STATE_FILE" "$work/rollback-state.before" || fail 'failed apply changes saved state'
+    po0_load_state "$PO0_STATE_FILE" || fail 'read rolled-back URI metadata'
+    [[ $PO0_PUBLIC_IP == 192.0.2.1 && ${PO0_URI[3]-} == *acceptance-id* ]] || fail 'rollback changes URI/global public IP'
     cmp -s "$PO0_NFT_FILE" "$work/rollback-config.before" || fail 'failed apply changes saved config'
     cmp -s "$PO0_SYSCTL_FILE" "$work/rollback-sysctl.before" || fail 'failed apply changes sysctl file'
     nft -s list ruleset >"$work/rollback-runtime.after"
@@ -175,7 +194,7 @@ PY
     cmp -s "$work/foreign.before" "$work/foreign.final" || fail 'reload changes foreign table'
     po0_load_current
     PO0_IDS=("$second")
-    unset 'PO0_NAME[$first]' 'PO0_ENABLED[$first]' 'PO0_PROTO[$first]' 'PO0_PORT[$first]' 'PO0_DEST_IP[$first]' 'PO0_DEST_PORT[$first]'
+    unset 'PO0_NAME[$first]' 'PO0_ENABLED[$first]' 'PO0_PROTO[$first]' 'PO0_PORT[$first]' 'PO0_DEST_IP[$first]' 'PO0_DEST_PORT[$first]' 'PO0_URI[3]'
     po0_apply || fail 'delete first stable ID'
     po0_load_current
     [[ "${#PO0_IDS[@]}" == 1 && "${PO0_IDS[0]}" == "$second" ]] || fail 'delete changes surviving stable ID'
@@ -299,6 +318,11 @@ wait_stage initial
 probe_line 20001 198.51.100.2 443
 probe_line 20002 198.51.100.3 8443
 touch "$WORK/initial.probed"
+wait_stage uri
+uri_port=$(sed -n '2p' "$WORK/exported-endpoint")
+probe_line "$uri_port" 198.51.100.2 443
+probe_line 23003 198.51.100.2 443
+touch "$WORK/uri.probed"
 wait_stage protocol
 probe tcp 20001 '198.51.100.2:443|192.0.2.1'
 probe udp 20001 '198.51.100.3:8443|192.0.2.1'
@@ -320,6 +344,7 @@ touch "$WORK/range.probed"
 wait_stage rollback
 probe_line 20010 198.51.100.3 8444
 probe_line 20002 198.51.100.3 8443
+probe_line "$uri_port" 198.51.100.2 443
 touch "$WORK/rollback.probed"
 wait_stage reload
 probe_line 20012 198.51.100.3 8444

@@ -232,7 +232,7 @@ bash bin/vpsctl service proxy update --core xray --version vX.Y.Z
 
 ## PO0 独立中转脚本
 
-内网 PO0 可单独复制 [po0-relay.sh](scripts/po0-relay.sh)，运行 `sudo bash po0-relay.sh`，通过编号菜单管理多条 IPv4 TCP／UDP 端口转发。支持单端口、端口区间，以及原 PO0 脚本生成配置的自动导入；不需要安装 vpsctl。使用和恢复说明见 [PO0 中转管理](docs/po0-relay.md)。
+内网 PO0 可单独复制 [po0-relay.sh](scripts/po0-relay.sh)，运行 `sudo bash po0-relay.sh`，通过分组编号菜单管理多条 IPv4 TCP／UDP 端口转发。支持直接粘贴常见节点 URI，查看时获取替换为 PO0 公网 IPv4 和入站端口的分享链接；URI 功能按需使用 Python 3 标准库。支持单端口、端口区间，以及原 PO0 脚本生成配置的自动导入；不需要安装 vpsctl。使用和恢复说明见 [PO0 中转管理](docs/po0-relay.md)。
 
 ## 当前状态
 

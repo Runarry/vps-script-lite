@@ -4,24 +4,41 @@
 PO0_STATE_FILE=/etc/po0-relay/state.tsv
 PO0_NFT_FILE=/etc/nftables.conf
 PO0_SYSCTL_FILE=/etc/sysctl.d/99-po0-relay.conf
+PO0_BBR_SYSCTL_FILE=/etc/sysctl.d/99-po0-relay-bbr.conf
+PO0_BBR_MODULES_FILE=/etc/modules-load.d/99-po0-relay-bbr.conf
 PO0_BACKUP_DIR=/etc/po0-relay/backups
 PO0_LOCK_FILE=/run/lock/po0-relay.lock
 PO0_MODE=fresh
 PO0_IFACE=''
 PO0_RELAY_IP=''
+PO0_PUBLIC_IP=''
 PO0_NEXT_ID=1
 PO0_BASE_STATE=''
 PO0_BASE_CONFIG=''
 PO0_ANSWER=''
 PO0_CHOSEN_PORT=''
 declare -a PO0_IDS=() PO0_SSH_PORTS=(22) PO0_LISTEN_TCP=() PO0_LISTEN_UDP=() PO0_LOCAL_IPS=()
-declare -A PO0_NAME=() PO0_ENABLED=() PO0_PROTO=() PO0_PORT=() PO0_DEST_IP=() PO0_DEST_PORT=()
+declare -A PO0_NAME=() PO0_ENABLED=() PO0_PROTO=() PO0_PORT=() PO0_DEST_IP=() PO0_DEST_PORT=() PO0_URI=()
 
-po0_error() { printf '[ERROR] %s\n' "$*" >&2; }
+po0_message() {
+    local color=$1
+    shift
+    if [[ -t 1 && ${TERM:-dumb} != dumb && ! ${NO_COLOR+x} ]]; then
+        printf '\033[%sm%s\033[0m\n' "$color" "$*"
+    else
+        printf '%s\n' "$*"
+    fi
+}
+
+po0_error() { po0_message 31 "[错误] $*" >&2; }
+po0_heading() {
+    printf '\n'
+    po0_message '1;36' "$*"
+}
 
 po0_reset_state() {
-    PO0_IDS=() PO0_NAME=() PO0_ENABLED=() PO0_PROTO=() PO0_PORT=() PO0_DEST_IP=() PO0_DEST_PORT=()
-    PO0_IFACE='' PO0_RELAY_IP='' PO0_NEXT_ID=1 PO0_SSH_PORTS=(22)
+    PO0_IDS=() PO0_NAME=() PO0_ENABLED=() PO0_PROTO=() PO0_PORT=() PO0_DEST_IP=() PO0_DEST_PORT=() PO0_URI=()
+    PO0_IFACE='' PO0_RELAY_IP='' PO0_PUBLIC_IP='' PO0_NEXT_ID=1 PO0_SSH_PORTS=(22)
 }
 
 po0_valid_port() {
@@ -51,6 +68,11 @@ po0_valid_name() {
 po0_valid_iface() { [[ $1 =~ ^[a-zA-Z0-9_.:-]{1,15}$ ]]; }
 po0_valid_id() { [[ $1 =~ ^[1-9][0-9]{0,9}$ ]] && ((10#$1 < 2147483647)); }
 
+# Structural state validation stays available without Python or network access.
+po0_valid_uri() {
+    [[ ${1,,} =~ ^(vless|vmess|trojan|ss|hysteria2|hy2|tuic|anytls)://.+$ && $1 != *[[:cntrl:]]* ]]
+}
+
 po0_ports_overlap() {
     local a=${1%-*} b=${1#*-} c=${2%-*} d=${2#*-}
     ((10#$a <= 10#$d && 10#$c <= 10#$b))
@@ -68,6 +90,10 @@ po0_validate_state() {
         po0_error '状态中的网卡、内网 IPv4 或 next_id 无效。'
         return 10
     }
+    if [[ -n $PO0_PUBLIC_IP ]] && ! po0_valid_ipv4 "$PO0_PUBLIC_IP"; then
+        po0_error '状态中的公网 IPv4 无效。'
+        return 10
+    fi
     ((${#PO0_SSH_PORTS[@]} > 0)) || {
         po0_error '状态缺少 SSH 保护端口。'
         return 10
@@ -89,6 +115,10 @@ po0_validate_state() {
             return 10
         }
         seen[$id]=1
+        if [[ ${PO0_URI[$id]+yes} ]] && ! po0_valid_uri "${PO0_URI[$id]}"; then
+            po0_error "规则 $id 的 URI 记录无效。"
+            return 10
+        fi
         po0_valid_name "${PO0_NAME[$id]-}" && [[ ${PO0_ENABLED[$id]-} =~ ^[01]$ ]] &&
             [[ ${PO0_PROTO[$id]-} =~ ^(tcp|udp|both)$ ]] && po0_valid_port_spec "${PO0_PORT[$id]-}" &&
             po0_valid_ipv4 "${PO0_DEST_IP[$id]-}" && po0_valid_port "${PO0_DEST_PORT[$id]-}" || {
@@ -122,20 +152,28 @@ po0_validate_state() {
             fi
         done
     done
+    for id in "${!PO0_URI[@]}"; do
+        [[ ${seen[$id]+yes} ]] || {
+            po0_error 'URI 记录没有对应线路。'
+            return 10
+        }
+    done
 }
 
 po0_write_state() {
     local id port
     po0_validate_state || return $?
-    printf 'PO0-RELAY\t1\nmeta\tinterface\t%s\nmeta\trelay_ip\t%s\nmeta\tnext_id\t%s\n' "$PO0_IFACE" "$PO0_RELAY_IP" "$PO0_NEXT_ID"
+    printf 'PO0-RELAY\t2\nmeta\tinterface\t%s\nmeta\trelay_ip\t%s\nmeta\tnext_id\t%s\n' "$PO0_IFACE" "$PO0_RELAY_IP" "$PO0_NEXT_ID"
+    [[ -z $PO0_PUBLIC_IP ]] || printf 'meta\tpublic_ip\t%s\n' "$PO0_PUBLIC_IP"
     for port in "${PO0_SSH_PORTS[@]}"; do printf 'ssh\t%s\n' "$port"; done
     for id in "${PO0_IDS[@]}"; do
         printf 'rule\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "${PO0_ENABLED[$id]}" "${PO0_PROTO[$id]}" "${PO0_PORT[$id]}" "${PO0_DEST_IP[$id]}" "${PO0_DEST_PORT[$id]}" "${PO0_NAME[$id]}"
+        [[ ! ${PO0_URI[$id]+yes} ]] || printf 'uri\t%s\t%s\n' "$id" "${PO0_URI[$id]}"
     done
 }
 
 po0_load_state() {
-    local line n=0 id key
+    local line n=0 id key version
     local -a fields
     local -A meta=() ids=() ssh_seen=()
     po0_reset_state
@@ -147,10 +185,11 @@ po0_load_state() {
     while IFS= read -r line || [[ -n $line ]]; do
         n=$((n + 1))
         if ((n == 1)); then
-            [[ $line == $'PO0-RELAY\t1' ]] || {
+            [[ $line == $'PO0-RELAY\t1' || $line == $'PO0-RELAY\t2' ]] || {
                 po0_error '状态版本不支持。'
                 return 10
             }
+            version=${line##*$'\t'}
             continue
         fi
         [[ -n $line && $line != *$'\t\t'* && $line != $'\t'* && $line != *$'\t' ]] || {
@@ -171,11 +210,22 @@ po0_load_state() {
                     interface) PO0_IFACE=${fields[2]} ;;
                     relay_ip) PO0_RELAY_IP=${fields[2]} ;;
                     next_id) PO0_NEXT_ID=${fields[2]} ;;
+                    public_ip)
+                        [[ $version == 2 ]] || return 10
+                        PO0_PUBLIC_IP=${fields[2]}
+                        ;;
                     *)
                         po0_error "未知状态字段: $key"
                         return 10
                         ;;
                 esac
+                ;;
+            uri)
+                [[ $version == 2 && ${#fields[@]} == 3 ]] || return 10
+                id=${fields[1]}
+                po0_valid_id "$id" || return 10
+                [[ ! ${PO0_URI[$id]+yes} ]] || return 10
+                PO0_URI[$id]=${fields[2]}
                 ;;
             ssh)
                 [[ ${#fields[@]} == 2 ]] && po0_valid_port "${fields[1]}" || return 10
@@ -205,11 +255,277 @@ po0_load_state() {
                 ;;
         esac
     done <"$1"
-    [[ $n -gt 0 && ${#meta[@]} == 3 ]] || {
+    [[ $n -gt 0 && ${meta[interface]+yes} && ${meta[relay_ip]+yes} && ${meta[next_id]+yes} ]] || {
         po0_error '状态文件不完整。'
         return 10
     }
     po0_validate_state
+}
+
+# URI data uses a separate descriptor, never Python source or process arguments.
+# parse/resolve print host (resolved IPv4 for resolve), port, name, protocol hint.
+# rewrite accepts an empty replacement host to retain an upstream domain.
+po0_uri() {
+    local action=$1 source=${2-}
+    command -v python3 >/dev/null 2>&1 || {
+        po0_error 'URI 功能需要 python3；线路基本信息仍可查看。'
+        return 3
+    }
+    python3 - "$action" "${@:3}" 3<<<"$source" <<'PY'
+import base64
+import ipaddress
+import json
+import os
+import re
+import signal
+import socket
+import sys
+import urllib.parse
+import urllib.request
+
+
+class Invalid(Exception):
+    pass
+
+
+def require(ok, message="URI 格式、地址或端口无效。"):
+    if not ok:
+        raise Invalid(message)
+
+
+def text_ok(value):
+    return isinstance(value, str) and not any(ord(c) < 32 or 127 <= ord(c) < 160 for c in value)
+
+
+def ipv4(value):
+    try:
+        address = ipaddress.IPv4Address(value)
+        first = int(str(address).split('.')[0])
+        return 0 < first < 224 and first != 127
+    except ipaddress.AddressValueError:
+        return False
+
+
+def host_ok(host):
+    require(isinstance(host, str) and host and text_ok(host))
+    require(':' not in host, "仅支持 IPv4 目标，不支持 IPv6。")
+    if re.fullmatch(r'[0-9.]+', host):
+        require(ipv4(host), "目标 IPv4 无效。")
+    else:
+        name = host.rstrip('.').encode('idna').decode('ascii')
+        require(len(name) <= 253 and all(
+            re.fullmatch(r'[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?', label)
+            for label in name.split('.')), "目标域名无效。")
+    return host
+
+
+def port_number(value):
+    require(isinstance(value, (str, int)) and not isinstance(value, bool))
+    require(re.fullmatch(r'[0-9]{1,5}', str(value)) and 1 <= int(value) <= 65535)
+    return int(value)
+
+
+def ports(value):
+    intervals = []
+    for part in value.split(','):
+        pair = part.split('-')
+        require(1 <= len(pair) <= 2)
+        start, end = port_number(pair[0]), port_number(pair[-1])
+        require(start <= end)
+        intervals.append((start, end))
+    merged = []
+    for start, end in sorted(intervals):
+        if merged and start <= merged[-1][1] + 1:
+            merged[-1] = (merged[-1][0], max(end, merged[-1][1]))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def unquote(value):
+    require(not re.search(r'%(?![0-9A-Fa-f]{2})', value))
+    value = urllib.parse.unquote(value, errors='strict')
+    require(text_ok(value), "URI 含控制字符。")
+    return value
+
+
+def b64decode(value):
+    require(re.fullmatch(r'[A-Za-z0-9+/_-]+={0,2}', value) and len(value.rstrip('=')) % 4 != 1)
+    return base64.b64decode(value + '=' * (-len(value) % 4), altchars=b'-_', validate=True).decode('utf-8')
+
+
+def b64encode(value, original):
+    raw = value.encode('utf-8')
+    encoded = (base64.urlsafe_b64encode(raw) if '-' in original or '_' in original
+               else base64.b64encode(raw)).decode('ascii')
+    return encoded if original.endswith('=') else encoded.rstrip('=')
+
+
+def unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        require(key not in result, "VMess JSON 含重复字段。")
+        result[key] = value
+    return result
+
+
+class Node:
+    def __init__(self, uri):
+        require(text_ok(uri) and '://' in uri)
+        self.scheme, rest = uri.split('://', 1)
+        self.kind = self.scheme.lower()
+        require(self.kind in ('vless', 'vmess', 'trojan', 'ss', 'hysteria2', 'hy2', 'tuic', 'anytls'),
+                "不支持此 URI 协议。")
+        self.body, mark, self.fragment = rest.partition('#')
+        self.fragment = mark + self.fragment
+        self.name = unquote(self.fragment[1:]) if mark else ''
+        self.hint = 'udp' if self.kind in ('hysteria2', 'hy2', 'tuic') else 'both'
+        self.vm = None
+        self.query = []
+        self.values = {}
+        self.legacy = False
+        if self.kind == 'vmess':
+            self.vm = json.loads(b64decode(self.body), object_pairs_hook=unique_object)
+            require(isinstance(self.vm, dict) and isinstance(self.vm.get('id'), str) and self.vm['id'])
+            self.host = host_ok(self.vm.get('add'))
+            self.port = port_number(self.vm.get('port'))
+            self.name = self.vm.get('ps', self.name)
+            require(text_ok(self.name))
+            return
+        self.body, marker, query = self.body.partition('?')
+        self.query_marker = marker
+        if marker:
+            self.query = query.split('&')
+            for part in self.query:
+                key, _, value = part.partition('=')
+                key = unquote(key).lower()
+                # Decode only fields needed for endpoint/TLS semantics. Unknown
+                # query values keep their exact original bytes and ordering.
+                if key in ('sni', 'peer', 'servername', 'host', 'type', 'security', 'mport', 'disable_sni'):
+                    require(key not in self.values, "URI 含重复的连接参数。")
+                    self.values[key] = unquote(value)
+        body = self.body
+        if self.kind == 'ss' and '@' not in body:
+            self.legacy = True
+            body = b64decode(body)
+            require(text_ok(body) and '@' in body)
+            self.userinfo, endpoint = body.rsplit('@', 1)
+            self.path = ''
+            require(':' in self.userinfo)
+        else:
+            authority, slash, tail = body.partition('/')
+            self.path = slash + tail
+            if '@' in authority:
+                self.userinfo, endpoint = authority.rsplit('@', 1)
+                require(self.userinfo)
+            else:
+                require(self.kind in ('hy2', 'hysteria2'))
+                self.userinfo, endpoint = '', authority
+            if self.kind == 'ss':
+                decoded = unquote(self.userinfo) if ':' in self.userinfo else b64decode(self.userinfo)
+                require(text_ok(decoded) and ':' in decoded)
+        require(not endpoint.startswith('['), "仅支持 IPv4 目标，不支持 IPv6。")
+        self.host, sep, port = endpoint.partition(':')
+        host_ok(self.host)
+        if self.kind in ('hy2', 'hysteria2'):
+            native = ports(port if sep else '443')
+            if 'mport' in self.values:
+                hopping = ports(self.values['mport'])
+                require(len(native) == 1 and native[0][0] == native[0][1] or native == hopping,
+                        "HY2 两处跳跃端口配置冲突。")
+                native = hopping
+            self.port = native[0][0]
+        else:
+            require(sep)
+            self.port = port_number(port)
+
+    def rewrite(self, host, port):
+        host = host_ok(host or self.host)
+        port = port_number(port)
+        if self.vm is not None:
+            data = self.vm.copy()
+            transport = data.get('net', 'tcp')
+            http = transport in ('ws', 'h2', 'http', 'httpupgrade', 'xhttp', 'splithttp') or (
+                transport == 'tcp' and data.get('type') == 'http')
+            if data.get('tls') in ('tls', 'reality') and not data.get('sni'):
+                data['sni'] = data.get('host') if http and data.get('host') else self.host
+            if http and not data.get('host'):
+                data['host'] = self.host
+            data['add'] = host
+            data['port'] = str(port) if isinstance(data['port'], str) else port
+            return self.scheme + '://' + b64encode(
+                json.dumps(data, ensure_ascii=False, separators=(',', ':')), self.body) + self.fragment
+        query = list(self.query)
+        values = self.values
+        transport = values.get('type', 'tcp')
+        http = self.kind in ('vless', 'trojan') and transport in (
+            'ws', 'http', 'h2', 'httpupgrade', 'xhttp', 'splithttp')
+        tls = self.kind in ('trojan', 'anytls', 'hysteria2', 'hy2', 'tuic') or (
+            self.kind == 'vless' and values.get('security') in ('tls', 'reality'))
+        if tls and not any(values.get(k) for k in ('sni', 'peer', 'servername')) and (
+                values.get('disable_sni', '').lower() not in ('1', 'true')):
+            sni = values.get('host') if http and values.get('host') else self.host
+            query = [part for part in query if unquote(part.partition('=')[0]).lower() != 'sni']
+            query.append('sni=' + urllib.parse.quote(sni, safe=''))
+        if http and not values.get('host'):
+            query = [part for part in query if unquote(part.partition('=')[0]).lower() != 'host']
+            query.append('host=' + urllib.parse.quote(self.host, safe=''))
+        if self.kind in ('hy2', 'hysteria2'):
+            query = [part for part in query if unquote(part.partition('=')[0]).lower() != 'mport']
+        endpoint = host + ':' + str(port)
+        if self.legacy:
+            body = b64encode(self.userinfo + '@' + endpoint, self.body)
+        else:
+            body = (self.userinfo + '@' if self.userinfo else '') + endpoint + self.path
+        suffix = '?' + '&'.join(query) if query else ''
+        return self.scheme + '://' + body + suffix + self.fragment
+
+
+def expired(_signum, _frame):
+    raise TimeoutError()
+
+
+def resolve(host, preferred):
+    if ipv4(host):
+        return host
+    signal.alarm(5)
+    answers = socket.getaddrinfo(host, None, socket.AF_INET, socket.SOCK_STREAM)
+    signal.alarm(0)
+    candidates = list(dict.fromkeys(item[4][0] for item in answers if ipv4(item[4][0])))
+    require(candidates, "目标域名没有可用的 IPv4 地址。")
+    return preferred if preferred in candidates else candidates[0]
+
+
+try:
+    signal.signal(signal.SIGALRM, expired)
+    action = sys.argv[1]
+    with os.fdopen(3, encoding='utf-8') as stream:
+        uri = stream.read()[:-1]  # Bash here-string adds exactly one newline.
+    if action == 'public-ip':
+        signal.alarm(5)
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open('https://api.ipify.org', timeout=5) as response:
+            address = response.read(64).decode('ascii').strip()
+        signal.alarm(0)
+        require(ipv4(address), "公网探测未返回有效 IPv4，请手动填写。")
+        print(address)
+    else:
+        node = Node(uri)
+        if action in ('parse', 'resolve'):
+            address = resolve(node.host, sys.argv[2] if len(sys.argv) > 2 else '') if action == 'resolve' else node.host
+            print(address, node.port, node.name, node.hint, sep='\n')
+        elif action == 'rewrite':
+            require(len(sys.argv) == 4)
+            print(node.rewrite(sys.argv[2], sys.argv[3]))
+        else:
+            raise Invalid('内部 URI 操作无效。')
+except Invalid as error:
+    print('[错误] ' + str(error), file=sys.stderr)
+    sys.exit(10)
+except (ValueError, TypeError, KeyError, OSError, UnicodeError):
+    print('[错误] URI 解析或网络查询失败，请检查格式、目标地址和网络后重试。', file=sys.stderr)
+    sys.exit(10)
+PY
 }
 
 # Used only to recognize the exact old generator. Comments/indentation are inert;
@@ -428,6 +744,8 @@ po0_require_tools() {
             ip | ss) package=iproute2 ;;
             flock) package=util-linux ;;
             sysctl) package=procps ;;
+            modprobe) package=kmod ;;
+            python3) package=python3 ;;
             *)
                 po0_error "缺少基础命令 $tool，请安装后重试。"
                 return 3
@@ -821,19 +1139,209 @@ po0_apply() (
         systemctl enable nftables || exit 20
     fi
     PO0_COMMITTED=1
-    printf '已应用。备份: %s\nroot 控制台恢复: bash %q\n' "$PO0_TX_DIR" "$PO0_TX_DIR/recover.sh"
+    po0_message 32 "已应用。备份: $PO0_TX_DIR"
+    printf 'root 控制台恢复: bash %q\n' "$PO0_TX_DIR/recover.sh"
 )
 
-po0_list() {
-    local id state mode protocol
+po0_bbr_sysctl_content() {
+    printf '# Managed by po0-relay BBR + FQ.\nnet.core.default_qdisc = fq\nnet.ipv4.tcp_congestion_control = bbr\n'
+}
+
+po0_bbr_modules_content() {
+    printf '# Managed by po0-relay BBR + FQ.\ntcp_bbr\nsch_fq\n'
+}
+
+po0_bbr_status() {
+    local algorithm queue
+    algorithm=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null) || algorithm=不可用
+    queue=$(sysctl -n net.core.default_qdisc 2>/dev/null) || queue=不可用
+    printf 'TCP 拥塞控制: %s；默认队列: %s\n' "$algorithm" "$queue"
+}
+
+# Separate tuning files keep forwarding edits and legacy imports independent.
+po0_enable_bbr() (
+    set -Eeuo pipefail
+    IFS=$'\n\t'
+    umask 077
+    local lock_fd old_algorithm old_queue available expected_sysctl expected_modules path expected reply backup
+    local runtime_touched=0 files_touched=0 committed=0
+    [[ $EUID == 0 ]] || {
+        po0_error '开启 BBR + FQ 需要 root。'
+        exit 4
+    }
+    po0_require_tools sysctl flock mktemp || exit $?
+    exec {lock_fd}>"$PO0_LOCK_FILE" || exit 20
+    flock -w 10 "$lock_fd" || {
+        po0_error '另一个 PO0 操作正在执行，请稍后重试。'
+        exit 3
+    }
+    old_algorithm=$(sysctl -n net.ipv4.tcp_congestion_control) || exit 3
+    old_queue=$(sysctl -n net.core.default_qdisc) || {
+        po0_error '当前内核或容器没有可设置的默认队列参数。'
+        exit 3
+    }
+    available=$(sysctl -n net.ipv4.tcp_available_congestion_control) || exit 3
+    expected_sysctl=$(po0_bbr_sysctl_content)
+    expected_modules=$(po0_bbr_modules_content)
+    for path in "$PO0_BBR_SYSCTL_FILE" "$PO0_BBR_MODULES_FILE"; do
+        [[ ! -L $path && (! -e $path || -f $path) ]] || {
+            po0_error "拒绝非普通配置文件: $path"
+            exit 10
+        }
+        if [[ $path == "$PO0_BBR_SYSCTL_FILE" ]]; then expected=$expected_sysctl; else expected=$expected_modules; fi
+        if [[ -e $path ]] && [[ $(cat -- "$path") != "$expected" ]]; then
+            po0_error "文件含非受管内容，保留原文件: $path"
+            exit 10
+        fi
+    done
+    if [[ $old_algorithm == bbr && $old_queue == fq && -f $PO0_BBR_SYSCTL_FILE && -f $PO0_BBR_MODULES_FILE ]]; then
+        po0_message 32 'BBR + FQ 已开启，开机配置也已保存，无需重复设置。'
+        exit 0
+    fi
+    if [[ ! $available =~ (^|[[:space:]])bbr($|[[:space:]]) ]]; then
+        po0_require_tools modprobe || exit $?
+    fi
+    printf '\n开启 BBR + FQ：TCP %s → bbr；默认队列 %s → fq。\n' "$old_algorithm" "$old_queue"
+    printf '保存开机配置: %s\n加载模块配置: %s\n' "$PO0_BBR_SYSCTL_FILE" "$PO0_BBR_MODULES_FILE"
+    printf 'BBR 用于本机新建 TCP 连接；默认 FQ 用于后续创建的队列，现有网卡队列保持当前配置。\n'
+    read -r -p '确认开启？[y/N] ' reply || exit 130
+    [[ $reply == y || $reply == Y ]] || exit 130
+    for path in "$PO0_BACKUP_DIR" "${PO0_BBR_SYSCTL_FILE%/*}" "${PO0_BBR_MODULES_FILE%/*}"; do
+        [[ ! -L $path ]] || {
+            po0_error "拒绝符号链接目录: $path"
+            exit 10
+        }
+    done
+    mkdir -p -- "$PO0_BACKUP_DIR" "${PO0_BBR_SYSCTL_FILE%/*}" "${PO0_BBR_MODULES_FILE%/*}" || exit 20
+    chmod 700 "$PO0_BACKUP_DIR" || exit 20
+    backup=$(mktemp -d "$PO0_BACKUP_DIR/bbr-$(date -u +%Y%m%dT%H%M%SZ).XXXXXX") || exit 20
+    [[ ! -f $PO0_BBR_SYSCTL_FILE ]] || cp -p -- "$PO0_BBR_SYSCTL_FILE" "$backup/sysctl.before" || exit 20
+    [[ ! -f $PO0_BBR_MODULES_FILE ]] || cp -p -- "$PO0_BBR_MODULES_FILE" "$backup/modules.before" || exit 20
+    printf 'tcp_congestion_control=%s\ndefault_qdisc=%s\n' "$old_algorithm" "$old_queue" >"$backup/before.txt" || exit 20
+    po0_bbr_sysctl_content >"$backup/sysctl.candidate" || exit 20
+    po0_bbr_modules_content >"$backup/modules.candidate" || exit 20
+    # Invoked by the EXIT trap, including failed commands and signals.
+    # shellcheck disable=SC2317
+    po0_bbr_finish() {
+        local status=$1 failed=0
+        trap - EXIT
+        trap '' HUP INT TERM
+        if [[ $committed != 1 ]]; then
+            if [[ $runtime_touched == 1 ]]; then
+                sysctl -q -w "net.ipv4.tcp_congestion_control=$old_algorithm" || failed=1
+                sysctl -q -w "net.core.default_qdisc=$old_queue" || failed=1
+            fi
+            if [[ $files_touched == 1 ]]; then
+                po0_restore_file "$backup/sysctl.before" "$PO0_BBR_SYSCTL_FILE" || failed=1
+                po0_restore_file "$backup/modules.before" "$PO0_BBR_MODULES_FILE" || failed=1
+            fi
+            if [[ $failed == 1 ]]; then
+                po0_error "恢复未完成，原值为 TCP=$old_algorithm、默认队列=$old_queue；恢复材料: $backup"
+                status=30
+            elif [[ $runtime_touched == 1 || $files_touched == 1 ]]; then
+                po0_error "BBR + FQ 未提交，已恢复原参数和文件。备份: $backup"
+            fi
+        fi
+        exit "$status"
+    }
+    trap 'po0_bbr_finish $?' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    trap 'exit 129' HUP
+    if [[ ! $available =~ (^|[[:space:]])bbr($|[[:space:]]) ]]; then
+        modprobe tcp_bbr || {
+            po0_error '当前内核无法加载 BBR，请使用支持 BBR 的内核。'
+            exit 3
+        }
+        available=$(sysctl -n net.ipv4.tcp_available_congestion_control) || exit 3
+        [[ $available =~ (^|[[:space:]])bbr($|[[:space:]]) ]] || {
+            po0_error '加载模块后 BBR 仍不可用。'
+            exit 3
+        }
+    fi
+    if command -v modprobe >/dev/null 2>&1 && ! modprobe sch_fq; then
+        printf 'sch_fq 未能作为模块加载，将以实际 sysctl 设置结果检查内核支持。\n' >&2
+    fi
+    runtime_touched=1
+    sysctl -q -w net.core.default_qdisc=fq || {
+        po0_error '内核不支持设置 FQ 默认队列。'
+        exit 20
+    }
+    sysctl -q -w net.ipv4.tcp_congestion_control=bbr || {
+        po0_error '设置 BBR 失败。'
+        exit 20
+    }
+    [[ $(sysctl -n net.core.default_qdisc) == fq && $(sysctl -n net.ipv4.tcp_congestion_control) == bbr ]] || {
+        po0_error 'BBR + FQ 运行参数复核失败。'
+        exit 20
+    }
+    files_touched=1
+    po0_atomic_write "$backup/sysctl.candidate" "$PO0_BBR_SYSCTL_FILE" 644 || exit $?
+    po0_atomic_write "$backup/modules.candidate" "$PO0_BBR_MODULES_FILE" 644 || exit $?
+    committed=1
+    po0_message 32 "BBR + FQ 已开启并保存开机配置。原参数与文件备份: $backup"
+)
+
+po0_overview() {
+    local mode id enabled=0
     case $PO0_MODE in fresh) mode=未初始化 ;; legacy) mode=旧版配置 ;; managed) mode=已接管 ;; *) mode=$PO0_MODE ;; esac
-    printf '\n模式: %s  网卡: %s  SNAT IPv4: %s\n' "$mode" "${PO0_IFACE:-尚未选择}" "${PO0_RELAY_IP:-尚未选择}"
-    printf 'ID | 名称 | 状态 | 协议 | 中转端口 → 目标\n'
+    for id in "${PO0_IDS[@]}"; do [[ ${PO0_ENABLED[$id]} != 1 ]] || enabled=$((enabled + 1)); done
+    printf '模式: %s  |  线路: %s  启用: %s  停用: %s\n' "$mode" "${#PO0_IDS[@]}" "$enabled" "$((${#PO0_IDS[@]} - enabled))"
+    printf '公网 IPv4: %s\n网卡: %s  |  SNAT 地址: %s\n' "${PO0_PUBLIC_IP:-未设置}" "${PO0_IFACE:-尚未选择}" "${PO0_RELAY_IP:-尚未选择}"
+}
+
+po0_menu() {
+    po0_heading 'PO0 中转管理'
+    po0_overview
+    po0_heading '线路管理'
+    printf '  1) 查看线路与 URI\n  2) 新增线路\n  3) 编辑线路\n  4) 启用 / 停用线路\n  5) 删除线路\n'
+    po0_heading '状态与维护'
+    printf '  6) 查看运行状态\n  7) 刷新目标并重新应用\n'
+    po0_heading '全局设置'
+    printf '  8) 开启 BBR + FQ\n  9) 公网 IP 设置\n\n  0) 退出\n\n'
+}
+
+po0_share_uri() {
+    local id=$1
+    [[ -n ${PO0_URI[$id]-} ]] || {
+        po0_error '此线路未关联 URI。'
+        return 3
+    }
+    [[ -n $PO0_PUBLIC_IP ]] || {
+        po0_error '尚未设置公网 IPv4。'
+        return 3
+    }
+    po0_uri rewrite "${PO0_URI[$id]}" "$PO0_PUBLIC_IP" "${PO0_PORT[$id]%-*}"
+}
+
+po0_show_share() {
+    local id=$1 share
+    if [[ -z ${PO0_URI[$id]-} ]]; then
+        printf '  URI: 未关联 URI，可在编辑中补录。\n'
+    elif [[ -z $PO0_PUBLIC_IP ]]; then
+        printf '  URI: 请先通过菜单 9 设置公网 IPv4。\n'
+    elif ! command -v python3 >/dev/null 2>&1; then
+        printf '  URI: 缺少 python3，无法生成；查看不会安装依赖。\n'
+    elif share=$(po0_share_uri "$id"); then
+        printf '  中转 URI'
+        [[ ${PO0_PORT[$id]} != *-* ]] || printf '（使用区间起始端口 %s）' "${PO0_PORT[$id]%-*}"
+        printf ':\n%s\n' "$share"
+    else
+        printf '  URI: 无法生成，请编辑并检查此线路的 URI。\n'
+    fi
+}
+
+po0_list() {
+    local id state protocol format=${1:-full}
+    po0_heading '中转线路'
+    po0_overview
     for id in "${PO0_IDS[@]}"; do
-        state=禁用
+        state=停用
         [[ ${PO0_ENABLED[$id]} != 1 ]] || state=启用
         case ${PO0_PROTO[$id]} in tcp) protocol=TCP ;; udp) protocol=UDP ;; both) protocol=TCP+UDP ;; esac
-        printf '%s | %s | %s | %s | %s → %s:%s\n' "$id" "${PO0_NAME[$id]}" "$state" "$protocol" "${PO0_PORT[$id]}" "${PO0_DEST_IP[$id]}" "${PO0_DEST_PORT[$id]}"
+        printf '\n[%s] %s  |  %s  |  %s\n' "$id" "${PO0_NAME[$id]}" "$state" "$protocol"
+        printf '  入站: %s:%s\n  目标: %s:%s\n' "${PO0_PUBLIC_IP:-本机}" "${PO0_PORT[$id]}" "${PO0_DEST_IP[$id]}" "${PO0_DEST_PORT[$id]}"
+        [[ $format == brief ]] || po0_show_share "$id"
     done
     ((${#PO0_IDS[@]} > 0)) || printf '暂无规则。\n'
     [[ $PO0_MODE != legacy ]] || printf '旧配置仅导入内存；首次确认变更时才备份并迁移。\n'
@@ -846,6 +1354,7 @@ po0_status() {
     if command -v sysctl >/dev/null 2>&1; then
         value=$(sysctl -n net.ipv4.ip_forward) || return 20
         printf 'IPv4 转发: %s\n' "$value"
+        po0_bbr_status
     else printf 'IPv4 转发: 缺少 sysctl，未查询\n'; fi
     if command -v systemctl >/dev/null 2>&1; then
         if value=$(systemctl is-enabled nftables 2>/dev/null); then :; else :; fi
@@ -886,6 +1395,10 @@ po0_read_value() {
                 po0_error '名称不能为空，不能包含制表符、换行或其他控制字符。'
                 ;;
             target) po0_check_target "$PO0_ANSWER" && return 0 ;;
+            public)
+                po0_valid_ipv4 "$PO0_ANSWER" && return 0
+                po0_error '请输入有效的公网 IPv4 地址。'
+                ;;
             port)
                 po0_valid_port "$PO0_ANSWER" && return 0
                 po0_error '目标端口须为 1–65535 的单个端口。'
@@ -896,6 +1409,63 @@ po0_read_value() {
                 ;;
         esac
     done
+}
+
+# One source prompt serves new lines and attaching/replacing an existing URI.
+po0_read_source() {
+    local existing=${1-} preferred=${2-} mode=${3:-any} candidate result action label='节点 URI 或目标 IPv4'
+    local -a values=()
+    PO0_SOURCE_URI='' PO0_SOURCE_IP='' PO0_SOURCE_PORT='' PO0_SOURCE_NAME='' PO0_SOURCE_PROTO=both
+    [[ $mode != uri ]] || label='节点 URI'
+    [[ -z $existing ]] || label+='（回车保留已有 URI）'
+    while :; do
+        po0_prompt "$label" || return $?
+        candidate=${PO0_ANSWER:-$existing}
+        if [[ $candidate == *://* ]]; then
+            po0_require_tools python3 || return $?
+            action=resolve
+            if [[ -z $PO0_ANSWER && -n $existing && -n $preferred ]]; then action=parse; fi
+            if ! result=$(po0_uri "$action" "$candidate" "$preferred"); then continue; fi
+            mapfile -t values <<<"$result"
+            [[ $action != parse ]] || values[0]=$preferred
+            po0_check_target "${values[0]}" || continue
+            PO0_SOURCE_URI=$candidate PO0_SOURCE_IP=${values[0]} PO0_SOURCE_PORT=${values[1]}
+            PO0_SOURCE_NAME=${values[2]} PO0_SOURCE_PROTO=${values[3]}
+            printf '已识别目标: %s:%s\n' "$PO0_SOURCE_IP" "$PO0_SOURCE_PORT"
+            return 0
+        fi
+        if [[ $mode == uri || -n $existing ]]; then
+            po0_error '请填写支持的节点 URI，或回车保留。'
+            continue
+        fi
+        po0_check_target "$candidate" || continue
+        PO0_SOURCE_IP=$candidate
+        po0_read_value port '目标端口（单个固定端口）' || return $?
+        PO0_SOURCE_PORT=$PO0_ANSWER
+        return 0
+    done
+}
+
+po0_read_public_ip() {
+    local suggested=${PO0_PUBLIC_IP:-}
+    if [[ ${1:-detect} == detect ]]; then
+        po0_require_tools python3 || return $?
+        printf '正在探测公网 IPv4（最多 5 秒）…\n'
+        if ! suggested=$(po0_uri public-ip); then
+            suggested=${PO0_PUBLIC_IP:-}
+            po0_message 33 '公网探测失败，请手动填写；已有设置不会自动改变。'
+        fi
+    fi
+    po0_read_value public 'PO0 公网 IPv4（可更正；公网端口须与入站端口相同）' "$suggested" || return $?
+    PO0_PUBLIC_IP=$PO0_ANSWER
+}
+
+po0_update_source_endpoint() {
+    local id=$1 host=$2 port=$3 updated
+    [[ -n ${PO0_URI[$id]-} ]] || return 0
+    po0_require_tools python3 || return $?
+    updated=$(po0_uri rewrite "${PO0_URI[$id]}" "$host" "$port") || return $?
+    PO0_URI[$id]=$updated
 }
 
 po0_random_port() {
@@ -1031,7 +1601,7 @@ po0_prepare_change() {
 po0_confirm_change() {
     local operation=$1 reply
     po0_validate_state || return $?
-    po0_list
+    po0_list brief
     printf '\n本次变更: %s\n' "$operation"
     printf '只更新 inet filter / ip nat / ip mangle；INPUT/FORWARD 默认丢弃。\n'
     printf '保留 SSH TCP 端口: '
@@ -1049,7 +1619,7 @@ po0_select_rule() {
         po0_error '暂无可操作规则。'
         return 3
     }
-    po0_list
+    po0_list brief
     while :; do
         po0_prompt '规则 ID' || return $?
         for id in "${PO0_IDS[@]}"; do [[ $PO0_ANSWER != "$id" ]] || return 0; done
@@ -1061,24 +1631,27 @@ po0_select_rule() {
 # including new IDs, discovery metadata and partially entered rule fields.
 # shellcheck disable=SC2030
 po0_action_add() (
-    local id name incoming target port protocol
+    local id name incoming target port protocol uri
     po0_prepare_change || return $?
     id=$PO0_NEXT_ID
-    po0_read_value name '规则名称' "线路$id" || return $?
+    po0_heading '新增线路 · 目标'
+    po0_read_source || return $?
+    target=$PO0_SOURCE_IP port=$PO0_SOURCE_PORT uri=$PO0_SOURCE_URI
+    po0_heading '新增线路 · 入口'
+    po0_read_value name '规则名称' "${PO0_SOURCE_NAME:-线路$id}" || return $?
     name=$PO0_ANSWER
     po0_read_incoming || return $?
     incoming=$PO0_ANSWER
-    po0_read_value target '目标 IPv4' || return $?
-    target=$PO0_ANSWER
-    po0_read_value port '目标端口（单个固定端口）' || return $?
-    port=$PO0_ANSWER
-    po0_read_protocol both "$incoming" '' 1 1 || return $?
+    po0_read_protocol "$PO0_SOURCE_PROTO" "$incoming" '' 1 1 || return $?
     protocol=$PO0_ANSWER incoming=$PO0_CHOSEN_PORT
+    if [[ -n $uri && -z $PO0_PUBLIC_IP ]]; then po0_read_public_ip || return $?; fi
     PO0_IDS+=("$id") PO0_NAME[$id]=$name PO0_ENABLED[$id]=1 PO0_PROTO[$id]=$protocol
     PO0_PORT[$id]=$incoming PO0_DEST_IP[$id]=$target PO0_DEST_PORT[$id]=$port PO0_NEXT_ID=$((id + 1))
+    [[ -z $uri ]] || PO0_URI[$id]=$uri
     po0_choose_initial_network || return $?
     po0_confirm_change "新增规则 $id" || return $?
-    po0_apply
+    po0_apply || return $?
+    [[ -z $uri ]] || po0_show_share "$id"
 )
 
 # Reload disk state first; only a successful apply persists this subshell's edit.
@@ -1089,11 +1662,12 @@ po0_action_edit() (
     po0_select_rule || return $?
     id=$PO0_ANSWER
     while :; do
-        printf '1) 名称  2) 中转端口  3) 目标 IPv4  4) 目标端口  5) 协议\n'
+        po0_heading '编辑线路'
+        printf '  1) 名称\n  2) 中转端口\n  3) 目标 IPv4\n  4) 目标端口\n  5) 协议\n  6) 补录 / 替换节点 URI\n'
         po0_prompt '编辑字段编号' || return $?
         field=$PO0_ANSWER
-        [[ $field =~ ^[1-5]$ ]] && break
-        po0_error '请选择 1–5。'
+        [[ $field =~ ^[1-6]$ ]] && break
+        po0_error '请选择 1–6。'
     done
     case $field in
         1)
@@ -1106,19 +1680,35 @@ po0_action_edit() (
             ;;
         3)
             po0_read_value target '目标 IPv4' "${PO0_DEST_IP[$id]}" || return $?
+            if [[ $PO0_ANSWER != "${PO0_DEST_IP[$id]}" ]]; then
+                po0_update_source_endpoint "$id" "$PO0_ANSWER" "${PO0_DEST_PORT[$id]}" || return $?
+            fi
             PO0_DEST_IP[$id]=$PO0_ANSWER
             ;;
         4)
             po0_read_value port '目标端口' "${PO0_DEST_PORT[$id]}" || return $?
+            if [[ $PO0_ANSWER != "${PO0_DEST_PORT[$id]}" ]]; then
+                po0_update_source_endpoint "$id" '' "$PO0_ANSWER" || return $?
+            fi
             PO0_DEST_PORT[$id]=$PO0_ANSWER
             ;;
         5)
             po0_read_protocol "${PO0_PROTO[$id]}" "${PO0_PORT[$id]}" "$id" "${PO0_ENABLED[$id]}" || return $?
             PO0_PROTO[$id]=$PO0_ANSWER
             ;;
+        6)
+            po0_read_source "${PO0_URI[$id]-}" "${PO0_DEST_IP[$id]}" uri || return $?
+            [[ -n $PO0_SOURCE_URI ]] || {
+                po0_error '补录需要节点 URI。'
+                return 10
+            }
+            PO0_URI[$id]=$PO0_SOURCE_URI PO0_DEST_IP[$id]=$PO0_SOURCE_IP PO0_DEST_PORT[$id]=$PO0_SOURCE_PORT
+            if [[ -z $PO0_PUBLIC_IP ]]; then po0_read_public_ip || return $?; fi
+            ;;
     esac
     po0_confirm_change "编辑规则 $id" || return $?
-    po0_apply
+    po0_apply || return $?
+    [[ -z ${PO0_URI[$id]-} ]] || po0_show_share "$id"
 )
 
 # Previous action subshells are irrelevant: prepare_change reloads disk state.
@@ -1140,7 +1730,7 @@ po0_action_toggle() (
 )
 
 # Previous action subshells are irrelevant: prepare_change reloads disk state.
-# shellcheck disable=SC2031
+# shellcheck disable=SC2030,SC2031
 po0_action_delete() (
     local id other
     local -a remaining=()
@@ -1149,17 +1739,51 @@ po0_action_delete() (
     id=$PO0_ANSWER
     for other in "${PO0_IDS[@]}"; do [[ $other == "$id" ]] || remaining+=("$other"); done
     PO0_IDS=("${remaining[@]}")
+    unset 'PO0_URI[$id]'
     po0_confirm_change "删除规则 $id (${PO0_NAME[$id]})" || return $?
     po0_apply
 )
 
+# Each action reloads disk state; previous action subshell edits are discarded.
+# shellcheck disable=SC2031
 po0_action_reapply() (
+    local id result
+    local -a values=()
     po0_prepare_change || return $?
     [[ $PO0_MODE != fresh ]] || {
         po0_error '尚未初始化，请先新增规则。'
         return 3
     }
-    po0_confirm_change '重新应用全部当前规则' || return $?
+    for id in "${PO0_IDS[@]}"; do
+        [[ -n ${PO0_URI[$id]-} ]] || continue
+        po0_require_tools python3 || return $?
+        result=$(po0_uri resolve "${PO0_URI[$id]}" "${PO0_DEST_IP[$id]}") || return $?
+        mapfile -t values <<<"$result"
+        po0_check_target "${values[0]}" || return $?
+        PO0_DEST_IP[$id]=${values[0]} PO0_DEST_PORT[$id]=${values[1]}
+    done
+    po0_confirm_change '刷新 URI 目标并重新应用全部当前规则' || return $?
+    po0_apply
+)
+
+# Public addressing is metadata in the same state/backup transaction as rules.
+po0_action_public_ip() (
+    local option
+    po0_prepare_change || return $?
+    [[ $PO0_MODE != fresh ]] || {
+        po0_error '请先新增线路；首次添加 URI 时会配置公网 IPv4。'
+        return 3
+    }
+    po0_heading '公网 IP 设置'
+    printf '当前公网 IPv4: %s\n  1) 手动填写\n  2) 重新探测\n' "${PO0_PUBLIC_IP:-未设置}"
+    while :; do
+        po0_prompt '操作编号' 1 || return $?
+        option=$PO0_ANSWER
+        [[ $option == 1 || $option == 2 ]] && break
+        po0_error '请选择 1 或 2。'
+    done
+    if [[ $option == 2 ]]; then po0_read_public_ip detect || return $?; else po0_read_public_ip manual || return $?; fi
+    po0_confirm_change '修改分享 URI 使用的公网 IPv4' || return $?
     po0_apply
 )
 
@@ -1172,24 +1796,34 @@ PO0 IPv4 中转管理（独立单文件，Ubuntu 22.04/24.04、Debian + systemd 
   sudo bash po0-relay.sh --status   只读查看，不安装依赖或改写配置
   bash po0-relay.sh --help          本帮助
 
-菜单: 列表、新增、逐字段编辑、启用/禁用、删除、状态、重新应用、退出。
+菜单按线路管理、状态与维护、全局设置分组；每项独占一行。
+新增可直接输入节点 URI 或手填目标 IPv4；名称默认沿用 URI 备注。
+支持 VLESS、VMess（Base64 JSON）、Trojan、SS、HY2/Hysteria2、TUIC、AnyTLS。
+查看线路显示完整中转 URI，使用保存的公网 IPv4 和入站端口；区间取起始端口。
+首次添加 URI 探测公网 IPv4（最多 5 秒），可手动更正；菜单 9 可修改或重探。
+URI 功能按需使用 python3 标准库，不需要仓库模块、代理内核或第三方 Python 包。
 输入 :q 可取消；确认默认否。端口可为单个或范围，统一映射到固定目标端口。
-协议用编号选择，默认 TCP+UDP；新增中转端口留空时生成并检查随机端口。
-仅支持 IPv4 字面地址；没有域名、IPv6、批量 CLI 或 dry-run 参数。
+协议用编号选择，默认 TCP+UDP（HY2/TUIC 默认 UDP）；入站留空生成并检查随机端口。
+URI 目标支持域名，导入/替换或菜单 7 时解析 IPv4；查看不联网，不后台刷新。
+HY2 跳跃端口选一个固定目标，导出移除 mport；保留凭据、SNI、Host 和其他参数。
+公网端口须与入站端口一致；不支持 IPv6、批量 CLI 或 dry-run 参数。
 
 状态: /etc/po0-relay/state.tsv（版本化纯 TSV，不作为 Shell 执行）
 旧版: 完整识别原始 /etc/nftables.conf，查看不落盘；首次确认变更时迁移。
 仅管理 inet filter、ip nat、ip mangle，其他表保留；从不全局 flush 或重启 nftables。
 INPUT/FORWARD 默认丢弃，保留本机发现的 SSH TCP 端口和原 22、MSS 1452。
-仅设置必要的 ip_forward=1，旧 sysctl 优化配置保留；启用 nftables 开机加载。
+转发管理设置 ip_forward=1，保留旧调优；菜单 8 可单独开启 BBR+FQ 并保存开机配置。
+BBR 用于本机新建 TCP 连接；FQ 设置为默认队列，现有网卡队列保持当前配置。
+BBR/FQ 保存到 /etc/sysctl.d/99-po0-relay-bbr.conf 和同名 modules-load.d 文件。
 禁止接管未知 nft 配置/同名表；缺少依赖时在需要时明确询问安装。
 禁用/删除/修改影响新连接，已有连接由 conntrack 自然过期。
 
 注意: 更改防火墙可能影响 SSH，请保留当前 SSH 会话及服务商 root 控制台。
-每次修改先 nft -c 校验并保留备份，失败或 HUP/INT/TERM 自动回滚。
-备份: /etc/po0-relay/backups/<UTC时间.随机串>/
-恢复: 在 root 控制台执行 bash /etc/po0-relay/backups/<对应目录>/recover.sh
+线路修改先 nft -c 校验并保留备份，失败或 HUP/INT/TERM 自动回滚。
+线路备份: /etc/po0-relay/backups/<UTC时间.随机串>/
+线路恢复: 在 root 控制台执行 bash /etc/po0-relay/backups/<对应目录>/recover.sh
 恢复只替换原三张表，并恢复旧文件、ip_forward 和服务开机启用状态。
+BBR/FQ 的原参数和文件单独备份到 backups/bbr-*，失败自动恢复。
 断电或 SIGKILL 不能触发 Shell 回滚；如遇文件不一致，用上述脚本恢复后重试。
 不支持自动关闭 UFW/firewalld 等其他防火墙，请避免同时管理同一组表。
 EOF
@@ -1236,7 +1870,7 @@ po0_main() {
     trap 'exit 143' TERM
     trap 'exit 129' HUP
     while :; do
-        printf '\nPO0 中转管理\n1) 列表  2) 新增  3) 编辑  4) 启用/禁用\n5) 删除  6) 状态  7) 重新应用  0) 退出\n'
+        po0_menu
         read -r -p '请选择: ' option || return 130
         status=0
         case $option in
@@ -1247,6 +1881,8 @@ po0_main() {
             5) po0_action_delete || status=$? ;;
             6) po0_status || status=$? ;;
             7) po0_action_reapply || status=$? ;;
+            8) po0_enable_bbr || status=$? ;;
+            9) po0_action_public_ip || status=$? ;;
             0) return 0 ;;
             *)
                 po0_error '请选择菜单中的编号。'
@@ -1254,7 +1890,7 @@ po0_main() {
                 ;;
         esac
         if [[ $status == 130 ]]; then
-            printf '已取消。\n'
+            po0_message 33 '已取消。'
         elif [[ $status != 0 ]]; then po0_error "操作失败，退出码 $status；请检查上方诊断。"; fi
         po0_load_current || return $?
     done
