@@ -16,3 +16,19 @@
 | 权限与恢复 | **PASS**。宿主 `runuser -u nobody -- ... service tcping start --port 56789` 返回 4，未产生状态。验收结束时 UFW 测试包已停用并清除，原 `/etc/ufw` 和共享 UFW 状态由基线 tar 恢复；共享状态文件哈希与基线相同。UFW 相关 sysctl 与原值相同；经 `iptables-restore`、`ip6tables-restore` 修复兼容表后，去除时间戳和流量计数的 iptables/ip6tables 规则正文与基线完全一致。原始 Alpine RAW 哈希未变化；overlay 经 `qemu-img check` 无错，guest 已关机，无 TCPing/QEMU 测试进程。流量计数和 nft 展示顺序不会在运行中的宿主上保持字节级相同。 |
 
 验收期间先后发现并复测修复了 Alpine 将 PID 1 `init` 误判为不支持 OpenRC、TCPing 清理误删匹配的手工 UFW 规则，以及普通用户因受保护父目录不可读而误报“未安装”三个问题。最终 live UFW 与 Debian netns 验收使用修复后的相同应用文件。未重启 Debian 宿主；开机自启的真实重启证据来自 Alpine guest。云厂商安全组不属于此专用环境，未进行外部公网接入测试。
+
+## 2026-10-28：未安装 systemd 单元的状态查询
+
+本次基线为 `8a258e4`（v0.8.17 发布验收提交），仅修改 TCPing 的自启查询和既有单元回归。候选目录为专用机 `/root/vpsctl-tcping-quiet-20261028/source`；`commands/service/tcping.sh` SHA-256 为 `b2a0af714dca76713095305da597b9a322da92c2183d22f9e8f60a7dd7a7812b`。所有执行仍通过 `ssh host-vps-scripts`。
+
+修复前在 Debian 12 / systemd `252.39-1~deb12u2` 的独立 QEMU guest 中复现：单元不存在时，`systemctl show --property=LoadState --value vpsctl-tcping.service` 返回 `not-found`、退出码 0，而 `is-enabled --quiet` 返回 1 并打印 `Failed to get unit file state ... No such file or directory`；旧版 status 与交互菜单均泄漏此诊断。修复先判断 LoadState，仅跳过确认不存在的单元，其他情况沿用原自启判断。
+
+| 检查 | 结果与证据 |
+| --- | --- |
+| 定向静态检查 | PASS。`bash -n commands/service/tcping.sh tests/unit/test-service-tcping.sh`；应用执行 `shellcheck -x -P SCRIPTDIR -S warning` 无 warning/error，测试执行 `shellcheck -x -P SCRIPTDIR` 零诊断；两文件 `shfmt -d -i 4 -ci` 零差异。日志位于候选目录同级 `validation/`，`status` 为 `validation_exit=0`。应用使用既有 warning 检查级别，不将其表述为所有级别零诊断。 |
+| TCPing 现有单元套件 | PASS。`LC_ALL=C bash tests/unit/test-service-tcping.sh`，日志 `validation/unit.log` 包含三项 PASS。新增回归验证未安装 status/菜单/首次 start 无缺失单元警告、服务管理器查询失败的诊断与退出码保留，以及无本模块路径但已加载且启用的外部同名服务仍被拒绝。既有监听器、回滚、UFW 所有权和 OpenRC 映射覆盖保持通过。 |
+| Debian 12 真实流程 | PASS。在 `/root/vpsctl-tcping-quiet-20261028` 执行 `./gssh "bash -s" < acceptance.sh`，流程通过标准输入进入 guest，调用 `/root/tcping-quiet-source/commands/service/tcping.sh`。未安装 helper 返回 1 且无 stderr，status 和 PTY 菜单安静。首次 `start --port 11111` 返回 0，单元 loaded/active/enabled，helper 返回 0，`127.0.0.1:11111` 与 `[::1]:11111` 实际 TCP 连接通过。stop 后 disabled，helper 返回 1；uninstall 后 helper/status/菜单均无缺失单元警告。宿主证据 `/root/vpsctl-tcping-quiet-20261028/fixed-acceptance-host.log` 以 `FIXED_ACCEPTANCE_PASS`、`ACCEPTANCE_EXIT=0` 结束，原问题日志为同目录 `old-reproduction.log`。 |
+
+验收明细和每条命令的 stdout/stderr/退出码位于同目录 `evidence/`，简报为 `acceptance-report.txt`。TCPing 专属文件、自启链接、11111 监听和防火墙需求已清理，guest 正常关机，`vm-cleanup.txt` 为 `VM_POWERED_OFF`；原始基线未修改。guest 为复现安装的 `jq` 保留在此可丢弃副本中。外层 PowerShell 调用曾因退出变量转义错误返回 1，记录为夹具调用问题；guest 脚本的逐项断言和最终退出码均通过，未因此重复验收。
+
+本次仅影响 systemd 单元不存在时的自启查询，未重跑全量套件、UFW 真实规则矩阵、Alpine 真实重启或公网接入。监听逻辑与防火墙逻辑未修改；相应原有验收记录继续保留。

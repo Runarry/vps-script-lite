@@ -48,7 +48,24 @@ root="$VPSCTL_SYSTEM_ROOT"
 action="${1:-}"
 case "$action" in
     is-active) [[ -e "$root/run/tcping-active" ]] ;;
-    is-enabled) [[ -e "$root/run/tcping-enabled" ]] ;;
+    show)
+        if [[ -e "$root/run/fail-show" ]]; then
+            printf 'Synthetic service-manager query failure\n' >&2
+            exit 42
+        fi
+        if [[ -f "$root/etc/systemd/system/vpsctl-tcping.service" || -e "$root/run/tcping-external-unit" ]]; then
+            printf 'loaded\n'
+        else
+            printf 'not-found\n'
+        fi
+        ;;
+    is-enabled)
+        if [[ ! -f "$root/etc/systemd/system/vpsctl-tcping.service" && ! -e "$root/run/tcping-external-unit" ]]; then
+            printf 'Failed to get unit file state for vpsctl-tcping.service: No such file or directory\n' >&2
+            exit 4
+        fi
+        [[ -e "$root/run/tcping-enabled" ]]
+        ;;
     daemon-reload) exit 0 ;;
     start)
         if [[ -e "$root/run/signal-start-once" ]]; then
@@ -87,7 +104,9 @@ SH
 
     assert_status 0 bash "$TEST_COMMAND" --install-deps --help
     assert_status 0 bash "$TEST_COMMAND" --install-deps status
+    ! grep -Fq 'Failed to get unit file state' "$TEST_TEMP/output" || fail 'uninstalled status queried missing unit enablement'
     assert_status 0 bash "$TEST_COMMAND" --install-deps stop
+    ! grep -Fq 'Failed to get unit file state' "$TEST_TEMP/output" || fail 'empty stop queried missing unit enablement'
     [[ ! -e "$state" && ! -e "$runtime" && ! -e "$unit" ]] || fail 'read-only/empty stop created TCPing files'
     ! grep -Fq 'apt-get ' "$TEST_LOG" || fail 'help/status/stop installed a dependency'
 
@@ -98,7 +117,19 @@ SH
     assert_status 2 bash "$TEST_COMMAND" start --port "$port" --port "$port"
     [[ ! -e "$state" ]] || fail 'invalid start wrote state'
 
+    touch "$TEST_SYSTEM_ROOT/run/fail-show"
+    # shellcheck disable=SC2016
+    assert_status 42 bash -c 'source "$1"; tcping_init_paths; tcping_service_enabled' bash "$TEST_COMMAND"
+    grep -Fq 'Synthetic service-manager query failure' "$TEST_TEMP/output" || fail 'service-manager failure diagnostic was hidden'
+    rm -f "$TEST_SYSTEM_ROOT/run/fail-show"
+    touch "$TEST_SYSTEM_ROOT/run/tcping-external-unit" "$TEST_SYSTEM_ROOT/run/tcping-enabled"
+    assert_status 3 bash "$TEST_COMMAND" start --port "$port"
+    grep -Fq '同名服务并非本模块受管服务' "$TEST_TEMP/output" || fail 'loaded external enabled unit was not protected'
+    [[ ! -e "$state" && ! -e "$runtime" && ! -e "$unit" ]] || fail 'external enabled unit was overwritten'
+    rm -f "$TEST_SYSTEM_ROOT/run/tcping-external-unit" "$TEST_SYSTEM_ROOT/run/tcping-enabled"
+
     assert_status 0 bash "$TEST_COMMAND" start --port "$port"
+    ! grep -Fq 'Failed to get unit file state' "$TEST_TEMP/output" || fail 'first start queried missing unit enablement'
     [[ -f "$runtime" && -f "$unit" && -e "$TEST_SYSTEM_ROOT/run/tcping-enabled" ]] || fail 'start did not deploy and enable service'
     jq -e --argjson port "$port" '.schema_version==1 and .port==$port and .enabled==true' "$state" >/dev/null || fail 'start state schema is wrong'
     jq -e --argjson port "$port" '[.requirements[] | select(.owner=="tcping" and .scope=="tcping" and .port==($port|tostring))] | length==1' "$fw" >/dev/null || fail 'start did not record TCPing UFW demand'
@@ -222,6 +253,7 @@ SH
         [[ "$cancel_status" == 0 ]] || fail "interactive menu exit returned $cancel_status"
         grep -Fq '创建 / 启动 / 修改端口' "$TEST_TEMP/menu-output" || fail 'interactive menu omitted start action'
         grep -Fq '卸载' "$TEST_TEMP/menu-output" || fail 'interactive menu omitted uninstall action'
+        ! grep -Fq 'Failed to get unit file state' "$TEST_TEMP/menu-output" || fail 'uninstalled menu queried missing unit enablement'
         [[ ! -e "$state" ]] || fail 'interactive menu exit changed state'
     fi
     printf 'PASS: mock systemd CLI lifecycle, validation, rollback, UFW ownership\n'
