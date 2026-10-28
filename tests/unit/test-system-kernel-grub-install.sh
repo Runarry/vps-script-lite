@@ -74,6 +74,8 @@ reset_fixture() {
     KERNEL_GRUB_DISK=/dev/vda
     KERNEL_GRUB_INSTALL_ROOT_FSTYPE=ext4
     KERNEL_GRUB_INSTALL_BOOT_FSTYPE=ext4
+    KERNEL_GRUB_INSTALL_REMOVE_PACKAGE=''
+    KERNEL_GRUB_INSTALL_REMOVE_VERSION=''
     KERNEL_CONFIRM_INSTALL_GRUB=INSTALL-BIOS-GRUB
     KERNEL_GRUB_SUPPORTED=0
     VPSCTL_DRY_RUN=0
@@ -438,7 +440,24 @@ test_apt_plan_trust_and_scope() (
                 printf '\n'
                 ;;
             --simulate)
-                [[ "$*" == *APT::Get::AutomaticRemove=false* && "$*" == *--no-remove* && "$*" == *--no-install-recommends* ]] || return 97
+                [[ "$*" == *APT::Get::AutomaticRemove=false* && "$*" == *--no-install-recommends* ]] || return 97
+                if [[ "$test_apt_case" == replace-efi-* ]]; then
+                    [[ "$*" != *--no-remove* && "$*" == *grub-efi-amd64-* ]] || return 97
+                    case "$test_apt_case" in
+                        replace-efi-missing) ;;
+                        replace-efi-purge) printf 'Purg grub-efi-amd64 [2.12-9]\n' ;;
+                        replace-efi-wrong-version) printf 'Remv grub-efi-amd64 [2.12-7]\n' ;;
+                        *) printf 'Remv grub-efi-amd64 [%s] []\n' "${KERNEL_PKG_VERSION['grub-efi-amd64']}" ;;
+                    esac
+                    case "$test_apt_case" in
+                        replace-efi-extra) printf 'Remv libc6 [2.41]\n' ;;
+                        replace-efi-signed) printf 'Remv grub-efi-amd64-signed [2.12-9]\n' ;;
+                        replace-efi-bin-remove) printf 'Remv grub-efi-amd64-bin [2.12-9]\n' ;;
+                        replace-efi-duplicate) printf 'Remv grub-efi-amd64 [2.12-9]\n' ;;
+                    esac
+                else
+                    [[ "$*" == *--no-remove* ]] || return 97
+                fi
                 case "$test_apt_case" in
                     failure) return 100 ;;
                     no-changes)
@@ -464,7 +483,7 @@ test_apt_plan_trust_and_scope() (
                 elif [[ "$test_apt_case" == efi-change ]]; then
                     printf 'Inst grub-efi-amd64 (2.12-9 Debian:13/stable [amd64])\n'
                 fi
-                if [[ "$test_apt_case" == efi-modules-* ]]; then
+                if [[ "$test_apt_case" == efi-modules-* || "$test_apt_case" == replace-efi-upgrade ]]; then
                     for package in grub-efi-amd64-bin grub-efi-amd64-unsigned; do
                         test_efi_version=2.12-9
                         if [[ "$test_apt_case" == efi-modules-bin-mismatch && "$package" == grub-efi-amd64-bin ]] ||
@@ -487,7 +506,7 @@ test_apt_plan_trust_and_scope() (
     apt-cache() {
         [[ "${1:-}" == policy ]] || return 97
         local queried="$2" source='https://deb.debian.org/debian trixie/main amd64 Packages' policy_version=2.12-9
-        if [[ "$test_apt_case" == foreign-request && "$queried" == grub-pc ]] ||
+        if [[ ("$test_apt_case" == foreign-request || "$test_apt_case" == replace-efi-foreign) && "$queried" == grub-pc ]] ||
             [[ "$test_apt_case" == foreign-dependency && "$queried" == libefiboot1 ]] ||
             [[ "$test_apt_case" == efi-modules-foreign && "$queried" == grub-efi-amd64-bin ]]; then
             source='https://foreign.example trixie/main amd64 Packages'
@@ -501,6 +520,17 @@ test_apt_plan_trust_and_scope() (
             [[ "$test_apt_case" == efi-modules-mixed && "$queried" == grub-efi-amd64-unsigned ]]; then
             printf '        500 https://foreign.example trixie/main amd64 Packages\n'
         fi
+    }
+    dpkg() {
+        case "${1:-}" in
+            --compare-versions) command dpkg "$@" ;;
+            --no-act)
+                [[ "$#" == 4 && "$2" == --remove && "$3" == -- && "$4" == grub-efi-amd64 ]] || return 97
+                printf 'dpkg:--no-act --remove -- %s\n' "$4" >>"$log"
+                [[ "$test_apt_case" != replace-efi-not-removable ]]
+                ;;
+            *) test_fail 'package planning attempted a mutating dpkg action' ;;
+        esac
     }
     _kernel_grub_install_plan_packages || test_fail 'official GRUB and dependency plan rejected'
     assert_equal 5 "${#KERNEL_GRUB_INSTALL_ARGS[@]}" 'complete package and dependency change list exposed'
@@ -553,12 +583,43 @@ test_apt_plan_trust_and_scope() (
     KERNEL_PKG_STATUS['grub-common']='ii '
     KERNEL_PKG_VERSION['grub-common']=2.12-10
     assert_status 3 'dependency downgrade rejected against installed package state' _kernel_grub_install_plan_packages
+
+    KERNEL_PKG_STATUS=(['grub-common']='ii ' ['grub-efi-amd64']='ii ' ['grub-efi-amd64-bin']='ii ')
+    KERNEL_PKG_VERSION=(['grub-common']=2.12-9 ['grub-efi-amd64']=2.12-9 ['grub-efi-amd64-bin']=2.12-9)
+    test_apt_case=replace-efi-valid
+    _kernel_grub_install_plan_packages || test_fail 'plain inactive EFI control package can be replaced for BIOS'
+    assert_equal grub-efi-amd64 "$KERNEL_GRUB_INSTALL_REMOVE_PACKAGE" 'replacement records only the plain EFI control package'
+    assert_equal 2.12-9 "$KERNEL_GRUB_INSTALL_REMOVE_VERSION" 'replacement records its installed version'
+    assert_equal 2.12-9 "${KERNEL_GRUB_INSTALL_EXPECTED_VERSIONS['grub-efi-amd64-bin']}" 'unchanged EFI modules are explicitly retained'
+    assert_contains "$(<"$log")" 'dpkg:--no-act --remove -- grub-efi-amd64' 'standalone removal dependency check is read-only'
+    for test_apt_case in replace-efi-extra replace-efi-signed replace-efi-bin-remove replace-efi-purge \
+        replace-efi-wrong-version replace-efi-duplicate replace-efi-missing; do
+        assert_status 30 "$test_apt_case cannot broaden the replacement" _kernel_grub_install_plan_packages
+    done
+    test_apt_case=replace-efi-foreign
+    assert_rejected 'foreign candidates cannot authorize EFI package replacement' _kernel_grub_install_plan_packages
+    test_apt_case=replace-efi-not-removable
+    assert_status 3 'EFI package with dependencies cannot be forcibly removed' _kernel_grub_install_plan_packages
+    test_apt_case=replace-efi-valid
+    KERNEL_PKG_STATUS['grub-efi-amd64']='hi '
+    assert_status 3 'held EFI control package is not removed through dpkg' _kernel_grub_install_plan_packages
+    KERNEL_PKG_STATUS['grub-efi-amd64']='ii '
+    unset 'KERNEL_PKG_STATUS[grub-efi-amd64-bin]'
+    assert_status 3 'replacement cannot introduce missing EFI modules' _kernel_grub_install_plan_packages
+    KERNEL_PKG_STATUS['grub-efi-amd64-bin']='ii '
+    KERNEL_PKG_VERSION=(['grub-common']=2.12-8 ['grub-efi-amd64']=2.12-8 ['grub-efi-amd64-bin']=2.12-8)
+    test_apt_case=replace-efi-upgrade
+    _kernel_grub_install_plan_packages || test_fail 'replacement accepts required matching EFI module upgrades'
+    assert_equal 2.12-9 "${KERNEL_GRUB_INSTALL_EXPECTED_VERSIONS['grub-efi-amd64-bin']}" 'retained module upgrade remains pinned'
+    assert_equal 2.12-8 "$KERNEL_GRUB_INSTALL_REMOVE_VERSION" 'control package removal retains its pre-upgrade version'
+
     KERNEL_PKG_STATUS=(['grub-pc']='ii ')
     KERNEL_PKG_VERSION=(['grub-pc']=2.12-8)
     test_apt_case=no-changes
     : >"$log"
     _kernel_grub_install_plan_packages || test_fail 'already installed GRUB repair plan rejected'
     assert_equal 0 "${#KERNEL_GRUB_INSTALL_ARGS[@]}" 'repair does not automatically upgrade installed grub-pc'
+    assert_equal '' "$KERNEL_GRUB_INSTALL_REMOVE_PACKAGE" 'a later repair cannot retain a stale removal exception'
     assert_equal 2.12-8 "${KERNEL_GRUB_INSTALL_EXPECTED_VERSIONS['grub-pc']}" 'repair retains currently installed version'
     assert_contains "$(<"$log")" 'grub-pc=2.12-8' 'repair simulation pins the installed version despite a newer candidate'
 )
@@ -822,6 +883,7 @@ test_execute_debconf_isolation_and_readback() (
         case "$1" in
             env)
                 printf 'apt\n' >>"$log"
+                [[ "$*" == *--no-remove* ]] || test_fail 'real APT installation lost its no-remove guard'
                 grep -Fqx 'grub-pc grub-pc/install_devices multiselect ' "$seed" || test_fail 'package hooks retained an old install disk'
                 grep -Fqx 'grub-pc grub-pc/install_devices_disks_changed multiselect ' "$seed" || test_fail 'package hooks retained a changed-disk fallback'
                 grep -Fqx 'grub-pc grub-pc/install_devices_empty boolean true' "$seed" || test_fail 'package hooks may prompt or write a guessed disk'
@@ -829,6 +891,13 @@ test_execute_debconf_isolation_and_readback() (
                 grep -Fqx 'grub-pc grub-pc/cloud_style_installation boolean false' "$seed" || test_fail 'Ubuntu cloud package hooks may bypass explicit install_devices'
                 [[ "$test_execute_case" != apt-failure ]] || return 100
                 [[ "$test_execute_case" != boot-drift ]] || printf 'unexpected initrd replacement\n' >>"$KERNEL_BOOT_DIR/initrd.img-6.12.12-amd64"
+                [[ "$test_execute_case" != efi-bin-lost ]] || KERNEL_PKG_STATUS['grub-efi-amd64-bin']='rc '
+                ;;
+            dpkg)
+                [[ "$#" == 4 && "$2" == --remove && "$3" == -- && "$4" == grub-efi-amd64 ]] || test_fail 'replacement removed an unapproved package or forced removal'
+                printf 'remove:grub-efi-amd64\n' >>"$log"
+                [[ "$test_execute_case" != efi-remove-failure ]] || return 1
+                [[ "$test_execute_case" == efi-still-installed ]] || KERNEL_PKG_STATUS['grub-efi-amd64']='rc '
                 ;;
             grub-install)
                 printf 'disk:%s\n' "${!#}" >>"$log"
@@ -860,7 +929,8 @@ test_execute_debconf_isolation_and_readback() (
         esac
     }
 
-    for test_execute_case in success btrfs-success missing-env apt-failure grub-failure readback-failure table-drift debconf-drift debconf-flag-drift cloud-auto-drift boot-drift; do
+    for test_execute_case in success btrfs-success efi-replace efi-remove-failure efi-still-installed efi-bin-lost \
+        missing-env apt-failure grub-failure readback-failure table-drift debconf-drift debconf-flag-drift cloud-auto-drift boot-drift; do
         reset_fixture
         : >"$log"
         updates=0
@@ -876,6 +946,16 @@ test_execute_debconf_isolation_and_readback() (
             KERNEL_PKG_STATUS[$package]='ii '
             KERNEL_PKG_VERSION[$package]=2.12-9
         done
+        if [[ "$test_execute_case" == efi-* ]]; then
+            KERNEL_GRUB_INSTALL_REMOVE_PACKAGE=grub-efi-amd64
+            KERNEL_GRUB_INSTALL_REMOVE_VERSION=2.12-9
+            KERNEL_PKG_STATUS['grub-efi-amd64']='ii '
+            KERNEL_PKG_VERSION['grub-efi-amd64']=2.12-9
+            KERNEL_PKG_STATUS['grub-efi-amd64-bin']='ii '
+            KERNEL_PKG_VERSION['grub-efi-amd64-bin']=2.12-9
+            KERNEL_GRUB_INSTALL_EXPECTED_VERSIONS['grub-efi-amd64-bin']=2.12-9
+            KERNEL_GRUB_INSTALL_ARGS+=(grub-efi-amd64-bin=2.12-9)
+        fi
         printf 'fixture normal module\n' >"$KERNEL_BOOT_DIR/grub/i386-pc/normal.mod"
         write_grub_fixture '1>1'
         write_env_fixture 'next_entry=0'
@@ -886,13 +966,17 @@ test_execute_debconf_isolation_and_readback() (
         KERNEL_GRUB_INSTALL_BOOT_SIGNATURE="$(_kernel_grub_install_boot_signature)" || test_fail 'execute fixture boot signature failed'
         status=0
         output="$(_kernel_grub_install_execute 2>&1)" || status=$?
-        if [[ "$test_execute_case" == success || "$test_execute_case" == btrfs-success || "$test_execute_case" == missing-env ]]; then
+        if [[ "$test_execute_case" == success || "$test_execute_case" == btrfs-success || "$test_execute_case" == missing-env || "$test_execute_case" == efi-replace ]]; then
             assert_equal 0 "$status" "$test_execute_case exact write and readback transaction ($output)"
-            assert_contains "$(<"$log")" $'seed:suppress\napt\ndisk:/dev/vda\nseed:persist' 'package implicit writes disabled before explicit disk installation'
+            if [[ "$test_execute_case" == efi-replace ]]; then
+                assert_contains "$(<"$log")" $'seed:suppress\nremove:grub-efi-amd64\napt\ndisk:/dev/vda\nseed:persist' 'only the inactive EFI package is removed before no-remove APT and explicit GRUB installation'
+            else
+                assert_contains "$(<"$log")" $'seed:suppress\napt\ndisk:/dev/vda\nseed:persist' 'package implicit writes disabled before explicit disk installation'
+            fi
             grep -Fqx 'grub-pc grub-pc/cloud_style_installation boolean false' "$seed" || test_fail 'persisting the selected disk re-enabled Ubuntu cloud auto-selection'
             grep -Fqx "GRUB_DEFAULT='$expected_default'" "$KERNEL_GRUB_DROPIN" || test_fail 'default was not fixed to the precise version entry'
             assert_equal complete-pending-reboot "$(<"$KERNEL_GRUB_INSTALL_BACKUP/stage")" 'post-write verification completes the transaction'
-            if [[ "$test_execute_case" == success ]]; then
+            if [[ "$test_execute_case" == success || "$test_execute_case" == efi-replace ]]; then
                 assert_contains "$(<"$KERNEL_GRUB_ENV")" "next_entry=$expected_next" 'numeric/simple next override retained as the exact release entry'
             elif [[ "$test_execute_case" == missing-env ]]; then
                 assert_contains "$(<"$log")" 'env:create' 'absent environment created only in backed-up write phase'
@@ -910,6 +994,11 @@ test_execute_debconf_isolation_and_readback() (
                 fi
             elif [[ "$test_execute_case" == grub-failure ]]; then
                 [[ "$(<"$log")" != *seed:persist* ]] || test_fail 'failed boot sector install persisted an unverified target'
+            elif [[ "$test_execute_case" == efi-* ]]; then
+                [[ "$(<"$log")" != *disk:* ]] || test_fail 'incomplete package replacement reached GRUB disk writes'
+                if [[ "$test_execute_case" == efi-remove-failure ]]; then
+                    [[ "$(<"$log")" != *apt* ]] || test_fail 'failed EFI package removal continued to APT'
+                fi
             fi
         fi
     done

@@ -606,23 +606,49 @@ _kernel_validate_policy_version_sources() {
 
 kernel_validate_install_plan() {
     local requested_package="$1" requested_version="$2" output line package version old_version metadata status dependency_state dependency_token
-    local distribution_output='' xanmod_output='' source_mode
+    local distribution_output='' xanmod_output='' source_mode allowed_remove="${3:-}" removal_seen=0
     local inst_pattern='^Inst[[:space:]]+([^[:space:]]+)([[:space:]]+\[[^]]+\])?[[:space:]]+\(([^[:space:])]+)([[:space:]][^)]*)?\)([[:space:]]+\[([^]]*)\])?$'
     local conf_pattern='^Conf[[:space:]]+([^[:space:]]+)[[:space:]]+\(([^[:space:])]+)([[:space:]][^)]*)?\)$'
+    local remv_pattern='^Remv[[:space:]]+([^[:space:]]+)[[:space:]]+\[([^]]+)\]([[:space:]]+\[[^]]*\])?$'
     local -A expected_versions=() configured_versions=()
-    local -a dependency_tokens=()
+    local -a dependency_tokens=() remove_guard=(--no-remove) remove_args=()
     KERNEL_INSTALL_EXPECTED_VERSIONS=()
     [[ "$requested_package" =~ ^[a-z0-9][a-z0-9+.-]*(:[a-z0-9]+)?$ && -n "$requested_version" && "$requested_version" != *[[:space:]]* ]] || {
         vps_cmd_error 'APT 安装计划包含无效的包名或版本'
         return 3
     }
-    if ! output="$(LC_ALL=C apt-get --simulate -o APT::Get::AutomaticRemove=false install --no-remove --no-install-recommends "$requested_package=$requested_version" 2>&1)"; then
+    if [[ -n "$allowed_remove" ]]; then
+        # Only the explicit BIOS GRUB path may inspect this one replacement.
+        # Execution still removes it separately and keeps APT --no-remove.
+        [[ "$requested_package" == grub-pc && "$allowed_remove" =~ ^grub-efi-amd64(:amd64)?$ &&
+            "${KERNEL_PKG_STATUS[$allowed_remove]:-}" == 'ii ' && -n "${KERNEL_PKG_VERSION[$allowed_remove]:-}" ]] || {
+            vps_cmd_error 'APT 删除例外只接受 BIOS GRUB 替换已安装且未锁定的 grub-efi-amd64'
+            return 3
+        }
+        remove_guard=()
+        remove_args=("${allowed_remove}-")
+    fi
+    if ! output="$(LC_ALL=C apt-get --simulate -o APT::Get::AutomaticRemove=false install "${remove_guard[@]}" --no-install-recommends "$requested_package=$requested_version" "${remove_args[@]}" 2>&1)"; then
         vps_cmd_error "APT 安装计划解析失败：$output"
         return 20
     fi
     while IFS= read -r line; do
         case "$line" in
-            Remv\ * | Purg\ *)
+            Remv\ *)
+                if [[ -z "$allowed_remove" || ! "$line" =~ $remv_pattern ]]; then
+                    vps_cmd_error "APT 安装计划包含删除动作：$line"
+                    return 30
+                fi
+                package="${BASH_REMATCH[1]}"
+                version="${BASH_REMATCH[2]}"
+                [[ "$package" =~ ^grub-efi-amd64(:amd64)?$ &&
+                    "$version" == "${KERNEL_PKG_VERSION[$allowed_remove]}" && "$removal_seen" == 0 ]] || {
+                    vps_cmd_error "APT 安装计划包含未批准或状态不一致的删除动作：$line"
+                    return 30
+                }
+                removal_seen=1
+                ;;
+            Purg\ *)
                 vps_cmd_error "APT 安装计划包含删除动作：$line"
                 return 30
                 ;;
@@ -680,6 +706,10 @@ kernel_validate_install_plan() {
                 ;;
         esac
     done <<<"$output"
+    if [[ -n "$allowed_remove" ]] && { ((removal_seen != 1)) || [[ -z "${expected_versions['grub-pc']+set}" ]]; }; then
+        vps_cmd_error 'APT 计划没有精确执行 grub-efi-amd64 到 grub-pc 的替换'
+        return 30
+    fi
     for package in "${!configured_versions[@]}"; do
         if [[ -z "${expected_versions["$package"]+set}" || "${expected_versions["$package"]}" != "${configured_versions["$package"]}" ]]; then
             vps_cmd_error "APT Conf 动作没有同版本 Inst 对应：$package=${configured_versions["$package"]}"

@@ -88,3 +88,17 @@ Debian 12 的 `btrfs-progs 6.2` 实测只接受文件系统挂载点：当 `/boo
 修正后的演练通过配置、包状态、APT、debconf、内核文件、分区表及无备份目录的只读断言。实际安装成功配置完整 `grub-pc`，固定原默认内核并清除覆盖；恢复备份的校验清单及权限均通过。随后两次完全由 SeaBIOS 和磁盘 GRUB 启动，分别进入原 `6.1.0-54-amd64` 和经 CLI 永久切换的 `6.1.0-54-cloud-amd64`，内核启动参数均包含正确的 `/@rootfs/boot/vmlinuz-...` 路径和 `rootflags=subvol=@rootfs`。最后通过 CLI 卸载原内核及其更新元包，当前/默认 Cloud 内核完整，dpkg 审计干净，GPT、ESP 标记、保留内核文件及恢复备份校验均通过。
 
 完整证据位于 `acceptance/`：`install.log`、`boot-generic.log`、`boot-cloud.log`、`final-checks.log` 和 `guest-evidence.tar.gz`（附 SHA-256）。最终断言为 `UNINSTALL_INTEGRITY_FINAL_PASS`。虚拟机已正常关闭，测试镜像无残留 loop 映射；宿主 ESP 校验通过，仍运行原 XanMod 内核。工具安装、镜像准备及恢复信息保留在该目录的日志和 `REPORT.txt`。此次真实启动仅覆盖上述 Debian 12 Btrfs 根子卷布局，未重跑全量测试或其他发行版验收。
+
+## 2026-10-28：BIOS 环境的 EFI 控制包替换
+
+另一个实际包组合为 BIOS 启动但仍安装 `grub-efi-amd64`、`grub-efi-amd64-bin` 和 `grub-pc-bin`，缺少完整 `grub-pc`。原流程因两种控制包互斥而被 APT `--no-remove` 拒绝，返回 `20`；已确认失败演练没有修改配置或包状态。
+
+修复仅允许在已确认 BIOS 平台及启动盘后，将已安装、未锁定的普通 `grub-efi-amd64` 替换为 `grub-pc`。模拟计划只允许这个包及其当前版本的唯一 `Remv`，拒绝 purge、签名包、shim、EFI 模块及任何额外删除。另以 `dpkg --no-act --remove` 确认它能独立移除。确认页展示原版本；备份后仅对这个包执行非 purge 的 `dpkg --remove`，后续 APT 继续使用 `--no-remove`，并将已有 EFI 模块的保留版本纳入安装后校验。普通内核安装的删除禁令不变。
+
+所有执行通过 `ssh host-vps-scripts`，证据目录为 `/root/vpsctl-bios-efi-replace-20261028/`。`validation/` 中安装流程、provider 和内核入口三组回归均通过；相关文件的 `bash -n`、完整 ShellCheck 和 shfmt 检查通过。新增夹具覆盖精确替换、模块随 common 的必要升级、未批准或重复删除、版本不符、缺失删除、非官方候选、锁定及依赖拒绝、移除失败后停止、错误包状态下禁止写盘和保留实际 APT 的 `--no-remove`。
+
+真实验收从前一节成功磁盘建立独立副本，使用 Debian 12、GRUB `2.06-13+deb12u2`、SeaBIOS/GPT、Btrfs `@rootfs` 与 `compress=zlib:3`。初始 EFI 控制包及模块已安装，`grub-pc` 未安装；当前 Cloud 内核具有有效的默认项、saved_entry 和 next_entry。修正后的演练通过配置、boot/ESP、dpkg、debconf、APT、现有备份清单及内容、GPT 的只读比对。
+
+实际安装后，EFI 控制包变为残留配置状态，完整 BIOS 包和 EFI 模块均为预期版本的已安装状态，dpkg 审计干净；内核、ESP 文件和 GPT 不变，Btrfs 默认项精确固定、`GRUB_SAVEDEFAULT=false`、next_entry 清除。新恢复备份权限及全部摘要通过，原始引导区备份与写入前字节一致，`apt-plan.txt` 包含明确的 `REMOVE` 记录。随后实际固件重启产生新 boot ID，SeaBIOS/GRUB 进入原 `6.1.0-54-cloud-amd64`，启动状态可解析，原“缺少完整 grub-pc”拦截消失，当前运行内核仍按原规则受保护。
+
+主要结果为 `corrected-dry-verification.log`、`corrected-install-verification.log` 及固件启动证据；完整脚本、包状态、文件摘要和恢复材料保留于上述远端目录。本轮没有重跑全量测试或其他平台启动矩阵。

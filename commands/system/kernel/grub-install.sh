@@ -6,6 +6,8 @@ declare -ag KERNEL_GRUB_INSTALL_ARGS=()
 declare -ag KERNEL_GRUB_INSTALL_PROTECTED_RELEASES=()
 declare -Ag KERNEL_GRUB_INSTALL_EXPECTED_VERSIONS=()
 KERNEL_GRUB_INSTALL_BACKUP=''
+KERNEL_GRUB_INSTALL_REMOVE_PACKAGE=''
+KERNEL_GRUB_INSTALL_REMOVE_VERSION=''
 
 _kernel_grub_install_require_platform() {
     local tool path output status=0
@@ -416,9 +418,12 @@ PY
 
 _kernel_grub_install_plan_packages() {
     local KERNEL_TYPE=official package resolved version old requested installed=0
-    local efi_bin_installed=0 planned_common='' planned_efi_bin=''
+    local efi_bin_installed=0 efi_bin_package='' efi_bin_version='' planned_common='' planned_efi_bin=''
+    local efi_replace='' efi_replace_version='' output
     KERNEL_GRUB_INSTALL_ARGS=()
     KERNEL_GRUB_INSTALL_EXPECTED_VERSIONS=()
+    KERNEL_GRUB_INSTALL_REMOVE_PACKAGE=''
+    KERNEL_GRUB_INSTALL_REMOVE_VERSION=''
     resolved="$(_kernel_inventory_resolve_package grub-pc 2>/dev/null || true)"
     if [[ -n "$resolved" ]] && kernel_inventory_package_installed "$resolved"; then
         requested="${KERNEL_PKG_VERSION[$resolved]}"
@@ -429,10 +434,23 @@ _kernel_grub_install_plan_packages() {
             return 3
         }
     fi
-    kernel_validate_install_plan grub-pc "$requested" || return $?
+    resolved="$(_kernel_inventory_resolve_package grub-efi-amd64 2>/dev/null || true)"
+    if ((installed == 0)) && [[ -n "$resolved" ]] && kernel_inventory_package_installed "$resolved"; then
+        [[ "${KERNEL_PKG_STATUS[$resolved]}" == 'ii ' ]] || {
+            vps_cmd_error 'grub-efi-amd64 已被锁定，不自动替换为 BIOS 启动器'
+            return 3
+        }
+        efi_replace="$resolved"
+        efi_replace_version="${KERNEL_PKG_VERSION[$resolved]}"
+        kernel_validate_install_plan grub-pc "$requested" "$efi_replace" || return $?
+    else
+        kernel_validate_install_plan grub-pc "$requested" || return $?
+    fi
     resolved="$(_kernel_inventory_resolve_package grub-efi-amd64-bin 2>/dev/null || true)"
     if [[ -n "$resolved" ]] && kernel_inventory_package_installed "$resolved"; then
         efi_bin_installed=1
+        efi_bin_package="$resolved"
+        efi_bin_version="${KERNEL_PKG_VERSION[$resolved]}"
     fi
     for package in "${!KERNEL_INSTALL_EXPECTED_VERSIONS[@]}"; do
         case "${package%%:*}" in
@@ -469,6 +487,21 @@ _kernel_grub_install_plan_packages() {
         fi
         KERNEL_GRUB_INSTALL_EXPECTED_VERSIONS["$package"]="$version"
     done
+    if [[ -n "$efi_replace" ]]; then
+        ((efi_bin_installed == 1)) || {
+            vps_cmd_error 'EFI 启动器替换必须保留已安装的 grub-efi-amd64-bin'
+            return 3
+        }
+        output="$(LC_ALL=C dpkg --no-act --remove -- "$efi_replace" 2>&1)" || {
+            vps_cmd_error "无法单独移除未使用的 EFI 控制包；保留依赖和锁定保护：$output"
+            return 3
+        }
+        KERNEL_GRUB_INSTALL_REMOVE_PACKAGE="$efi_replace"
+        KERNEL_GRUB_INSTALL_REMOVE_VERSION="$efi_replace_version"
+        if [[ -z "${KERNEL_GRUB_INSTALL_EXPECTED_VERSIONS[$efi_bin_package]+set}" ]]; then
+            KERNEL_GRUB_INSTALL_EXPECTED_VERSIONS["$efi_bin_package"]="$efi_bin_version"
+        fi
+    fi
     KERNEL_GRUB_INSTALL_EXPECTED_VERSIONS['grub-pc']="$requested"
     if ((installed == 0 || ${#KERNEL_INSTALL_EXPECTED_VERSIONS[@]} > 0)); then
         while IFS= read -r package; do
@@ -611,6 +644,7 @@ _kernel_grub_install_prepare() {
         printf '%s=%s\n' "$package" "${KERNEL_GRUB_INSTALL_EXPECTED_VERSIONS[$package]}"
     done | LC_ALL=C sort)"
     KERNEL_GRUB_INSTALL_PLAN_SIGNATURE="$(printf '%s\n' "$KERNEL_GRUB_INSTALL_DISK_DATA" "$configs" "$debconf" "$packages" \
+        "$KERNEL_GRUB_INSTALL_REMOVE_PACKAGE=$KERNEL_GRUB_INSTALL_REMOVE_VERSION" \
         "$KERNEL_GRUB_INSTALL_DEFAULT_RELEASE" "$KERNEL_GRUB_INSTALL_NEXT_RELEASE" "$KERNEL_GRUB_INSTALL_NEXT_ID" \
         "$KERNEL_GRUB_INSTALL_CLEAR_NEXT" "$KERNEL_GRUB_INSTALL_FALLBACK" \
         "$KERNEL_GRUB_INSTALL_BOOT_SIGNATURE" | sha256sum)" || return 3
@@ -626,6 +660,9 @@ _kernel_grub_install_show_plan() {
         vps_cmd_info "APT 完整包变更：$(kernel_join_values "${KERNEL_GRUB_INSTALL_ARGS[@]}")"
     else
         vps_cmd_info 'GRUB 软件包已满足要求；本次仅修复引导安装及配置，不升级软件包'
+    fi
+    if [[ -n "$KERNEL_GRUB_INSTALL_REMOVE_PACKAGE" ]]; then
+        vps_cmd_warning "BIOS 启动器替换：移除 $KERNEL_GRUB_INSTALL_REMOVE_PACKAGE=$KERNEL_GRUB_INSTALL_REMOVE_VERSION，安装 grub-pc；保留 grub-efi-amd64-bin、配置和 ESP 文件"
     fi
     if [[ "$KERNEL_GRUB_INSTALL_FALLBACK" == 1 ]]; then
         vps_cmd_warning "原默认项无法安全解析；将固定当前运行内核 $KERNEL_GRUB_INSTALL_DEFAULT_RELEASE 并清除单次覆盖"
@@ -681,6 +718,9 @@ _kernel_grub_install_backup() {
     LC_ALL=C dpkg-query -W -f='${db:Status-Abbrev}\t${binary:Package}\t${Version}\n' >"$KERNEL_GRUB_INSTALL_BACKUP/packages.tsv" || return 20
     _kernel_grub_install_debconf_snapshot >"$KERNEL_GRUB_INSTALL_BACKUP/debconf.txt" || return 20
     printf '%s\n' "${KERNEL_GRUB_INSTALL_ARGS[@]}" >"$KERNEL_GRUB_INSTALL_BACKUP/apt-plan.txt" || return 20
+    if [[ -n "$KERNEL_GRUB_INSTALL_REMOVE_PACKAGE" ]]; then
+        printf 'REMOVE %s=%s\n' "$KERNEL_GRUB_INSTALL_REMOVE_PACKAGE" "$KERNEL_GRUB_INSTALL_REMOVE_VERSION" >>"$KERNEL_GRUB_INSTALL_BACKUP/apt-plan.txt" || return 20
+    fi
     tar --create --absolute-names --file "$KERNEL_GRUB_INSTALL_BACKUP/grub-files.tar" -- "${present[@]}" || return 20
     tar --list --file "$KERNEL_GRUB_INSTALL_BACKUP/grub-files.tar" >/dev/null || return 20
     printf 'file\tdisk\toffset_bytes\tlength_bytes\n' >"$KERNEL_GRUB_INSTALL_BACKUP/disk-regions.tsv" || return 20
@@ -765,6 +805,13 @@ _kernel_grub_install_seed_devices() {
 _kernel_grub_install_verify_packages() {
     local package resolved
     kernel_inventory_load || return 30
+    if [[ -n "$KERNEL_GRUB_INSTALL_REMOVE_PACKAGE" ]]; then
+        resolved="$(_kernel_inventory_resolve_package "$KERNEL_GRUB_INSTALL_REMOVE_PACKAGE" 2>/dev/null || true)"
+        if [[ -n "$resolved" ]] && kernel_inventory_package_installed "$resolved"; then
+            vps_cmd_error '安装后原 EFI 控制包仍已安装，启动器替换未完成'
+            return 30
+        fi
+    fi
     for package in grub-pc grub-pc-bin grub-common grub2-common; do
         resolved="$(_kernel_inventory_resolve_package "$package")" && kernel_inventory_package_installed "$resolved" || {
             vps_cmd_error "安装后未确认完整软件包：$package"
@@ -788,6 +835,10 @@ _kernel_grub_install_execute() {
     local target next='' output release old_table="$KERNEL_GRUB_INSTALL_TABLE_DATA"
     _kernel_grub_install_stage suppress-package-boot-writes || return 30
     _kernel_grub_install_seed_devices suppress || return 30
+    if [[ -n "$KERNEL_GRUB_INSTALL_REMOVE_PACKAGE" ]]; then
+        _kernel_grub_install_stage remove-inactive-efi-package || return 30
+        _kernel_grub_install_run dpkg --remove -- "$KERNEL_GRUB_INSTALL_REMOVE_PACKAGE" || return 30
+    fi
     if ((${#KERNEL_GRUB_INSTALL_ARGS[@]})); then
         _kernel_grub_install_stage apt-install || return 30
         _kernel_grub_install_run env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l \
