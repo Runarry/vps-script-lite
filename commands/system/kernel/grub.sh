@@ -209,14 +209,17 @@ _kernel_grub_title_has_exact_release() {
 }
 
 _kernel_grub_record_entry() {
-    local title="$1" id="$2" stable="$3" numeric="$4" title_path="$5" image="$6"
+    local title="$1" id="$2" stable="$3" numeric="$4" title_path="$5" image="$6" boot_path="${7:-}"
     local release='' submenu_id entry_id root
 
     [[ "${title,,}" != *recovery* && "${title,,}" != *rescue* ]] || return 0
     case "$image" in
         /boot/vmlinuz-*) release="${image#/boot/vmlinuz-}" ;;
         /vmlinuz-*) release="${image#/vmlinuz-}" ;;
-        *) return 0 ;;
+        *)
+            [[ -n "$boot_path" && "$image" == "${boot_path%/}/vmlinuz-"* ]] || return 0
+            release="${image#"${boot_path%/}/vmlinuz-"}"
+            ;;
     esac
     _kernel_grub_known_release "$release" || return 0
     if [[ -z "$_KERNEL_GRUB_ACTIVE_ROOT" ]]; then
@@ -247,10 +250,17 @@ _kernel_grub_record_entry() {
 }
 
 _kernel_grub_parse_cfg() {
-    local line trimmed image
+    local line trimmed image boot_path=''
     local submenu_id='' submenu_title='' submenu_number='' entry_id='' entry_title='' entry_image=''
     local entry_stable='' entry_number='' entry_title_path=''
     local top_index=0 child_index=0 in_entry=0 in_linux_section=0 saw_linux_section=0 entry_trusted=0
+
+    # Btrfs embeds the active subvolume in GRUB paths; accept only /boot's
+    # current relative path, never a matching release from another subvolume.
+    if command -v grub-mkrelpath >/dev/null 2>&1; then
+        boot_path="$(grub-mkrelpath "$(vps_cmd_system_path /boot)" 2>/dev/null)" || boot_path=''
+        [[ "$boot_path" == /* && "$boot_path" != *$'\n'* && "$boot_path" != *$'\r'* ]] || boot_path=''
+    fi
 
     while IFS= read -r line || [[ -n "$line" ]]; do
         trimmed="$(vps_cmd_trim "$line")"
@@ -310,7 +320,7 @@ _kernel_grub_parse_cfg() {
         if [[ "$trimmed" == '}' ]]; then
             if ((in_entry == 1)); then
                 if ((entry_trusted == 1)); then
-                    _kernel_grub_record_entry "$entry_title" "$entry_id" "$entry_stable" "$entry_number" "$entry_title_path" "$entry_image"
+                    _kernel_grub_record_entry "$entry_title" "$entry_id" "$entry_stable" "$entry_number" "$entry_title_path" "$entry_image" "$boot_path"
                 fi
                 in_entry=0
                 entry_id=''

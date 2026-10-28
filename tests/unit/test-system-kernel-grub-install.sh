@@ -72,6 +72,8 @@ reset_fixture() {
     KERNEL_VIRTUALIZATION=kvm
     KERNEL_RUNNING_RELEASE=6.12.12-amd64
     KERNEL_GRUB_DISK=/dev/vda
+    KERNEL_GRUB_INSTALL_ROOT_FSTYPE=ext4
+    KERNEL_GRUB_INSTALL_BOOT_FSTYPE=ext4
     KERNEL_CONFIRM_INSTALL_GRUB=INSTALL-BIOS-GRUB
     KERNEL_GRUB_SUPPORTED=0
     VPSCTL_DRY_RUN=0
@@ -144,10 +146,10 @@ mbr = bytearray(512)
 mbr[510:512] = bytes.fromhex("55aa")
 requested = "/dev/vda"
 
-if case in {"separate-boot", "cross-disk", "gpt", "gpt-small", "gpt-mounted", "gpt-formatted", "gpt-missing", "gpt-duplicate", "gpt-data-out-of-bounds"}:
+if case in {"separate-boot", "cross-disk", "btrfs-ext-boot", "gpt-btrfs", "gpt", "gpt-small", "gpt-mounted", "gpt-formatted", "gpt-missing", "gpt-duplicate", "gpt-data-out-of-bounds"}:
     part["size"] = 4194304
     table["partitiontable"]["partitions"][0]["size"] = 8192
-if case in {"separate-boot", "cross-disk"}:
+if case in {"separate-boot", "cross-disk", "btrfs-ext-boot"}:
     boot["filesystems"][0].update(source="/dev/vda2", target="/boot", **{"maj:min": "252:2"})
     disk["children"].append({"name": "/dev/vda2", "path": "/dev/vda2", "type": "part", "pkname": "/dev/vda", "maj:min": "252:2", "size": 4194304, "ro": False, "fstype": "ext3", "mountpoints": ["/boot"], "start": 10240, "parttype": "0x83"})
     boot["filesystems"][0]["fstype"] = "ext3"
@@ -201,7 +203,7 @@ elif case == "readonly-disk":
 elif case == "readonly-root":
     root["filesystems"][0]["options"] = "ro,relatime"
 elif case == "unsupported-fs":
-    root["filesystems"][0]["fstype"] = part["fstype"] = "btrfs"
+    root["filesystems"][0]["fstype"] = part["fstype"] = "xfs"
 elif case == "lvm":
     part["type"] = "lvm"
 elif case == "raid":
@@ -229,7 +231,39 @@ elif case == "nvme":
 elif case == "bad-sector":
     disk["log-sec"] = table["partitiontable"]["sectorsize"] = 0
 
-values = {"root": root, "boot": boot, "lsblk": lsblk, "table": table, "mbr": mbr.hex(), "requested": requested}
+root_btrfs = boot_btrfs = ""
+if "btrfs" in case:
+    fs_uuid = "a1111111-2222-3333-4444-555555555555"
+    part.update(fstype="btrfs", uuid=fs_uuid)
+    root["filesystems"][0].update(source="/dev/vda1[/@rootfs]", fstype="btrfs", uuid=fs_uuid, fsroot="/@rootfs", **{"maj:min": "0:42"})
+    root_btrfs = f"Label: none  uuid: {fs_uuid}\n\tTotal devices 1 FS bytes used 1048576\n\tdevid    1 size 8388608 used 4194304 path /dev/vda1\n"
+    if case == "btrfs-top-level":
+        root["filesystems"][0].update(source="/dev/vda1", fsroot="/")
+    elif case == "btrfs-multi-device":
+        root_btrfs = root_btrfs.replace("Total devices 1", "Total devices 2")
+        root_btrfs += "\tdevid    2 size 8388608 used 4194304 path /dev/vdb1\n"
+    elif case == "btrfs-missing-device":
+        root_btrfs = root_btrfs.replace("Total devices 1", "Total devices 2")
+        root_btrfs += "*** Some devices missing\n"
+    elif case == "btrfs-wrong-device":
+        root_btrfs = root_btrfs.replace("path /dev/vda1", "path /dev/vdb1")
+    elif case == "btrfs-wrong-uuid":
+        root_btrfs = root_btrfs.replace(fs_uuid, "b1111111-2222-3333-4444-555555555555")
+    elif case == "btrfs-degraded":
+        root["filesystems"][0]["options"] += ",degraded"
+    elif case == "btrfs-lvm":
+        part["type"] = "lvm"
+    elif case == "btrfs-duplicate-uuid":
+        duplicate = json.loads(json.dumps(part))
+        duplicate.update(name="/dev/vdb1", pkname="/dev/vdb", **{"maj:min": "253:1"})
+        lsblk["blockdevices"].append({"name": "/dev/vdb", "type": "disk", "children": [duplicate]})
+    if case != "btrfs-ext-boot":
+        boot = json.loads(json.dumps(root))
+        boot_btrfs = root_btrfs
+        if case == "btrfs-boot-subvolume":
+            boot["filesystems"][0].update(target="/boot", source="/dev/vda1[/@boot]", fsroot="/@boot", **{"maj:min": "0:43"})
+
+values = {"root": root, "boot": boot, "lsblk": lsblk, "table": table, "mbr": mbr.hex(), "requested": requested, "root-btrfs": root_btrfs, "boot-btrfs": boot_btrfs}
 value = values[field]
 print(json.dumps(value, separators=(",", ":")) if isinstance(value, dict) else value)
 PY
@@ -243,11 +277,13 @@ load_disk_fixture() {
     DISK_TABLE_JSON="$(disk_fixture_field "$mode" table)"
     DISK_MBR_HEX="$(disk_fixture_field "$mode" mbr)"
     DISK_REQUESTED="$(disk_fixture_field "$mode" requested)"
+    DISK_ROOT_BTRFS="$(disk_fixture_field "$mode" root-btrfs)"
+    DISK_BOOT_BTRFS="$(disk_fixture_field "$mode" boot-btrfs)"
 }
 
 parse_disk_fixture() {
     _kernel_grub_install_parse_disk_data "$DISK_REQUESTED" "$DISK_ROOT_JSON" "$DISK_BOOT_JSON" \
-        "$DISK_LSBLK_JSON" "$DISK_TABLE_JSON" "$DISK_MBR_HEX"
+        "$DISK_LSBLK_JSON" "$DISK_TABLE_JSON" "$DISK_MBR_HEX" "$DISK_ROOT_BTRFS" "$DISK_BOOT_BTRFS"
 }
 
 test_disk_json_safety() (
@@ -278,6 +314,70 @@ test_disk_json_safety() (
     assert_rejected 'missing partition-table evidence is refused' parse_disk_fixture
 )
 
+test_btrfs_disk_membership() (
+    local mode output
+    for mode in btrfs btrfs-top-level btrfs-boot-subvolume btrfs-ext-boot gpt-btrfs; do
+        load_disk_fixture "$mode"
+        output="$(parse_disk_fixture)" || test_fail "$mode single-device layout rejected"
+        assert_contains "$output" $'ROOT_PART\t/dev/vda1' "$mode resolves an anonymous Btrfs device number to the physical partition"
+        assert_contains "$output" $'ROOT_FSTYPE\tbtrfs' "$mode reports the mounted filesystem"
+        if [[ "$mode" == btrfs-ext-boot ]]; then
+            assert_contains "$output" $'BOOT_FSTYPE\text3' 'Btrfs root with an independent ext boot partition is supported'
+        else
+            assert_contains "$output" $'BOOT_FSTYPE\tbtrfs' 'Btrfs boot filesystem is reported for the next-entry policy'
+        fi
+    done
+    for mode in btrfs-multi-device btrfs-missing-device btrfs-wrong-device btrfs-wrong-uuid \
+        btrfs-degraded btrfs-lvm btrfs-duplicate-uuid; do
+        load_disk_fixture "$mode"
+        assert_status 3 "$mode is refused before writes" parse_disk_fixture
+    done
+    load_disk_fixture btrfs
+    DISK_ROOT_BTRFS=''
+    assert_status 3 'Btrfs device membership must be independently confirmed' parse_disk_fixture
+)
+
+test_btrfs_probe_mountpoints() (
+    local mode expected log="$TEST_TEMP/btrfs-mountpoints.log"
+    findmnt() {
+        case "${!#}" in
+            /) printf '%s\n' "$DISK_ROOT_JSON" ;;
+            /boot) printf '%s\n' "$DISK_BOOT_JSON" ;;
+            *) test_fail 'unexpected mount inspection' ;;
+        esac
+    }
+    lsblk() { printf '%s\n' "$DISK_LSBLK_JSON"; }
+    btrfs() {
+        [[ "$#" == 4 && "$1 $2 $3" == 'filesystem show --raw' ]] || return 97
+        printf '%s\n' "$4" >>"$log"
+        case "$4" in
+            /) printf '%s\n' "$DISK_ROOT_BTRFS" ;;
+            /boot)
+                [[ "$mode" == btrfs-boot-subvolume ]] || return 1
+                printf '%s\n' "$DISK_BOOT_BTRFS"
+                ;;
+            *) return 97 ;;
+        esac
+    }
+    _kernel_grub_install_parse_disk_data() {
+        [[ "$7" == "$DISK_ROOT_BTRFS" && "$8" == "$DISK_BOOT_BTRFS" ]] || return 97
+        # Stop at the block-device guard, without reading any host disk.
+        printf '%s\n' "$TEST_TEMP/not-a-block-device"
+    }
+    for mode in btrfs btrfs-boot-subvolume btrfs-ext-boot; do
+        load_disk_fixture "$mode"
+        : >"$log"
+        assert_status 3 "$mode completes Btrfs inspection before the isolated block-device guard" _kernel_grub_install_probe_disk
+        assert_contains "$(<"$TEST_TEMP/last-output")" '候选设备不是可写的真实规范整盘路径' "$mode reached the disk guard after gathering membership"
+        case "$mode" in
+            btrfs) expected=$'/\n/' ;;
+            btrfs-boot-subvolume) expected=$'/\n/boot' ;;
+            btrfs-ext-boot) expected=/ ;;
+        esac
+        assert_equal "$expected" "$(<"$log")" "$mode queries actual mountpoints rather than directories inside them"
+    done
+)
+
 test_default_and_next_repair_plan() (
     reset_fixture
     kernel_inventory_load() { return 0; }
@@ -291,6 +391,13 @@ test_default_and_next_repair_plan() (
     assert_equal 6.12.12-amd64 "$KERNEL_GRUB_INSTALL_DEFAULT_RELEASE" 'numeric submenu default preserves its target'
     assert_equal 7.2.4-x64v3-xanmod1 "$KERNEL_GRUB_INSTALL_NEXT_RELEASE" 'valid numeric one-time override preserves its target'
     assert_equal 0 "$KERNEL_GRUB_INSTALL_CLEAR_NEXT" 'valid override will be retained'
+
+    KERNEL_GRUB_INSTALL_BOOT_FSTYPE=btrfs
+    _kernel_grub_install_plan_defaults || test_fail 'Btrfs fixed-default plan rejected'
+    assert_equal 6.12.12-amd64 "$KERNEL_GRUB_INSTALL_DEFAULT_RELEASE" 'Btrfs preserves the existing permanent default'
+    assert_equal 1 "$KERNEL_GRUB_INSTALL_CLEAR_NEXT" 'Btrfs clears even a valid one-time override that older GRUB cannot consume'
+    assert_equal '' "$KERNEL_GRUB_INSTALL_NEXT_RELEASE" 'Btrfs plan does not retain a persistent next-entry override'
+    KERNEL_GRUB_INSTALL_BOOT_FSTYPE=ext4
 
     write_grub_fixture '1>1'
     write_env_fixture 'next_entry=unknown-menu-entry'
@@ -753,7 +860,7 @@ test_execute_debconf_isolation_and_readback() (
         esac
     }
 
-    for test_execute_case in success missing-env apt-failure grub-failure readback-failure table-drift debconf-drift debconf-flag-drift cloud-auto-drift boot-drift; do
+    for test_execute_case in success btrfs-success missing-env apt-failure grub-failure readback-failure table-drift debconf-drift debconf-flag-drift cloud-auto-drift boot-drift; do
         reset_fixture
         : >"$log"
         updates=0
@@ -772,13 +879,14 @@ test_execute_debconf_isolation_and_readback() (
         printf 'fixture normal module\n' >"$KERNEL_BOOT_DIR/grub/i386-pc/normal.mod"
         write_grub_fixture '1>1'
         write_env_fixture 'next_entry=0'
+        if [[ "$test_execute_case" == btrfs-success ]]; then KERNEL_GRUB_INSTALL_BOOT_FSTYPE=btrfs; fi
         if [[ "$test_execute_case" == missing-env ]]; then rm -- "$KERNEL_GRUB_ENV"; fi
         _kernel_grub_install_plan_defaults || test_fail 'execute fixture default plan rejected'
         KERNEL_GRUB_INSTALL_PROTECTED_RELEASES=(6.12.12-amd64 7.2.4-x64v3-xanmod1)
         KERNEL_GRUB_INSTALL_BOOT_SIGNATURE="$(_kernel_grub_install_boot_signature)" || test_fail 'execute fixture boot signature failed'
         status=0
         output="$(_kernel_grub_install_execute 2>&1)" || status=$?
-        if [[ "$test_execute_case" == success || "$test_execute_case" == missing-env ]]; then
+        if [[ "$test_execute_case" == success || "$test_execute_case" == btrfs-success || "$test_execute_case" == missing-env ]]; then
             assert_equal 0 "$status" "$test_execute_case exact write and readback transaction ($output)"
             assert_contains "$(<"$log")" $'seed:suppress\napt\ndisk:/dev/vda\nseed:persist' 'package implicit writes disabled before explicit disk installation'
             grep -Fqx 'grub-pc grub-pc/cloud_style_installation boolean false' "$seed" || test_fail 'persisting the selected disk re-enabled Ubuntu cloud auto-selection'
@@ -786,9 +894,12 @@ test_execute_debconf_isolation_and_readback() (
             assert_equal complete-pending-reboot "$(<"$KERNEL_GRUB_INSTALL_BACKUP/stage")" 'post-write verification completes the transaction'
             if [[ "$test_execute_case" == success ]]; then
                 assert_contains "$(<"$KERNEL_GRUB_ENV")" "next_entry=$expected_next" 'numeric/simple next override retained as the exact release entry'
-            else
+            elif [[ "$test_execute_case" == missing-env ]]; then
                 assert_contains "$(<"$log")" 'env:create' 'absent environment created only in backed-up write phase'
                 [[ "$(<"$KERNEL_GRUB_ENV")" != *next_entry=* ]] || test_fail 'absent environment unexpectedly acquired an override'
+            else
+                assert_contains "$(<"$log")" 'env:unset' 'Btrfs clears the one-time override from the running system'
+                [[ "$(<"$KERNEL_GRUB_ENV")" != *next_entry=* ]] || test_fail 'Btrfs retained an override that GRUB cannot consume'
             fi
         else
             assert_equal 30 "$status" "$test_execute_case is detected as incomplete installation ($output)"
@@ -901,6 +1012,10 @@ test_debconf_snapshot_is_read_only() (
 
 printf 'TEST: BIOS GRUB disk JSON safety\n'
 test_disk_json_safety
+printf 'TEST: BIOS GRUB single-device Btrfs membership\n'
+test_btrfs_disk_membership
+printf 'TEST: BIOS GRUB Btrfs mountpoint inspection\n'
+test_btrfs_probe_mountpoints
 printf 'TEST: BIOS GRUB default and next override repair planning\n'
 test_default_and_next_repair_plan
 printf 'TEST: BIOS GRUB APT trust and transaction scope\n'

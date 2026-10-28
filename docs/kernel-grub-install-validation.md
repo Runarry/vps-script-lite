@@ -74,3 +74,17 @@ Debian 13 初始完全未安装 `grub-pc`。移走原 `grub.cfg` 后，实际计
 `debian12`、`debian13`、`ubuntu24`、`rescue` 和 `debian13-damaged` 全部正常停止；故障首次启动使用 QEMU monitor 退出，此时未启动操作系统。相关 qcow2 完整性检查均通过。宿主前后 `uname -a` 完全一致，仍运行 `7.1.13-x64v3-xanmod1`，原交换分区保持不变；最终可用内存约 1.6 GiB、磁盘余约 3.6 GiB。
 
 逐阶段日志、镜像链、产品备份及证据归档保留在各 `vms/<name>/` 目录，每份归档均有 SHA-256 文件。`rescue/recovery-evidence.tar` 包含救援脚本、身份核验和原始恢复材料；`debian13-damaged/recovered-boot.log` 记录恢复后的真实启动。总入口为 `RESTORE.txt`、`matrix.tsv`、`vms-stopped-final.txt` 和 `host-after.txt`，所有路径均相对上述测试目录。历史基线及三个成功验收盘继续保留。
+
+## 2026-10-28：单设备 Btrfs 子卷兼容
+
+此次针对 Debian 12、BIOS/GPT、Btrfs `@rootfs` 根子卷且 `/boot` 位于该子卷的布局增加兼容。设备识别使用挂载 UUID、`btrfs filesystem show --raw` 的唯一完整设备成员及 `lsblk` 的普通分区证据；GRUB 菜单额外识别 `grub-mkrelpath /boot` 返回的实际子卷路径。Btrfs `/boot` 使用固定默认菜单 ID、禁用 `GRUB_SAVEDEFAULT`，并在安装/修复时清除单次覆盖。
+
+所有执行均通过 `ssh host-vps-scripts`。代码快照与验证记录位于 `/root/vpsctl-btrfs-grub-20261028/`；`validation/` 下的 `grub-install-unit.log`、`grub-unit.log` 和 `kernel-unit.log` 均通过。新增回归覆盖匿名 Btrfs 设备号、根及启动子卷、独立 ext `/boot`、多设备和缺失设备拒绝、错误 UUID/成员拒绝、快照路径隔离及稳定默认项切换。涉及的五个 shell 文件通过 `bash -n`、`shellcheck -x` 和 `shfmt -d -i 4 -ci`；静态及格式记录为 `static.log`、`format.log`。
+
+Debian 12 的 `btrfs-progs 6.2` 实测只接受文件系统挂载点：当 `/boot` 是根子卷内的目录时，`btrfs filesystem show --raw /boot` 返回失败，而查询 `/` 成功。实现因此使用已捕获的 `findmnt` JSON 中的 `TARGET` 查询成员，另加挂载点回归。修正后的安装流程单元回归及涉及文件的语法、静态、格式检查再次通过，记录为 `grub-install-unit.log`、`mountpoint-static.log`、`mountpoint-format.log`。
+
+真实验收使用独立 SeaBIOS/TCG 虚拟机：Debian 12、`btrfs-progs 6.2-1+deb12u2`、GRUB `2.06-13+deb12u2`；GPT 包含 2 MiB BIOS Boot 分区、挂载于 `/boot/efi` 的 ESP，以及 `/dev/vda3` 上的 Btrfs `@rootfs`，根挂载启用 `compress=zlib:3`。初始只安装 `grub-pc-bin`，默认内核为 `6.1.0-54-amd64`，另有完整的 `6.1.0-54-cloud-amd64` 及指向它的有效单次覆盖。
+
+修正后的演练通过配置、包状态、APT、debconf、内核文件、分区表及无备份目录的只读断言。实际安装成功配置完整 `grub-pc`，固定原默认内核并清除覆盖；恢复备份的校验清单及权限均通过。随后两次完全由 SeaBIOS 和磁盘 GRUB 启动，分别进入原 `6.1.0-54-amd64` 和经 CLI 永久切换的 `6.1.0-54-cloud-amd64`，内核启动参数均包含正确的 `/@rootfs/boot/vmlinuz-...` 路径和 `rootflags=subvol=@rootfs`。最后通过 CLI 卸载原内核及其更新元包，当前/默认 Cloud 内核完整，dpkg 审计干净，GPT、ESP 标记、保留内核文件及恢复备份校验均通过。
+
+完整证据位于 `acceptance/`：`install.log`、`boot-generic.log`、`boot-cloud.log`、`final-checks.log` 和 `guest-evidence.tar.gz`（附 SHA-256）。最终断言为 `UNINSTALL_INTEGRITY_FINAL_PASS`。虚拟机已正常关闭，测试镜像无残留 loop 映射；宿主 ESP 校验通过，仍运行原 XanMod 内核。工具安装、镜像准备及恢复信息保留在该目录的日志和 `REPORT.txt`。此次真实启动仅覆盖上述 Debian 12 Btrfs 根子卷布局，未重跑全量测试或其他发行版验收。

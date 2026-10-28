@@ -287,7 +287,8 @@ kernel_usage() {
 官方内核使用发行版已配置的受信源；XanMod 验证完整密钥指纹并拒绝
 Secure Boot 启用或状态未知的环境。切换及安全卸载需要可识别的标准 GRUB 2。
 install-grub 为 experimental：仅支持 BIOS、同一普通磁盘上的 ext2/ext3/ext4
-根分区和 /boot，不创建分区。非交互必须指定 --disk；真实安装还须提供
+或单设备 Btrfs 根分区和 /boot（支持子卷），不创建分区。Btrfs 预检需 btrfs-progs。
+非交互必须指定 --disk；真实安装还须提供
 --confirm-install-grub INSTALL-BIOS-GRUB。演练只检查并显示安装计划。
 
 永久切换固定具体版本，由用户自行重启。安装不会卸载旧版本；先切换并

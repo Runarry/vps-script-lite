@@ -116,6 +116,8 @@ try:
     requested, root_raw, boot_raw, blocks_raw = sys.argv[1:5]
     table_raw = sys.argv[5] if len(sys.argv) > 5 else ""
     mbr_hex = sys.argv[6] if len(sys.argv) > 6 else ""
+    root_btrfs = sys.argv[7] if len(sys.argv) > 7 else ""
+    boot_btrfs = sys.argv[8] if len(sys.argv) > 8 else ""
     blocks = json.loads(blocks_raw)["blockdevices"]
     nodes = {}
     parents = {}
@@ -132,16 +134,32 @@ try:
             walk(item.get("children", []), name)
     walk(blocks)
 
-    def mount(raw, allowed):
+    def mount(raw, allowed, btrfs_data):
         entries = json.loads(raw)["filesystems"]
         if len(entries) != 1:
             fail("挂载来源不唯一")
         entry = entries[0]
-        if entry["target"] not in allowed or entry["fstype"] not in ("ext2", "ext3", "ext4"):
-            fail("仅支持普通 ext2/ext3/ext4 根分区和同盘 /boot")
+        if entry["target"] not in allowed or entry["fstype"] not in ("ext2", "ext3", "ext4", "btrfs"):
+            fail("仅支持普通 ext2/ext3/ext4 或单设备 Btrfs 根分区和同盘 /boot")
         if "rw" not in entry["options"].split(","):
             fail("根分区或 /boot 为只读")
-        matches = [x for x in nodes.values() if x.get("maj:min") == entry["maj:min"]]
+        if entry["fstype"] == "btrfs":
+            # Btrfs mounts use an anonymous MAJ:MIN, and SOURCE can include a
+            # subvolume suffix. Bind the mounted UUID to independently queried
+            # filesystem membership rather than treating that number as a disk.
+            fs_uuid = entry.get("uuid")
+            if not isinstance(fs_uuid, str) or not re.fullmatch(r"[0-9a-fA-F-]{36}", fs_uuid):
+                fail("无法确认已挂载 Btrfs 的文件系统 UUID")
+            uuids = re.findall(r"^Label: .*\buuid: ([0-9a-fA-F-]+)\s*$", btrfs_data, re.M)
+            counts = re.findall(r"^\s*Total devices (\d+) FS bytes used \d+\s*$", btrfs_data, re.M)
+            devices = re.findall(r"^\s*devid\s+\d+\s+size\s+\d+\s+used\s+\d+\s+path\s+(\S+)\s*$", btrfs_data, re.M)
+            if uuids != [fs_uuid] or counts != ["1"] or len(devices) != 1 or "degraded" in entry["options"].split(","):
+                fail("Btrfs 必须能确认唯一完整设备，不支持多设备或降级挂载")
+            matches = [x for x in nodes.values() if x.get("uuid") == fs_uuid]
+            if len(matches) != 1 or matches[0]["name"] != devices[0]:
+                fail("Btrfs 文件系统 UUID、设备成员与块设备证据不一致")
+        else:
+            matches = [x for x in nodes.values() if x.get("maj:min") == entry["maj:min"]]
         if len(matches) != 1:
             fail("挂载设备无法唯一关联到块设备")
         node = matches[0]
@@ -156,8 +174,8 @@ try:
             fail("块设备父子证据不一致")
         return entry, node, nodes[disk_name]
 
-    root_mount, root, disk = mount(root_raw, ("/",))
-    boot_mount, boot, boot_disk = mount(boot_raw, ("/", "/boot"))
+    root_mount, root, disk = mount(root_raw, ("/",), root_btrfs)
+    boot_mount, boot, boot_disk = mount(boot_raw, ("/", "/boot"), boot_btrfs)
     disk_name = device(disk["name"])
     if disk_name != boot_disk["name"]:
         fail("根分区和 /boot 跨盘，不在首版支持范围")
@@ -238,6 +256,7 @@ try:
     }
     fields = {
         "DISK": disk_name, "ROOT_PART": root["name"], "BOOT_PART": boot["name"],
+        "ROOT_FSTYPE": root_mount["fstype"], "BOOT_FSTYPE": boot_mount["fstype"],
         "LABEL": label, "SIZE": size, "SECTOR_SIZE": sector,
         "REGION_DEVICE": region_device, "REGION_OFFSET": offset, "REGION_LENGTH": length,
         "DISK_DATA": json.dumps(data, sort_keys=True, separators=(",", ":")),
@@ -256,6 +275,7 @@ PY
 
 _kernel_grub_install_probe_disk() {
     local requested="${1:-}" root_json boot_json blocks_json table_json disk mbr output key value signature status=0
+    local mount_path mount_json mount_target fstype root_btrfs='' boot_btrfs=''
     if [[ -n "$requested" ]]; then
         [[ "$requested" =~ ^/dev/[A-Za-z0-9._+-]+$ || "$requested" =~ ^/dev/disk/by-id/[A-Za-z0-9._+:-]+$ ]] || {
             vps_cmd_error '--disk 只接受整盘设备或 /dev/disk/by-id/ 下的整盘链接'
@@ -264,10 +284,26 @@ _kernel_grub_install_probe_disk() {
         requested="$(readlink -e -- "$requested")" || return 3
         [[ -b "$requested" ]] || return 3
     fi
-    root_json="$(LC_ALL=C findmnt --json --output SOURCE,FSTYPE,TARGET,MAJ:MIN,OPTIONS --target /)" || return 3
-    boot_json="$(LC_ALL=C findmnt --json --output SOURCE,FSTYPE,TARGET,MAJ:MIN,OPTIONS --target /boot)" || return 3
+    root_json="$(LC_ALL=C findmnt --json --output SOURCE,FSTYPE,TARGET,MAJ:MIN,OPTIONS,UUID,FSROOT --target /)" || return 3
+    boot_json="$(LC_ALL=C findmnt --json --output SOURCE,FSTYPE,TARGET,MAJ:MIN,OPTIONS,UUID,FSROOT --target /boot)" || return 3
     blocks_json="$(LC_ALL=C lsblk --json --bytes --paths --output NAME,TYPE,PKNAME,RO,SIZE,MAJ:MIN,LOG-SEC,START,FSTYPE,MOUNTPOINTS,PTTYPE,PARTTYPE,UUID,PARTUUID,SERIAL,WWN)" || return 3
-    disk="$(_kernel_grub_install_parse_disk_data "$requested" "$root_json" "$boot_json" "$blocks_json")" || return $?
+    for mount_path in / /boot; do
+        if [[ "$mount_path" == / ]]; then mount_json="$root_json"; else mount_json="$boot_json"; fi
+        output="$(python3 -c 'import json, sys; mount = json.loads(sys.argv[1])["filesystems"][0]; print(mount["fstype"] + "\t" + mount["target"])' "$mount_json")" || return 3
+        IFS=$'\t' read -r fstype mount_target <<<"$output"
+        [[ "$fstype" == btrfs ]] || continue
+        command -v btrfs >/dev/null 2>&1 || {
+            vps_cmd_error 'Btrfs 磁盘预检缺少 btrfs；请先单独安装 btrfs-progs 后重试'
+            return 3
+        }
+        # Older btrfs-progs accepts a mountpoint, not a directory within it.
+        output="$(LC_ALL=C btrfs filesystem show --raw "$mount_target")" || {
+            vps_cmd_error "无法确认 $mount_path 所在 Btrfs 文件系统的设备成员"
+            return 3
+        }
+        if [[ "$mount_path" == / ]]; then root_btrfs="$output"; else boot_btrfs="$output"; fi
+    done
+    disk="$(_kernel_grub_install_parse_disk_data "$requested" "$root_json" "$boot_json" "$blocks_json" '' '' "$root_btrfs" "$boot_btrfs")" || return $?
     [[ -b "$disk" && "$(readlink -e -- "$disk")" == "$disk" && "$(blockdev --getro "$disk")" == 0 ]] || {
         vps_cmd_error '候选设备不是可写的真实规范整盘路径'
         return 3
@@ -279,10 +315,10 @@ _kernel_grub_install_probe_disk() {
     }
     mbr="$(od -An -v -tx1 -N512 -- "$disk")" || return 3
     mbr="${mbr//[[:space:]]/}"
-    output="$(_kernel_grub_install_parse_disk_data "$requested" "$root_json" "$boot_json" "$blocks_json" "$table_json" "$mbr")" || return $?
+    output="$(_kernel_grub_install_parse_disk_data "$requested" "$root_json" "$boot_json" "$blocks_json" "$table_json" "$mbr" "$root_btrfs" "$boot_btrfs")" || return $?
     while IFS=$'\t' read -r key value; do
         case "$key" in
-            DISK | ROOT_PART | BOOT_PART | LABEL | SIZE | SECTOR_SIZE | REGION_DEVICE | REGION_OFFSET | REGION_LENGTH | DISK_DATA | TABLE_DATA)
+            DISK | ROOT_PART | BOOT_PART | ROOT_FSTYPE | BOOT_FSTYPE | LABEL | SIZE | SECTOR_SIZE | REGION_DEVICE | REGION_OFFSET | REGION_LENGTH | DISK_DATA | TABLE_DATA)
                 printf -v "KERNEL_GRUB_INSTALL_$key" '%s' "$value"
                 ;;
             *) return 3 ;;
@@ -452,7 +488,8 @@ _kernel_grub_install_plan_defaults() {
         "${KERNEL_RELEASE_COMPLETE[$KERNEL_GRUB_DEFAULT_RELEASE]:-0}" == 1 &&
         "${KERNEL_RELEASE_MANAGED[$KERNEL_GRUB_DEFAULT_RELEASE]:-0}" == 1 ]]; then
         KERNEL_GRUB_INSTALL_DEFAULT_RELEASE="$KERNEL_GRUB_DEFAULT_RELEASE"
-        if [[ "${KERNEL_GRUB_NEXT_READ_KNOWN:-0}" == 1 && -n "${KERNEL_GRUB_NEXT_RELEASE:-}" &&
+        if [[ "${KERNEL_GRUB_INSTALL_BOOT_FSTYPE:-}" != btrfs &&
+            "${KERNEL_GRUB_NEXT_READ_KNOWN:-0}" == 1 && -n "${KERNEL_GRUB_NEXT_RELEASE:-}" &&
             "${KERNEL_RELEASE_COMPLETE[$KERNEL_GRUB_NEXT_RELEASE]:-0}" == 1 &&
             "${KERNEL_RELEASE_MANAGED[$KERNEL_GRUB_NEXT_RELEASE]:-0}" == 1 ]]; then
             KERNEL_GRUB_INSTALL_NEXT_RELEASE="$KERNEL_GRUB_NEXT_RELEASE"
@@ -581,8 +618,8 @@ _kernel_grub_install_prepare() {
 
 _kernel_grub_install_show_plan() {
     vps_cmd_status 'BIOS GRUB 目标' "$KERNEL_GRUB_INSTALL_DISK（$KERNEL_GRUB_INSTALL_SIZE 字节，$KERNEL_GRUB_INSTALL_LABEL）" normal
-    vps_cmd_status '根分区 /' "$KERNEL_GRUB_INSTALL_ROOT_PART" normal
-    vps_cmd_status '/boot 所在分区' "$KERNEL_GRUB_INSTALL_BOOT_PART" normal
+    vps_cmd_status '根分区 /' "$KERNEL_GRUB_INSTALL_ROOT_PART（$KERNEL_GRUB_INSTALL_ROOT_FSTYPE）" normal
+    vps_cmd_status '/boot 所在分区' "$KERNEL_GRUB_INSTALL_BOOT_PART（$KERNEL_GRUB_INSTALL_BOOT_FSTYPE）" normal
     vps_cmd_status '引导区备份' "偏移 $KERNEL_GRUB_INSTALL_REGION_OFFSET，长度 $KERNEL_GRUB_INSTALL_REGION_LENGTH 字节" normal
     [[ "$KERNEL_GRUB_INSTALL_LABEL" != gpt ]] || vps_cmd_info '另备份磁盘前 512 字节的保护 MBR；不修改分区表'
     if ((${#KERNEL_GRUB_INSTALL_ARGS[@]})); then
@@ -599,6 +636,9 @@ _kernel_grub_install_show_plan() {
         vps_cmd_info '单次覆盖：清除 next_entry（包括缺失或无法解析的覆盖）'
     else
         vps_cmd_info "保留有效单次覆盖内核：$KERNEL_GRUB_INSTALL_NEXT_RELEASE"
+    fi
+    if [[ "$KERNEL_GRUB_INSTALL_BOOT_FSTYPE" == btrfs ]]; then
+        vps_cmd_info 'Btrfs /boot 使用固定默认菜单 ID 并禁用 GRUB_SAVEDEFAULT；清除单次覆盖以避免旧版 GRUB 无法在启动时消费 next_entry'
     fi
     vps_cmd_info '包安装期间将清空旧 debconf 安装盘以阻止维护脚本强制写盘；随后显式安装无 --force 的 i386-pc GRUB，并保存确认目标'
     vps_cmd_info '将关闭云镜像 cloud_style_installation 自动选盘选项，使后续 GRUB 维护继续使用本次确认的目标盘'
