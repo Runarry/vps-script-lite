@@ -157,7 +157,7 @@ test_registry() {
     vps_registry_init
 
     test_assert_equal "6" "${#VPS_DOMAIN_IDS[@]}" "registered domain count"
-    test_assert_equal "19" "${#VPS_COMMAND_KEYS[@]}" "registered command count"
+    test_assert_equal "20" "${#VPS_COMMAND_KEYS[@]}" "registered command count"
     test_assert_equal "network" "${VPS_DOMAIN_IDS[0]}" "network domain id"
     test_assert_equal "system" "${VPS_DOMAIN_IDS[1]}" "system domain id"
     test_assert_equal "security" "${VPS_DOMAIN_IDS[2]}" "security domain id"
@@ -196,8 +196,17 @@ test_registry() {
     test_assert_equal "experimental" "${VPS_COMMAND_LIFECYCLE["system:swap"]}" "swap lifecycle"
     test_assert_equal $'shared-command\nsystem-swap' "$(vps_registry_command_bundles system:swap)" "swap dependencies"
     test_assert_equal "commands/system/swap.sh" "$(vps_registry_bundle_files system-swap)" "swap bundle files"
+    test_assert_equal "commands/system/clean.sh" "${VPS_COMMAND_PATH["system:clean"]}" "clean command path"
+    test_assert_equal "系统清理" "${VPS_COMMAND_LABEL["system:clean"]}" "clean menu label"
+    test_assert_equal "change" "${VPS_COMMAND_RISK["system:clean"]}" "clean risk"
+    test_assert_equal "optional-root" "${VPS_COMMAND_PRIVILEGE["system:clean"]}" "clean privilege"
+    test_assert_equal "supported" "${VPS_COMMAND_DRY_RUN["system:clean"]}" "clean dry-run"
+    test_assert_equal "linux" "${VPS_COMMAND_REQUIREMENTS["system:clean"]}" "clean requirements"
+    test_assert_equal "experimental" "${VPS_COMMAND_LIFECYCLE["system:clean"]}" "clean lifecycle"
+    test_assert_equal $'shared-command\nsystem-clean' "$(vps_registry_command_bundles system:clean)" "clean dependencies"
+    test_assert_equal "commands/system/clean.sh" "$(vps_registry_bundle_files system-clean)" "clean bundle files"
     vps_registry_commands_for_domain system
-    test_assert_equal $'system:kernel\nsystem:reinstall\nsystem:swap' "$(printf '%s\n' "${VPS_REGISTRY_RESULTS[@]}")" "system menu preserves existing indices and appends swap"
+    test_assert_equal $'system:kernel\nsystem:reinstall\nsystem:swap\nsystem:clean' "$(printf '%s\n' "${VPS_REGISTRY_RESULTS[@]}")" "system menu preserves existing indices and appends clean"
     test_assert_equal "linux,libc:glibc" "${VPS_COMMAND_REQUIREMENTS["network:ip-policy"]}" "IP policy requirements"
     test_assert_equal "linux,os:debian-family" "${VPS_COMMAND_REQUIREMENTS["system:kernel"]}" "kernel requirements"
     test_assert_equal "commands/security/access.sh" "${VPS_COMMAND_PATH["security:access"]}" "access command path"

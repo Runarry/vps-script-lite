@@ -25,7 +25,7 @@ declare -ga VPS_REGISTRY_RESULTS=()
 declare -ga VPS_BUNDLE_IDS=(
     core shared-command shared-ufw shared-server-test
     network-bbr network-dns network-ip-policy network-ufw network-rfw
-    system-kernel system-reinstall system-swap security-access security-fail2ban security-tls
+    system-kernel system-reinstall system-swap system-clean security-access security-fail2ban security-tls
     service-proxy service-tcping service-iperf3 test-nodequality test-tcpquality
 )
 
@@ -42,6 +42,7 @@ vps_registry_bundle_files() {
         system-kernel) printf '%s\n' commands/system/kernel.sh commands/system/kernel/{providers,inventory,grub,grub-install}.sh ;;
         system-reinstall) printf '%s\n' commands/system/reinstall.sh ;;
         system-swap) printf '%s\n' commands/system/swap.sh ;;
+        system-clean) printf '%s\n' commands/system/clean.sh ;;
         security-access) printf '%s\n' commands/security/access.sh commands/security/access/{common,users,keys,firewall,sshd}.sh ;;
         security-fail2ban) printf '%s\n' commands/security/fail2ban.sh ;;
         security-tls) printf '%s\n' commands/security/tls.sh commands/security/tls/{common,store,issue,timer,ufw}.sh ;;
@@ -272,6 +273,18 @@ vps_registry_init() {
         "查看、设置或关闭普通磁盘 Swap 及其开机配置" \
         "commands/system/swap.sh" \
         "disruptive" \
+        "optional-root" \
+        "supported" \
+        "linux" \
+        "experimental"
+
+    vps_registry_register_command \
+        "system" \
+        "clean" \
+        "系统清理" \
+        "查看并清理脚本残留、功能缓存、软件包缓存、临时文件和归档日志" \
+        "commands/system/clean.sh" \
+        "change" \
         "optional-root" \
         "supported" \
         "linux" \

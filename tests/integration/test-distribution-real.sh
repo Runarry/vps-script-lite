@@ -29,6 +29,7 @@ CACHE_UFW_LOCK=/run/vpsctl/network-ufw.lock
 CACHE_UFW_BACKUP="$TEST_TEMP/cache-ufw-baseline"
 CACHE_UFW_BASELINE_TAKEN=0
 CACHE_UFW_LOCK_PARENT_EXISTED=0
+CLEAN_ACCEPT_UNIT=''
 
 fail() {
     printf 'FAIL: %s\n' "$1" >&2
@@ -91,6 +92,7 @@ feature_release_hashes() (
 
 cleanup() {
     local restore_status=0
+    if [[ -n "$CLEAN_ACCEPT_UNIT" ]]; then systemctl stop "$CLEAN_ACCEPT_UNIT" || restore_status=1; fi
     restore_feature_cache_ufw || restore_status=1
     rm -f -- "$ENTRY"
     rm -rf -- "$INSTALL_ROOT" "$SELF_ROOT"
@@ -240,6 +242,76 @@ for feature in "${features[@]}"; do
 done
 VPSCTL_TEST_CURL_FAIL=1 PATH="$MOCK_BIN:$PATH" "$ENTRY" self status >/dev/null
 [[ ! -s "$VPSCTL_TEST_DOWNLOAD_TRACE" ]] || fail 'cached feature contacted the network'
+
+# Targeted cleanup acceptance reuses the real install/restore boundary above.
+# It does not run updates, uninstall features, or execute server tests.
+if [[ "${VPSCTL_TEST_CLEAN_ONLY:-0}" == 1 ]]; then
+    for feature in system-swap system-clean; do
+        PATH="$MOCK_BIN:$PATH" "$ENTRY" "${feature%%-*}" "${feature#*-}" --help >/dev/null
+        features+=("$feature")
+    done
+    CLEAN_ACCEPT_UNIT="vpsctl-clean-acceptance-$$.service"
+    systemd-run --quiet --unit="$CLEAN_ACCEPT_UNIT" --property=Type=exec /bin/sleep 300
+    active_units=("$CLEAN_ACCEPT_UNIT")
+    for unit in sing-box.service xray.service vpsctl-tcping.service vpsctl-iperf3.service; do
+        if systemctl is-active --quiet "$unit" 2>/dev/null; then active_units+=("$unit"); fi
+    done
+    for unit in "${active_units[@]}"; do
+        systemctl show "$unit" -p MainPID -p ActiveState >"$TEST_TEMP/$unit.before"
+    done
+    old_release="$INSTALL_ROOT/releases/0.0.1"
+    cp -a -- "$release_root" "$old_release"
+    printf 'Runarry/vps-script-lite\t0.0.1\n' >"$old_release/.vpsctl-managed-release"
+    printf 'unused launcher\n' >"$SELF_ROOT/vpsctl.sh"
+    mkdir -p "$release_root/.bundles/.network-bbr.work.ABC123" \
+        "$release_root/.bundles/.unknown.work.ABC123" \
+        "$INSTALL_ROOT/.update.cleanup-preserve" "$INSTALL_ROOT/releases/.staging-cleanup-preserve"
+    printf 'temporary marker\n' >"$release_root/.bundles/.network-bbr.ABC123"
+    printf 'recovery\n' >"$INSTALL_ROOT/.update.cleanup-preserve/old-vpsctl.sh"
+    feature_release_hashes >"$TEST_TEMP/clean-preview.before"
+    VPSCTL_TEST_CURL_FAIL=1 PATH="$MOCK_BIN:$PATH" "$ENTRY" --dry-run system clean vpsctl
+    feature_release_hashes >"$TEST_TEMP/clean-preview.after"
+    cmp -s "$TEST_TEMP/clean-preview.before" "$TEST_TEMP/clean-preview.after" || fail 'cleanup preview changed cached files'
+    [[ -d "$old_release" && -f "$SELF_ROOT/vpsctl.sh" ]] || fail 'cleanup preview removed residue'
+    VPSCTL_TEST_CURL_FAIL=1 PATH="$MOCK_BIN:$PATH" "$ENTRY" --yes --non-interactive system clean vpsctl
+    [[ ! -e "$old_release" && ! -e "$SELF_ROOT/vpsctl.sh" &&
+        ! -e "$release_root/.bundles/.network-bbr.work.ABC123" &&
+        ! -e "$release_root/.bundles/.network-bbr.ABC123" ]] || fail 'managed residue was not removed'
+    [[ -d "$release_root/.bundles/.unknown.work.ABC123" &&
+        -f "$INSTALL_ROOT/.update.cleanup-preserve/old-vpsctl.sh" &&
+        -d "$INSTALL_ROOT/releases/.staging-cleanup-preserve" ]] || fail 'cleanup removed protected recovery or unknown data'
+    VPSCTL_TEST_CURL_FAIL=1 PATH="$MOCK_BIN:$PATH" "$ENTRY" --yes --non-interactive system clean bundles
+    for feature in "${features[@]}"; do
+        [[ "$feature" != system-clean ]] || continue
+        [[ ! -e "$release_root/.bundles/$feature.sha256" &&
+            ! -e "$release_root/commands/${feature%%-*}/${feature#*-}.sh" ]] || fail "$feature survived bundle eviction"
+    done
+    for bundle in core shared-command shared-ufw shared-server-test system-clean; do
+        [[ -f "$release_root/.bundles/$bundle.sha256" ]] || fail "$bundle was evicted"
+    done
+    [[ -f "$ETC_MARKER" && -f "$STATE_MARKER" && -f "$LIBEXEC_MARKER" && -f "$BACKUP_MARKER" ]] ||
+        fail 'cleanup removed protected business data'
+    for unit in "${active_units[@]}"; do
+        systemctl show "$unit" -p MainPID -p ActiveState >"$TEST_TEMP/$unit.after"
+        cmp -s "$TEST_TEMP/$unit.before" "$TEST_TEMP/$unit.after" || fail "cleanup changed active service: $unit"
+    done
+    printf 'Preserved active service PIDs: %s units\n' "${#active_units[@]}"
+    : >"$VPSCTL_TEST_DOWNLOAD_TRACE"
+    PATH="$MOCK_BIN:$PATH" "$ENTRY" network bbr --help >/dev/null
+    [[ "$(cat "$VPSCTL_TEST_DOWNLOAD_TRACE")" == "vpsctl-network-bbr-${RELEASE_VERSION}.tar.gz" ]] ||
+        fail 'evicted feature did not re-download exactly its own bundle'
+    : >"$VPSCTL_TEST_DOWNLOAD_TRACE"
+    VPSCTL_TEST_CURL_FAIL=1 PATH="$MOCK_BIN:$PATH" "$ENTRY" network bbr --help >/dev/null
+    VPSCTL_TEST_CURL_FAIL=1 PATH="$MOCK_BIN:$PATH" "$ENTRY" system clean status >/dev/null
+    [[ ! -s "$VPSCTL_TEST_DOWNLOAD_TRACE" ]] || fail 'reloaded feature or cleanup status contacted the network'
+    printf '2\n4\nq\n\nq\n' |
+        VPSCTL_TEST_CURL_FAIL=1 PATH="$MOCK_BIN:$PATH" TERM=dumb \
+            timeout 30s script -q -e -c "$ENTRY --no-color --no-clear menu" /dev/null >"$TEST_TEMP/cleanup-menu.log" 2>&1 ||
+        fail 'installed cleanup menu failed'
+    grep -Fq '推荐清理' "$TEST_TEMP/cleanup-menu.log" || fail 'system menu did not reach cleanup feature'
+    printf 'PASS: distribution cleanup real integration test (original installation restored on exit)\n'
+    exit 0
+fi
 
 for cache_feature in tcping iperf3; do
     case "$cache_feature" in

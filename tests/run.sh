@@ -25,6 +25,7 @@ for syntax_file in \
     "${TEST_ROOT}/commands/system/kernel.sh" \
     "${TEST_ROOT}/commands/system/reinstall.sh" \
     "${TEST_ROOT}/commands/system/swap.sh" \
+    "${TEST_ROOT}/commands/system/clean.sh" \
     "${TEST_ROOT}"/commands/system/kernel/*.sh \
     "${TEST_ROOT}/commands/security/access.sh" \
     "${TEST_ROOT}"/commands/security/access/*.sh \
@@ -45,6 +46,7 @@ for syntax_file in \
     "${TEST_ROOT}/tests/unit/test-libraries.sh" \
     "${TEST_ROOT}/tests/unit/test-command.sh" \
     "${TEST_ROOT}/tests/unit/test-distribution.sh" \
+    "${TEST_ROOT}/tests/unit/test-distribution-clean.sh" \
     "${TEST_ROOT}/tests/unit/test-release-build.sh" \
     "${TEST_ROOT}/tests/unit/test-release-workflow.sh" \
     "${TEST_ROOT}/tests/unit/test-network-bbr.sh" \
@@ -59,6 +61,7 @@ for syntax_file in \
     "${TEST_ROOT}/tests/unit/test-system-kernel.sh" \
     "${TEST_ROOT}/tests/unit/test-system-reinstall.sh" \
     "${TEST_ROOT}/tests/unit/test-system-swap.sh" \
+    "${TEST_ROOT}/tests/unit/test-system-clean.sh" \
     "${TEST_ROOT}/tests/unit/test-system-kernel-providers.sh" \
     "${TEST_ROOT}/tests/unit/test-system-kernel-inventory.sh" \
     "${TEST_ROOT}/tests/unit/test-system-kernel-grub.sh" \
@@ -98,6 +101,7 @@ for syntax_file in \
     "${TEST_ROOT}/tests/integration/test-system-kernel-grub-install-rescue-real.sh" \
     "${TEST_ROOT}/tests/integration/test-system-reinstall-real.sh" \
     "${TEST_ROOT}/tests/integration/test-system-swap-real.sh" \
+    "${TEST_ROOT}/tests/integration/test-system-clean-real.sh" \
     "${TEST_ROOT}/tests/integration/test-vpsctl.sh"; do
     bash -n "$syntax_file"
 done
@@ -105,6 +109,7 @@ done
 bash "${TEST_ROOT}/tests/unit/test-libraries.sh"
 bash "${TEST_ROOT}/tests/unit/test-command.sh"
 bash "${TEST_ROOT}/tests/unit/test-distribution.sh"
+bash "${TEST_ROOT}/tests/unit/test-distribution-clean.sh"
 bash "${TEST_ROOT}/tests/unit/test-release-build.sh"
 bash "${TEST_ROOT}/tests/unit/test-release-workflow.sh"
 bash "${TEST_ROOT}/tests/unit/test-po0-relay.sh"
@@ -120,6 +125,7 @@ bash "${TEST_ROOT}/tests/unit/test-tls-ufw.sh"
 bash "${TEST_ROOT}/tests/unit/test-system-kernel.sh"
 bash "${TEST_ROOT}/tests/unit/test-system-reinstall.sh"
 bash "${TEST_ROOT}/tests/unit/test-system-swap.sh"
+bash "${TEST_ROOT}/tests/unit/test-system-clean.sh"
 bash "${TEST_ROOT}/tests/unit/test-system-kernel-providers.sh"
 bash "${TEST_ROOT}/tests/unit/test-system-kernel-inventory.sh"
 bash "${TEST_ROOT}/tests/unit/test-system-kernel-grub.sh"

@@ -413,10 +413,10 @@ vps_distribution_ensure_command() {
 }
 
 vps_distribution_remove_command_cache() {
-    local command_key="${1:-}" domain action bundle files release_root marker lock path parent relative status=0
+    local command_key="${1:-}" validation="${2:-}" domain action bundle files release_root marker lock path parent relative status=0
     local -a bundle_files=() private_dirs=()
     vps_distribution_is_distributed || return 0
-    (($# == 1)) || return 2
+    [[ $# == 1 || ($# == 2 && "$validation" == cleanup) ]] || return 2
     # Feature scripts may source distribution.sh without passing through bin/vpsctl.
     ((${#VPS_COMMAND_KEYS[@]} > 0)) || vps_registry_init
     vps_registry_has_command "$command_key" && [[ "$command_key" != self:* ]] || return 2
@@ -426,12 +426,17 @@ vps_distribution_remove_command_cache() {
     files="$(vps_registry_bundle_files "$bundle")" || return $?
     mapfile -t bundle_files <<<"$files"
     vps_distribution_require_self_mutation || return $?
-    vps_distribution_validate_managed_install || return $?
+    vps_distribution_validate_managed_install "$validation" || return $?
     release_root="$VPSCTL_PROJECT_ROOT"
     vps_distribution_require_no_symlink_components "$release_root/.bundles" || return 3
     [[ -d "$release_root/.bundles" && ! -L "$release_root/.bundles" ]] || return 3
     marker="${release_root}/.bundles/${bundle}.sha256"
     lock="${release_root}/.bundles/.${bundle}.lock"
+    if [[ "$validation" == cleanup ]]; then
+        vps_distribution_require_no_symlink_components "$lock/pid" || return 3
+        [[ ! -e "$lock" || -d "$lock" ]] || return 3
+        [[ ! -e "$lock/pid" || -f "$lock/pid" ]] || return 3
+    fi
     vps_distribution_acquire_lock "$lock" || return $?
 
     # Check every target before unlinking any file; the registry is the only
@@ -445,6 +450,10 @@ vps_distribution_remove_command_cache() {
         path="${release_root}/${relative}"
         if ! vps_distribution_require_no_symlink_components "$path" || [[ -e "$path" && ! -f "$path" ]]; then
             vps_distribution_error "功能缓存路径不是安全的普通文件：$relative"
+            status=3
+            break
+        fi
+        if [[ "$validation" == cleanup && -e "$path" ]] && ! vps_distribution_clean_path_safe "$path"; then
             status=3
             break
         fi
@@ -466,8 +475,11 @@ vps_distribution_remove_command_cache() {
             parent="${parent%/*}"
         done
     done
-    if [[ -L "$marker" || ( -e "$marker" && ! -f "$marker" ) ]]; then
+    if [[ -L "$marker" || (-e "$marker" && ! -f "$marker") ]]; then
         vps_distribution_error "功能缓存标记不是安全的普通文件：$marker"
+        status=3
+    fi
+    if [[ "$validation" == cleanup && -e "$marker" ]] && ! vps_distribution_clean_path_safe "$marker"; then
         status=3
     fi
     if [[ "$status" == 0 ]]; then
@@ -568,7 +580,12 @@ vps_distribution_validate_managed_install() {
         vps_distribution_error '当前执行代码不属于受管 current release'
         return 3
     }
-    if [[ -n "$(find "$resolved" -type l -print -quit)" ]]; then
+    # Cleanup validates each candidate separately, so an unrelated damaged cache
+    # cannot prevent removal of independent residue. Self operations stay strict.
+    if [[ "${1:-}" == cleanup ]]; then
+        vps_distribution_require_no_symlink_components "$resolved/.release/manifest.tsv" &&
+            vps_distribution_require_no_symlink_components "$resolved/.bundles/core.sha256" || return 3
+    elif [[ -n "$(find "$resolved" -type l -print -quit)" ]]; then
         vps_distribution_error '当前 release 包含异常符号链接'
         return 3
     fi
@@ -649,9 +666,19 @@ vps_distribution_self_status() {
     printf '项目路径：%s\n安装根：%s\nself 状态：%s\n' "$VPSCTL_PROJECT_ROOT" "$VPSCTL_INSTALL_ROOT" "$VPSCTL_SELF_STATE_ROOT"
 }
 
+vps_distribution_owned_release() {
+    local release="$1" version="${1##*/}" record=''
+    local marker="$release/.vpsctl-managed-release"
+    [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && -d "$release" && ! -L "$release" &&
+        -f "$marker" && -r "$marker" && ! -L "$marker" ]] || return 1
+    # Read through EOF: extra lines and NUL bytes invalidate the ownership record.
+    if IFS= read -r -d '' record <"$marker"; then return 1; fi
+    [[ "${record%$'\n'}" == $'Runarry/vps-script-lite\t'"$version" ]]
+}
+
 vps_distribution_cleanup_old_releases() {
     local active_release="$1" releases_root="${VPSCTL_INSTALL_ROOT}/releases"
-    local release version marker record status=0
+    local release version marker status=0
     version="${active_release##*/}"
     if ! vps_distribution_require_no_symlink_components "$releases_root" ||
         [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ || "$active_release" != "$releases_root/$version" ||
@@ -662,14 +689,9 @@ vps_distribution_cleanup_old_releases() {
     fi
     for release in "$releases_root"/*; do
         version="${release##*/}"
-        [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "$release" != "$active_release" && -d "$release" && ! -L "$release" ]] || continue
+        [[ "$release" != "$active_release" ]] || continue
+        vps_distribution_owned_release "$release" || continue
         marker="$release/.vpsctl-managed-release"
-        [[ -f "$marker" && -r "$marker" && ! -L "$marker" ]] || continue
-        # Read through EOF: extra lines and NUL bytes must not be hidden by
-        # command substitution's removal of trailing newlines.
-        record=''
-        if IFS= read -r -d '' record <"$marker"; then continue; fi
-        [[ "${record%$'\n'}" == $'Runarry/vps-script-lite\t'"$version" ]] || continue
         if ! rm -rf -- "$release"; then
             status=20
             vps_distribution_error "历史 release 清理失败：$release"
@@ -896,6 +918,315 @@ vps_distribution_self_uninstall() {
     vps_distribution_self_uninstall_locked "$purge" || status=$?
     vps_distribution_release_lock "$lock"
     return "$status"
+}
+
+# Cleanup shares the install layout with self management, but preview is offline
+# and unprivileged. Actual cleanup validates current only after taking self's lock.
+vps_distribution_clean_require_install() {
+    vps_distribution_is_distributed || {
+        vps_distribution_error '源码树模式不能清理 vpsctl 受管文件'
+        return 3
+    }
+    vps_distribution_init_paths
+    if [[ "${VPSCTL_TESTING:-0}" == 1 ]]; then
+        vps_distribution_validate_testing_root || return $?
+    fi
+    if [[ "$VPSCTL_INSTALL_ROOT" != "$(vps_distribution_system_path /usr/local/lib/vpsctl)" ||
+    "$VPSCTL_SELF_STATE_ROOT" != "$(vps_distribution_system_path /var/lib/vpsctl/self)" ||
+    "$VPSCTL_MANAGED_ENTRY" != "$(vps_distribution_system_path /usr/local/bin/vpsctl)" ]]; then
+        vps_distribution_error '拒绝清理非标准受管安装路径'
+        return 3
+    fi
+    if [[ "${VPSCTL_DRY_RUN:-0}" != 1 && "${VPSCTL_TESTING:-0}" != 1 && "${EUID:-$(id -u)}" != 0 ]]; then
+        vps_distribution_error '清理受管文件需要 root 权限'
+        return 4
+    fi
+    vps_distribution_require_no_symlink_components "$VPSCTL_INSTALL_ROOT" || return 3
+}
+
+vps_distribution_clean_path_safe() {
+    local path="$1" unsafe mount_point boundary="$VPSCTL_INSTALL_ROOT"
+    vps_distribution_require_no_symlink_components "$path" || {
+        vps_distribution_error "保留含符号链接的清理路径：$path"
+        return 3
+    }
+    [[ -f "$path" || -d "$path" ]] || {
+        vps_distribution_error "保留非普通文件或目录：$path"
+        return 3
+    }
+    # mountinfo includes same-filesystem bind mounts, which -xdev alone misses.
+    [[ -r /proc/self/mountinfo ]] || return 3
+    [[ "$path" != "$VPSCTL_SELF_STATE_ROOT/"* ]] || boundary="$VPSCTL_SELF_STATE_ROOT"
+    while IFS=' ' read -r _ _ _ _ mount_point _; do
+        mount_point="$(printf '%b' "$mount_point")"
+        if [[ "$mount_point" == "$path" || "$mount_point" == "$path/"* ||
+            ("$path" == "$mount_point/"* && ("$mount_point" == "$boundary" || "$mount_point" == "$boundary/"*)) ]]; then
+            vps_distribution_error "保留含挂载点的清理路径：$path"
+            return 3
+        fi
+    done </proc/self/mountinfo
+    if [[ -d "$path" ]]; then
+        unsafe="$(find "$path" -xdev ! -type d ! -type f -print -quit)" || return 20
+        [[ -z "$unsafe" ]] || {
+            vps_distribution_error "保留含链接或特殊文件的目录：$path"
+            return 3
+        }
+    fi
+}
+
+vps_distribution_clean_business_names() {
+    case "$1" in
+        service:proxy) printf '%s\n' proxy proxy-time ;;
+        service:tcping) printf 'tcping\n' ;;
+        service:iperf3) printf 'iperf3\n' ;;
+        test:*) : ;; # One-shot runners use private temporary trees, no service.
+        *) printf '%s\n' "${1/:/-}" ;;
+    esac
+}
+
+# Each candidate owns these leases in a subshell, independent of the caller's
+# command-lock slot. Never force a business lock or disturb the running service.
+vps_distribution_clean_unlock() {
+    local descriptor lock
+    for descriptor in "${clean_fds[@]}"; do
+        flock -u "$descriptor" 2>/dev/null || true
+        exec {descriptor}>&-
+    done
+    for lock in "${clean_download_locks[@]}"; do
+        vps_distribution_release_lock "$lock"
+    done
+}
+
+vps_distribution_clean_business_lock() {
+    local command_key="$1" directory feature descriptor names
+    names="$(vps_distribution_clean_business_names "$command_key")"
+    [[ -n "$names" ]] || return 0
+    command -v flock >/dev/null 2>&1 || return 3
+    directory="$(vps_distribution_system_path /run/vpsctl)"
+    vps_distribution_require_no_symlink_components "$directory" || return 3
+    mkdir -p -- "$directory" || return 20
+    while IFS= read -r feature; do
+        vps_distribution_require_no_symlink_components "$directory/$feature.lock" || return 3
+        [[ ! -e "$directory/$feature.lock" || -f "$directory/$feature.lock" ]] || return 3
+        # system clean already holds its business lock. Borrow that exact open
+        # descriptor without adding it to the descriptors this helper releases.
+        if [[ "${VPS_CMD_LOCK_PATH:-}" == "$directory/$feature.lock" && "${VPS_CMD_LOCK_FD:-}" =~ ^[0-9]+$ &&
+            "$(readlink "/proc/self/fd/$VPS_CMD_LOCK_FD")" == "$directory/$feature.lock" ]]; then
+            continue
+        fi
+        exec {descriptor}>>"$directory/$feature.lock" || return 20
+        clean_fds+=("$descriptor")
+        if ! flock -n "$descriptor"; then
+            vps_distribution_error "保留正在使用的功能缓存：$command_key（$feature 锁被占用）"
+            return 3
+        fi
+    done <<<"$names"
+}
+
+vps_distribution_clean_download_lock() {
+    local lock="$1"
+    vps_distribution_require_no_symlink_components "$lock/pid" || return 3
+    [[ ! -e "$lock" || -d "$lock" ]] || return 3
+    [[ ! -e "$lock/pid" || -f "$lock/pid" ]] || return 3
+    vps_distribution_acquire_lock "$lock" || return $?
+    clean_download_locks+=("$lock")
+}
+
+vps_distribution_clean_remove_path() (
+    local path="$1" bundle="${2:-}" old_release="${3:-0}" before after status=0 key
+    local -a clean_fds=() clean_download_locks=()
+    vps_distribution_clean_path_safe "$path" || return $?
+    if [[ "${VPSCTL_DRY_RUN:-0}" == 1 ]]; then
+        printf '将清理：%s\n' "$path"
+        return 0
+    fi
+    trap vps_distribution_clean_unlock EXIT
+    if [[ "$old_release" == 1 ]]; then
+        for key in "${VPS_COMMAND_KEYS[@]}"; do
+            [[ "$key" != self:* ]] || continue
+            if [[ -e "$path/${VPS_COMMAND_PATH[$key]}" || -e "$path/.bundles/${key/:/-}.sha256" ]]; then
+                vps_distribution_clean_business_lock "$key" || return $?
+            fi
+        done
+        if [[ -d "$path/.bundles" ]]; then
+            for bundle in "${VPS_BUNDLE_IDS[@]}"; do
+                vps_distribution_clean_download_lock "$path/.bundles/.$bundle.lock" || return $?
+            done
+        fi
+    elif [[ -n "$bundle" ]]; then
+        vps_distribution_clean_download_lock "$VPSCTL_PROJECT_ROOT/.bundles/.$bundle.lock" || return $?
+    fi
+    # A preceding downloader may have finished while we waited for its lock.
+    [[ -e "$path" || -L "$path" ]] || return 0
+    vps_distribution_clean_path_safe "$path" || return $?
+    before="$(find "$path" -xdev -printf .)" || return 20
+    if [[ -d "$path" ]]; then
+        rm -rf --one-file-system -- "$path" || status=20
+    else
+        rm -f -- "$path" || status=20
+    fi
+    if [[ "$status" != 0 ]]; then
+        after=''
+        [[ ! -e "$path" ]] || after="$(find "$path" -xdev -printf .)"
+        ((${#after} >= ${#before})) || status=30
+        vps_distribution_error "清理未完成：$path"
+        # Keep failed old releases recognizable for a later retry.
+        if [[ "$old_release" == 1 && -d "$path" && ! -L "$path" &&
+            ! -e "$path/.vpsctl-managed-release" && ! -L "$path/.vpsctl-managed-release" ]]; then
+            (
+                set -o noclobber
+                printf 'Runarry/vps-script-lite\t%s\n' "${path##*/}" >"$path/.vpsctl-managed-release"
+            ) || true
+        fi
+        return "$status"
+    fi
+    printf '已清理：%s\n' "$path"
+)
+
+vps_distribution_clean_bundle() (
+    local key="$1" bundle="${1/:/-}" relative path files private_dir status=0 before='' after=''
+    local -a targets=() clean_fds=() clean_download_locks=()
+    files="$(vps_registry_bundle_files "$bundle")" || return 3
+    targets+=("$VPSCTL_PROJECT_ROOT/.bundles/$bundle.sha256")
+    while IFS= read -r relative; do targets+=("$VPSCTL_PROJECT_ROOT/$relative"); done <<<"$files"
+    for path in "${targets[@]}"; do
+        [[ -e "$path" || -L "$path" ]] || continue
+        vps_distribution_clean_path_safe "$path" || return $?
+        [[ -f "$path" ]] || return 3
+        before+='.'
+    done
+    private_dir="$VPSCTL_PROJECT_ROOT/commands/${key/:/\/}"
+    if [[ "$files" == *"commands/${key/:/\/}/"* && (-e "$private_dir" || -L "$private_dir") ]]; then
+        vps_distribution_clean_path_safe "$private_dir" || return $?
+        [[ -d "$private_dir" ]] || return 3
+        targets+=("$private_dir")
+        before+='.'
+    fi
+    [[ -n "$before" ]] || return 0
+    if [[ "${VPSCTL_DRY_RUN:-0}" == 1 ]]; then
+        printf '将清理功能包：%s\n' "$bundle"
+        for path in "${targets[@]}"; do [[ ! -e "$path" ]] || printf '  %s\n' "$path"; done
+        return 0
+    fi
+    trap vps_distribution_clean_unlock EXIT
+    vps_distribution_clean_business_lock "$key" || return $?
+    # The existing eviction helper owns its download lock; never acquire it twice.
+    vps_distribution_remove_command_cache "$key" cleanup || status=$?
+    if [[ "$status" != 0 ]]; then
+        for path in "${targets[@]}"; do [[ ! -e "$path" && ! -L "$path" ]] || after+='.'; done
+        ((${#after} >= ${#before})) || status=30
+        return "$status"
+    fi
+    printf '已清理功能包：%s\n' "$bundle"
+)
+
+vps_distribution_clean_run() (
+    local kind="$1" path name bundle suffix key status=0 result completed=0 issue=0
+    local lock="" present
+    vps_distribution_clean_require_install || return $?
+    ((${#VPS_COMMAND_KEYS[@]} > 0)) || vps_registry_init
+    if [[ "${VPSCTL_DRY_RUN:-0}" != 1 ]]; then
+        lock="$VPSCTL_INSTALL_ROOT/.self-update.lock"
+        vps_distribution_require_no_symlink_components "$lock/pid" || return 3
+        [[ ! -e "$lock" || -d "$lock" ]] || return 3
+        [[ ! -e "$lock/pid" || -f "$lock/pid" ]] || return 3
+        vps_distribution_acquire_lock "$lock" || return $?
+        trap 'vps_distribution_release_lock "$lock"' EXIT
+    fi
+    vps_distribution_validate_managed_install cleanup &&
+        vps_distribution_owned_release "$VPSCTL_PROJECT_ROOT" || return 3
+    local -a candidates=() bundles=() old_releases=()
+    if [[ "$kind" == residue ]]; then
+        for path in "$VPSCTL_INSTALL_ROOT/releases/"*; do
+            [[ "$path" != "$VPSCTL_PROJECT_ROOT" ]] || continue
+            vps_distribution_owned_release "$path" || continue
+            candidates+=("$path")
+            bundles+=('')
+            old_releases+=(1)
+        done
+        path="$VPSCTL_SELF_STATE_ROOT/vpsctl.sh"
+        if [[ -e "$path" || -L "$path" ]]; then
+            if [[ -f "$path" && ! -L "$path" ]]; then
+                candidates+=("$path")
+                bundles+=('')
+                old_releases+=(0)
+            else
+                vps_distribution_error "保留异常 self 旧入口：$path"
+                issue=3
+            fi
+        fi
+        for bundle in "${VPS_BUNDLE_IDS[@]}"; do
+            for path in "$VPSCTL_PROJECT_ROOT/.bundles/.$bundle."*; do
+                [[ -e "$path" || -L "$path" ]] || continue
+                name="${path##*/}"
+                suffix="${name#".$bundle.work."}"
+                if [[ "$suffix" != "$name" && "$suffix" =~ ^[A-Za-z0-9]{6}$ && -d "$path" && ! -L "$path" ]]; then
+                    candidates+=("$path")
+                    bundles+=("$bundle")
+                    old_releases+=(0)
+                else
+                    suffix="${name#".$bundle."}"
+                    if [[ "$suffix" != "$name" && "$suffix" =~ ^[A-Za-z0-9]{6}$ && -f "$path" && ! -L "$path" ]]; then
+                        candidates+=("$path")
+                        bundles+=("$bundle")
+                        old_releases+=(0)
+                    fi
+                fi
+            done
+        done
+        for ((result = 0; result < ${#candidates[@]}; result++)); do
+            status=0
+            vps_distribution_clean_remove_path "${candidates[$result]}" "${bundles[$result]}" "${old_releases[$result]}" || status=$?
+            case "$status" in
+                0) completed=$((completed + 1)) ;;
+                30)
+                    completed=$((completed + 1))
+                    issue=20
+                    ;;
+                20) issue=20 ;;
+                *) [[ "$issue" == 20 ]] || issue=3 ;;
+            esac
+        done
+    else
+        for key in "${VPS_COMMAND_KEYS[@]}"; do
+            [[ "$key" != self:* && "$key" != system:clean ]] || continue
+            bundle="${key/:/-}"
+            present=0
+            if [[ -e "$VPSCTL_PROJECT_ROOT/.bundles/$bundle.sha256" || -L "$VPSCTL_PROJECT_ROOT/.bundles/$bundle.sha256" ]]; then present=1; fi
+            while IFS= read -r path; do
+                [[ ! -e "$VPSCTL_PROJECT_ROOT/$path" && ! -L "$VPSCTL_PROJECT_ROOT/$path" ]] || present=1
+                if [[ "$path" == "commands/${key/:/\/}/"* &&
+                    (-e "$VPSCTL_PROJECT_ROOT/commands/${key/:/\/}" || -L "$VPSCTL_PROJECT_ROOT/commands/${key/:/\/}") ]]; then present=1; fi
+            done < <(vps_registry_bundle_files "$bundle")
+            [[ "$present" == 1 ]] || continue
+            status=0
+            vps_distribution_clean_bundle "$key" || status=$?
+            case "$status" in
+                0) completed=$((completed + 1)) ;;
+                30)
+                    completed=$((completed + 1))
+                    issue=20
+                    ;;
+                20) issue=20 ;;
+                *) [[ "$issue" == 20 ]] || issue=3 ;;
+            esac
+        done
+    fi
+    if [[ "$issue" != 0 ]]; then
+        ((completed == 0)) || return 30
+        return "$issue"
+    fi
+    ((completed > 0)) || printf '没有可清理的 vpsctl %s。\n' "$([[ "$kind" == residue ]] && printf '残留' || printf '功能包缓存')"
+)
+
+vps_distribution_clean_residue() {
+    (($# == 0)) || return 2
+    vps_distribution_clean_run residue
+}
+
+vps_distribution_clean_bundles() {
+    (($# == 0)) || return 2
+    vps_distribution_clean_run bundles
 }
 
 vps_distribution_init_paths
