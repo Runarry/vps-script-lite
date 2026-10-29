@@ -73,4 +73,4 @@ bash tests/integration/test-system-clean-real.sh
 
 既有 `test-libraries.sh` 的 ShellCheck 提示和 shfmt 解析问题、`test-release-build.sh` 的格式差异、`test-distribution-real.sh` 的 `SC2155` 与格式差异仍存在，不能记为零诊断通过。已将当前文件与 HEAD 基线在同一远端工具环境对比，规范化文件名及行号后的诊断一致，无本次新增诊断；证据为 `evidence/*baseline*`、`*.normalized`。受管真实测试先通过了仅排除既有 `SC2155` 的定向 ShellCheck。
 
-未运行无关完整套件，没有重启或卸载软件包。DNF5、DNF、YUM、APK、Pacman、Zypper 仅完成参数分支测试，尚未在对应发行版真实运行；journal 的真实验收没有观察到超过 30 天归档的删除。仓库版本保持 `0.8.19`，未发布新 Release。
+未运行无关完整套件，没有重启或卸载软件包。DNF5、DNF、YUM、APK、Pacman、Zypper 仅完成参数分支测试，尚未在对应发行版真实运行；journal 的真实验收没有观察到超过 30 天归档的删除。功能验收时仓库版本为 `0.8.19`；版本升级及发布结果另见 [v0.9.1 发布验收](release-0.9.1-validation.md)。
