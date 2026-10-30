@@ -15,6 +15,8 @@ for syntax_file in \
     "${TEST_ROOT}/lib/distribution.sh" \
     "${TEST_ROOT}/lib/registry.sh" \
     "${TEST_ROOT}/lib/server-test.sh" \
+    "${TEST_ROOT}/lib/backup.sh" \
+    "${TEST_ROOT}"/lib/backup/*.sh \
     "${TEST_ROOT}/lib/ui.sh" \
     "${TEST_ROOT}/commands/network/bbr.sh" \
     "${TEST_ROOT}/commands/network/dns.sh" \
@@ -26,6 +28,12 @@ for syntax_file in \
     "${TEST_ROOT}/commands/system/reinstall.sh" \
     "${TEST_ROOT}/commands/system/swap.sh" \
     "${TEST_ROOT}/commands/system/clean.sh" \
+    "${TEST_ROOT}/commands/system/backup.sh" \
+    "${TEST_ROOT}"/commands/system/backup/*.sh \
+    "${TEST_ROOT}/commands/system/backup-docker.sh" \
+    "${TEST_ROOT}"/commands/system/backup-docker/*.sh \
+    "${TEST_ROOT}/commands/system/backup-repo.sh" \
+    "${TEST_ROOT}"/commands/system/backup-repo/*.sh \
     "${TEST_ROOT}"/commands/system/kernel/*.sh \
     "${TEST_ROOT}/commands/security/access.sh" \
     "${TEST_ROOT}"/commands/security/access/*.sh \
@@ -62,6 +70,10 @@ for syntax_file in \
     "${TEST_ROOT}/tests/unit/test-system-reinstall.sh" \
     "${TEST_ROOT}/tests/unit/test-system-swap.sh" \
     "${TEST_ROOT}/tests/unit/test-system-clean.sh" \
+    "${TEST_ROOT}/tests/unit/test-backup-repo.sh" \
+    "${TEST_ROOT}/tests/unit/test-backup-schedule.sh" \
+    "${TEST_ROOT}/tests/unit/test-backup-docker.sh" \
+    "${TEST_ROOT}/tests/unit/test-system-backup.sh" \
     "${TEST_ROOT}/tests/unit/test-system-kernel-providers.sh" \
     "${TEST_ROOT}/tests/unit/test-system-kernel-inventory.sh" \
     "${TEST_ROOT}/tests/unit/test-system-kernel-grub.sh" \
@@ -102,6 +114,8 @@ for syntax_file in \
     "${TEST_ROOT}/tests/integration/test-system-reinstall-real.sh" \
     "${TEST_ROOT}/tests/integration/test-system-swap-real.sh" \
     "${TEST_ROOT}/tests/integration/test-system-clean-real.sh" \
+    "${TEST_ROOT}/tests/integration/test-backup-real.sh" \
+    "${TEST_ROOT}/tests/integration/test-backup-rear-real.sh" \
     "${TEST_ROOT}/tests/integration/test-vpsctl.sh"; do
     bash -n "$syntax_file"
 done
@@ -126,6 +140,10 @@ bash "${TEST_ROOT}/tests/unit/test-system-kernel.sh"
 bash "${TEST_ROOT}/tests/unit/test-system-reinstall.sh"
 bash "${TEST_ROOT}/tests/unit/test-system-swap.sh"
 bash "${TEST_ROOT}/tests/unit/test-system-clean.sh"
+bash "${TEST_ROOT}/tests/unit/test-backup-repo.sh"
+bash "${TEST_ROOT}/tests/unit/test-backup-schedule.sh"
+bash "${TEST_ROOT}/tests/unit/test-backup-docker.sh"
+bash "${TEST_ROOT}/tests/unit/test-system-backup.sh"
 bash "${TEST_ROOT}/tests/unit/test-system-kernel-providers.sh"
 bash "${TEST_ROOT}/tests/unit/test-system-kernel-inventory.sh"
 bash "${TEST_ROOT}/tests/unit/test-system-kernel-grub.sh"

@@ -23,9 +23,10 @@ declare -ga VPS_REGISTRY_RESULTS=()
 # Release contents are fixed, never discovered by scanning directories. Both
 # the builder and runtime use these exact file lists (including private modules).
 declare -ga VPS_BUNDLE_IDS=(
-    core shared-command shared-ufw shared-server-test
+    core shared-command shared-ufw shared-server-test shared-backup
     network-bbr network-dns network-ip-policy network-ufw network-rfw
-    system-kernel system-reinstall system-swap system-clean security-access security-fail2ban security-tls
+    system-kernel system-reinstall system-swap system-clean system-backup system-backup-docker system-backup-repo
+    security-access security-fail2ban security-tls
     service-proxy service-tcping service-iperf3 test-nodequality test-tcpquality
 )
 
@@ -35,6 +36,7 @@ vps_registry_bundle_files() {
         shared-command) printf '%s\n' lib/command.sh ;;
         shared-ufw) printf '%s\n' lib/ufw.sh ;;
         shared-server-test) printf '%s\n' lib/server-test.sh ;;
+        shared-backup) printf '%s\n' lib/backup.sh lib/backup/{config,repository,jobs,schedule}.sh ;;
         network-bbr | network-dns | network-ip-policy | network-rfw)
             printf 'commands/network/%s.sh\n' "${1#network-}"
             ;;
@@ -43,6 +45,9 @@ vps_registry_bundle_files() {
         system-reinstall) printf '%s\n' commands/system/reinstall.sh ;;
         system-swap) printf '%s\n' commands/system/swap.sh ;;
         system-clean) printf '%s\n' commands/system/clean.sh ;;
+        system-backup) printf '%s\n' commands/system/backup.sh commands/system/backup/{tools,inventory,capture,recovery}.sh ;;
+        system-backup-docker) printf '%s\n' commands/system/backup-docker.sh commands/system/backup-docker/{actions.sh,engine.py} ;;
+        system-backup-repo) printf '%s\n' commands/system/backup-repo.sh commands/system/backup-repo/cli.sh ;;
         security-access) printf '%s\n' commands/security/access.sh commands/security/access/{common,users,keys,firewall,sshd}.sh ;;
         security-fail2ban) printf '%s\n' commands/security/fail2ban.sh ;;
         security-tls) printf '%s\n' commands/security/tls.sh commands/security/tls/{common,store,issue,timer,ufw}.sh ;;
@@ -65,6 +70,7 @@ vps_registry_command_bundles() {
     case "$command_key" in
         network:ufw | security:access | security:tls | service:proxy | service:tcping | service:iperf3) printf 'shared-ufw\n' ;;
         test:nodequality | test:tcpquality) printf 'shared-server-test\n' ;;
+        system:backup | system:backup-docker | system:backup-repo) printf 'shared-backup\n' ;;
     esac
     printf '%s\n' "${command_key/:/-}"
 }
@@ -160,7 +166,7 @@ vps_registry_init() {
     vps_registry_register_domain \
         "system" \
         "系统管理" \
-        "内核、Swap、软件包和主机基础维护"
+        "内核、Swap、系统维护与异地备份恢复"
 
     vps_registry_register_domain \
         "security" \
@@ -285,6 +291,42 @@ vps_registry_init() {
         "查看并清理脚本残留、功能缓存、软件包缓存、临时文件和归档日志" \
         "commands/system/clean.sh" \
         "change" \
+        "optional-root" \
+        "supported" \
+        "linux" \
+        "experimental"
+
+    vps_registry_register_command \
+        "system" \
+        "backup" \
+        "整机备份与恢复" \
+        "ReaR 系统备份、异地上传、救援恢复与定时任务" \
+        "commands/system/backup.sh" \
+        "destructive" \
+        "optional-root" \
+        "supported" \
+        "linux" \
+        "experimental"
+
+    vps_registry_register_command \
+        "system" \
+        "backup-docker" \
+        "Docker 备份与恢复" \
+        "备份镜像、容器配置与数据，重建服务并管理定时任务" \
+        "commands/system/backup-docker.sh" \
+        "destructive" \
+        "optional-root" \
+        "supported" \
+        "linux" \
+        "experimental"
+
+    vps_registry_register_command \
+        "system" \
+        "backup-repo" \
+        "备份仓库" \
+        "配置 WebDAV、S3 与本地加密仓库，校验和清理恢复点" \
+        "commands/system/backup-repo.sh" \
+        "destructive" \
         "optional-root" \
         "supported" \
         "linux" \

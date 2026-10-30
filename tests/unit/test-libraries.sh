@@ -157,7 +157,7 @@ test_registry() {
     vps_registry_init
 
     test_assert_equal "6" "${#VPS_DOMAIN_IDS[@]}" "registered domain count"
-    test_assert_equal "20" "${#VPS_COMMAND_KEYS[@]}" "registered command count"
+    test_assert_equal "23" "${#VPS_COMMAND_KEYS[@]}" "registered command count"
     test_assert_equal "network" "${VPS_DOMAIN_IDS[0]}" "network domain id"
     test_assert_equal "system" "${VPS_DOMAIN_IDS[1]}" "system domain id"
     test_assert_equal "security" "${VPS_DOMAIN_IDS[2]}" "security domain id"
@@ -206,7 +206,10 @@ test_registry() {
     test_assert_equal $'shared-command\nsystem-clean' "$(vps_registry_command_bundles system:clean)" "clean dependencies"
     test_assert_equal "commands/system/clean.sh" "$(vps_registry_bundle_files system-clean)" "clean bundle files"
     vps_registry_commands_for_domain system
-    test_assert_equal $'system:kernel\nsystem:reinstall\nsystem:swap\nsystem:clean' "$(printf '%s\n' "${VPS_REGISTRY_RESULTS[@]}")" "system menu preserves existing indices and appends clean"
+    test_assert_equal $'system:kernel\nsystem:reinstall\nsystem:swap\nsystem:clean\nsystem:backup\nsystem:backup-docker\nsystem:backup-repo' "$(printf '%s\n' "${VPS_REGISTRY_RESULTS[@]}")" "system menu preserves existing indices and appends backup commands"
+    test_assert_equal $'shared-command\nshared-backup\nsystem-backup-docker' "$(vps_registry_command_bundles system:backup-docker)" "Docker backup does not depend on ReaR bundle"
+    test_assert_equal $'shared-command\nshared-backup\nsystem-backup' "$(vps_registry_command_bundles system:backup)" "system backup dependencies"
+    test_assert_equal $'shared-command\nshared-backup\nsystem-backup-repo' "$(vps_registry_command_bundles system:backup-repo)" "repository dependencies"
     test_assert_equal "linux,libc:glibc" "${VPS_COMMAND_REQUIREMENTS["network:ip-policy"]}" "IP policy requirements"
     test_assert_equal "linux,os:debian-family" "${VPS_COMMAND_REQUIREMENTS["system:kernel"]}" "kernel requirements"
     test_assert_equal "commands/security/access.sh" "${VPS_COMMAND_PATH["security:access"]}" "access command path"

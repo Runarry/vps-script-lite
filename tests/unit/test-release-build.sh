@@ -212,9 +212,10 @@ if [[ "${VPSCTL_TEST_ONLY:-}" == release-delivery ]]; then
 fi
 
 expected_bundles=(
-    core shared-command shared-ufw shared-server-test
+    core shared-command shared-ufw shared-server-test shared-backup
     network-bbr network-dns network-ip-policy network-ufw network-rfw
-    system-kernel system-reinstall system-swap system-clean security-access security-fail2ban security-tls
+    system-kernel system-reinstall system-swap system-clean system-backup system-backup-docker system-backup-repo
+    security-access security-fail2ban security-tls
     service-proxy service-tcping service-iperf3 test-nodequality test-tcpquality
 )
 expected_assets=(vpsctl.sh vpsctl-manifest.tsv)
@@ -229,7 +230,7 @@ expected_sorted="$(printf '%s\n' "${expected_assets[@]}" | sort)"
 [[ "$actual_assets" == "$expected_sorted" ]] || fail 'release output contains an unexpected asset set'
 
 mapfile -t manifest <"${RELEASE_DIR}/vpsctl-manifest.tsv"
-[[ ${#manifest[@]} -eq 25 ]] || fail 'manifest record count is not 25'
+[[ ${#manifest[@]} -eq 29 ]] || fail 'manifest record count is not 29'
 [[ ${manifest[0]} == $'schema_version\t2' ]] || fail 'manifest schema record is invalid'
 [[ ${manifest[1]} == $'version\t'"${RELEASE_VERSION}" ]] || fail 'manifest distribution version is invalid'
 [[ ${manifest[2]} == $'repository\tRunarry/vps-script-lite' ]] || fail 'manifest repository is invalid'
@@ -276,7 +277,7 @@ for bundle in "${expected_bundles[@]}"; do
     actual_files="$(tar -tzf "$archive" | grep -v '/$' | sort)"
     [[ "$actual_files" == "$expected_files" ]] || fail "unexpected files in $bundle"
 done
-for shared in command ufw server-test; do
+for shared in command ufw server-test backup; do
     assert_archive_has "${RELEASE_DIR}/vpsctl-shared-${shared}-${RELEASE_VERSION}.tar.gz" "lib/${shared}.sh"
 done
 for archive in "${RELEASE_DIR}"/*.tar.gz; do

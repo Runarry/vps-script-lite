@@ -79,7 +79,7 @@ make_core_asset() {
 
 make_feature_assets() {
     local version="$1" build="${TEST_TEMP}/build-feature" bundle files path
-    for bundle in shared-command shared-ufw network-bbr network-dns network-ufw system-reinstall system-swap service-tcping service-iperf3; do
+    for bundle in shared-command shared-ufw shared-backup network-bbr network-dns network-ufw system-reinstall system-swap system-backup system-backup-docker system-backup-repo service-tcping service-iperf3; do
         rm -rf -- "$build"
         mkdir -p "$build"
         files="$(vps_registry_bundle_files "$bundle")"
@@ -336,6 +336,31 @@ test_lazy_swap_install_and_cache() (
     vps_distribution_ensure_command system:swap || fail 'cached swap failed offline'
     assert_equal 2 "$calls" 'cached swap attempted a network download'
     [[ -z "$(find "$release/.bundles" -mindepth 1 ! -name '*.sha256' -print -quit)" ]] || fail 'swap lazy download left temporary assets'
+)
+
+test_lazy_backup_isolation() (
+    local release="${TEST_INSTALL_ROOT}/releases/0.1.2" calls=0
+    make_feature_assets 0.1.2
+    mkdir -p "$release/.release" "$release/.bundles"
+    printf '0.1.2\n' >"$release/VERSION"
+    write_manifest "$release/.release/manifest.tsv" 0.1.2 "$(sha_file "$TEST_ASSETS/vpsctl-shared-command-0.1.2.tar.gz")" "$(sha_file "$TEST_ASSETS/vpsctl-network-bbr-0.1.2.tar.gz")"
+    VPSCTL_DISTRIBUTED=1
+    VPSCTL_PROJECT_ROOT="$release"
+    vps_distribution_download() {
+        calls=$((calls + 1))
+        cp -- "${TEST_ASSETS}/${1##*/}" "$2"
+    }
+    vps_distribution_ensure_command system:backup-docker || fail 'Docker backup lazy load failed'
+    assert_equal 3 "$calls" 'Docker backup loads only shared-command, shared-backup and its own bundle'
+    [[ -f "$release/commands/system/backup-docker/engine.py" && -f "$release/lib/backup/jobs.sh" ]] || fail 'Docker workflow or shared job code missing'
+    [[ ! -e "$release/commands/system/backup.sh" && ! -e "$release/commands/system/backup-repo.sh" ]] || fail 'Docker loading fetched unrelated entry points'
+    vps_distribution_ensure_command system:backup-repo || fail 'repository lazy load failed'
+    assert_equal 4 "$calls" 'repository reuses shared backup dependencies'
+    [[ ! -e "$release/commands/system/backup.sh" ]] || fail 'repository loading fetched ReaR workflow'
+    vps_distribution_download() { return 20; }
+    vps_distribution_ensure_command system:backup-docker || fail 'cached Docker backup failed offline'
+    vps_distribution_ensure_command system:backup-repo || fail 'cached repository failed offline'
+    [[ ! -e "$TEST_SYSTEM_ROOT/etc/vpsctl/backup" ]] || fail 'lazy loading configured a backup repository'
 )
 
 test_command_cache_eviction() (
@@ -962,7 +987,7 @@ test_system_bundle_requires_kernel_modules() (
 
 test_private_modules_and_shared_boundaries() (
     local bundle tree="$TEST_TEMP/private-modules" path files status archive="$TEST_TEMP/boundary.tar.gz"
-    for bundle in network-ufw security-access security-tls service-proxy service-tcping service-iperf3; do
+    for bundle in network-ufw security-access security-tls service-proxy service-tcping service-iperf3 shared-backup system-backup system-backup-docker system-backup-repo; do
         rm -rf "$tree"
         mkdir -p "$tree"
         files="$(vps_registry_bundle_files "$bundle")"
@@ -979,7 +1004,7 @@ test_private_modules_and_shared_boundaries() (
             mv "$tree/missing" "$tree/$path"
         done <<<"$files"
     done
-    for bundle in shared-command shared-ufw shared-server-test network-bbr system-swap security-fail2ban; do
+    for bundle in shared-command shared-ufw shared-server-test shared-backup network-bbr system-swap system-backup system-backup-docker system-backup-repo security-fail2ban; do
         status=0
         vps_distribution_archive_path_allowed "$bundle" lib/distribution.sh || status=$?
         assert_equal 1 "$status" "$bundle may overwrite core"
@@ -1016,6 +1041,7 @@ test_manifest_is_strict
 test_bootstrap_uses_release_launcher
 test_lazy_feature_install_and_cache
 test_lazy_swap_install_and_cache
+test_lazy_backup_isolation
 test_command_cache_eviction
 test_status_is_offline
 test_failed_downloads_retry_and_lock_recheck

@@ -124,7 +124,7 @@ vps-script-lite/
 /var/lib/vpsctl/self/                        # 安装、自更新、资产缓存元数据
 ```
 
-`core` 常驻，只包含 `bin/vpsctl`、`VERSION`、`environment.sh`、`registry.sh`、`ui.sh`、`distribution.sh` 和三个 self 命令。每个非 self 公开命令独立打包为 `<domain>-<action>`，文件边界和全部私有模块由 `lib/registry.sh` 的固定清单定义。所有功能依赖 `shared-command`；`network ufw`、`security access`、`security tls`、`service proxy`、`service tcping`、`service iperf3` 另依赖 `shared-ufw`；两项测试另依赖 `shared-server-test`。首次执行功能或功能帮助时，按依赖顺序下载、校验、缓存，再分发。全局帮助、版本、环境、清单、菜单浏览和 self 状态保持离线。更新只获取目标版本的 manifest、安装器和 core，不预取旧缓存；不同版本的功能和共享库不得混用。功能卸载可在验证当前受管 release 后，持功能包下载锁删除该命令的固定文件和缓存标记；下次调用只重下该功能包。
+`core` 常驻，只包含 `bin/vpsctl`、`VERSION`、`environment.sh`、`registry.sh`、`ui.sh`、`distribution.sh` 和三个 self 命令。每个非 self 公开命令独立打包为 `<domain>-<action>`，文件边界和全部私有模块由 `lib/registry.sh` 的固定清单定义。所有功能依赖 `shared-command`；`network ufw`、`security access`、`security tls`、`service proxy`、`service tcping`、`service iperf3` 另依赖 `shared-ufw`；两项测试另依赖 `shared-server-test`；三个备份入口另依赖 `shared-backup`。首次执行功能或功能帮助时，按依赖顺序下载、校验、缓存，再分发。全局帮助、版本、环境、清单、菜单浏览和 self 状态保持离线。更新只获取目标版本的 manifest、安装器和 core，不预取旧缓存；不同版本的功能和共享库不得混用。功能卸载可在验证当前受管 release 后，持功能包下载锁删除该命令的固定文件和缓存标记；下次调用只重下该功能包。
 
 仓库根 `VERSION` 是项目版本的规范来源。自 v0.8.10 起使用 schema 2，v0.8.9 使用 schema 1，不能用新格式覆盖旧 Release。资产由固定注册表生成，命名与交付约定见[Release 资产与发布流程](development-workflow.md#4-release-资产与发布流程)，此处不再维护一份逐包清单。
 

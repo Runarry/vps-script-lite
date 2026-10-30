@@ -10,6 +10,8 @@
 
 `v0.9.1` 新增 `system clean` 系统清理入口，提供推荐清理、功能包清空和归档 journal 清理。
 
+当前源码新增实验性的整机备份、Docker 备份与加密仓库入口，支持按需加载及 WebDAV/S3；尚未发布为新的 Release。使用方法见[备份与恢复](docs/backup-management.md)，实际兼容性与恢复结果见[验收记录](docs/backup-validation.md)。
+
 ## 文档
 
 - [架构与目录](docs/architecture.md)：组件边界、调用关系和目录用途。
@@ -23,6 +25,7 @@
 - [系统重装与 DD](docs/reinstall-management.md)：Linux、Windows 与 RAW DD 快捷菜单、上游参数透传、取消重装及工具缓存清理。
 - [Swap 管理](docs/swap-management.md)：内存与 Swap 状态、自动容量、磁盘 Swap 替换和关闭、开机配置及失败恢复。
 - [系统清理](docs/system-clean.md)：脚本残留、按需功能包、软件包缓存、临时文件与归档 journal 的清理范围和演练；另见[验收记录](docs/system-clean-validation.md)。
+- [备份与恢复](docs/backup-management.md)：整机与 Docker 备份、WebDAV/S3 加密仓库、定时任务和独立恢复工具包；另见[验收记录](docs/backup-validation.md)。
 - [代理管理](docs/proxy-management.md)：Xray/sing-box 内核、节点、出口关联、端口转发、订阅、证书、日志与时间同步。
 - [代理机器接口](docs/proxy-machine-api.md)：可信本机 Agent 的 JSON 快照、版本冲突检查、原生变更与请求回执。
 - [TCPing 测试站点](docs/tcping-management.md)：按需管理独立的 TCP 探测监听服务及其端口。

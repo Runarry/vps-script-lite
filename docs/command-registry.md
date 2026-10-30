@@ -71,6 +71,10 @@ vpsctl list
 
 `system clean` 追加为系统领域第 4 项，标签为“系统清理”；登记为 `change`、`optional-root`、`supported`、`linux` 和 `experimental`。独立 `system-clean` bundle 只包含 `commands/system/clean.sh`，仅依赖 `shared-command`。状态和演练可由普通用户执行，真实清理要求 root 和一次默认拒绝的普通确认。`safe` 组合脚本残留、软件包缓存和既有时效规则下的临时文件清理，不包含功能包缓存或 journal；后两项分别由 `bundles` 和 `journal` 显式执行。清理会永久删除对应缓存、过期临时文件或归档日志；配置、功能状态、备份、证书、Swap、外部工具和恢复材料保留。源码模式跳过脚本残留项并可清理系统缓存；详细命令和路径边界见[系统清理](system-clean.md)。
 
+`system backup`、`system backup-docker`、`system backup-repo` 依次追加为系统领域第 5–7 项，保留原菜单编号。三者登记为 `destructive`、`optional-root`、`supported`、`linux` 和 `experimental`，风险覆盖恢复/历史清理动作；帮助、状态及演练仍只读。各自独立功能包依赖 `shared-command` 与 `shared-backup`，Docker 与仓库入口不加载 ReaR 功能包。S3 按需准备 Restic，WebDAV 再准备 rclone，整机和 Docker 的业务依赖由具体动作检测。命令支持 JSON 状态、无人值守计划及针对实际覆盖目标的确认，接口与运行边界见[备份与恢复](backup-management.md)。
+
+备份调度的自包含代码位于独立 libexec 版本目录，固定包含同版本功能入口、私有模块和共享依赖。它不属于 release 缓存，不能因 core 更新或清理旧 release 而失效；功能卸载关闭受管调度，保留备份数据和凭据。恢复清单采用独立 schema，不随项目版本字符串自动迁移。
+
 主管理菜单选中登记功能后直接进入对应功能入口，不插入命令详情或二次运行页。封闭枚举由编号选择，开放值沿用命令参数校验；菜单真实执行动作，不暴露执行型全局参数、机器输出开关、`--force` 或 `--confirm-*` 标志。上述参数仅供直接功能 CLI；菜单中的危险动作使用对应交互确认及强确认短语。
 
 管理器仅解析通用选项、查找已登记入口，并在加载功能包前检查注册需求中的 Linux 能力。注册表的完整权限与能力元数据用于展示功能运行条件；帮助、状态和变更动作的参数与前置要求统一由功能脚本判断。管理器不维护子参数白名单或只读豁免，不预先按 root、init、libc 或发行版拦截。冷缓存可能先下载并校验功能包，再由功能入口报告参数、权限或平台错误；下载器自身的路径、权限与内容校验保持不变。

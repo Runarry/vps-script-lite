@@ -515,6 +515,12 @@ vps_cmd_package_for_tool() {
             ;;
         systemctl | systemd-run | systemd-escape) printf 'systemd\n' ;;
         rc-update) printf 'openrc\n' ;;
+        crontab)
+            case "$manager" in
+                apt-get) printf 'cron\n' ;;
+                *) printf 'cronie\n' ;;
+            esac
+            ;;
         python3)
             if [[ "$manager" == pacman ]]; then printf 'python\n'; else printf 'python3\n'; fi
             ;;
@@ -554,7 +560,7 @@ vps_cmd_package_for_tool() {
                 *) printf 'iproute2\n' ;;
             esac
             ;;
-        base64 | sha256sum | tr | mktemp | sort | head | tail | install | od | readlink | stat | df | dd | cp | mv | rm | chmod | chown | date | cat) printf 'coreutils\n' ;;
+        base64 | sha256sum | tr | mktemp | sort | head | tail | install | od | readlink | stat | df | dd | cp | mv | rm | chmod | chown | date | cat | timeout) printf 'coreutils\n' ;;
         cmp) printf 'diffutils\n' ;;
         awk) printf 'gawk\n' ;;
         flock)
@@ -576,8 +582,15 @@ vps_cmd_package_for_tool() {
         findmnt | blkid | lsblk)
             if [[ "$manager" == apk ]]; then printf '%s\n' "$tool"; else printf 'util-linux\n'; fi
             ;;
-        curl | jq | openssl | unzip | tar | chrony | efibootmgr) printf '%s\n' "$tool" ;;
+        curl | jq | openssl | unzip | tar | chrony | efibootmgr | restic | rclone | rear | xorriso | file | less) printf '%s\n' "$tool" ;;
         gpg) printf 'gnupg\n' ;;
+        strings) printf 'binutils\n' ;;
+        extlinux)
+            case "$manager" in
+                apt-get) printf 'extlinux\n' ;;
+                *) printf 'syslinux\n' ;;
+            esac
+            ;;
         chronyc) printf 'chrony\n' ;;
         *)
             vps_cmd_error "没有工具的软件包映射：${tool:-<空>}"
