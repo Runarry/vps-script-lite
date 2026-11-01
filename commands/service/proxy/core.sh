@@ -144,6 +144,14 @@ _proxy_core_resolve_release() {
     local max_pages=10
     repository="$(_proxy_core_release_repository "$core")" || return $?
     case "$release_channel" in stable | prerelease) ;; *) vps_cmd_error "Release channel 无效：$release_channel"; return 2 ;; esac
+    if vps_offline_active; then
+        vps_offline_component "$core" "$requested_tag" "$release_channel" || return $?
+        jq -n --arg tag "$VPS_OFFLINE_COMPONENT_TAG" --arg asset "$VPS_OFFLINE_COMPONENT_ASSET" \
+            --arg url "$VPS_OFFLINE_COMPONENT_URL" --arg digest "sha256:$VPS_OFFLINE_COMPONENT_SHA256" \
+            '{tag_name:$tag,draft:false,prerelease:false,assets:[{name:$asset,browser_download_url:$url,digest:$digest}]}' \
+            >"$output" || return 20
+        return 0
+    fi
     if [[ -n "$requested_tag" ]]; then
         [[ "$requested_tag" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$ ]] || {
             vps_cmd_error "Release tag 格式无效：$requested_tag"
@@ -220,8 +228,15 @@ _proxy_core_resolve_release() {
 # Writes a verified, extracted executable to OUTPUT and release details to INFO.
 _proxy_core_fetch_release() {
     local core="$1" release_channel="$2" requested_tag="$3" output="$4" info="$5"
-    local release_json="${6:-}" asset_json tag version asset url digest expected actual archive dgst_url dgst extract candidate="" member
-    command -v curl >/dev/null 2>&1 || { vps_cmd_error "代理内核下载需要 curl"; return 3; }
+    local release_json="${6:-}" asset_json tag version asset url digest expected actual archive dgst_url dgst extract candidate="" member offline_path=""
+    if vps_offline_active; then
+        # Recreate even a supplied release object from the validated snapshot.
+        release_json="${output}.release.json"
+        _proxy_core_resolve_release "$core" "$release_channel" "$requested_tag" "$release_json" || return $?
+        offline_path="$VPS_OFFLINE_COMPONENT_PATH"
+    else
+        command -v curl >/dev/null 2>&1 || { vps_cmd_error "代理内核下载需要 curl"; return 3; }
+    fi
     command -v jq >/dev/null 2>&1 || { vps_cmd_error "代理内核下载需要 jq"; return 3; }
     command -v sha256sum >/dev/null 2>&1 || { vps_cmd_error "代理内核下载需要 sha256sum"; return 3; }
     if [[ -z "$release_json" ]]; then
@@ -261,10 +276,12 @@ _proxy_core_fetch_release() {
         return 20
     }
     archive="${output}.archive"
-    _proxy_core_curl 300 -o "$archive" "$url" || {
+    if [[ -n "$offline_path" ]]; then
+        cp -- "$offline_path" "$archive" || return 20
+    elif ! _proxy_core_curl 300 -o "$archive" "$url"; then
         vps_cmd_error "下载 $asset 失败"
         return 20
-    }
+    fi
     if [[ "$digest" =~ ^sha256:([0-9A-Fa-f]{64})$ ]]; then
         expected="${BASH_REMATCH[1],,}"
     elif [[ "$core" == "xray" ]]; then
@@ -454,12 +471,16 @@ proxy_core_install() (
     _proxy_core_require_name "$core" || return $?
     proxy_require_platform || return $?
     vps_cmd_require_root || return $?
+    if vps_offline_active; then required_tools=(jq sha256sum); fi
     case "$core" in
         sing-box) required_tools+=(tar) ;;
         xray) required_tools+=(unzip) ;;
     esac
     proxy_ensure_mutation_tools "${core}-install" "${required_tools[@]}" || return $?
     if proxy_stop_after_dependency_plan; then return 0; fi
+    if vps_offline_active; then
+        vps_offline_component "$core" "$requested_tag" "$release_channel" || return $?
+    fi
     vps_cmd_lock proxy || return $?
     trap 'vps_cmd_unlock' EXIT
     proxy_recover_transaction || return $?
@@ -717,12 +738,16 @@ proxy_core_update() (
     _proxy_core_require_name "$core" || return $?
     proxy_require_platform || return $?
     vps_cmd_require_root || return $?
+    if vps_offline_active; then required_tools=(jq sha256sum); fi
     case "$core" in
         sing-box) required_tools+=(tar) ;;
         xray) required_tools+=(unzip) ;;
     esac
     proxy_ensure_mutation_tools "${core}-update" "${required_tools[@]}" || return $?
     if proxy_stop_after_dependency_plan; then return 0; fi
+    if vps_offline_active; then
+        vps_offline_component "$core" "$requested_tag" "$release_channel" || return $?
+    fi
     _proxy_core_require_registered "$core" || return $?
     vps_cmd_lock proxy || return $?
     trap 'vps_cmd_unlock' EXIT

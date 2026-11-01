@@ -66,7 +66,7 @@ make_core_asset() {
     mkdir -p "$build/bin" "$build/lib" "$build/commands/self"
     printf '%s\n' "$version" >"$build/VERSION"
     printf '#!/usr/bin/env bash\nexit 0\n' >"$build/bin/vpsctl"
-    for required in environment registry ui distribution; do
+    for required in environment registry ui distribution offline; do
         printf '#!/usr/bin/env bash\n' >"$build/lib/${required}.sh"
     done
     for required in status update uninstall; do
@@ -717,7 +717,7 @@ prepare_managed_install() {
     mkdir -p "$release/.release" "$release/.bundles" "$release/bin" "$release/lib" "$release/commands/self"
     printf '%s\n' "$version" >"$release/VERSION"
     printf '#!/usr/bin/env bash\nexit 0\n' >"$release/bin/vpsctl"
-    for required in environment registry ui distribution; do
+    for required in environment registry ui distribution offline; do
         printf '#!/usr/bin/env bash\n' >"$release/lib/${required}.sh"
     done
     cp -- "$TEST_ROOT/lib/registry.sh" "$release/lib/registry.sh"

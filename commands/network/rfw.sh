@@ -736,10 +736,6 @@ rfw_expected_checksum() {
 
 rfw_fetch_binary() {
     local output="$1" target tag tag_version binary_version asset expected actual tmp_dir json checksums version_output
-    command -v curl >/dev/null 2>&1 || {
-        rfw_error "缺少必需命令 curl"
-        return 3
-    }
     command -v sha256sum >/dev/null 2>&1 || {
         rfw_error "缺少必需命令 sha256sum"
         return 3
@@ -750,22 +746,37 @@ rfw_fetch_binary() {
     json="${tmp_dir}/release.json"
     checksums="${tmp_dir}/checksums.txt"
 
-    curl -fsSL --proto '=https' --proto-redir '=https' --retry 3 --connect-timeout 15 --max-time 120 -o "$json" "$RFW_RELEASE_API" || {
-        rfw_error "查询最新 RFW Release 失败"
-        return 20
-    }
-    tag="$(rfw_release_tag "$json")" || return
-    curl -fsSL --proto '=https' --proto-redir '=https' --retry 3 --connect-timeout 15 --max-time 300 -o "$output" \
-        "https://github.com/${RFW_REPOSITORY}/releases/download/${tag}/${asset}" || {
-        rfw_error "下载 ${asset} 失败"
-        return 20
-    }
-    curl -fsSL --proto '=https' --proto-redir '=https' --retry 3 --connect-timeout 15 --max-time 120 -o "$checksums" \
-        "https://github.com/${RFW_REPOSITORY}/releases/download/${tag}/checksums.txt" || {
-        rfw_error "下载 checksums.txt 失败"
-        return 20
-    }
-    expected="$(rfw_expected_checksum "$checksums" "$asset")" || return
+    if vps_offline_active; then
+        vps_offline_component rfw || return $?
+        [[ "$VPS_OFFLINE_COMPONENT_ASSET" == "$asset" ]] || {
+            rfw_error "离线 RFW 资产与当前平台不匹配：$asset"
+            return 20
+        }
+        tag="$VPS_OFFLINE_COMPONENT_TAG"
+        expected="$VPS_OFFLINE_COMPONENT_SHA256"
+        cp -- "$VPS_OFFLINE_COMPONENT_PATH" "$output" || return 20
+    else
+        command -v curl >/dev/null 2>&1 || {
+            rfw_error "缺少必需命令 curl"
+            return 3
+        }
+        curl -fsSL --proto '=https' --proto-redir '=https' --retry 3 --connect-timeout 15 --max-time 120 -o "$json" "$RFW_RELEASE_API" || {
+            rfw_error "查询最新 RFW Release 失败"
+            return 20
+        }
+        tag="$(rfw_release_tag "$json")" || return
+        curl -fsSL --proto '=https' --proto-redir '=https' --retry 3 --connect-timeout 15 --max-time 300 -o "$output" \
+            "https://github.com/${RFW_REPOSITORY}/releases/download/${tag}/${asset}" || {
+            rfw_error "下载 ${asset} 失败"
+            return 20
+        }
+        curl -fsSL --proto '=https' --proto-redir '=https' --retry 3 --connect-timeout 15 --max-time 120 -o "$checksums" \
+            "https://github.com/${RFW_REPOSITORY}/releases/download/${tag}/checksums.txt" || {
+            rfw_error "下载 checksums.txt 失败"
+            return 20
+        }
+        expected="$(rfw_expected_checksum "$checksums" "$asset")" || return
+    fi
     actual="$(sha256sum "$output")" || {
         rfw_error "执行 sha256sum 失败"
         return 20
@@ -927,11 +938,15 @@ rfw_install_or_update() {
         rfw_error "RFW 已安装；如需替换受管二进制，请使用 update"
         return 3
     fi
+    if vps_offline_active; then dependency_tools=(sha256sum); fi
     [[ "$action" == "install" ]] && dependency_tools+=(ip)
     [[ "${VPSCTL_DRY_RUN:-0}" == "1" ]] || dependency_tools+=(flock)
     rfw_ensure_dependencies "${dependency_tools[@]}" || return
     if rfw_stop_after_dependency_plan; then
         return 0
+    fi
+    if vps_offline_active; then
+        vps_offline_component rfw || return $?
     fi
     if [[ "$action" == "update" ]]; then
         rfw_require_managed_install || return

@@ -1,5 +1,5 @@
 # shellcheck shell=bash
-# ACME issue/renew via pinned lego, DNS credentials, and optional proxy reload.
+# ACME issue/renew via managed lego, DNS credentials, and optional proxy reload.
 
 tls_maybe_reload() {
     local reload="${1:-none}" unit path
@@ -43,9 +43,9 @@ tls_http_port_busy() {
 }
 
 tls_lego_asset_name() {
-    local arch
+    local version="${1:-$TLS_LEGO_VERSION}" arch
     arch="$(tls_lego_arch)" || return $?
-    printf 'lego_%s_linux_%s.tar.gz' "$TLS_LEGO_VERSION" "$arch"
+    printf 'lego_%s_linux_%s.tar.gz' "$version" "$arch"
 }
 
 tls_checksum_for_asset() {
@@ -87,19 +87,30 @@ tls_extract_lego_member() {
 }
 
 tls_install_lego() {
-    local asset tmp_dir archive checksums expected actual member extracted
-    if tls_lego_installed; then
+    local asset tmp_dir archive checksums expected actual member extracted version="$TLS_LEGO_VERSION" offline_path=""
+    local -a tools=(curl tar sha256sum flock)
+    if vps_offline_active; then
+        tools=(tar sha256sum flock)
+        vps_offline_component lego || return $?
+        version="$VPS_OFFLINE_COMPONENT_TAG"
+        offline_path="$VPS_OFFLINE_COMPONENT_PATH"
+        expected="$VPS_OFFLINE_COMPONENT_SHA256"
+        asset="$VPS_OFFLINE_COMPONENT_ASSET"
+    fi
+    if tls_lego_installed && { [[ -z "$offline_path" ]] || [[ "$(tls_kv_get "$TLS_LEGO_META" tag)" == "$version" ]]; }; then
         return 0
     fi
     tls_lego_arch >/dev/null || return $?
-    tls_ensure_tools lego-install curl tar sha256sum flock || return $?
+    tls_ensure_tools lego-install "${tools[@]}" || return $?
     if [[ "${VPS_CMD_DEPENDENCIES_PLANNED:-0}" == 1 ]]; then
         vps_cmd_info "依赖仅完成安装计划；请安装依赖后重跑"
         return 0
     fi
-    asset="$(tls_lego_asset_name)" || return $?
+    if [[ -z "$offline_path" ]]; then
+        asset="$(tls_lego_asset_name "$version")" || return $?
+    fi
     if [[ "${VPSCTL_DRY_RUN:-0}" == 1 ]]; then
-        vps_cmd_info "演练：下载 lego ${TLS_LEGO_VERSION}（$asset）到 $TLS_LEGO_LOGICAL"
+        vps_cmd_info "演练：安装 lego ${version}（$asset）到 $TLS_LEGO_LOGICAL"
         return 0
     fi
     tls_ensure_state_dirs || return $?
@@ -109,27 +120,31 @@ tls_install_lego() {
     chmod 0700 -- "$tmp_dir" || { rm -rf -- "$tmp_dir"; return 20; }
     archive="${tmp_dir}/${asset}"
     checksums="${tmp_dir}/checksums.txt"
-    if ! curl --fail --location --silent --show-error --proto '=https' --proto-redir '=https' --tlsv1.2 \
-        --retry 3 --connect-timeout 15 --max-time 300 -o "$archive" \
-        "https://github.com/${TLS_LEGO_REPOSITORY}/releases/download/${TLS_LEGO_VERSION}/${asset}"; then
-        rm -rf -- "$tmp_dir"
-        vps_cmd_error "下载 lego 资产失败：$asset"
-        return 20
-    fi
-    if ! curl --fail --location --silent --show-error --proto '=https' --proto-redir '=https' --tlsv1.2 \
-        --retry 3 --connect-timeout 15 --max-time 120 -o "$checksums" \
-        "https://github.com/${TLS_LEGO_REPOSITORY}/releases/download/${TLS_LEGO_VERSION}/lego_${TLS_LEGO_VERSION}_checksums.txt" &&
-        ! curl --fail --location --silent --show-error --proto '=https' --proto-redir '=https' --tlsv1.2 \
+    if [[ -n "$offline_path" ]]; then
+        cp -- "$offline_path" "$archive" || { rm -rf -- "$tmp_dir"; return 20; }
+    else
+        if ! curl --fail --location --silent --show-error --proto '=https' --proto-redir '=https' --tlsv1.2 \
+            --retry 3 --connect-timeout 15 --max-time 300 -o "$archive" \
+            "https://github.com/${TLS_LEGO_REPOSITORY}/releases/download/${version}/${asset}"; then
+            rm -rf -- "$tmp_dir"
+            vps_cmd_error "下载 lego 资产失败：$asset"
+            return 20
+        fi
+        if ! curl --fail --location --silent --show-error --proto '=https' --proto-redir '=https' --tlsv1.2 \
             --retry 3 --connect-timeout 15 --max-time 120 -o "$checksums" \
-            "https://github.com/${TLS_LEGO_REPOSITORY}/releases/download/${TLS_LEGO_VERSION}/lego_${TLS_LEGO_VERSION#v}_checksums.txt"; then
-        rm -rf -- "$tmp_dir"
-        vps_cmd_error "下载 lego checksums 失败"
-        return 20
+            "https://github.com/${TLS_LEGO_REPOSITORY}/releases/download/${version}/lego_${version}_checksums.txt" &&
+            ! curl --fail --location --silent --show-error --proto '=https' --proto-redir '=https' --tlsv1.2 \
+                --retry 3 --connect-timeout 15 --max-time 120 -o "$checksums" \
+                "https://github.com/${TLS_LEGO_REPOSITORY}/releases/download/${version}/lego_${version#v}_checksums.txt"; then
+            rm -rf -- "$tmp_dir"
+            vps_cmd_error "下载 lego checksums 失败"
+            return 20
+        fi
+        expected="$(tls_checksum_for_asset "$checksums" "$asset")" || {
+            rm -rf -- "$tmp_dir"
+            return 20
+        }
     fi
-    expected="$(tls_checksum_for_asset "$checksums" "$asset")" || {
-        rm -rf -- "$tmp_dir"
-        return 20
-    }
     actual="$(tls_sha256 "$archive")" || {
         rm -rf -- "$tmp_dir"
         return 20
@@ -162,7 +177,7 @@ tls_install_lego() {
         return 20
     }
     {
-        printf 'tag=%s\n' "$TLS_LEGO_VERSION"
+        printf 'tag=%s\n' "$version"
         printf 'asset=%s\n' "$asset"
         printf 'sha256=%s\n' "$(tls_sha256 "$TLS_LEGO_BIN")"
     } | tls_atomic_file "${TLS_STATE_LOGICAL}/lego.meta" 0600 || {
@@ -170,7 +185,7 @@ tls_install_lego() {
         return 20
     }
     rm -rf -- "$tmp_dir"
-    vps_cmd_success "已安装 lego ${TLS_LEGO_VERSION}"
+    vps_cmd_success "已安装 lego ${version}"
 }
 
 tls_parse_credential_file() {

@@ -349,7 +349,7 @@ tls_lego_installed() {
     [[ -f "$TLS_LEGO_META" && ! -L "$TLS_LEGO_META" ]] || return 1
     tag="$(tls_kv_get "$TLS_LEGO_META" tag 2>/dev/null || true)"
     expected="$(tls_kv_get "$TLS_LEGO_META" sha256 2>/dev/null || true)"
-    [[ "$tag" == "$TLS_LEGO_VERSION" && "$expected" =~ ^[0-9a-f]{64}$ ]] || return 1
+    [[ "$tag" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+([._+-][0-9A-Za-z.-]+)?$ && "$expected" =~ ^[0-9a-f]{64}$ ]] || return 1
     actual="$(tls_sha256 "$TLS_LEGO_BIN" 2>/dev/null || true)"
     [[ "$actual" == "$expected" ]]
 }
@@ -367,7 +367,7 @@ tls_timer_flags() {
 }
 
 tls_status() {
-    local json="$1" id days
+    local json="$1" id days lego_version=""
     local -a ids=()
     local -A days_by_id=()
     local total=0 imported=0 acme=0 expiring=0 first=1
@@ -385,10 +385,13 @@ tls_status() {
         days_by_id["$id"]="$days"
     done
     tls_timer_flags
+    if tls_lego_installed; then
+        lego_version="$(tls_kv_get "$TLS_LEGO_META" tag)"
+    fi
     if [[ "$json" == 1 ]]; then
         printf '{"schema_version":1,"lego_installed":%s,"lego_version":' \
-            "$(tls_lego_installed && printf true || printf false)"
-        if tls_lego_installed; then printf '"%s"' "$TLS_LEGO_VERSION"; else printf 'null'; fi
+            "$([[ -n "$lego_version" ]] && printf true || printf false)"
+        if [[ -n "$lego_version" ]]; then printf '"%s"' "$lego_version"; else printf 'null'; fi
         printf ',"timer":{"supported":%s,"enabled":%s,"active":%s},"counts":{"total":%s,"imported":%s,"acme":%s,"expiring_soon":%s},"certificates":[' \
             "$TLS_TIMER_SUPPORTED" "$TLS_TIMER_ENABLED" "$TLS_TIMER_ACTIVE" "$total" "$imported" "$acme" "$expiring"
         for id in "${ids[@]}"; do
@@ -402,8 +405,8 @@ tls_status() {
     vps_cmd_status "证书数量" "$total" normal
     vps_cmd_status "导入 / ACME" "${imported} / ${acme}" normal
     vps_cmd_status "即将到期" "$expiring" "$([[ "$expiring" == 0 ]] && printf success || printf warning)"
-    vps_cmd_status "lego" "$(tls_lego_installed && printf "已安装 $TLS_LEGO_VERSION" || printf 未安装)" \
-        "$(tls_lego_installed && printf success || printf muted)"
+    vps_cmd_status "lego" "$([[ -n "$lego_version" ]] && printf '已安装 %s' "$lego_version" || printf 未安装)" \
+        "$([[ -n "$lego_version" ]] && printf success || printf muted)"
     vps_cmd_status "续期 timer" \
         "$([[ "$TLS_TIMER_SUPPORTED" == true ]] && { [[ "$TLS_TIMER_ENABLED" == true ]] && printf 已启用 || printf 未启用; } || printf 需要 systemd)" \
         "$([[ "$TLS_TIMER_ENABLED" == true ]] && printf success || printf warning)"

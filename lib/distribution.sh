@@ -14,6 +14,15 @@ declare -g VPS_DISTRIBUTION_LAUNCHER_SHA256=""
 declare -gA VPS_DISTRIBUTION_BUNDLE_FILE=()
 declare -gA VPS_DISTRIBUTION_BUNDLE_SHA256=()
 
+if [[ -f "$(dirname -- "${BASH_SOURCE[0]}")/offline.sh" ]]; then
+    # shellcheck source=offline.sh disable=SC1091
+    source "$(dirname -- "${BASH_SOURCE[0]}")/offline.sh"
+else
+    vps_offline_active() {
+        [[ -n "${VPSCTL_PROJECT_ROOT:-}" && ( -e "$VPSCTL_PROJECT_ROOT/.offline" || -L "$VPSCTL_PROJECT_ROOT/.offline" ) ]]
+    }
+fi
+
 vps_distribution_error() {
     printf 'vpsctl：错误：%s\n' "$1" >&2
 }
@@ -327,7 +336,14 @@ vps_distribution_install_bundle() {
     archive="${work_root}/${filename}"
     extract_root="${work_root}/extract-${domain}"
     mkdir -p -- "$extract_root" || return 20
-    vps_distribution_download "${base_url}/${filename}" "$archive" || return $?
+    if declare -F vps_offline_active >/dev/null && vps_offline_active && [[ "$domain" != core ]]; then
+        declare -F vps_offline_runtime_root >/dev/null || { vps_distribution_error '离线帮助库缺失；拒绝联网回退'; return 10; }
+        vps_offline_runtime_root || return $?
+        vps_offline_check_file "$VPS_OFFLINE_ROOT" "$filename" || return $?
+        cp -- "$VPS_OFFLINE_ROOT/$filename" "$archive" || return 20
+    else
+        vps_distribution_download "${base_url}/${filename}" "$archive" || return $?
+    fi
     vps_distribution_verify_sha256 "$archive" "$sha" || return $?
     vps_distribution_validate_archive "$archive" "$domain" || return $?
     tar --no-same-owner --no-same-permissions -xzf "$archive" -C "$extract_root" || return 20
@@ -664,6 +680,19 @@ vps_distribution_self_status() {
         printf '分发版本：未安装\n缓存功能与共享包：不适用\n'
     fi
     printf '项目路径：%s\n安装根：%s\nself 状态：%s\n' "$VPSCTL_PROJECT_ROOT" "$VPSCTL_INSTALL_ROOT" "$VPSCTL_SELF_STATE_ROOT"
+    if declare -F vps_offline_active >/dev/null && vps_offline_active; then
+        if vps_offline_runtime_root; then
+            printf '离线来源：%s %s %s（构建于 %s）\n' "$VPS_OFFLINE_OS" "$VPS_OFFLINE_OS_VERSION" "$VPS_OFFLINE_ARCH" "$VPS_OFFLINE_BUILT_AT"
+            local component
+            for component in xray sing-box lego rfw; do
+                vps_offline_read_components "$VPS_OFFLINE_ROOT" "$component" || return $?
+                printf '离线组件 %s：%s\n' "$component" "$VPS_OFFLINE_COMPONENT_TAG"
+            done
+        else
+            vps_distribution_error '离线资源缺失或损坏；功能安装不会联网回退'
+            return 10
+        fi
+    fi
 }
 
 vps_distribution_owned_release() {

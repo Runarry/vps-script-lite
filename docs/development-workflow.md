@@ -87,7 +87,7 @@ ssh host-vps-scripts 'cd /path/to/vps-script-lite && VPSCTL_TEST_ONLY=entry-vers
 
 ## 4. Release 资产与发布流程
 
-仓库根 `VERSION` 是项目版本的规范来源，当前版本为 `0.10.0`。应用、功能、tag、发布资产、安装目录和命令行展示必须使用同一版本号。自 v0.8.10 起使用 schema 2；v0.8.9 按领域打包，使用 schema 1，跨格式迁移不通过 self update。
+仓库根 `VERSION` 是项目版本的规范来源，当前版本为 `0.11.0`。应用、功能、tag、发布资产、安装目录和命令行展示必须使用同一版本号。自 v0.8.10 起使用 schema 2；v0.8.9 按领域打包，使用 schema 1，跨格式迁移不通过 self update。
 
 schema 2 Release 必须一次性提供安装器、严格 TSV 清单及注册表中的全部 bundle。构建与运行时共用 [lib/registry.sh](../lib/registry.sh) 中的 `VPS_BUNDLE_IDS`、`vps_registry_bundle_files` 和 `vps_registry_command_bundles`；新增命令、文件或依赖只维护这些固定定义，不复制另一份文档清单。当前生成的完整资产集合以构建输出的 manifest 为准，v0.8.9 的 schema 1 资产保持原样。
 
@@ -96,29 +96,63 @@ schema 2 Release 必须一次性提供安装器、严格 TSV 清单及注册表�
 | 安装器 | `vpsctl.sh` |
 | 清单 | `vpsctl-manifest.tsv` |
 | core、共享库与功能包 | `vpsctl-<bundle-id>-<VERSION>.tar.gz`；bundle ID 来自注册表，版本来自根目录 `VERSION` |
+| 离线包 | `vpsctl-offline-<VERSION>-<OS>-<OS_VERSION>-<ARCH>.tar.gz`；Debian 12/13、Ubuntu 22.04/24.04，分别提供 amd64/arm64，共 8 包 |
+| 离线归档校验清单 | `vpsctl-offline-SHA256SUMS`；登记同版本的全部 8 个离线归档 |
 
-每个 tar 包内使用项目根相对路径，不包含额外顶级包目录。`vpsctl-manifest.tsv` 依次包含 `schema_version<TAB>2`、`version<TAB>VERSION`、`repository<TAB>Runarry/vps-script-lite`、`asset<TAB>launcher<TAB>vpsctl.sh<TAB>SHA256`，以及各 bundle 的 `bundle<TAB>NAME<TAB>vpsctl-NAME-VERSION.tar.gz<TAB>SHA256`。名称唯一，文件名和版本精确对应，摘要是 64 位小写十六进制，core 必须存在；功能和共享包内容必须符合注册表固定清单。新增功能或私有模块时同步更新该清单和依赖映射。
+每个在线 bundle 内使用项目根相对路径，不包含额外顶级包目录。`vpsctl-manifest.tsv` 依次包含 `schema_version<TAB>2`、`version<TAB>VERSION`、`repository<TAB>Runarry/vps-script-lite`、`asset<TAB>launcher<TAB>vpsctl.sh<TAB>SHA256`，以及各 bundle 的 `bundle<TAB>NAME<TAB>vpsctl-NAME-VERSION.tar.gz<TAB>SHA256`。名称唯一，文件名和版本精确对应，摘要是 64 位小写十六进制，core 必须存在；功能和共享包内容必须符合注册表固定清单。新增功能或私有模块时同步更新该清单和依赖映射。
 
-`bash scripts/build-release.sh [输出目录]` 默认输出到 `dist/release`。输出目录专用于发布资产：只接受 `vpsctl.sh`、`vpsctl-manifest.tsv` 和 `vpsctl-<包名>-<X.Y.Z>.tar.gz` 普通文件；包名由小写字母、数字和分隔它们的连字符组成。目录内有其他文件、隐藏条目、子目录或符号链接时，构建报错并保留原内容。不能将文件系统根、源码根或源码祖先目录作为输出目录。
+`bash scripts/build-release.sh [输出目录]` 仍只构建在线脚本资产，默认输出到 `dist/release`，不解析或下载上游依赖。输出目录只接受 `vpsctl.sh`、`vpsctl-manifest.tsv`、`vpsctl-<包名>-<X.Y.Z>.tar.gz`，以及上述 8 种离线归档名称和 `vpsctl-offline-SHA256SUMS` 普通文件；包名由小写字母、数字和分隔它们的连字符组成。目录内有其他文件、隐藏条目、子目录或符号链接时，构建报错并保留原内容。单独重建在线资产会整体替换旧输出，包括移除其中的离线资产；共享输出目录时，完整发布流程随后重新生成离线包。不能将文件系统根、源码根或源码祖先目录作为输出目录。
 
 构建先在输出目录的同一父目录准备完整候选资产，归档、摘要和 manifest 写入成功后才整体切换；成功构建会移除该输出中的旧版本资产。构建失败保留旧输出；交付失败会尝试恢复旧目录，恢复失败则保留并报告旧资产路径。交付完成后的临时目录清理失败返回非零、报告残留路径，并保留已经生成的新输出。
 
 同一输出目录应串行构建。切换期间该路径可能短暂不存在；可捕获的 HUP／INT／TERM 会进入相同清理与恢复流程，SIGKILL 或掉电后的自动恢复不在保证范围内。此步骤只生成本地发布资产，不创建或上传 GitHub Release。
 
+### 离线包构建
+
+`scripts/build-offline-release.sh` 默认输出到 `dist/offline`。不指定目标时，先构建在线资产、解析一次上游快照，再顺序构建全部 8 包并生成归档校验清单。构建需要 Docker、Python 3、curl 和可达的软件源与 GitHub；跨架构构建还需对应 binfmt/QEMU 支持。所有构建和验证仍在专用主机执行：
+
+```bash
+ssh host-vps-scripts 'cd /path/to/vps-script-lite && bash scripts/build-offline-release.sh --output-dir dist/offline'
+```
+
+矩阵构建先使用 `scripts/resolve-offline-upstreams.sh SNAPSHOT_DIR` 生成同次发布共用的快照。Xray、sing-box、lego、RFW 分别只查询一次最新稳定版，校验官方资产后同时保存 amd64/arm64 内容；不固定旧版本，也不在所选版本缺资产或无法运行时回退旧 Release。对应发行版官方镜像内从当前 APT 软件源收集完整 Depends/Pre-Depends 闭包，解析时使用空的已安装状态，避免遗漏镜像已自带的依赖；不回退 old-releases 软件源。包内保存版本、来源、软件包清单和摘要，并执行所选上游二进制的版本冒烟检查。
+
+单目标构建必须同时指定 OS、系统版本、架构，以及已经生成的同版本在线资产和统一快照。下面只生成 Debian 13 / amd64 一包；快照输出目录必须尚不存在，同一次发布其余目标复用这两个输入目录：
+
+```bash
+ssh host-vps-scripts 'cd /path/to/vps-script-lite &&
+  bash scripts/build-release.sh dist/online &&
+  bash scripts/resolve-offline-upstreams.sh dist/upstream-snapshot &&
+  bash scripts/build-offline-release.sh \
+    --os debian --os-version 13 --arch amd64 \
+    --online-dir dist/online --snapshot-dir dist/upstream-snapshot \
+    --output-dir dist/offline'
+```
+
+全部 8 包收集到同一输出目录后，使用下列命令检查归档集合并生成 `vpsctl-offline-SHA256SUMS`；缺包、混入其他版本或额外目标归档时失败。离线归档内保留原在线 manifest 与全部 bundle，另提供离线元数据、原始上游资产、完整性清单和本地 APT 仓库，不修改在线 manifest schema。
+
+```bash
+ssh host-vps-scripts 'cd /path/to/vps-script-lite && bash scripts/build-offline-release.sh --aggregate --output-dir dist/offline'
+```
+
+离线验收应覆盖首次安装、同版本在线安装补全、跨版本本地升级、删除原解压目录后运行、清理缓存后恢复，以及错误平台、缺资源和损坏资源拒绝且无联网回退。按目标系统验证依赖安装与受支持服务；ARM 如在专用主机使用 QEMU，只记为模拟执行，不记为真实 ARM 硬件验收。功能范围与联网例外见[离线安装与更新](../README.md#离线安装与更新)。
+
+### 发布步骤
+
 发布按以下顺序进行：
 
 1. 固定仓库根 `VERSION`，并确认应用展示、tag、manifest 版本和资产文件名完全一致。
-2. 从目标提交按注册表清单构建全部不带顶级目录的 bundle 和 `vpsctl.sh`，计算所有资产的 SHA-256，最后生成 `vpsctl-manifest.tsv`；清单不能自我登记。
-3. 只通过 `ssh host-vps-scripts` 验证清单严格解析、摘要、tar 路径安全、全新安装、重复安装、首次功能及共享依赖下载、离线缓存、显式更新、指定版本更新、失败回退、普通卸载和 purge 边界。不得在当前系统或 WSL 运行这些检查。
+2. 从目标提交按注册表清单构建全部不带顶级目录的 bundle 和 `vpsctl.sh`，计算所有在线资产的 SHA-256，最后生成 `vpsctl-manifest.tsv`；清单不能自我登记。解析统一上游快照，构建全部 8 个离线包，汇总生成 `vpsctl-offline-SHA256SUMS`。
+3. 只通过 `ssh host-vps-scripts` 验证清单严格解析、摘要、tar 路径安全、全新安装、重复安装、首次功能及共享依赖下载、离线缓存、显式更新、指定版本更新、失败回退、普通卸载和 purge 边界，并完成上述离线验收。不得在当前系统或 WSL 运行这些检查。
 4. 先创建 draft Release 并上传同一版本的完整资产集；资产未齐全或摘要不符时不得发布，也不得让 `latest` 提前指向该版本。
 5. 从 draft 资产重新下载并在 `host-vps-scripts` 复核 SHA-256 与安装结果，再发布 tag 对应的 Release。
 6. 发布后验证 `releases/latest/download/vpsctl.sh`、显式 `vX.Y.Z` 更新和全新 VPS 安装，记录命令、关键结果、回退版本和必要恢复信息。
 
-标签触发的发布工作流先查询该 tag 对应的 Release：不存在时创建草稿，已有草稿时保留标题和说明，随后上传本次完整构建并覆盖同名资产；不在本次构建中的附件保留。查询失败或无法确定状态时停止，已发布版本直接报错，不修改其资产。工作流不会自动发布 Release。
+标签触发的发布工作流先构建在线资产和统一上游快照，再由 8 个系统/架构矩阵任务构建离线包；只有全部成功，才收集在线资产、8 包及汇总校验清单并进入草稿上传。随后查询该 tag 对应的 Release：不存在时创建草稿，已有草稿时保留标题和说明，上传本次完整构建并覆盖同名资产；不在本次构建中的附件保留。查询失败或无法确定状态时停止，已发布版本直接报错，不修改其资产。工作流不会自动发布 Release，重新下载复核和手动发布流程保持不变。
 
 创建或上传失败后可直接重跑。同一 tag 应串行执行，上传期间不要手动发布或修改草稿。`gh release upload --clobber` 会先删除旧同名资产，再上传新文件，因此失败可能暂时留下不完整草稿；重跑补齐后仍须按上述流程重新下载复核，再手动发布，不提供远端资产回滚。
 
-跨格式验证必须包含上一版实际发布的安装器与资产，不能只依赖修改当前源码版本号的夹具。schema 1 与 schema 2 双向迁移均使用先下载并校验目标安装器/manifest、普通卸载管理器代码（不使用 purge）、再运行目标安装器的流程；验证已部署服务、配置、功能状态和备份保持不变。schema 2 同格式更新须验证仅下载 manifest、安装器和 core，旧功能缓存不预取，新版本首次调用才重新下载。
+跨格式验证必须包含上一版实际发布的安装器与资产，不能只依赖修改当前源码版本号的夹具。schema 1 与 schema 2 双向迁移均使用先下载并校验目标安装器/manifest、普通卸载管理器代码（不使用 purge）、再运行目标安装器的流程；验证已部署服务、配置、功能状态和备份保持不变。schema 2 同格式在线更新须验证仅下载 manifest、安装器和 core，旧功能缓存不预取，新版本首次调用才重新下载；离线更新须验证全部 bundle 由本地导入且保留完整资源。
 
 一行 `curl | bash` 安装把 HTTPS、GitHub、仓库与 Release 发布权限以及远端安装器本身放在初始信任边界内。manifest 能验证安装器之后下载的资产，也能在先下载模式下验证本地 `vpsctl.sh`，但如果安装器和 manifest 都来自同一被攻破的发布渠道，它不能提供独立真实性证明。验收文档必须同时保留“先固定 tag 下载安装器与 manifest、核对摘要、审阅脚本、再执行本地文件”的较安全流程。
 

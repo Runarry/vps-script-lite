@@ -48,6 +48,28 @@ vpsctl_require_tools() {
     done
 }
 
+vpsctl_install_offline() {
+    local directory="$1" core_root tool
+    for tool in awk bash chmod cp find id install ln mkdir mktemp mv readlink rm sha256sum tar uname; do
+        command -v "$tool" >/dev/null 2>&1 || vpsctl_bootstrap_die "required tool not found: $tool"
+    done
+    directory="$(cd -- "$directory" && pwd -P)" || vpsctl_bootstrap_die 'offline directory is unavailable'
+    vpsctl_validate_manifest "$directory/vpsctl-manifest.tsv"
+    vpsctl_validate_launcher "$directory/vpsctl.sh"
+    vpsctl_verify_file "$directory/${VPSCTL_MANIFEST_FILES[core]}" "${VPSCTL_MANIFEST_HASHES[core]}" 'offline core'
+    vpsctl_validate_archive_paths "$directory/${VPSCTL_MANIFEST_FILES[core]}"
+    VPSCTL_TEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/vpsctl-offline-bootstrap.XXXXXXXX")"
+    core_root="$VPSCTL_TEMP_DIR/core"
+    mkdir -- "$core_root"
+    tar --no-same-owner --no-same-permissions -xzf "$directory/${VPSCTL_MANIFEST_FILES[core]}" -C "$core_root"
+    vpsctl_validate_release_tree "$core_root"
+    [[ -f "$core_root/lib/offline.sh" && ! -L "$core_root/lib/offline.sh" ]] || vpsctl_bootstrap_die 'offline helper is missing'
+    # Load helpers only after validating the target core and launcher.
+    # shellcheck source=/dev/null
+    source "$core_root/lib/distribution.sh"
+    vps_offline_import "$directory" || exit $?
+}
+
 vpsctl_sha256() {
     sha256sum -- "$1" | awk '{print $1}'
 }
@@ -380,6 +402,16 @@ vpsctl_main() {
     local provided_manifest=''
 
     vpsctl_require_platform
+
+    if [[ "${1:-}" == --offline-dir ]]; then
+        if (($# < 2)) || [[ -z "$2" ]]; then vpsctl_bootstrap_die '--offline-dir requires a local package directory'; fi
+        vpsctl_require_install_privilege
+        vpsctl_install_offline "$2"
+        shift 2
+        vpsctl_bootstrap_cleanup
+        VPSCTL_TEMP_DIR=''
+        vpsctl_exec_current "$@"
+    fi
 
     if [[ -x "${VPSCTL_CURRENT_LINK}/bin/vpsctl" ]]; then
         vpsctl_exec_current "$@"

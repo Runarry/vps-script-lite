@@ -80,9 +80,10 @@ release_require_output_directory() (
         filename="${entry##*/}"
         [[ -f "$entry" && ! -L "$entry" ]] || release_die "output contains a non-release entry: $entry"
         case "$filename" in
-            vpsctl.sh | vpsctl-manifest.tsv) ;;
+            vpsctl.sh | vpsctl-manifest.tsv | vpsctl-offline-SHA256SUMS) ;;
             *)
-                [[ "$filename" =~ ^vpsctl-[a-z0-9]+(-[a-z0-9]+)*-[0-9]+\.[0-9]+\.[0-9]+\.tar\.gz$ ]] ||
+                [[ "$filename" =~ ^vpsctl-[a-z0-9]+(-[a-z0-9]+)*-[0-9]+\.[0-9]+\.[0-9]+\.tar\.gz$ ||
+                   "$filename" =~ ^vpsctl-offline-[0-9]+\.[0-9]+\.[0-9]+-(debian-(12|13)|ubuntu-(22\.04|24\.04))-(amd64|arm64)\.tar\.gz$ ]] ||
                     release_die "output contains a non-release entry: $entry"
                 ;;
         esac
@@ -204,6 +205,9 @@ MANIFEST_PATH="${ASSET_DIR}/vpsctl-manifest.tsv"
     done
 } >"$MANIFEST_PATH"
 
+# A shared output may include offline assets from the previous complete run.
+# This script replaces it with online assets only; the full release flow must
+# regenerate all offline packages and their aggregate checksums afterward.
 if [[ -d "$OUTPUT_DIR" ]]; then
     chmod --reference="$OUTPUT_DIR" "$ASSET_DIR"
     mv -T -- "$OUTPUT_DIR" "${BUILD_TEMP}/previous"

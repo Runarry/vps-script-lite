@@ -7,6 +7,18 @@ if [[ -z "${VPS_UI_LOADED:-}" ]]; then
     source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/ui.sh"
 fi
 
+if [[ -f "${BASH_SOURCE[0]%/*}/offline.sh" ]]; then
+    # shellcheck source=offline.sh
+    source "${BASH_SOURCE[0]%/*}/offline.sh"
+else
+    # Older source-tree fixtures omit this optional library. An offline marker
+    # must still prevent network fallback if the imported library is missing.
+    vps_offline_active() {
+        [[ -n "${VPSCTL_PROJECT_ROOT:-}" ]] &&
+            [[ -e "${VPSCTL_PROJECT_ROOT}/.offline" || -L "${VPSCTL_PROJECT_ROOT}/.offline" ]]
+    }
+fi
+
 VPS_CMD_DEPENDENCIES_PLANNED=0
 _VPS_CMD_APT_REFRESHED=0
 
@@ -643,8 +655,16 @@ vps_cmd_install_packages() {
         fi
     done
     vps_cmd_require_root || return $?
+    if vps_offline_active && [[ "$manager" != apt-get ]]; then
+        vps_cmd_error "离线软件包仅支持 apt-get，当前管理器：$manager"
+        return 3
+    fi
     case "$manager" in
         apt-get)
+            if vps_offline_active; then
+                vps_offline_apt install "${packages[@]}"
+                return $?
+            fi
             vps_cmd_apt_update || return 20
             vps_cmd_run apt-get install -y --no-install-recommends "${packages[@]}" || return 20
             ;;

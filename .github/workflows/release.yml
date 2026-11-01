@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 jobs:
-  release:
+  prepare:
     if: github.repository == 'Runarry/vps-script-lite'
     runs-on: ubuntu-latest
     steps:
@@ -27,6 +27,78 @@ jobs:
       - name: Build release assets
         shell: bash
         run: bash scripts/build-release.sh dist/release
+
+      - name: Resolve and verify one upstream snapshot
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/resolve-offline-upstreams.sh dist/upstream-snapshot
+
+      - name: Save online assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: online-release
+          path: dist/release/
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Save upstream snapshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: upstream-snapshot
+          path: dist/upstream-snapshot/
+          if-no-files-found: error
+          retention-days: 1
+
+  offline:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - { os: debian, version: '12' }
+          - { os: debian, version: '13' }
+          - { os: ubuntu, version: '22.04' }
+          - { os: ubuntu, version: '24.04' }
+        arch: [amd64, arm64]
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: online-release
+          path: dist/online
+      - uses: actions/download-artifact@v4
+        with:
+          name: upstream-snapshot
+          path: dist/upstream-snapshot
+      - name: Build matching offline package
+        run: >-
+          bash scripts/build-offline-release.sh
+          --os '${{ matrix.target.os }}' --os-version '${{ matrix.target.version }}' --arch '${{ matrix.arch }}'
+          --online-dir dist/online --snapshot-dir dist/upstream-snapshot --output-dir dist/offline
+      - uses: actions/upload-artifact@v4
+        with:
+          name: offline-${{ matrix.target.os }}-${{ matrix.target.version }}-${{ matrix.arch }}
+          path: dist/offline/*.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  release:
+    needs: [prepare, offline]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: online-release
+          path: dist/release
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: offline-*
+          merge-multiple: true
+          path: dist/release
+      - name: Require all eight packages and create aggregate checksums
+        run: bash scripts/build-offline-release.sh --aggregate --output-dir dist/release
 
       - name: Prepare draft GitHub release
         env:

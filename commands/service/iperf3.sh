@@ -436,6 +436,10 @@ iperf3_update_package() {
         return 3
     }
     manager="$(vps_cmd_detect_package_manager)" || return $?
+    if vps_offline_active && [[ "$manager" != apt-get ]]; then
+        vps_cmd_error "离线 iperf3 更新仅支持 apt-get，当前管理器：$manager"
+        return 3
+    fi
     package="$(vps_cmd_package_for_tool "$manager" iperf3)" || return $?
     case "$manager" in
         apt-get)
@@ -457,6 +461,13 @@ iperf3_update_package() {
     esac
     case "$manager" in
         apt-get)
+            if vps_offline_active; then
+                (
+                    export DEBIAN_FRONTEND=noninteractive
+                    vps_offline_apt upgrade "$package"
+                )
+                return $?
+            fi
             vps_cmd_apt_update || return $?
             vps_cmd_run env DEBIAN_FRONTEND=noninteractive apt-get install -y --only-upgrade --no-install-recommends "$package" || return 20
             ;;

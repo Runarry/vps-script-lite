@@ -13,6 +13,7 @@ for syntax_file in \
     "${TEST_ROOT}/lib/command.sh" \
     "${TEST_ROOT}/lib/ufw.sh" \
     "${TEST_ROOT}/lib/distribution.sh" \
+    "${TEST_ROOT}/lib/offline.sh" \
     "${TEST_ROOT}/lib/registry.sh" \
     "${TEST_ROOT}/lib/server-test.sh" \
     "${TEST_ROOT}/lib/backup.sh" \
@@ -48,6 +49,9 @@ for syntax_file in \
     "${TEST_ROOT}"/commands/test/*.sh \
     "${TEST_ROOT}/scripts/build-release.sh" \
     "${TEST_ROOT}/scripts/prepare-draft-release.sh" \
+    "${TEST_ROOT}/scripts/build-offline-release.sh" \
+    "${TEST_ROOT}/scripts/resolve-offline-upstreams.sh" \
+    "${TEST_ROOT}"/scripts/offline-build/*.sh \
     "${TEST_ROOT}/scripts/po0-relay.sh" \
     "${TEST_ROOT}/tests/unit/test-po0-relay.sh" \
     "${TEST_ROOT}/tests/integration/test-po0-relay-real.sh" \
@@ -57,6 +61,12 @@ for syntax_file in \
     "${TEST_ROOT}/tests/unit/test-distribution-clean.sh" \
     "${TEST_ROOT}/tests/unit/test-release-build.sh" \
     "${TEST_ROOT}/tests/unit/test-release-workflow.sh" \
+    "${TEST_ROOT}/tests/unit/test-offline-build.sh" \
+    "${TEST_ROOT}/tests/unit/test-offline-distribution.sh" \
+    "${TEST_ROOT}/tests/unit/test-offline-runtime.sh" \
+    "${TEST_ROOT}/tests/integration/test-offline-distribution-real.sh" \
+    "${TEST_ROOT}/tests/integration/test-offline-platforms-real.sh" \
+    "${TEST_ROOT}/tests/integration/test-offline-services-real.sh" \
     "${TEST_ROOT}/tests/unit/test-network-bbr.sh" \
     "${TEST_ROOT}/tests/unit/test-network-dns.sh" \
     "${TEST_ROOT}/tests/unit/test-network-ip-policy.sh" \
@@ -126,6 +136,9 @@ bash "${TEST_ROOT}/tests/unit/test-distribution.sh"
 bash "${TEST_ROOT}/tests/unit/test-distribution-clean.sh"
 bash "${TEST_ROOT}/tests/unit/test-release-build.sh"
 bash "${TEST_ROOT}/tests/unit/test-release-workflow.sh"
+bash "${TEST_ROOT}/tests/unit/test-offline-build.sh"
+bash "${TEST_ROOT}/tests/unit/test-offline-distribution.sh"
+bash "${TEST_ROOT}/tests/unit/test-offline-runtime.sh"
 bash "${TEST_ROOT}/tests/unit/test-po0-relay.sh"
 bash "${TEST_ROOT}/tests/unit/test-network-bbr.sh"
 bash "${TEST_ROOT}/tests/unit/test-network-dns.sh"

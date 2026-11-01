@@ -42,6 +42,11 @@ vps-script-lite/
 │       └── kernel/         # 内核来源、清点、GRUB 与 BIOS 安装私有模块
 ├── config/                 # 可提交的默认配置与示例；禁止存放真实密钥
 ├── lib/                    # 可被入口或功能脚本复用的稳定公共函数
+├── scripts/                # 构建、发布与独立运维工具
+│   ├── build-release.sh    # 在线安装器、manifest 与全部 bundle 构建
+│   ├── build-offline-release.sh  # 目标系统离线包构建与八包汇总
+│   ├── resolve-offline-upstreams.sh  # 同次构建共用的上游稳定版快照
+│   └── offline-build/      # 目标系统 APT 依赖收集与离线归档组装
 ├── tests/
 │   ├── fixtures/           # 脱敏、最小化的测试输入
 │   ├── integration/        # 隔离环境中的跨组件验证
@@ -104,6 +109,8 @@ vps-script-lite/
 
 `lib/ufw.sh` 提供网络管理、SSH、代理、TCP 探测监听、iperf3 和 TLS 共用的规则归属、服务需求与事务接口，随 `shared-ufw` 按需下载。各业务提交声明，UFW 入口通过已知持久数据契约采集存量，不加载其他功能的私有模块。独立 UFW 锁在业务锁之后获取，跨命令同步按访问管理、代理、TLS、TCP 探测监听、iperf3 的固定顺序获取业务锁。中转后台运行时复制同版本共享库，避免升级或重启后丢失端口联动能力。
 
+`lib/offline.sh` 随 core 常驻，供安装器、自更新、分发和功能依赖安装共用，负责离线包平台与完整性校验、导入事务、本地 APT 仓库和固定上游资产读取。功能脚本继续通过公共依赖与下载接口获取资源，不另行实现离线分发流程。
+
 公共库不得：
 
 - 包含某个功能命令专属的业务流程。
@@ -120,11 +127,12 @@ vps-script-lite/
 /usr/local/lib/vpsctl/
 ├── current                                  # 指向当前分发版本的原子切换指针
 └── releases/
-    └── <version>/                           # 单一不可变分发版本
+    └── <version>/                           # 单一分发版本
+        └── .offline/                        # 离线导入后持久保存的完整资源
 /var/lib/vpsctl/self/                        # 安装、自更新、资产缓存元数据
 ```
 
-`core` 常驻，只包含 `bin/vpsctl`、`VERSION`、`environment.sh`、`registry.sh`、`ui.sh`、`distribution.sh` 和三个 self 命令。每个非 self 公开命令独立打包为 `<domain>-<action>`，文件边界和全部私有模块由 `lib/registry.sh` 的固定清单定义。所有功能依赖 `shared-command`；`network ufw`、`security access`、`security tls`、`service proxy`、`service tcping`、`service iperf3` 另依赖 `shared-ufw`；两项测试另依赖 `shared-server-test`；三个备份入口另依赖 `shared-backup`。首次执行功能或功能帮助时，按依赖顺序下载、校验、缓存，再分发。全局帮助、版本、环境、清单、菜单浏览和 self 状态保持离线。更新只获取目标版本的 manifest、安装器和 core，不预取旧缓存；不同版本的功能和共享库不得混用。功能卸载可在验证当前受管 release 后，持功能包下载锁删除该命令的固定文件和缓存标记；下次调用只重下该功能包。
+`core` 常驻，只包含 `bin/vpsctl`、`VERSION`、`environment.sh`、`registry.sh`、`ui.sh`、`distribution.sh`、`offline.sh` 和三个 self 命令。每个非 self 公开命令独立打包为 `<domain>-<action>`，文件边界和全部私有模块由 `lib/registry.sh` 的固定清单定义。所有功能依赖 `shared-command`；`network ufw`、`security access`、`security tls`、`service proxy`、`service tcping`、`service iperf3` 另依赖 `shared-ufw`；两项测试另依赖 `shared-server-test`；三个备份入口另依赖 `shared-backup`。默认在线安装首次执行功能或功能帮助时，按依赖顺序下载、校验、缓存，再分发。全局帮助、版本、环境、清单、菜单浏览和 self 状态保持离线。在线更新只获取目标版本的 manifest、安装器和 core，不预取旧缓存；不同版本的功能和共享库不得混用。功能卸载可在验证当前受管 release 后，持功能包下载锁删除该命令的固定文件和缓存标记；下次调用只恢复该功能包，在线安装重新下载，离线安装读取本地资源。
 
 仓库根 `VERSION` 是项目版本的规范来源。自 v0.8.10 起使用 schema 2，v0.8.9 使用 schema 1，不能用新格式覆盖旧 Release。资产由固定注册表生成，命名与交付约定见[Release 资产与发布流程](development-workflow.md#4-release-资产与发布流程)，此处不再维护一份逐包清单。
 
@@ -141,7 +149,11 @@ bundle<TAB>NAME<TAB>vpsctl-NAME-VERSION.tar.gz<TAB>SHA256
 
 manifest 的 `version`、tag、文件名、安装目标版本和应用展示版本必须一致。schema 2 不解析旧 schema 1；跨格式迁移须普通卸载管理器后重新安装，保留服务、配置、功能状态和备份。bootstrap 在 core 安装前只验证安全、唯一的 bundle 记录并要求 core，不执行下载的注册表。运行时按本地固定清单验证功能及共享包的精确路径和必需文件，锁内再次检查缓存，成功后才写 marker；失败清除本次临时资产。`current` 在 manifest、core 和安装器完成校验并落盘后切换；提交前失败仍恢复原 current、入口和 self 元数据。
 
-`self update` 仅在跨版本更新的 current、快捷入口及 self 元数据全部提交成功后清理历史 release，不保留自动回退版本。清理只处理 `releases/` 下名称为 `X.Y.Z` 的非符号链接目录，且普通文件 `.vpsctl-managed-release` 的单条记录必须为 `Runarry/vps-script-lite<TAB>X.Y.Z`、与目录名称匹配；当前 release、临时目录及不受管或异常条目跳过。历史清理失败时不回滚已激活的新版本，返回 `30` 并报告未完成路径；部分删除若已移除归属标识，则在原安全目录仍存在时恢复该标识，供下次成功跨版本更新重试。同版本更新只同步 self 缓存，同版本更新和提交失败路径均不清理历史版本。self 缓存缺失或普通文件内容损坏不阻断操作；更新回滚材料来自当前已验证入口和 release manifest，当前安装归属与完整性检查仍保留。初始安装、卸载及业务功能的状态与备份不受此策略影响。
+离线归档在既有在线资产之外增加目标系统元数据 `offline-manifest.tsv`、上游来源与版本 `components.tsv`、完整文件摘要 `SHA256SUMS`、上游原始资产和本地 APT 仓库；在线 manifest schema 2 与 bundle 格式保持不变。归档按 Debian 12/13、Ubuntu 22.04/24.04 和 amd64/arm64 分为 8 包。构建开始时统一解析 Xray、sing-box、lego、RFW 各自的最新稳定版，两个架构共用版本选择；APT 收集对应发行版当前软件源的完整 Depends/Pre-Depends 闭包，包括构建镜像已安装的依赖。
+
+`vpsctl.sh --offline-dir` 和 `self update --offline-dir` 使用同一导入流程：校验平台、摘要与全部 bundle，在候选目录解包全部项目代码并复制完整资源，再提交 release、current、入口和 self 元数据。原解压目录不参与后续运行；功能包缓存清理后从当前 release 的 `.offline/` 恢复。同版本导入要求 manifest 一致，可补全已有在线安装；跨版本使用目标包内代码和注册表。本地资源缺失或损坏时失败，不联网回退。`self update` 未带该选项时仍为在线更新。离线依赖覆盖与联网例外见[离线安装与更新](../README.md#离线安装与更新)。
+
+`self update` 仅在跨版本更新的 current、快捷入口及 self 元数据全部提交成功后清理历史 release，不保留自动回退版本。清理只处理 `releases/` 下名称为 `X.Y.Z` 的非符号链接目录，且普通文件 `.vpsctl-managed-release` 的单条记录必须为 `Runarry/vps-script-lite<TAB>X.Y.Z`、与目录名称匹配；当前 release、临时目录及不受管或异常条目跳过。历史清理失败时不回滚已激活的新版本，返回 `30` 并报告未完成路径；部分删除若已移除归属标识，则在原安全目录仍存在时恢复该标识，供下次成功跨版本更新重试。同版本在线更新只同步 self 缓存，同版本更新和提交失败路径均不清理历史版本。self 缓存缺失或普通文件内容损坏不阻断操作；更新回滚材料来自当前已验证入口和 release manifest，当前安装归属与完整性检查仍保留。初始安装、卸载及业务功能的状态与备份不受此策略影响。
 
 ### 3.5 配置与运行数据
 

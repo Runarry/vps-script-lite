@@ -32,7 +32,7 @@ declare -ga VPS_BUNDLE_IDS=(
 
 vps_registry_bundle_files() {
     case "${1:-}" in
-        core) printf '%s\n' VERSION bin/vpsctl lib/environment.sh lib/registry.sh lib/ui.sh lib/distribution.sh commands/self/{status,update,uninstall}.sh ;;
+        core) printf '%s\n' VERSION bin/vpsctl lib/environment.sh lib/registry.sh lib/ui.sh lib/distribution.sh lib/offline.sh commands/self/{status,update,uninstall}.sh ;;
         shared-command) printf '%s\n' lib/command.sh ;;
         shared-ufw) printf '%s\n' lib/ufw.sh ;;
         shared-server-test) printf '%s\n' lib/server-test.sh ;;
