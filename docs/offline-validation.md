@@ -118,7 +118,7 @@ bash tests/integration/test-offline-services-real.sh
 
 资源验收完成后，复用已验证的依赖和上游文件，将全部包的项目资产统一替换为最终 `6f5f4f…dbb3d` manifest 对应内容，重新生成包内 `SHA256SUMS` 与归档；未重复已经通过且资源未改变的检查。汇总器验证 8 种目标元数据、相同在线 manifest 和各架构一致的上游组件清单，随后生成 `vpsctl-offline-SHA256SUMS`，标准 `sha256sum -c` 对全部 8 包均为 OK。
 
-最终 8 包及汇总清单位于仓库忽略目录 `dist/offline-validation/`，未上传或发布 GitHub Release。汇总清单本身的 SHA256 为 `e1f519530791bffe9dcdbba87a94fd212591346646549af89e33fd5f431be51c`。每包携带目标版本、使用说明和逐文件摘要；原始上游和 DEB 来源可从包内清单追溯。
+最终 8 包及汇总清单位于仓库忽略目录 `dist/offline-validation/`；本次功能验收时未上传或发布 GitHub Release。汇总清单本身的 SHA256 为 `e1f519530791bffe9dcdbba87a94fd212591346646549af89e33fd5f431be51c`。每包携带目标版本、使用说明和逐文件摘要；原始上游和 DEB 来源可从包内清单追溯。后续正式构建、草稿复核与公开发布结果见 [v0.11.0 发布验收](release-0.11.0-validation.md)。
 
 ### Debian 13 ARM64 的 nft 仿真限制
 
