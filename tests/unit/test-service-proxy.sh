@@ -197,7 +197,6 @@ make_mock ss '
 [[ ! -f "${VPSCTL_SYSTEM_ROOT}/run/listening-port" ]] || printf "tcp LISTEN 0 128 0.0.0.0:%s 0.0.0.0:*\n" "$(<"${VPSCTL_SYSTEM_ROOT}/run/listening-port")"
 [[ ! -f "${VPSCTL_SYSTEM_ROOT}/run/listening-udp-port" ]] || printf "udp UNCONN 0 0 0.0.0.0:%s 0.0.0.0:*\n" "$(<"${VPSCTL_SYSTEM_ROOT}/run/listening-udp-port")"'
 make_mock flock 'exit 0'
-make_mock ufw '[[ "${1:-}" == status ]] || exit 99; printf "Status: inactive\n"'
 make_mock curl '
 printf "curl %s\n" "$*" >>"$MOCK_LOG"
 scenario_file="${VPSCTL_SYSTEM_ROOT}/run/release-fixture-scenario"
@@ -3836,7 +3835,7 @@ core_pending_files() {
 core_pending_snapshot() {
     local core
     sha256sum "$(manifest_path)" \
-        "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/network/ufw/state.json"
+        "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/network/nftables/state.json"
     [[ ! -f "$(relay_path)" ]] || sha256sum "$(relay_path)"
     for core in xray sing-box; do
         core_pending_files "$core"
@@ -3847,7 +3846,7 @@ core_pending_snapshot() {
 
 core_pending_owner() {
     jq -Sc --arg owner "node:$1" '[.requirements[] | select(.owner == $owner)]' \
-        "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/network/ufw/state.json"
+        "${TEST_SYSTEM_ROOT}/var/lib/vpsctl/network/nftables/state.json"
 }
 
 core_pending_restart_fails() {
@@ -3892,8 +3891,8 @@ test_core_pending_isolation() {
             assert_equal "$a_files" "$(core_pending_files "$a")" "$a config binary and metadata restored"
             assert_equal "$b_nodes" "$(jq -Sc --arg core "$b" '[.nodes[] | select(.core == $core)]' "$(manifest_path)")" "$b later CRUD preserved"
             assert_equal "$b_files" "$(core_pending_files "$b")" "$b files preserved"
-            assert_equal "$b_owner" "$(core_pending_owner "$keep_id")" "$b UFW owner preserved"
-            [[ "$b_owner" != '[]' ]] || fail 'later node has no UFW requirements'
+            assert_equal "$b_owner" "$(core_pending_owner "$keep_id")" "$b nftables owner preserved"
+            [[ "$b_owner" != '[]' ]] || fail 'later node has no nftables requirements'
             if [[ "$a" == sing-box ]]; then
                 assert_equal "$a_dns" "$(jq -Sc '.settings.sing_box // null' "$(manifest_path)")" 'failed sing-box DNS restored'
             else
@@ -4054,7 +4053,7 @@ test_core_pending_runtime_retry() {
     assert_equal runtime-a "$(jq -r --arg id "$aid" '.nodes[] | select(.id == $id) | .name' "$(manifest_path)")" 'retry restored original Xray node'
     jq -e 'any(.exits[]; .name == "before") and all(.exits[]; .name != "before-pending")' "$(relay_path)" >/dev/null || fail 'retry failed to undo pending exit edit'
     assert_equal "$b_files" "$(core_pending_files sing-box)" 'runtime rollback changed later sing-box files'
-    assert_equal "$b_owner" "$(core_pending_owner "$hop_id")" 'runtime rollback changed later HY2 UFW owner'
+    assert_equal "$b_owner" "$(core_pending_owner "$hop_id")" 'runtime rollback changed later HY2 nftables owner'
     jq -e --arg id "$exit_id" '.exits[$id].host == "later.example" and .exits[$id].ipv4 == "198.51.100.71"' "$cache" >/dev/null || fail 'runtime rollback lost later DNS cache'
     assert_file_contains "${TEST_SYSTEM_ROOT}/run/last-nft.batch" 'redirect to :39400' 'runtime rollback lost later HY2 rules'
     assert_file_contains "${TEST_SYSTEM_ROOT}/run/last-nft.batch" 'tcp dport 19411' 'runtime rollback lost later forward rules'

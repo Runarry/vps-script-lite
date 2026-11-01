@@ -24,8 +24,8 @@ source "${TEST_ROOT}/commands/service/proxy/protocols-xray.sh"
 source "${TEST_ROOT}/commands/service/proxy/core.sh"
 # shellcheck source=commands/service/proxy/relay.sh
 source "${TEST_ROOT}/commands/service/proxy/relay.sh"
-# shellcheck source=commands/service/proxy/ufw.sh
-source "${TEST_ROOT}/commands/service/proxy/ufw.sh"
+# shellcheck source=commands/service/proxy/nftables.sh
+source "${TEST_ROOT}/commands/service/proxy/nftables.sh"
 proxy_common_init
 PROXY_RELAY_LOGICAL="${PROXY_STATE_LOGICAL}/relay.json"
 PROXY_RELAY_FILE="${PROXY_STATE_DIR}/relay.json"
@@ -42,8 +42,8 @@ vps_cmd_unlock() { return 0; }
 proxy_ensure_mutation_tools() { return 0; }
 proxy_service_is_active() { [[ -f "${TEST_PROXY_ROOT}/active" ]]; }
 proxy_service_is_enabled() { return 1; }
-proxy_ufw_nodes_transaction() { shift; "$@"; }
-proxy_ufw_relay_transaction() { "$@"; }
+proxy_nft_nodes_transaction() { shift; "$@"; }
+proxy_nft_relay_transaction() { "$@"; }
 proxy_relay_forward_init() { PROXY_RELAY_FORWARD_CACHE="${PROXY_STATE_DIR}/relay-resolved.json"; }
 proxy_relay_forward_sync() { return 0; }
 proxy_service_action() {

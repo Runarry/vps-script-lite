@@ -34,7 +34,7 @@ printf 'system=%s-%s kernel=%s boot_id=%s\n' "${ID:-unknown}" "${VERSION_ID:-unk
 state='/var/lib/vpsctl/service/tcping/state.json'
 runtime='/usr/local/libexec/vpsctl/tcping/listener.py'
 ready='/run/vpsctl/tcping-ready.json'
-fw='/var/lib/vpsctl/network/ufw/state.json'
+fw='/var/lib/vpsctl/network/nftables/state.json'
 unit=''
 init=''
 if [[ -d /run/systemd/system ]] && command -v systemctl >/dev/null; then
@@ -62,8 +62,8 @@ else
     ! rc-service vpsctl-tcping status >/dev/null 2>&1 || exit 3
     [[ ! -e /etc/runlevels/default/vpsctl-tcping ]] || exit 3
 fi
-if command -v ufw >/dev/null; then ufw status; else printf 'ufw=absent\n'; fi
-if [[ -f "$fw" ]]; then jq -c '[.requirements[] | .owner] | unique' "$fw" >"$RESULT_DIR/ufw-owners-before.json"; fi
+if command -v nft >/dev/null; then nft list tables; else printf 'nft=absent\n'; fi
+if [[ -f "$fw" ]]; then jq -c '[.requirements[] | .owner] | unique' "$fw" >"$RESULT_DIR/nft-owners-before.json"; fi
 
 fail() {
     printf 'FAIL: %s\n' "$*" >&2
@@ -155,29 +155,29 @@ other_owner() {
         bash -c '
         set -Eeuo pipefail
         source "$TCPING_TEST_ROOT/lib/command.sh"
-        source "$TCPING_TEST_ROOT/lib/ufw.sh"
+        source "$TCPING_TEST_ROOT/lib/nftables.sh"
         vps_cmd_init tcping-real-acceptance "$TCPING_TEST_ROOT"
         if [[ "$1" == add ]]; then
             jq -n --arg port "$TCPING_TEST_PORT" \
                 '\''[{owner:"node:tcping-test",kind:"input",family:"ipv4",proto:"tcp",port:$port,source:"any",destination:"any",temporary:false}]'\'' \
                 >"$TCPING_TEST_DESIRED"
         else printf "[]\n" >"$TCPING_TEST_DESIRED"; fi
-        vps_ufw_begin tcping-other "$TCPING_TEST_DESIRED"
-        vps_ufw_commit
+        vps_nft_begin tcping-other "$TCPING_TEST_DESIRED"
+        vps_nft_commit
     ' _ "$1"
 }
 
 assert_rule() {
     local port="$1" owner="$2" present="$3" inventory
-    inventory="$(vpsctl network ufw rule list --json)"
+    inventory="$(jq '.requirements' "$fw")"
     if [[ "$present" == yes ]]; then
         jq -e --arg port "$port" --arg owner "$owner" \
-            'any(.[]; .family=="ipv4" and .kind=="input" and .proto=="tcp" and .port==$port and (.owners|index($owner)))' \
-            <<<"$inventory" >/dev/null || fail "UFW has no IPv4 TCP $port rule owned by $owner"
+            'any(.[]; .family=="ipv4" and .kind=="input" and .proto=="tcp" and .port==$port and .owner==$owner)' \
+            <<<"$inventory" >/dev/null || fail "NFT has no IPv4 TCP $port rule owned by $owner"
     else
         jq -e --arg port "$port" --arg owner "$owner" \
-            'all(.[]; .port!=$port or (.owners|index($owner)|not))' \
-            <<<"$inventory" >/dev/null || fail "UFW retained IPv4 TCP $port rule owned by $owner"
+            'all(.[]; .port!=$port or .owner!=$owner)' \
+            <<<"$inventory" >/dev/null || fail "NFT retained IPv4 TCP $port rule owned by $owner"
     fi
 }
 
@@ -185,6 +185,7 @@ namespace=''
 root_if=''
 busy_pid=''
 manual_port=''
+manual_id="tcping-accept-manual-${BASHPID}"
 other_owner_seeded=0
 cleanup() {
     local result=$?
@@ -197,7 +198,7 @@ cleanup() {
     if [[ -n "$root_if" ]]; then ip link del "$root_if" 2>/dev/null || true; fi
     if [[ -f "$unit" || -f "$state" || -f "$runtime" ]]; then vpsctl service tcping uninstall || result=30; fi
     if ((other_owner_seeded == 1)); then other_owner clear || result=30; fi
-    if [[ -n "$manual_port" ]]; then ufw --force delete allow "$manual_port/tcp" || result=30; fi
+    if [[ -n "$manual_port" ]]; then vpsctl network nftables rule delete --id "$manual_id" || result=30; fi
     if ((result == 0)); then printf 'PASS: real TCPing acceptance and owned-resource cleanup\n'; fi
     exit "$result"
 }
@@ -208,9 +209,9 @@ old_port="$(free_port)"
 new_port="$(free_port)"
 while [[ "$new_port" == "$old_port" ]]; do new_port="$(free_port)"; done
 printf 'old_port=%s new_port=%s\n' "$old_port" "$new_port"
-if [[ "${VPSCTL_TCPING_LIVE_UFW:-0}" == 1 ]]; then
-    [[ "$(LC_ALL=C ufw status | head -1)" == 'Status: active' ]] || fail 'live UFW acceptance needs an active firewall'
-    ufw allow "$old_port/tcp" comment 'tcping-accept-manual'
+if [[ "${VPSCTL_TCPING_LIVE_NFT:-0}" == 1 ]]; then
+    nft list table inet vpsctl_firewall >/dev/null || fail 'live nftables acceptance needs an active shared firewall'
+    vpsctl network nftables rule add --id "$manual_id" --action allow --family ipv4 --proto tcp --port "$old_port" --comment tcping-accept-manual
     manual_port="$old_port"
 fi
 
@@ -242,7 +243,7 @@ if [[ "$init" == systemd ]] && command -v runuser >/dev/null 2>&1; then
         printf 'PASS: restricted ordinary-user status fails clearly without false state\n'
     fi
 fi
-if [[ "${VPSCTL_TCPING_LIVE_UFW:-0}" == 1 ]]; then assert_rule "$old_port" tcping yes; fi
+if [[ "${VPSCTL_TCPING_LIVE_NFT:-0}" == 1 ]]; then assert_rule "$old_port" tcping yes; fi
 
 if [[ "${VPSCTL_TCPING_NETNS:-0}" == 1 ]]; then
     command -v ip >/dev/null || fail 'network namespace test needs ip'
@@ -316,11 +317,11 @@ if [[ -n "$namespace" ]]; then
     netns_probe "$root_ip" "$old_port" closed
     netns_probe "$root_ip6" "$old_port" closed
 fi
-if [[ "${VPSCTL_TCPING_LIVE_UFW:-0}" == 1 ]]; then
+if [[ "${VPSCTL_TCPING_LIVE_NFT:-0}" == 1 ]]; then
     assert_rule "$new_port" tcping yes
-    vpsctl network ufw rule list --json | jq -e --arg port "$old_port" \
-        'any(.[]; .family=="ipv4" and .port==$port and .action=="allow")' >/dev/null ||
-        fail 'port change removed pre-existing manual UFW rule'
+    vpsctl network nftables rule list --json | jq -e --arg port "$old_port" \
+        'any(.rules[]; .family=="ipv4" and .port==$port and .action=="allow")' >/dev/null ||
+        fail 'port change removed pre-existing manual NFT rule'
     other_owner add
     other_owner_seeded=1
     assert_rule "$new_port" node:tcping-test yes
@@ -336,18 +337,18 @@ if [[ -n "$namespace" ]]; then
     netns_probe "$root_ip" "$new_port" closed
     netns_probe "$root_ip6" "$new_port" closed
 fi
-jq -e '[.requirements[] | select(.owner=="tcping")] | length==0' "$fw" >/dev/null || fail 'stop retained UFW demand'
-if [[ "${VPSCTL_TCPING_LIVE_UFW:-0}" == 1 ]]; then
+jq -e '[.requirements[] | select(.owner=="tcping")] | length==0' "$fw" >/dev/null || fail 'stop retained NFT demand'
+if [[ "${VPSCTL_TCPING_LIVE_NFT:-0}" == 1 ]]; then
     assert_rule "$new_port" tcping no
     assert_rule "$new_port" node:tcping-test yes
     other_owner clear
     other_owner_seeded=0
-    vpsctl network ufw sync
+    vpsctl network nftables sync
     assert_rule "$new_port" tcping no
-    vpsctl network ufw rule list --json | jq -e --arg port "$old_port" \
-        'any(.[]; .family=="ipv4" and .port==$port and .action=="allow")' >/dev/null ||
-        fail 'global sync removed manual UFW rule'
-    printf 'PASS: live UFW manual/shared ownership and stopped global sync\n'
+    vpsctl network nftables rule list --json | jq -e --arg port "$old_port" \
+        'any(.rules[]; .family=="ipv4" and .port==$port and .action=="allow")' >/dev/null ||
+        fail 'global sync removed manual NFT rule'
+    printf 'PASS: live NFT manual/shared ownership and stopped global sync\n'
 fi
 vpsctl service tcping start
 check_enabled || fail 'portless restart failed'
@@ -355,5 +356,5 @@ probe 127.0.0.1 "$new_port"
 vpsctl service tcping uninstall
 [[ ! -e "$state" && ! -e "$runtime" && ! -e "$unit" && ! -e "$ready" ]] || fail 'uninstall left owned files'
 check_disabled || fail 'uninstall left active or enabled service'
-jq -e '[.requirements[] | select(.owner=="tcping")] | length==0' "$fw" >/dev/null || fail 'uninstall retained UFW demand'
+jq -e '[.requirements[] | select(.owner=="tcping")] | length==0' "$fw" >/dev/null || fail 'uninstall retained NFT demand'
 printf 'PASS: stop/restart/uninstall lifecycle\n'

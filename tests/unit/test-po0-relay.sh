@@ -214,7 +214,7 @@ ok 'unknown state version, duplicate IDs, and modified legacy refusal'
     PO0_PUBLIC_IP=203.0.113.9
     PO0_URI[1]='vless://PRIVATE-ID@198.51.100.2:443?security=tls&sni=cert.example#State'
     po0_write_state >"$TMP/uri-state.tsv"
-    grep -Fxq $'PO0-RELAY\t2' "$TMP/uri-state.tsv" || fail 'URI state is not v2'
+    grep -Fxq $'PO0-RELAY\t3' "$TMP/uri-state.tsv" || fail 'URI state is not v3'
     po0_load_state "$TMP/uri-state.tsv" || fail 'load v2 URI state'
     equal 203.0.113.9 "$PO0_PUBLIC_IP" 'v2 public address'
     equal 'vless://PRIVATE-ID@198.51.100.2:443?security=tls&sni=cert.example#State' "${PO0_URI[1]}" 'v2 original URI'
@@ -225,13 +225,13 @@ ok 'unknown state version, duplicate IDs, and modified legacy refusal'
         printf '%s\n' "$record" >>"$TMP/uri-invalid.tsv"
         if po0_load_state "$TMP/uri-invalid.tsv"; then fail 'duplicate, orphan or unknown v2 record accepted'; fi
     done
-    # v1 is read compatibly, and the next serialization upgrades to v2.
-    sed '/^uri\t/d; /^meta\tpublic_ip\t/d; 1s/2$/1/' "$TMP/uri-state.tsv" >"$TMP/v1-state.tsv"
+    # v1/v2 are read compatibly, and serialization persists filter ownership.
+    sed '/^uri\t/d; /^meta\tpublic_ip\t/d; /^meta\tfilter_owner\t/d; 1s/3$/1/' "$TMP/uri-state.tsv" >"$TMP/v1-state.tsv"
     po0_load_state "$TMP/v1-state.tsv" || fail 'v1 compatibility'
     equal '' "$PO0_PUBLIC_IP" 'v1 resets previous public address'
     equal '' "${PO0_URI[1]-}" 'v1 resets previous URIs'
     po0_write_state >"$TMP/v1-upgraded.tsv"
-    grep -Fxq $'PO0-RELAY\t2' "$TMP/v1-upgraded.tsv" || fail 'v1 is not upgraded on write'
+    grep -Fxq $'PO0-RELAY\t3' "$TMP/v1-upgraded.tsv" || fail 'v1 is not upgraded on write'
     po0_load_state "$TMP/v1-upgraded.tsv" || fail 'v1 upgraded reload'
     ok 'v1 compatibility and v2 URI/public-IP roundtrip, duplicate/orphan/unknown refusal'
 )
@@ -258,6 +258,36 @@ po0_import_legacy "$ROOT/tests/fixtures/po0-legacy-multiple.nft"
 po0_render_config >"$TMP/rendered.nft"
 if grep -Eq '^[[:space:]]*flush[[:space:]]+ruleset' "$TMP/rendered.nft"; then fail 'render wipes foreign nft tables'; fi
 ok 'rendered persistent configuration uses scoped reset'
+(
+    grep -q 'table inet po0_relay_filter' "$TMP/rendered.nft" || fail 'standalone filter missing'
+    grep -q 'policy drop' "$TMP/rendered.nft" || fail 'standalone protection missing'
+    PO0_FILTER_OWNER=vpsctl
+    po0_write_state >"$TMP/cooperative.tsv"
+    po0_load_state "$TMP/cooperative.tsv" || fail 'cooperative state reload'
+    equal vpsctl "$PO0_FILTER_OWNER" 'filter ownership survives reload'
+    po0_render_config >"$TMP/cooperative.nft"
+    if grep -q 'policy drop' "$TMP/cooperative.nft"; then fail 'cooperative PO0 reinstates global DROP'; fi
+    grep -q 'table ip po0_relay_nat {' "$TMP/cooperative.nft" || fail 'cooperative NAT missing'
+    po0_requirements_json >"$TMP/cooperative.json"
+    jq -e 'length == 4 and all(.[]; .scope == "po0" and .kind == "route" and .interfaces.in == "wan0")' "$TMP/cooperative.json" >/dev/null || fail 'cooperative route requirements'
+    vps_nft_state() {
+        printf '%s\n' '{"schema_version":1,"revision":7,"enabled":false,"logging":false,"rules":[],"limits":[],"requirements":[{"scope":"ssh","owner":"ssh","kind":"input","family":"ipv4","proto":"tcp","port":"22,2022","source":"any","destination":"any"}],"links":{"po0:1":{"detached":true,"scope":"po0"}},"leases":{}}'
+    }
+    vps_nft_prepare_state() { cp "$1" "$TMP/prepared-shared.json"; }
+    po0_shared_prepare "$TMP" || fail 'prepare shared requirements'
+    jq -e '.revision == 8 and (.requirements | length == 5) and .links["po0:1"].detached and
+        .links["po0:2"] == {detached:false,scope:"po0"}' "$TMP/prepared-shared.json" >/dev/null || fail 'shared update loses foreign demand or detached preference'
+    PO0_PROXY_STATE_DIR="$TMP/proxy"
+    mkdir -p "$PO0_PROXY_STATE_DIR"
+    printf '{"forwards":[{"network":"udp","listen_port_start":20000,"listen_port_end":20001}]}' >"$PO0_PROXY_STATE_DIR/relay.json"
+    if po0_check_configured_conflicts; then fail 'configured main relay overlap accepted'; fi
+    printf '{"forwards":[]}' >"$PO0_PROXY_STATE_DIR/relay.json"
+    printf '{"nodes":[{"profile":"hysteria2","port":443,"listen":"::","options":{"hop_ports":"20001-20005"}}]}' >"$PO0_PROXY_STATE_DIR/nodes.json"
+    if po0_check_configured_conflicts; then fail 'HY2 hopping overlap accepted'; fi
+    printf '{"nodes":[]}' >"$PO0_PROXY_STATE_DIR/nodes.json"
+    po0_check_configured_conflicts || fail 'unoccupied ports rejected'
+    ok 'cooperative ownership, NAT retention, declarations and configured relay/HY2 conflicts'
+)
 cp "$ROOT/scripts/po0-relay.sh" "$TMP/standalone.sh"
 help="$(cd "$TMP" && bash ./standalone.sh --help)"
 [[ -n "$help" ]] || fail 'public help is empty'
@@ -505,7 +535,7 @@ cp "$ROOT/tests/fixtures/po0-legacy-multiple.nft" "$TMP/menu-legacy.nft"
 before="$(sha256sum "$TMP/menu-legacy.nft")"
 {
     printf '#!/usr/bin/env bash\nsource %q\n' "$TMP/standalone.sh"
-    printf 'PO0_NFT_FILE=%q\nPO0_STATE_FILE=%q\npo0_main\n' "$TMP/menu-legacy.nft" "$TMP/menu-state.tsv"
+    printf 'PO0_LEGACY_NFT_FILE=%q\nPO0_NFT_FILE=%q\nPO0_STATE_FILE=%q\npo0_main\n' "$TMP/menu-legacy.nft" "$TMP/menu-rules.nft" "$TMP/menu-state.tsv"
 } >"$TMP/menu-runner.sh"
 python3 - "$TMP/menu-runner.sh" "$ROOT/scripts/po0-relay.sh" <<'PY'
 import os, pty, select, subprocess, sys, time

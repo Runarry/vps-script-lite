@@ -11,6 +11,8 @@ readonly FAIL2BAN_PROJECT_ROOT
 
 # shellcheck source=../../lib/command.sh
 source "${FAIL2BAN_PROJECT_ROOT}/lib/command.sh"
+# shellcheck source=../../lib/nftables.sh
+source "${FAIL2BAN_PROJECT_ROOT}/lib/nftables.sh"
 
 readonly FAIL2BAN_MARKER='# Managed by vpsctl security fail2ban.'
 readonly FAIL2BAN_CONFIG_LOGICAL='/etc/fail2ban/jail.d/99-vpsctl-sshd.local'
@@ -368,15 +370,13 @@ fail2ban_existing_sshd_jail() {
 }
 
 fail2ban_detect_banaction() {
-    local firewalld=0 ufw_active=0
-    if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then firewalld=1; fi
-    if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | awk 'tolower($0) ~ /^status:[[:space:]]*active/ {found=1} END{exit !found}'; then ufw_active=1; fi
-    if ((firewalld + ufw_active > 1)); then
-        vps_cmd_error "检测到多个活动防火墙前端（firewalld 与 UFW），拒绝选择 Fail2ban banaction"
-        return 10
+    local firewalld=0
+    if vps_nft_enabled || vps_nft_is_active; then
+        printf 'nftables-multiport\n'
+        return 0
     fi
+    if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then firewalld=1; fi
     if ((firewalld)); then printf 'firewallcmd-rich-rules\n'
-    elif ((ufw_active)); then printf 'ufw\n'
     elif command -v nft >/dev/null 2>&1; then printf 'nftables-multiport\n'
     elif command -v iptables >/dev/null 2>&1; then printf 'iptables-multiport\n'
     else printf 'nftables-multiport\n'
@@ -665,6 +665,7 @@ fail2ban_rollback_daemon() {
 
 fail2ban_apply_loaded_config() {
     local backup_id was_active=0 was_enabled=0 rc=0
+    FAIL2BAN_BANACTION="$(fail2ban_detect_banaction)" || return $?
     vps_cmd_require_root || return $?
     vps_cmd_lock security-fail2ban || return $?
     if [[ "${VPSCTL_DRY_RUN:-0}" == 1 ]]; then

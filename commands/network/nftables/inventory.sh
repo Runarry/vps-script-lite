@@ -2,7 +2,7 @@
 # Read only the documented business state contracts. Never source another
 # command's private modules or run another public command from global sync.
 
-ufw_cli_inventory_file() {
+nft_cli_inventory_file() {
     local logical="$1" destination="$2" path
     path="$(vps_cmd_system_path "$logical")" || return $?
     vps_cmd_require_no_symlink_components "$path" || return $?
@@ -18,19 +18,19 @@ ufw_cli_inventory_file() {
     fi
 }
 
-ufw_cli_requirement() {
+nft_cli_requirement() {
     local owner="$1" kind="$2" family="$3" proto="$4" port="$5" destination="$6"
-    ufw_cli_valid_port "$port" || {
+    nft_cli_valid_port "$port" || {
         vps_cmd_error "业务清单包含无效端口：$port"
         return 10
     }
-    ufw_cli_valid_address "$destination" || return 10
+    nft_cli_valid_address "$destination" || return 10
     jq -cn --arg owner "$owner" --arg kind "$kind" --arg family "$family" \
         --arg proto "$proto" --arg port "$port" --arg destination "$destination" \
         '{owner:$owner,kind:$kind,family:$family,proto:$proto,port:$port,source:"any",destination:$destination,temporary:false}'
 }
 
-ufw_cli_ssh_desired() {
+nft_cli_ssh_desired() {
     local sshd output='' port family='any' line keyword value local_ip server_port
     local -a ports=() families=()
     local -A seen=()
@@ -60,7 +60,7 @@ ufw_cli_ssh_desired() {
         }
         local_ip="${connection[2]}"
         server_port="${connection[3]}"
-        ufw_cli_valid_port "$server_port" || return 3
+        nft_cli_valid_port "$server_port" || return 3
         ports+=("$server_port")
         [[ "$local_ip" != *:* || "$family" != inet ]] || family=any
         [[ "$local_ip" == *:* || "$family" != inet6 ]] || family=any
@@ -74,7 +74,7 @@ ufw_cli_ssh_desired() {
         inet6) families=(ipv6) ;;
         any)
             families=(ipv4)
-            if vps_ufw_ipv6_available; then families+=(ipv6); fi
+            if vps_nft_ipv6_available; then families+=(ipv6); fi
             # An existing IPv6 SSH connection must never be omitted.
             if [[ "${local_ip:-}" == *:* && " ${families[*]} " != *ipv6* ]]; then families+=(ipv6); fi
             ;;
@@ -84,27 +84,27 @@ ufw_cli_ssh_desired() {
             ;;
     esac
     for port in "${ports[@]}"; do
-        ufw_cli_valid_port "$port" || return 10
+        nft_cli_valid_port "$port" || return 10
         [[ -z "${seen[$port]+set}" ]] || continue
         seen[$port]=1
-        for line in "${families[@]}"; do ufw_cli_requirement ssh input "$line" tcp "$port" any || return $?; done
+        for line in "${families[@]}"; do nft_cli_requirement ssh input "$line" tcp "$port" any || return $?; done
     done | jq -s '.'
 }
 
-ufw_cli_validate_requirements() {
+nft_cli_validate_requirements() {
     local desired="$1" row port destination
     while IFS= read -r row; do
         port="$(jq -r '.port' <<<"$row")"
         destination="$(jq -r '.destination' <<<"$row")"
-        ufw_cli_valid_port "$port" || {
+        nft_cli_valid_port "$port" || {
             vps_cmd_error "业务清单包含无效端口：$port"
             return 10
         }
-        ufw_cli_valid_address "$destination" || return 10
+        nft_cli_valid_address "$destination" || return 10
     done < <(jq -c '.[]' <<<"$desired")
 }
 
-ufw_cli_nodes_desired() {
+nft_cli_nodes_desired() {
     local manifest="$1" node id profile manifest_json desired ipv6=false
     jq -e '.nodes | type == "array"' "$manifest" >/dev/null || return 10
     while IFS= read -r node; do
@@ -116,13 +116,13 @@ ufw_cli_nodes_desired() {
     # but a missing listener stays invalid rather than taking that default.
     manifest_json="$(jq '.nodes |= map(.id |= tostring |
         .listen |= (if . == "" then "::" else tostring end))' "$manifest")" || return 10
-    vps_ufw_ipv6_available && ipv6=true
-    desired="$(vps_ufw_proxy_nodes_requirements "$manifest_json" "$ipv6")" || return 10
-    ufw_cli_validate_requirements "$desired" || return $?
+    vps_nft_ipv6_available && ipv6=true
+    desired="$(vps_nft_proxy_nodes_requirements "$manifest_json" "$ipv6")" || return 10
+    nft_cli_validate_requirements "$desired" || return $?
     printf '%s\n' "$desired"
 }
 
-ufw_cli_forwards_desired() {
+nft_cli_forwards_desired() {
     local manifest="$1" cache="$2" forward exit id exit_id wanted host cached_host
     local manifest_json cache_json desired
     jq -e '(.forwards | type == "array") and (.exits | type == "array")' "$manifest" >/dev/null || return 10
@@ -147,17 +147,17 @@ ufw_cli_forwards_desired() {
         manifest_json="$(jq -cn --argjson forward "$forward" --argjson exit "$exit" \
             --arg id "$id" --arg family "$wanted" \
             '{exits:[$exit],forwards:[$forward | .id=$id | .family=$family | .network //= "auto"]}')" || return 10
-        desired="$(vps_ufw_proxy_forwards_requirements "$manifest_json" "$cache_json")" || return 10
+        desired="$(vps_nft_proxy_forwards_requirements "$manifest_json" "$cache_json")" || return 10
         jq -e 'length > 0' <<<"$desired" >/dev/null || {
             vps_cmd_error "转发 $id 缺少已解析目标；请先刷新代理转发"
             return 3
         }
-        ufw_cli_validate_requirements "$desired" || return $?
+        nft_cli_validate_requirements "$desired" || return $?
         jq -c '.[]' <<<"$desired"
     done < <(jq -c '.forwards[]' "$manifest") | jq -s '.'
 }
 
-ufw_cli_tcping_desired() {
+nft_cli_tcping_desired() {
     local state ipv6=false
     state="$(vps_cmd_system_path /var/lib/vpsctl/service/tcping/state.json)" || return $?
     vps_cmd_require_no_symlink_components "$state" || return $?
@@ -171,14 +171,14 @@ ufw_cli_tcping_desired() {
         vps_cmd_error 'TCPing 状态损坏，拒绝猜测放行端口'
         return 10
     }
-    vps_ufw_ipv6_available && ipv6=true
+    vps_nft_ipv6_available && ipv6=true
     jq --argjson ipv6 "$ipv6" 'if .enabled then .port as $port |
         (["ipv4"] + if $ipv6 then ["ipv6"] else [] end) |
         map({owner:"tcping",kind:"input",family:.,proto:"tcp",port:($port|tostring),
             source:"any",destination:"any",temporary:false,preserve_existing:true}) else [] end' "$state"
 }
 
-ufw_cli_iperf3_desired() {
+nft_cli_iperf3_desired() {
     local state ipv6=false
     state="$(vps_cmd_system_path /var/lib/vpsctl/service/iperf3/state.json)" || return $?
     vps_cmd_require_no_symlink_components "$state" || return $?
@@ -193,7 +193,7 @@ ufw_cli_iperf3_desired() {
         vps_cmd_error 'iperf3 状态损坏，拒绝猜测放行端口'
         return 10
     }
-    vps_ufw_ipv6_available && ipv6=true
+    vps_nft_ipv6_available && ipv6=true
     jq --argjson ipv6 "$ipv6" 'if .enabled then .port as $port |
         [( ["ipv4"] + if $ipv6 then ["ipv6"] else [] end )[] as $family |
           ("tcp", "udp") as $proto |
@@ -201,14 +201,18 @@ ufw_cli_iperf3_desired() {
            source:"any",destination:"any",temporary:false,preserve_existing:true}] else [] end' "$state"
 }
 
-ufw_cli_sync_locked() {
-    local mode="${1:-0}" temporary='' status=0 cache
-    ufw_cli_no_ssh_transaction || return $?
+nft_cli_sync_locked() {
+    local mode="${1:-auto}" temporary='' status=0 cache
+    nft_cli_no_ssh_transaction || return $?
+    if [[ "${VPSCTL_DRY_RUN:-0}" == 1 ]]; then
+        vps_cmd_info "演练：同步 SSH、代理、TCPing 和 iperf3；保持 TLS 租约"
+        return 0
+    fi
     # Temporary candidates are calculation inputs, never managed state. The
     # shared library owns dry-run behavior and will not persist these files.
-    temporary="$(mktemp -d /tmp/vpsctl-ufw-inventory.XXXXXX)" || return 20
-    ufw_cli_inventory_file /var/lib/vpsctl/service/proxy/nodes.json "$temporary/nodes.json" || status=$?
-    if ((status == 0)); then ufw_cli_inventory_file /var/lib/vpsctl/service/proxy/relay.json "$temporary/relay.json" || status=$?; fi
+    temporary="$(mktemp -d /tmp/vpsctl-nft-inventory.XXXXXX)" || return 20
+    nft_cli_inventory_file /var/lib/vpsctl/service/proxy/nodes.json "$temporary/nodes.json" || status=$?
+    if ((status == 0)); then nft_cli_inventory_file /var/lib/vpsctl/service/proxy/relay.json "$temporary/relay.json" || status=$?; fi
     cache="$(vps_cmd_system_path /var/lib/vpsctl/service/proxy/relay-resolved.json)" || status=$?
     if ((status == 0)); then
         vps_cmd_require_no_symlink_components "$cache" || status=$?
@@ -219,15 +223,15 @@ ufw_cli_sync_locked() {
             printf '{"schema_version":1,"exits":{}}\n' >"$temporary/cache.json"
         fi
     fi
-    if ((status == 0)); then ufw_cli_ssh_desired >"$temporary/ssh.json" || status=$?; fi
-    if ((status == 0)); then ufw_cli_nodes_desired "$temporary/nodes.json" >"$temporary/proxy-nodes.json" || status=$?; fi
-    if ((status == 0)); then ufw_cli_forwards_desired "$temporary/relay.json" "$temporary/cache.json" >"$temporary/proxy-forwards.json" || status=$?; fi
-    if ((status == 0)); then ufw_cli_tcping_desired >"$temporary/tcping.json" || status=$?; fi
-    if ((status == 0)); then ufw_cli_iperf3_desired >"$temporary/iperf3.json" || status=$?; fi
+    if ((status == 0)); then nft_cli_ssh_desired >"$temporary/ssh.json" || status=$?; fi
+    if ((status == 0)); then nft_cli_nodes_desired "$temporary/nodes.json" >"$temporary/proxy-nodes.json" || status=$?; fi
+    if ((status == 0)); then nft_cli_forwards_desired "$temporary/relay.json" "$temporary/cache.json" >"$temporary/proxy-forwards.json" || status=$?; fi
+    if ((status == 0)); then nft_cli_tcping_desired >"$temporary/tcping.json" || status=$?; fi
+    if ((status == 0)); then nft_cli_iperf3_desired >"$temporary/iperf3.json" || status=$?; fi
     if ((status == 0)); then
         local scope begun=0
         for scope in ssh proxy-nodes proxy-forwards tcping iperf3; do
-            vps_ufw_begin "$scope" "$temporary/$scope.json" "$mode" || {
+            vps_nft_begin "$scope" "$temporary/$scope.json" "$mode" || {
                 status=$?
                 break
             }
@@ -235,7 +239,7 @@ ufw_cli_sync_locked() {
         done
         if ((status == 0)); then
             while ((begun > 0)); do
-                vps_ufw_commit || {
+                vps_nft_commit || {
                     status=$?
                     break
                 }
@@ -244,7 +248,7 @@ ufw_cli_sync_locked() {
         fi
         if ((status != 0)); then
             while ((begun > 0)); do
-                vps_ufw_rollback || true
+                vps_nft_rollback || true
                 begun=$((begun - 1))
             done
         fi

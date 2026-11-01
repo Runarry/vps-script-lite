@@ -2693,7 +2693,7 @@ proxy_purge_core_nodes() {
             proxy_commit_manifest_config "$core" "$candidate_manifest" "$candidate_config" "core-purge" || status=$?
         fi
     elif ((status == 0)); then
-        proxy_ufw_nodes_transaction "$candidate_manifest" proxy_atomic_write_from_file \
+        proxy_nft_nodes_transaction "$candidate_manifest" proxy_atomic_write_from_file \
             "$candidate_manifest" "${PROXY_STATE_LOGICAL}/nodes.json" 0600 || status=$?
     fi
     rm -f -- "$candidate_manifest" "$candidate_config"

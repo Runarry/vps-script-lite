@@ -10,8 +10,8 @@ TCPING_PROJECT_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P
 readonly TCPING_PROJECT_ROOT
 # shellcheck source=../../lib/command.sh
 source "$TCPING_PROJECT_ROOT/lib/command.sh"
-# shellcheck source=../../lib/ufw.sh
-source "$TCPING_PROJECT_ROOT/lib/ufw.sh"
+# shellcheck source=../../lib/nftables.sh
+source "$TCPING_PROJECT_ROOT/lib/nftables.sh"
 
 readonly TCPING_STATE_LOGICAL='/var/lib/vpsctl/service/tcping/state.json'
 readonly TCPING_RUNTIME_LOGICAL='/usr/local/libexec/vpsctl/tcping/listener.py'
@@ -36,7 +36,7 @@ TCPing 测试站点：提供可由其他机器探测的 TCP 监听端口。
 启动时按需使用 Python 3 标准库；监听全部 IPv4 接口及可用 IPv6。
 同端口且服务已就绪时不重新部署监听脚本。需要更新时，先执行 `vpsctl service tcping stop`，
 再执行 `vpsctl service tcping start`；后者按保存端口部署当前 listener.py。
-启动会联动已有 UFW，停止和卸载释放本模块需求；不会安装或启用 UFW。
+启动会联动共享 nftables，停止和卸载释放本模块需求；不会启用防火墙。
 云安全组和其他防火墙须另行放行所选 TCP 端口。
 
 全局选项：--dry-run、--install-deps、--yes、--non-interactive、
@@ -292,11 +292,11 @@ EOF
 
 tcping_desired() {
     local port="$1" enabled="$2" ipv6=false
-    vps_ufw_ipv6_available && ipv6=true
+    vps_nft_ipv6_available && ipv6=true
     jq -n --arg port "$port" --argjson enabled "$enabled" --argjson ipv6 "$ipv6" '
         if $enabled then (["ipv4"] + if $ipv6 then ["ipv6"] else [] end) |
             map({owner:"tcping",kind:"input",family:.,proto:"tcp",port:$port,
-                source:"any",destination:"any",temporary:false,preserve_existing:true}) else [] end'
+                source:"any",destination:"any",temporary:false}) else [] end'
 }
 
 tcping_save_state() {
@@ -346,7 +346,7 @@ tcping_restore() {
         fi
         if [[ "$TCPING_OLD_ACTIVE" == 0 ]]; then rm -f -- "$TCPING_READY" || status=30; fi
     fi
-    vps_ufw_rollback || status=30
+    vps_nft_rollback || status=30
     return "$status"
 }
 
@@ -359,10 +359,10 @@ tcping_cleanup() {
             vps_cmd_error "恢复不完整，备份保留于 $TCPING_WORK；修复后重试 start 或 stop"
             result=30
         fi
-    elif [[ "$TCPING_COMMITTED" == 1 && "${VPS_UFW_DEPTH:-0}" != 0 ]]; then
+    elif [[ "$TCPING_COMMITTED" == 1 && "${VPS_NFT_DEPTH:-0}" != 0 ]]; then
         # A signal between the business commit and the firewall commit must
         # retain the rules for the now-persisted service, not leave a prepared journal.
-        vps_ufw_commit || result=30
+        vps_nft_commit || result=30
     fi
     if [[ -n "$TCPING_WORK" && "$restored" == 0 ]]; then rm -rf -- "$TCPING_WORK" || result=30; fi
     vps_cmd_unlock
@@ -433,7 +433,7 @@ tcping_mutate() (
     tcping_load_state || return $?
     [[ -n "$port" ]] || port="$TCPING_SAVED_PORT"
     if [[ "$VPSCTL_DRY_RUN" == 1 ]]; then
-        vps_cmd_info "演练：TCPing $action，端口 ${port:-未设置}；同步该模块的 UFW 需求，不启用防火墙"
+        vps_cmd_info "演练：TCPing $action，端口 ${port:-未设置}；同步该模块的 nftables 需求，不启用防火墙"
         if [[ "$action" == start ]]; then
             vps_cmd_info '部署监听脚本、启动服务并启用开机启动'
         elif [[ "$action" == stop ]]; then
@@ -446,7 +446,7 @@ tcping_mutate() (
     trap 'exit 130' INT
     trap 'exit 143' TERM
     trap 'exit 129' HUP
-    # Re-read after taking the same business lock as global UFW synchronization.
+    # Re-read after taking the same business lock as global NFT synchronization.
     tcping_check_paths || return $?
     tcping_load_state || return $?
     [[ -n "${2:-}" ]] || port="$TCPING_SAVED_PORT"
@@ -473,7 +473,7 @@ tcping_mutate() (
     fi
     tcping_snapshot || return $?
     tcping_desired "$port" "$([[ "$action" == start ]] && printf true || printf false)" >"$TCPING_WORK/desired.json" || return 20
-    vps_ufw_begin tcping "$TCPING_WORK/desired.json" || return $?
+    vps_nft_begin tcping "$TCPING_WORK/desired.json" || return $?
     if [[ "$action" == start ]]; then
         mkdir -p -- "${TCPING_STATE%/*}" "${TCPING_RUNTIME%/*}" "${TCPING_UNIT%/*}" "${TCPING_LOG%/*}" || return 20
         if [[ "$port" != "$TCPING_SAVED_PORT" ]] || ! tcping_service_active || ! tcping_ready "$port"; then
@@ -507,7 +507,7 @@ tcping_mutate() (
         if [[ -n "$port" ]]; then tcping_save_state "$port" false || return $?; fi
     fi
     TCPING_COMMITTED=1
-    vps_ufw_commit || return $?
+    vps_nft_commit || return $?
     if [[ "$action" == uninstall ]]; then
         tcping_remove_runtime || return $?
         vps_cmd_success 'TCPing 已卸载；专属资源和功能缓存已清理'

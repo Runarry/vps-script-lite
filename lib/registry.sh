@@ -23,8 +23,8 @@ declare -ga VPS_REGISTRY_RESULTS=()
 # Release contents are fixed, never discovered by scanning directories. Both
 # the builder and runtime use these exact file lists (including private modules).
 declare -ga VPS_BUNDLE_IDS=(
-    core shared-command shared-ufw shared-server-test shared-backup
-    network-bbr network-dns network-ip-policy network-ufw network-rfw
+    core shared-command shared-nftables shared-server-test shared-backup
+    network-bbr network-dns network-ip-policy network-nftables
     system-kernel system-reinstall system-swap system-clean system-backup system-backup-docker system-backup-repo
     security-access security-fail2ban security-tls
     service-proxy service-tcping service-iperf3 test-nodequality test-tcpquality
@@ -34,13 +34,13 @@ vps_registry_bundle_files() {
     case "${1:-}" in
         core) printf '%s\n' VERSION bin/vpsctl lib/environment.sh lib/registry.sh lib/ui.sh lib/distribution.sh lib/offline.sh commands/self/{status,update,uninstall}.sh ;;
         shared-command) printf '%s\n' lib/command.sh ;;
-        shared-ufw) printf '%s\n' lib/ufw.sh ;;
+        shared-nftables) printf '%s\n' lib/nftables.sh lib/nftables/{schema.jq,render.jq,reconcile.jq,transactions.sh} ;;
         shared-server-test) printf '%s\n' lib/server-test.sh ;;
         shared-backup) printf '%s\n' lib/backup.sh lib/backup/{config,repository,jobs,schedule}.sh ;;
-        network-bbr | network-dns | network-ip-policy | network-rfw)
+        network-bbr | network-dns | network-ip-policy)
             printf 'commands/network/%s.sh\n' "${1#network-}"
             ;;
-        network-ufw) printf '%s\n' commands/network/ufw.sh commands/network/ufw/{common,inventory,rules,actions,menu}.sh ;;
+        network-nftables) printf '%s\n' commands/network/nftables.sh commands/network/nftables/{common,inventory,rules,actions,menu,runtime,legacy}.sh scripts/po0-relay.sh ;;
         system-kernel) printf '%s\n' commands/system/kernel.sh commands/system/kernel/{providers,inventory,grub,grub-install}.sh ;;
         system-reinstall) printf '%s\n' commands/system/reinstall.sh ;;
         system-swap) printf '%s\n' commands/system/swap.sh ;;
@@ -50,8 +50,8 @@ vps_registry_bundle_files() {
         system-backup-repo) printf '%s\n' commands/system/backup-repo.sh commands/system/backup-repo/cli.sh ;;
         security-access) printf '%s\n' commands/security/access.sh commands/security/access/{common,users,keys,firewall,sshd}.sh ;;
         security-fail2ban) printf '%s\n' commands/security/fail2ban.sh ;;
-        security-tls) printf '%s\n' commands/security/tls.sh commands/security/tls/{common,store,issue,timer,ufw}.sh ;;
-        service-proxy) printf '%s\n' commands/service/proxy.sh commands/service/proxy/{common,core,address,dns,hysteria2,hysteria2-runtime,machine,nodes,protocols-xray,protocols-sing-box,relay,relay-uri,relay-forward,time,ufw}.sh ;;
+        security-tls) printf '%s\n' commands/security/tls.sh commands/security/tls/{common,store,issue,timer,nftables}.sh ;;
+        service-proxy) printf '%s\n' commands/service/proxy.sh commands/service/proxy/{common,core,address,dns,hysteria2,hysteria2-runtime,machine,nodes,protocols-xray,protocols-sing-box,relay,relay-uri,relay-forward,time,nftables}.sh ;;
         service-tcping) printf '%s\n' commands/service/tcping.sh commands/service/tcping/listener.py ;;
         service-iperf3) printf '%s\n' commands/service/iperf3.sh ;;
         test-nodequality | test-tcpquality) printf 'commands/test/%s.sh\n' "${1#test-}" ;;
@@ -68,7 +68,8 @@ vps_registry_command_bundles() {
     fi
     printf 'shared-command\n'
     case "$command_key" in
-        network:ufw | security:access | security:tls | service:proxy | service:tcping | service:iperf3) printf 'shared-ufw\n' ;;
+        network:nftables) printf '%s\n' shared-nftables service-proxy ;;
+        security:access | security:tls | service:proxy | service:tcping | service:iperf3) printf 'shared-nftables\n' ;;
         test:nodequality | test:tcpquality) printf 'shared-server-test\n' ;;
         system:backup | system:backup-docker | system:backup-repo) printf 'shared-backup\n' ;;
     esac
@@ -161,7 +162,7 @@ vps_registry_init() {
     vps_registry_register_domain \
         "network" \
         "网络设置" \
-        "BBR、本机 DNS、IP 地址族偏好、UFW 与 RFW 网络防护管理"
+        "BBR、本机 DNS、IP 地址族偏好与 nftables 防火墙管理"
 
     vps_registry_register_domain \
         "system" \
@@ -226,26 +227,14 @@ vps_registry_init() {
 
     vps_registry_register_command \
         "network" \
-        "ufw" \
-        "UFW 防火墙" \
-        "安装、管理防火墙规则并联动 SSH、节点、中转、TCPing、iperf3 与证书端口" \
-        "commands/network/ufw.sh" \
+        "nftables" \
+        "nftables 防火墙" \
+        "管理原生防火墙规则、来源限制、连接防护及服务端口联动" \
+        "commands/network/nftables.sh" \
         "disruptive" \
         "optional-root" \
         "supported" \
         "linux" \
-        "experimental"
-
-    vps_registry_register_command \
-        "network" \
-        "rfw" \
-        "RFW 管理" \
-        "安装、更新、配置和管理基于 XDP 的 RFW 服务" \
-        "commands/network/rfw.sh" \
-        "disruptive" \
-        "optional-root" \
-        "supported" \
-        "linux,init:systemd" \
         "experimental"
 
     vps_registry_register_command \

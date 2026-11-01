@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Exercise SSH transaction ordering against the shared UFW API. The UFW engine's
+# Exercise SSH transaction ordering against the shared NFT API. The NFT engine's
 # real inventory, adoption and cross-owner behavior are covered by its own suite.
 # shellcheck disable=SC2317,SC2034
 
@@ -39,31 +39,33 @@ vps_cmd_require_root() { return 0; }
 vps_cmd_lock() { log_event security.lock; }
 vps_cmd_unlock() { log_event security.unlock; }
 vps_cmd_confirm_token() { return 0; }
-vps_ufw_init() { return 0; }
-vps_ufw_require_tools() { return 0; }
-vps_ufw_ipv6_available() { [[ "$MOCK_IPV6" == 1 ]]; }
-vps_ufw_owner_detached() { [[ "$MOCK_DETACHED" == 1 ]]; }
-vps_ufw_lock() {
-    UFW_LOCKS=$((UFW_LOCKS + 1))
-    log_event ufw.lock
+vps_nft_init() { return 0; }
+vps_nft_require_tools() { return 0; }
+vps_nft_enabled() { [[ "${MOCK_ENABLED:-0}" == 1 ]]; }
+vps_nft_is_active() { [[ "${MOCK_ACTIVE:-0}" == 1 ]]; }
+vps_nft_ipv6_available() { [[ "$MOCK_IPV6" == 1 ]]; }
+vps_nft_owner_detached() { [[ "$MOCK_DETACHED" == 1 ]]; }
+vps_nft_lock() {
+    NFT_LOCKS=$((NFT_LOCKS + 1))
+    log_event nft.lock
 }
-vps_ufw_unlock() {
-    UFW_LOCKS=$((UFW_LOCKS - 1))
-    log_event ufw.unlock
+vps_nft_unlock() {
+    NFT_LOCKS=$((NFT_LOCKS - 1))
+    log_event nft.unlock
 }
-vps_ufw_scope_desired() { cat -- "$FIXTURE/scope.json"; }
-vps_ufw_inventory() { cat -- "$FIXTURE/inventory.json"; }
-vps_ufw_scope_snapshot() {
-    [[ "$1" == ssh && "$UFW_LOCKS" -gt 0 ]] || fail 'snapshot must hold the shared lock'
-    log_event ufw.snapshot
+vps_nft_scope_desired() { cat -- "$FIXTURE/scope.json"; }
+vps_nft_inventory() { cat -- "$FIXTURE/inventory.json"; }
+vps_nft_scope_snapshot() {
+    [[ "$1" == ssh && "$NFT_LOCKS" -gt 0 ]] || fail 'snapshot must hold the shared lock'
+    log_event nft.snapshot
     cp -- "$FIXTURE/scope.json" "$2"
     chmod 0600 -- "$2"
 }
-vps_ufw_begin() {
+vps_nft_begin() {
     [[ "$1" == ssh ]] || fail 'SSH changed another scope'
-    log_event ufw.begin
+    log_event nft.begin
     ((MOCK_BEGIN_FAIL == 0)) || return 3
-    UFW_LOCKS=$((UFW_LOCKS + 1))
+    NFT_LOCKS=$((NFT_LOCKS + 1))
     cp -- "$FIXTURE/scope.json" "$FIXTURE/before.json"
     if [[ "$MOCK_DETACHED" == 1 ]]; then
         printf '[]\n' >"$FIXTURE/pending.json"
@@ -71,21 +73,21 @@ vps_ufw_begin() {
         cp -- "$2" "$FIXTURE/pending.json"
     fi
 }
-vps_ufw_commit() {
-    log_event ufw.commit
-    UFW_LOCKS=$((UFW_LOCKS - 1))
+vps_nft_commit() {
+    log_event nft.commit
+    NFT_LOCKS=$((NFT_LOCKS - 1))
     if [[ "${VPSCTL_DRY_RUN:-0}" != 1 ]]; then
         cp -- "$FIXTURE/pending.json" "$FIXTURE/scope.json"
     fi
     ((MOCK_COMMIT_FAIL == 0)) || return 30
 }
-vps_ufw_scope_restore_begin() {
-    log_event ufw.restore
-    vps_ufw_begin "$1" "$2"
+vps_nft_scope_restore_begin() {
+    log_event nft.restore
+    vps_nft_begin "$1" "$2"
 }
-vps_ufw_rollback() {
-    log_event ufw.rollback
-    UFW_LOCKS=$((UFW_LOCKS - 1))
+vps_nft_rollback() {
+    log_event nft.rollback
+    NFT_LOCKS=$((NFT_LOCKS - 1))
     cp -- "$FIXTURE/before.json" "$FIXTURE/scope.json"
 }
 
@@ -126,7 +128,7 @@ reset_fixture() {
     FIXTURE="$TEST_TEMP/$TEST_INDEX"
     EVENTS="$FIXTURE/events"
     export VPSCTL_TESTING=1 VPSCTL_SYSTEM_ROOT="$FIXTURE/system" VPSCTL_DRY_RUN=0 VPSCTL_NO_COLOR=1
-    MOCK_IPV6=1 MOCK_DETACHED=0 MOCK_BEGIN_FAIL=0 MOCK_COMMIT_FAIL=0 MOCK_RESTORE_FAIL=0 MOCK_RELOAD_FAIL=0 MOCK_LISTEN_FAIL=0 UFW_LOCKS=0
+    MOCK_IPV6=1 MOCK_DETACHED=0 MOCK_ENABLED=0 MOCK_ACTIVE=0 MOCK_BEGIN_FAIL=0 MOCK_COMMIT_FAIL=0 MOCK_RESTORE_FAIL=0 MOCK_RELOAD_FAIL=0 MOCK_LISTEN_FAIL=0 NFT_LOCKS=0
     mkdir -p -- "$VPSCTL_SYSTEM_ROOT/etc/ssh/sshd_config.d"
     : >"$EVENTS"
     printf '[]\n' >"$FIXTURE/scope.json"
@@ -139,7 +141,7 @@ reset_fixture() {
     mkdir -p -- "$TX_DIR/proofs" "$BACKUP_DIR"
     chmod 0700 -- "$BACKUP_DIR" "$TX_DIR/proofs"
     printf 'pending\n' >"$ACCESS_CONFIG"
-    access_firewall_write_state ufw 22
+    access_firewall_write_state nft 22
     cp -- "$ACCESS_FW_STATE" "$BACKUP_DIR/firewall.state"
     access_firewall_backup_mode_write "$BACKUP_DIR" auto
 }
@@ -149,7 +151,7 @@ seed_transaction() {
     now="$(date +%s)"
     sha="$(access_sha256_file "$ACCESS_CONFIG")"
     access_sshd_write_transaction "$TX_DIR" prepared "$TX_ID" "$BACKUP_ID" "$((now - 10))" "$((now + 900))" \
-        22 2222 yes yes yes yes no '' auto ufw ufw-shared ufw 22 '' "$sha"
+        22 2222 yes yes yes yes no '' auto nft nft-shared nft 22 '' "$sha"
     {
         access_kv_put schema_version 1
         access_kv_put kind ssh
@@ -170,32 +172,32 @@ seed_transaction() {
 }
 
 reset_fixture
-assert_status 0 access_firewall_open ufw 2222 22 0 "$BACKUP_DIR"
+assert_status 0 access_firewall_open nft 2222 22 0 "$BACKUP_DIR"
 assert_equal '22,2222' "$(jq -r '[.[].port] | unique | join(",")' "$FIXTURE/scope.json")" 'prepare retains both ports'
 assert_equal 4 "$(jq length "$FIXTURE/scope.json")" 'prepare covers both available families'
-assert_equal ufw-shared "$ACCESS_FW_ADDED" 'shared transaction discriminator'
-assert_equal 0 "$UFW_LOCKS" 'prepare releases shared lock before waiting for SSH proof'
-assert_before ufw.lock ufw.snapshot
-assert_before ufw.snapshot ufw.begin
-assert_before ufw.commit ufw.unlock
+assert_equal nft-shared "$ACCESS_FW_ADDED" 'shared transaction discriminator'
+assert_equal 0 "$NFT_LOCKS" 'prepare releases shared lock before waiting for SSH proof'
+assert_before nft.lock nft.snapshot
+assert_before nft.snapshot nft.begin
+assert_before nft.commit nft.unlock
 seed_transaction
 : >"$EVENTS"
 assert_status 0 access_ssh_commit "$TX_ID" "$TX_ID"
 assert_before ssh.reload ssh.verify.2222
-assert_before ssh.verify.2222 ufw.begin
+assert_before ssh.verify.2222 nft.begin
 assert_equal '2222' "$(jq -r '[.[].port] | unique | join(",")' "$FIXTURE/scope.json")" 'commit releases old SSH requirement'
 assert_equal committed "$(access_kv_get "$TX_DIR/state" status)" 'SSH transaction committed'
 
 : >"$EVENTS"
 assert_status 0 access_ssh_restore "$BACKUP_ID"
-assert_before ufw.restore ssh.restore
-assert_before ssh.listen.22 ufw.commit
+assert_before nft.restore ssh.restore
+assert_before ssh.listen.22 nft.commit
 assert_equal 0 "$(jq length "$FIXTURE/scope.json")" 'restore reinstates original scope'
 assert_equal 22 "$(access_kv_get "$ACCESS_FW_STATE" port)" 'restore preserves legacy state snapshot'
 
 for failure in restore reload; do
     reset_fixture
-    assert_status 0 access_firewall_open ufw 2222 22 0 "$BACKUP_DIR"
+    assert_status 0 access_firewall_open nft 2222 22 0 "$BACKUP_DIR"
     seed_transaction
     state_sha="$(sha256sum "$TX_DIR/state")"
     manifest_sha="$(sha256sum "$BACKUP_DIR/manifest")"
@@ -205,18 +207,18 @@ for failure in restore reload; do
     if [[ "$failure" == restore ]]; then MOCK_RESTORE_FAIL=1; else MOCK_RELOAD_FAIL=1; fi
     : >"$EVENTS"
     assert_status 30 access_ssh_abort "$TX_ID"
-    assert_before ufw.restore ssh.restore
+    assert_before nft.restore ssh.restore
     if [[ "$failure" == restore ]]; then
-        assert_before ssh.restore ufw.rollback
+        assert_before ssh.restore nft.rollback
         assert_no_event ssh.reload
         assert_equal "$config_sha" "$(sha256sum "$ACCESS_CONFIG")" 'failed restore keeps candidate config'
     else
-        assert_before ssh.reload ufw.rollback
+        assert_before ssh.reload nft.rollback
     fi
     assert_no_event ssh.listen.22
-    assert_no_event ufw.commit
+    assert_no_event nft.commit
     assert_no_event timer.cancel
-    assert_before ufw.rollback security.unlock
+    assert_before nft.rollback security.unlock
     assert_equal prepared "$(access_kv_get "$TX_DIR/state" status)" 'failed abort remains retryable'
     assert_equal "$state_sha" "$(sha256sum "$TX_DIR/state")" 'failed abort preserves transaction metadata'
     assert_equal prepared "$(access_kv_get "$BACKUP_DIR/manifest" lifecycle)" 'failed abort preserves backup lifecycle'
@@ -225,19 +227,19 @@ for failure in restore reload; do
     assert_equal '22,2222' "$(jq -r '[.[].port] | unique | join(",")' "$FIXTURE/scope.json")" 'failed rollback keeps both requirements'
     assert_equal "$scope_sha" "$(sha256sum "$FIXTURE/scope.json")" 'failed abort rolls back shared scope changes'
     assert_equal "$firewall_sha" "$(sha256sum "$ACCESS_FW_STATE")" 'failed abort preserves legacy firewall state'
-    assert_equal 0 "$UFW_LOCKS" 'failed abort releases shared lock'
+    assert_equal 0 "$NFT_LOCKS" 'failed abort releases shared lock'
 
     MOCK_RESTORE_FAIL=0 MOCK_RELOAD_FAIL=0
     : >"$EVENTS"
     assert_status 0 access_ssh_abort "$TX_ID"
-    assert_before ssh.listen.22 ufw.commit
-    assert_before ufw.commit timer.cancel
+    assert_before ssh.listen.22 nft.commit
+    assert_before nft.commit timer.cancel
     assert_equal aborted "$(access_kv_get "$TX_DIR/state" status)" 'successful retry aborts transaction'
     assert_equal aborted "$(access_kv_get "$BACKUP_DIR/manifest" lifecycle)" 'successful retry marks backup aborted'
     assert_equal restored "$(cat -- "$ACCESS_CONFIG")" 'successful retry restores SSH config'
     assert_equal 0 "$(jq length "$FIXTURE/scope.json")" 'successful retry restores original shared scope'
     assert_equal 22 "$(access_kv_get "$ACCESS_FW_STATE" port)" 'successful retry restores legacy firewall state'
-    assert_equal 0 "$UFW_LOCKS" 'successful retry releases shared lock'
+    assert_equal 0 "$NFT_LOCKS" 'successful retry releases shared lock'
     [[ ! -e "$ACCESS_STATE_DIR/active" ]] || fail 'successful retry retains active transaction'
     assert_equal 1 "$(grep -Fc timer.cancel "$EVENTS")" 'successful retry cancels timer once'
     assert_status 3 access_ssh_abort "$TX_ID"
@@ -245,9 +247,9 @@ done
 
 reset_fixture
 before_state="$(cat -- "$ACCESS_FW_STATE")"
-assert_status 0 access_firewall_commit none 22 2222 0 ufw 22 '' manual
+assert_status 0 access_firewall_commit none 22 2222 0 nft 22 '' manual
 assert_equal "$before_state" "$(cat -- "$ACCESS_FW_STATE")" 'manual commit preserves existing ownership metadata'
-[[ ! -s "$EVENTS" ]] || fail 'manual commit called shared UFW'
+[[ ! -s "$EVENTS" ]] || fail 'manual commit called shared NFT'
 access_firewall_backup_mode_write "$BACKUP_DIR" manual
 seed_transaction
 assert_equal manual "$(access_firewall_backup_mode "$BACKUP_DIR")" 'manual backup mode takes precedence'
@@ -257,31 +259,54 @@ assert_equal manual "$(access_firewall_backup_mode "$BACKUP_DIR")" 'legacy backu
 rm -f -- "$ACCESS_STATE_DIR/active"
 access_sshd_backup_mark "$BACKUP_DIR" committed "$(access_sha256_file "$ACCESS_CONFIG")"
 # Even an unrelated leftover scope snapshot cannot authorize a manual restore.
-printf '[]\n' >"$BACKUP_DIR/ufw.scope.json"
+printf '[]\n' >"$BACKUP_DIR/nft.scope.json"
 : >"$EVENTS"
 assert_status 0 access_ssh_restore "$BACKUP_ID"
-if grep -q '^ufw\.' "$EVENTS"; then fail 'manual restore called shared UFW'; fi
+if grep -q '^nft\.' "$EVENTS"; then fail 'manual restore called shared NFT'; fi
 assert_equal "$before_state" "$(cat -- "$ACCESS_FW_STATE")" 'manual restore preserves firewall state'
 
 reset_fixture
 MOCK_IPV6=0
-assert_status 0 access_firewall_open ufw 2222 22 0 "$BACKUP_DIR"
-assert_equal ipv4 "$(jq -r '[.[].family] | unique | join(",")' "$FIXTURE/scope.json")" 'IPv6-disabled UFW gets only available family'
+assert_status 0 access_firewall_open nft 2222 22 0 "$BACKUP_DIR"
+assert_equal ipv4 "$(jq -r '[.[].family] | unique | join(",")' "$FIXTURE/scope.json")" 'IPv6-disabled NFT gets only available family'
 MOCK_DETACHED=1
-assert_status 0 access_firewall_commit ufw 22 2222 ufw-shared ufw 22 '' auto
+assert_status 0 access_firewall_commit nft 22 2222 nft-shared nft 22 '' auto
 [[ ! -e "$ACCESS_FW_STATE" ]] || fail 'commit revived detached SSH ownership state'
 assert_equal 0 "$(jq length "$FIXTURE/scope.json")" 'detached SSH is not reattached'
 
 reset_fixture
-printf '[{"simple":true,"kind":"input","family":"ipv4","action":"allow","proto":"tcp","port":"2222","source":"any","destination":"any","comment":"vpsctl security access"}]\n' >"$FIXTURE/inventory.json"
-assert_status 0 access_firewall_abort ufw 2222 1 ufw 22 '' "$BACKUP_DIR"
-assert_equal 0 "$(jq length "$FIXTURE/scope.json")" 'legacy abort releases only imported legacy requirement'
-assert_equal 0 "$UFW_LOCKS" 'legacy cleanup releases shared lock'
+printf '[{"owner":"ssh","kind":"input","family":"ipv4","proto":"tcp","port":"2222","source":"any","destination":"any","temporary":false},{"owner":"ssh","kind":"input","family":"ipv4","proto":"tcp","port":"22","source":"any","destination":"any","temporary":false}]\n' >"$FIXTURE/scope.json"
+assert_status 0 access_firewall_abort nft 2222 1 nft 22 '' "$BACKUP_DIR"
+assert_equal 22 "$(jq -r '.[0].port' "$FIXTURE/scope.json")" 'owned cleanup preserves other SSH port'
+assert_equal 0 "$NFT_LOCKS" 'owned cleanup releases shared lock'
+
+reset_fixture
+MOCK_ENABLED=1
+access_firewall_native_nft_targets() { fail 'shared manager probed arbitrary INPUT chains'; }
+assert_equal nft "$(access_firewall_detect)" 'enabled shared manager wins backend selection'
+MOCK_ENABLED=0 MOCK_ACTIVE=1
+assert_equal nft "$(access_firewall_detect)" 'active shared table wins backend selection'
+
+reset_fixture
+assert_status 0 access_firewall_open nft 2222 22 0 "$BACKUP_DIR"
+seed_transaction
+sed -i 's/^firewall_backend\tnft$/firewall_backend\tufw/' "$TX_DIR/state"
+: >"$EVENTS"
+assert_status 30 access_ssh_abort "$TX_ID"
+assert_no_event ssh.restore
+assert_status 30 access_ssh_commit "$TX_ID" "$TX_ID"
+assert_no_event ssh.install
+rm -f -- "$ACCESS_STATE_DIR/active" "$BACKUP_DIR/nft.scope.json"
+access_sshd_backup_mark "$BACKUP_DIR" committed "$(access_sha256_file "$ACCESS_CONFIG")"
+sed -i 's/^backend\tnft$/backend\tufw/' "$BACKUP_DIR/firewall.state"
+: >"$EVENTS"
+assert_status 30 access_ssh_restore "$BACKUP_ID"
+assert_no_event ssh.restore
 
 reset_fixture
 MOCK_BEGIN_FAIL=1
-assert_status 3 access_firewall_open ufw 2222 22 0 "$BACKUP_DIR"
-assert_equal 0 "$UFW_LOCKS" 'failed prepare releases snapshot lock'
+assert_status 3 access_firewall_open nft 2222 22 0 "$BACKUP_DIR"
+assert_equal 0 "$NFT_LOCKS" 'failed prepare releases snapshot lock'
 assert_equal 0 "$ACCESS_FW_ADDED" 'failed begin is not recorded as an applied change'
 
-printf 'PASS: SSH shared UFW transaction ordering, rollback and manual isolation\n'
+printf 'PASS: SSH shared NFT transaction ordering, rollback and manual isolation\n'

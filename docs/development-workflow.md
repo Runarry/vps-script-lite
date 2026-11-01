@@ -99,7 +99,7 @@ schema 2 Release 必须一次性提供安装器、严格 TSV 清单及注册表�
 | 离线包 | `vpsctl-offline-<VERSION>-<OS>-<OS_VERSION>-<ARCH>.tar.gz`；Debian 12/13、Ubuntu 22.04/24.04，分别提供 amd64/arm64，共 8 包 |
 | 离线归档校验清单 | `vpsctl-offline-SHA256SUMS`；登记同版本的全部 8 个离线归档 |
 
-每个在线 bundle 内使用项目根相对路径，不包含额外顶级包目录。`vpsctl-manifest.tsv` 依次包含 `schema_version<TAB>2`、`version<TAB>VERSION`、`repository<TAB>Runarry/vps-script-lite`、`asset<TAB>launcher<TAB>vpsctl.sh<TAB>SHA256`，以及各 bundle 的 `bundle<TAB>NAME<TAB>vpsctl-NAME-VERSION.tar.gz<TAB>SHA256`。名称唯一，文件名和版本精确对应，摘要是 64 位小写十六进制，core 必须存在；功能和共享包内容必须符合注册表固定清单。新增功能或私有模块时同步更新该清单和依赖映射。
+每个在线 bundle 内使用项目根相对路径，不包含额外顶级包目录。`vpsctl-manifest.tsv` 依次包含 `schema_version<TAB>2`、`version<TAB>VERSION`、`repository<TAB>Runarry/vps-script-lite`、`asset<TAB>launcher<TAB>vpsctl.sh<TAB>SHA256`，以及各 bundle 的 `bundle<TAB>NAME<TAB>vpsctl-NAME-VERSION.tar.gz<TAB>SHA256`。名称唯一，文件名和版本精确对应，摘要是 64 位小写十六进制，core 必须存在；功能和共享包内容必须符合注册表固定清单。新增功能或私有模块时同步更新该清单和依赖映射。原生防火墙使用 `network-nftables` 和 `shared-nftables`；共享包包含 shell 入口、事务模块与 jq 模式/渲染/同步文件，功能包包含既有 PO0 协调所需的固定 helper。旧 UFW/RFW 功能包与 RFW 上游资产不再构建；离线系统依赖保留 nftables 与其他功能仍需的 iptables，不包含 UFW。
 
 `bash scripts/build-release.sh [输出目录]` 仍只构建在线脚本资产，默认输出到 `dist/release`，不解析或下载上游依赖。输出目录只接受 `vpsctl.sh`、`vpsctl-manifest.tsv`、`vpsctl-<包名>-<X.Y.Z>.tar.gz`，以及上述 8 种离线归档名称和 `vpsctl-offline-SHA256SUMS` 普通文件；包名由小写字母、数字和分隔它们的连字符组成。目录内有其他文件、隐藏条目、子目录或符号链接时，构建报错并保留原内容。单独重建在线资产会整体替换旧输出，包括移除其中的离线资产；共享输出目录时，完整发布流程随后重新生成离线包。不能将文件系统根、源码根或源码祖先目录作为输出目录。
 
@@ -115,7 +115,7 @@ schema 2 Release 必须一次性提供安装器、严格 TSV 清单及注册表�
 ssh host-vps-scripts 'cd /path/to/vps-script-lite && bash scripts/build-offline-release.sh --output-dir dist/offline'
 ```
 
-矩阵构建先使用 `scripts/resolve-offline-upstreams.sh SNAPSHOT_DIR` 生成同次发布共用的快照。Xray、sing-box、lego、RFW 分别只查询一次最新稳定版，校验官方资产后同时保存 amd64/arm64 内容；不固定旧版本，也不在所选版本缺资产或无法运行时回退旧 Release。对应发行版官方镜像内从当前 APT 软件源收集完整 Depends/Pre-Depends 闭包，解析时使用空的已安装状态，避免遗漏镜像已自带的依赖；不回退 old-releases 软件源。包内保存版本、来源、软件包清单和摘要，并执行所选上游二进制的版本冒烟检查。
+矩阵构建先使用 `scripts/resolve-offline-upstreams.sh SNAPSHOT_DIR` 生成同次发布共用的快照。Xray、sing-box、lego 分别只查询一次最新稳定版，校验官方资产后同时保存 amd64/arm64 内容；不固定旧版本，也不在所选版本缺资产或无法运行时回退旧 Release。对应发行版官方镜像内从当前 APT 软件源收集完整 Depends/Pre-Depends 闭包，解析时使用空的已安装状态，避免遗漏镜像已自带的依赖；不回退 old-releases 软件源。包内保存版本、来源、软件包清单和摘要，并执行所选上游二进制的版本冒烟检查。
 
 单目标构建必须同时指定 OS、系统版本、架构，以及已经生成的同版本在线资产和统一快照。下面只生成 Debian 13 / amd64 一包；快照输出目录必须尚不存在，同一次发布其余目标复用这两个输入目录：
 

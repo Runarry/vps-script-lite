@@ -22,7 +22,7 @@ vps-script-lite/
 │   ├── deploy/             # 预留目录，未登记命令
 │   ├── monitoring/         # 预留目录，未登记命令
 │   ├── network/            # 网络、DNS、防火墙和连通性
-│   │   └── ufw/            # UFW 入口的私有模块
+│   │   └── nftables/       # 原生 nftables 入口的私有模块
 │   ├── security/           # 加固、审计、证书和访问控制
 │   │   ├── access.sh       # 用户、凭据与 SSH 访问管理公开入口
 │   │   ├── fail2ban.sh     # OpenSSH Fail2ban 防护公开入口
@@ -107,7 +107,7 @@ vps-script-lite/
 
 `lib/command.sh` 的 `vps_cmd_systemd_unit_enabled UNIT` 用于单元可能尚未安装的 systemd 自启查询。TCPing、iperf3、代理核心和代理中转共用此函数：LoadState 为 `not-found` 时返回 1 且不查询单元文件自启状态，其他情况保留 systemctl 原有结果和诊断。OpenRC 继续使用各功能的现有查询。
 
-`lib/ufw.sh` 提供网络管理、SSH、代理、TCP 探测监听、iperf3 和 TLS 共用的规则归属、服务需求与事务接口，随 `shared-ufw` 按需下载。各业务提交声明，UFW 入口通过已知持久数据契约采集存量，不加载其他功能的私有模块。独立 UFW 锁在业务锁之后获取，跨命令同步按访问管理、代理、TLS、TCP 探测监听、iperf3 的固定顺序获取业务锁。中转后台运行时复制同版本共享库，避免升级或重启后丢失端口联动能力。
+`lib/nftables.sh` 及 `lib/nftables/` 提供网络管理、SSH、代理、TCP 探测监听、iperf3 和 TLS 共用的原生规则引擎、服务需求与事务接口，随 `shared-nftables` 按需下载。业务提交声明，网络入口通过已知持久数据契约采集存量，不加载其他功能的私有模块。引擎只管理 `inet vpsctl_firewall`，持久状态为 `/var/lib/vpsctl/network/nftables/state.json`，写操作使用 `/run/vpsctl/network-nftables.lock`。候选规则先通过 `nft -c`，再以单批次原子提交；普通同步保留 meter 与来源到期时间。服务事务在防火墙未启用时只记录需求，不自行激活防火墙。后台运行时复制同版本共享库及 jq 模块，避免 core 更新或清理缓存后丢失联动能力。
 
 `lib/offline.sh` 随 core 常驻，供安装器、自更新、分发和功能依赖安装共用，负责离线包平台与完整性校验、导入事务、本地 APT 仓库和固定上游资产读取。功能脚本继续通过公共依赖与下载接口获取资源，不另行实现离线分发流程。
 
@@ -132,7 +132,9 @@ vps-script-lite/
 /var/lib/vpsctl/self/                        # 安装、自更新、资产缓存元数据
 ```
 
-`core` 常驻，只包含 `bin/vpsctl`、`VERSION`、`environment.sh`、`registry.sh`、`ui.sh`、`distribution.sh`、`offline.sh` 和三个 self 命令。每个非 self 公开命令独立打包为 `<domain>-<action>`，文件边界和全部私有模块由 `lib/registry.sh` 的固定清单定义。所有功能依赖 `shared-command`；`network ufw`、`security access`、`security tls`、`service proxy`、`service tcping`、`service iperf3` 另依赖 `shared-ufw`；两项测试另依赖 `shared-server-test`；三个备份入口另依赖 `shared-backup`。默认在线安装首次执行功能或功能帮助时，按依赖顺序下载、校验、缓存，再分发。全局帮助、版本、环境、清单、菜单浏览和 self 状态保持离线。在线更新只获取目标版本的 manifest、安装器和 core，不预取旧缓存；不同版本的功能和共享库不得混用。功能卸载可在验证当前受管 release 后，持功能包下载锁删除该命令的固定文件和缓存标记；下次调用只恢复该功能包，在线安装重新下载，离线安装读取本地资源。
+`core` 常驻，只包含 `bin/vpsctl`、`VERSION`、`environment.sh`、`registry.sh`、`ui.sh`、`distribution.sh`、`offline.sh` 和三个 self 命令。每个非 self 公开命令独立打包为 `<domain>-<action>`，文件边界和全部私有模块由 `lib/registry.sh` 的固定清单定义。所有功能依赖 `shared-command`；`network nftables`、`security access`、`security tls`、`service proxy`、`service tcping`、`service iperf3` 另依赖 `shared-nftables`；两项测试另依赖 `shared-server-test`；三个备份入口另依赖 `shared-backup`。`network-nftables` 还固定包含 `scripts/po0-relay.sh`，用于识别和协调既有独立 PO0 中转；它不另行登记为公开命令。默认在线安装首次执行功能或功能帮助时，按依赖顺序下载、校验、缓存，再分发。全局帮助、版本、环境、清单、菜单浏览和 self 状态保持离线。在线更新只获取目标版本的 manifest、安装器和 core，不预取旧缓存；不同版本的功能和共享库不得混用。功能卸载可在验证当前受管 release 后，持功能包下载锁删除该命令的固定文件和缓存标记；下次调用只恢复该功能包，在线安装重新下载，离线安装读取本地资源。
+
+`network nftables` 的完整装载顺序为 `shared-command` → `shared-nftables` → `service-proxy` → `network-nftables`。现有 `service-proxy` 包提供退役 UFW 前更新已安装代理中转运行时所需的同版本脚本；迁移在代理业务锁内直接复制固定文件，快照包含整个旧运行时，不调用代理公开入口，不安装内核二进制或代理服务，也不重启代理。包的文件所有权和数量保持不变。
 
 仓库根 `VERSION` 是项目版本的规范来源。自 v0.8.10 起使用 schema 2，v0.8.9 使用 schema 1，不能用新格式覆盖旧 Release。资产由固定注册表生成，命名与交付约定见[Release 资产与发布流程](development-workflow.md#4-release-资产与发布流程)，此处不再维护一份逐包清单。
 
@@ -149,7 +151,7 @@ bundle<TAB>NAME<TAB>vpsctl-NAME-VERSION.tar.gz<TAB>SHA256
 
 manifest 的 `version`、tag、文件名、安装目标版本和应用展示版本必须一致。schema 2 不解析旧 schema 1；跨格式迁移须普通卸载管理器后重新安装，保留服务、配置、功能状态和备份。bootstrap 在 core 安装前只验证安全、唯一的 bundle 记录并要求 core，不执行下载的注册表。运行时按本地固定清单验证功能及共享包的精确路径和必需文件，锁内再次检查缓存，成功后才写 marker；失败清除本次临时资产。`current` 在 manifest、core 和安装器完成校验并落盘后切换；提交前失败仍恢复原 current、入口和 self 元数据。
 
-离线归档在既有在线资产之外增加目标系统元数据 `offline-manifest.tsv`、上游来源与版本 `components.tsv`、完整文件摘要 `SHA256SUMS`、上游原始资产和本地 APT 仓库；在线 manifest schema 2 与 bundle 格式保持不变。归档按 Debian 12/13、Ubuntu 22.04/24.04 和 amd64/arm64 分为 8 包。构建开始时统一解析 Xray、sing-box、lego、RFW 各自的最新稳定版，两个架构共用版本选择；APT 收集对应发行版当前软件源的完整 Depends/Pre-Depends 闭包，包括构建镜像已安装的依赖。
+离线归档在既有在线资产之外增加目标系统元数据 `offline-manifest.tsv`、上游来源与版本 `components.tsv`、完整文件摘要 `SHA256SUMS`、上游原始资产和本地 APT 仓库；在线 manifest schema 2 与 bundle 格式保持不变。归档按 Debian 12/13、Ubuntu 22.04/24.04 和 amd64/arm64 分为 8 包。构建开始时统一解析 Xray、sing-box、lego 各自的最新稳定版，两个架构共用版本选择；APT 收集对应发行版当前软件源的完整 Depends/Pre-Depends 闭包，包括构建镜像已安装的依赖。
 
 `vpsctl.sh --offline-dir` 和 `self update --offline-dir` 使用同一导入流程：校验平台、摘要与全部 bundle，在候选目录解包全部项目代码并复制完整资源，再提交 release、current、入口和 self 元数据。原解压目录不参与后续运行；功能包缓存清理后从当前 release 的 `.offline/` 恢复。同版本导入要求 manifest 一致，可补全已有在线安装；跨版本使用目标包内代码和注册表。本地资源缺失或损坏时失败，不联网回退。`self update` 未带该选项时仍为在线更新。离线依赖覆盖与联网例外见[离线安装与更新](../README.md#离线安装与更新)。
 

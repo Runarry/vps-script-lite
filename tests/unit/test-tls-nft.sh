@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Focused lifecycle checks; the shared UFW suite owns real rule reconciliation.
+# Focused lifecycle checks; the shared NFT suite owns real rule reconciliation.
 set -Eeuo pipefail
 IFS=$'\n\t'
 TEST_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 TEST_TMP="$(mktemp -d)"
 export TEST_TMP
 trap 'rm -rf -- "$TEST_TMP"' EXIT
-# shellcheck source=../../commands/security/tls/ufw.sh
-source "${TEST_ROOT}/commands/security/tls/ufw.sh"
+# shellcheck source=../../commands/security/tls/nftables.sh
+source "${TEST_ROOT}/commands/security/tls/nftables.sh"
 fail() {
     printf 'FAIL: %s\n' "$*" >&2
     exit 1
@@ -15,11 +15,11 @@ fail() {
 vps_cmd_warning() { :; }
 vps_cmd_info() { :; }
 vps_cmd_unlock() { :; }
-vps_ufw_require_tools() { printf 'tools\n' >>"$TEST_TMP/events"; }
-vps_ufw_init() { :; }
-vps_ufw_rollback() { :; }
-vps_ufw_ipv6_available() { [[ "${TLS_TEST_IPV6:-1}" == 1 ]]; }
-vps_ufw_begin() {
+vps_nft_require_tools() { printf 'tools\n' >>"$TEST_TMP/events"; }
+vps_nft_init() { :; }
+vps_nft_rollback() { :; }
+vps_nft_ipv6_available() { [[ "${TLS_TEST_IPV6:-1}" == 1 ]]; }
+vps_nft_begin() {
     if [[ "$(cat "$2")" == '[]' ]]; then
         printf 'release\n' >>"$TEST_TMP/events"
     else
@@ -29,7 +29,7 @@ vps_ufw_begin() {
         printf 'acquire\n' >>"$TEST_TMP/events"
     fi
 }
-vps_ufw_commit() { printf 'commit\n' >>"$TEST_TMP/events"; }
+vps_nft_commit() { printf 'commit\n' >>"$TEST_TMP/events"; }
 tls_run_lego() { printf 'dns-or-dry\n' >>"$TEST_TMP/events"; }
 TLS_LEGO_BIN="$TEST_TMP/lego"
 cat >"$TLS_LEGO_BIN" <<'EOF'
@@ -51,18 +51,18 @@ for TLS_TEST_IPV6 in 0 1; do
         tls_run_challenge http-01 '' run || status=$?
         [[ "$status" == "$expected" ]] || fail "lego status not preserved: $status"
         [[ "$(cat "$TEST_TMP/events")" == $'tools\nacquire\ncommit\nlego\nrelease\ncommit' ]] || fail 'lease lifetime/order'
-        [[ -z "$TLS_UFW_SCOPE$TLS_UFW_DESIRED$TLS_HTTP_CHILD_PID" ]] || fail 'lease globals not cleared'
+        [[ -z "$TLS_NFT_SCOPE$TLS_NFT_DESIRED$TLS_HTTP_CHILD_PID" ]] || fail 'lease globals not cleared'
     done
 done
 
 for challenge in dns-01 http-01; do
     : >"$TEST_TMP/events"
     VPSCTL_DRY_RUN=1 tls_run_challenge "$challenge" '' run
-    [[ "$(cat "$TEST_TMP/events")" == dns-or-dry ]] || fail 'dry-run called UFW'
+    [[ "$(cat "$TEST_TMP/events")" == dns-or-dry ]] || fail 'dry-run called NFT'
 done
 : >"$TEST_TMP/events"
 tls_run_challenge dns-01 '' run
-[[ "$(cat "$TEST_TMP/events")" == dns-or-dry ]] || fail 'DNS called UFW'
+[[ "$(cat "$TEST_TMP/events")" == dns-or-dry ]] || fail 'DNS called NFT'
 
 # Explicit BASHPID targets the lease holder even inside a Bash subshell.
 : >"$TEST_TMP/events"
@@ -82,11 +82,11 @@ for original in 0 17; do
         tls_install_cleanup_traps
         # Invoked indirectly by the EXIT cleanup installed above.
         # shellcheck disable=SC2317
-        tls_ufw_release() { return 30; }
+        tls_nft_release() { return 30; }
         exit "$original"
     ) || status=$?
     expected="$original"
     ((original != 0)) || expected=30
     [[ "$status" == "$expected" ]] || fail "EXIT cleanup status: expected $expected, got $status"
 done
-printf 'PASS: TLS UFW lease lifecycle\n'
+printf 'PASS: TLS NFT lease lifecycle\n'

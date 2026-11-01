@@ -29,7 +29,7 @@ make_package() {
     printf 'schema_version\t1\nversion\t%s\nos\t%s\nos_version\t%s\narchitecture\t%s\nbuilt_at\t2026-11-01T00:00:00Z\n' \
         "$version" "$ID" "$VERSION_ID" "$(dpkg --print-architecture)" >"$destination/offline-manifest.tsv"
     : >"$destination/components.tsv"
-    for component in xray sing-box lego rfw; do
+    for component in xray sing-box lego; do
         asset="${component}-fixture.tar.gz"
         mkdir -p "$destination/upstream/$component"
         printf 'inert %s upstream fixture\n' "$component" >"$destination/upstream/$component/$asset"

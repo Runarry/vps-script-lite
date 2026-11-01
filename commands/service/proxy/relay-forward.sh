@@ -715,9 +715,9 @@ _proxy_relay_forward_warn_external_policy() {
     if jq -e --arg table4 "$PROXY_RELAY_FORWARD_TABLE4" --arg table6 "$PROXY_RELAY_FORWARD_TABLE6" '
         any(.nftables[]?.chain;
             .hook == "forward" and (.policy == "drop" or .policy == "reject") and
-            .table != $table4 and .table != $table6)
+            .table != $table4 and .table != $table6 and .table != "vpsctl_firewall")
     ' <<<"$rules" >/dev/null 2>&1; then
-        vps_cmd_warning "检测到其他 nftables FORWARD 链的拒绝策略；若中转不通，请检查 UFW/firewalld/自定义防火墙的后续链"
+        vps_cmd_warning "检测到其他 nftables FORWARD 链的拒绝策略；若中转不通，请检查 firewalld 或自定义防火墙的后续链"
     fi
 }
 
@@ -788,7 +788,7 @@ _proxy_relay_forward_ensure_layout() {
     vps_cmd_require_root || return $?
     _proxy_relay_forward_require_safe_paths || return $?
     for directory in "$(dirname -- "$PROXY_RELAY_FORWARD_MANIFEST")" "$(dirname -- "$PROXY_RELAY_FORWARD_HELPER")" "$(dirname -- "$PROXY_RELAY_FORWARD_SERVICE")" "$(dirname -- "$PROXY_RELAY_FORWARD_SYSCTL")" \
-        "$PROXY_RELAY_FORWARD_RUNTIME/lib" "$PROXY_RELAY_FORWARD_RUNTIME/commands/service/proxy"; do
+        "$PROXY_RELAY_FORWARD_RUNTIME/lib/nftables" "$PROXY_RELAY_FORWARD_RUNTIME/commands/service/proxy"; do
         if [[ "${VPSCTL_DRY_RUN:-0}" == 1 ]]; then
             vps_cmd_run mkdir -p "$directory" || return 20
         else
@@ -803,14 +803,18 @@ proxy_relay_forward_install_runtime() {
     local -a files=(
         lib/command.sh
         lib/ui.sh
-        lib/ufw.sh
+        lib/nftables.sh
+        lib/nftables/schema.jq
+        lib/nftables/render.jq
+        lib/nftables/reconcile.jq
+        lib/nftables/transactions.sh
         commands/service/proxy.sh
         commands/service/proxy/common.sh
         commands/service/proxy/dns.sh
         commands/service/proxy/address.sh
         commands/service/proxy/hysteria2.sh
         commands/service/proxy/hysteria2-runtime.sh
-        commands/service/proxy/ufw.sh
+        commands/service/proxy/nftables.sh
         commands/service/proxy/protocols-sing-box.sh
         commands/service/proxy/protocols-xray.sh
         commands/service/proxy/nodes.sh
@@ -839,6 +843,14 @@ proxy_relay_forward_install_runtime() {
         else
             proxy_atomic_write_from_file "$source" "$logical_target" "$mode" || return 20
         fi
+    done
+    # Retire only the two former backend files after the native runtime is complete.
+    for relative in lib/ufw.sh commands/service/proxy/ufw.sh; do
+        physical_target="${PROXY_RELAY_FORWARD_RUNTIME}/${relative}"
+        [[ -e "$physical_target" || -L "$physical_target" ]] || continue
+        vps_cmd_require_no_symlink_components "$physical_target" || return $?
+        [[ -f "$physical_target" ]] || return 3
+        vps_cmd_run rm -f -- "$physical_target" || return 20
     done
 }
 
@@ -1008,14 +1020,14 @@ proxy_relay_forward_apply() {
     proxy_relay_forward_nft_check "$batch" || { local rc=$?; rm -rf -- "$tmp"; return "$rc"; }
     # DNAT packets traverse FORWARD using the translated destination. Allow the
     # new cache targets before switching nft, keeping old targets until commit.
-    proxy_ufw_forwards_begin "$PROXY_RELAY_FORWARD_MANIFEST" "$cache_candidate" || {
+    proxy_nft_forwards_begin "$PROXY_RELAY_FORWARD_MANIFEST" "$cache_candidate" || {
         local rc=$?; rm -rf -- "$tmp"; return "$rc";
     }
     if proxy_relay_forward_nft_apply "$batch"; then
         :
     else
         local rc=$?
-        vps_ufw_rollback || rollback_failed=1
+        vps_nft_rollback || rollback_failed=1
         rm -rf -- "$tmp"
         ((rollback_failed == 0)) || return 30
         return "$rc"
@@ -1031,15 +1043,15 @@ proxy_relay_forward_apply() {
         else
             rm -f -- "$PROXY_RELAY_FORWARD_CACHE" || rollback_failed=1
         fi
-        vps_ufw_rollback || rollback_failed=1
+        vps_nft_rollback || rollback_failed=1
         rm -rf -- "$tmp"
         ((rollback_failed == 0)) || return 30
         vps_cmd_error "写入 relay DNS 缓存失败，已恢复旧 nftables 规则与缓存"
         return 20
     fi
-    if ! vps_ufw_commit; then
+    if ! vps_nft_commit; then
         rm -rf -- "$tmp"
-        vps_cmd_error "relay DNS 缓存和 nftables 已刷新，但旧 UFW 规则清理未完成；新目标放行已保留"
+        vps_cmd_error "relay DNS 缓存和 nftables 已刷新，但旧放行需求清理未完成；新目标放行已保留"
         return 30
     fi
     _proxy_relay_forward_warn_external_policy
@@ -1223,10 +1235,10 @@ proxy_relay_forward_sync() {
     fi
     # Explicit removal of the last forward releases its scope; stopping the
     # helper only calls clear(), which intentionally retains its declarations.
-    proxy_ufw_forwards_begin "$PROXY_RELAY_FORWARD_MANIFEST" "" || return $?
+    proxy_nft_forwards_begin "$PROXY_RELAY_FORWARD_MANIFEST" "" || return $?
     _proxy_relay_forward_sync || status=$?
-    if ((status == 0)); then vps_ufw_commit || cleanup_status=$?
-    else vps_ufw_rollback || cleanup_status=$?
+    if ((status == 0)); then vps_nft_commit || cleanup_status=$?
+    else vps_nft_rollback || cleanup_status=$?
     fi
     ((cleanup_status == 0)) || return 30
     return "$status"

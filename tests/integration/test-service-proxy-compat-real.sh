@@ -102,10 +102,10 @@ export VPSCTL_NO_COLOR=1
 
 # shellcheck source=../../lib/command.sh
 source "${TEST_ROOT}/lib/command.sh"
-# shellcheck source=../../lib/ufw.sh
-source "${TEST_ROOT}/lib/ufw.sh"
-# shellcheck source=../../commands/service/proxy/ufw.sh
-source "${TEST_ROOT}/commands/service/proxy/ufw.sh"
+# shellcheck source=../../lib/nftables.sh
+source "${TEST_ROOT}/lib/nftables.sh"
+# shellcheck source=../../commands/service/proxy/nftables.sh
+source "${TEST_ROOT}/commands/service/proxy/nftables.sh"
 vps_cmd_init 'proxy compatibility real test' "$TEST_ROOT"
 # shellcheck source=../../commands/service/proxy/common.sh
 source "${TEST_ROOT}/commands/service/proxy/common.sh"

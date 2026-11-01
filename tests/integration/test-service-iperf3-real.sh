@@ -30,7 +30,7 @@ sha256sum "$TEST_ROOT/bin/vpsctl" "$TEST_ROOT/commands/service/iperf3.sh"
 . /etc/os-release
 printf 'system=%s-%s kernel=%s boot_id=%s\n' "${ID:-unknown}" "${VERSION_ID:-unknown}" "$(uname -r)" "$(cat /proc/sys/kernel/random/boot_id)"
 state='/var/lib/vpsctl/service/iperf3/state.json'
-fw='/var/lib/vpsctl/network/ufw/state.json'
+fw='/var/lib/vpsctl/network/nftables/state.json'
 if [[ -d /run/systemd/system ]] && command -v systemctl >/dev/null; then
     init=systemd
     unit='/etc/systemd/system/vpsctl-iperf3.service'
@@ -57,14 +57,14 @@ else
     ! rc-service vpsctl-iperf3 status >/dev/null 2>&1 || exit 3
     [[ ! -e /etc/runlevels/default/vpsctl-iperf3 ]] || exit 3
 fi
-if command -v ufw >/dev/null; then ufw status; else printf 'ufw=absent\n'; fi
+if command -v nft >/dev/null; then nft list tables; else printf 'nft=absent\n'; fi
 if [[ -f "$fw" ]]; then
-    jq -S '[.requirements[] | select(.owner!="iperf3")]' "$fw" >"$RESULT_DIR/ufw-unrelated-before.json"
+    jq -S '[.requirements[] | select(.owner!="iperf3")]' "$fw" >"$RESULT_DIR/nft-unrelated-before.json"
     jq -e 'all(.requirements[]; .owner!="iperf3")' "$fw" >/dev/null || {
-        printf 'FAIL: pre-existing iperf3 UFW demand\n'
+        printf 'FAIL: pre-existing iperf3 NFT demand\n'
         exit 3
     }
-else printf '[]\n' >"$RESULT_DIR/ufw-unrelated-before.json"; fi
+else printf '[]\n' >"$RESULT_DIR/nft-unrelated-before.json"; fi
 
 fail() {
     printf 'FAIL: %s\n' "$*" >&2
@@ -150,40 +150,40 @@ assert_firewall_demand() {
         "$fw" >/dev/null || fail 'missing IPv4 TCP+UDP iperf3 firewall demands'
 }
 assert_unrelated_firewall() {
-    jq -S '[.requirements[] | select(.owner!="iperf3")]' "$fw" >"$RESULT_DIR/ufw-unrelated-after.json"
-    cmp -s "$RESULT_DIR/ufw-unrelated-before.json" "$RESULT_DIR/ufw-unrelated-after.json" || fail 'unrelated firewall demands changed'
+    jq -S '[.requirements[] | select(.owner!="iperf3")]' "$fw" >"$RESULT_DIR/nft-unrelated-after.json"
+    cmp -s "$RESULT_DIR/nft-unrelated-before.json" "$RESULT_DIR/nft-unrelated-after.json" || fail 'unrelated firewall demands changed'
 }
 assert_live_rule() {
     local port="$1" owner="$2" present="$3" protocol="$4" inventory
-    inventory="$(vpsctl network ufw rule list --json)"
+    inventory="$(jq '.requirements' "$fw")"
     if [[ "$present" == yes ]]; then
         jq -e --arg port "$port" --arg owner "$owner" --arg protocol "$protocol" \
-            'any(.[]; .family=="ipv4" and .kind=="input" and .proto==$protocol and .port==$port and (.owners|index($owner)))' \
-            <<<"$inventory" >/dev/null || fail "missing $protocol $port UFW owner $owner"
+            'any(.[]; .family=="ipv4" and .kind=="input" and .proto==$protocol and .port==$port and .owner==$owner)' \
+            <<<"$inventory" >/dev/null || fail "missing $protocol $port NFT owner $owner"
     else
         jq -e --arg port "$port" --arg owner "$owner" --arg protocol "$protocol" \
-            'all(.[]; .port!=$port or .proto!=$protocol or (.owners|index($owner)|not))' \
-            <<<"$inventory" >/dev/null || fail "retained $protocol $port UFW owner $owner"
+            'all(.[]; .port!=$port or .proto!=$protocol or .owner!=$owner)' \
+            <<<"$inventory" >/dev/null || fail "retained $protocol $port NFT owner $owner"
     fi
 }
 assert_manual_rule() {
-    vpsctl network ufw rule list --json | jq -e --arg port "$old_port" \
-        'any(.[]; .family=="ipv4" and .proto=="tcp" and .port==$port and .action=="allow")' >/dev/null || fail 'pre-existing manual TCP rule was removed'
+    vpsctl network nftables rule list --json | jq -e --arg port "$old_port" \
+        'any(.rules[]; .family=="ipv4" and .proto=="tcp" and .port==$port and .action=="allow")' >/dev/null || fail 'pre-existing manual TCP rule was removed'
 }
 other_owner() {
     IPERF3_TEST_ROOT="$TEST_ROOT" IPERF3_TEST_PORT="$new_port" IPERF3_TEST_DESIRED="$TEST_TEMP/other-owner.json" \
         bash -c '
         set -Eeuo pipefail
         source "$IPERF3_TEST_ROOT/lib/command.sh"
-        source "$IPERF3_TEST_ROOT/lib/ufw.sh"
+        source "$IPERF3_TEST_ROOT/lib/nftables.sh"
         vps_cmd_init iperf3-real-acceptance "$IPERF3_TEST_ROOT"
         if [[ "$1" == add ]]; then
             jq -n --arg port "$IPERF3_TEST_PORT" \
                 '\''["tcp","udp"] | map({owner:"node:iperf3-test",kind:"input",family:"ipv4",proto:.,port:$port,source:"any",destination:"any",temporary:false})'\'' \
                 >"$IPERF3_TEST_DESIRED"
         else printf "[]\n" >"$IPERF3_TEST_DESIRED"; fi
-        vps_ufw_begin iperf3-other "$IPERF3_TEST_DESIRED"
-        vps_ufw_commit
+        vps_nft_begin iperf3-other "$IPERF3_TEST_DESIRED"
+        vps_nft_commit
     ' _ "$1"
 }
 busy_pid=''
@@ -193,11 +193,12 @@ root_if=''
 root_ip=''
 root_ip6=''
 manual_port=''
+manual_id="iperf3-accept-manual-${BASHPID}"
 other_owner_seeded=0
 if [[ "${VPSCTL_IPERF3_NETNS:-0}" == 1 ]]; then command -v ip >/dev/null || fail 'network namespace test requires ip'; fi
-if [[ "${VPSCTL_IPERF3_LIVE_UFW:-0}" == 1 ]]; then
-    command -v ufw >/dev/null || fail 'live UFW acceptance requires existing UFW'
-    [[ "$(LC_ALL=C ufw status | head -1)" == 'Status: active' ]] || fail 'live UFW acceptance requires already active UFW'
+if [[ "${VPSCTL_IPERF3_LIVE_NFT:-0}" == 1 ]]; then
+    command -v nft >/dev/null || fail 'live NFT acceptance requires existing NFT'
+    nft list table inet vpsctl_firewall >/dev/null || fail 'live nftables acceptance requires an active shared firewall'
     if [[ -f "$fw" ]]; then
         jq -e 'all(.requirements[]; .owner!="node:iperf3-test" and .scope!="iperf3-other")' "$fw" >/dev/null || fail 'pre-existing shared-owner test demand'
     fi
@@ -213,7 +214,7 @@ cleanup() {
     if [[ -n "$root_if" ]]; then ip link del "$root_if" 2>/dev/null || true; fi
     if ((owned)) && [[ -e "$state" || -e "$unit" ]]; then vpsctl service iperf3 uninstall || result=30; fi
     if ((other_owner_seeded)); then other_owner clear || result=30; fi
-    if [[ -n "$manual_port" ]]; then ufw --force delete allow "$manual_port/tcp" || result=30; fi
+    if [[ -n "$manual_port" ]]; then vpsctl network nftables rule delete --id "$manual_id" || result=30; fi
     if ((result == 0)); then printf 'PASS: real iperf3 acceptance and owned-resource cleanup\n'; fi
     printf 'results=%s\n' "$RESULT_DIR"
     exit "$result"
@@ -223,8 +224,8 @@ trap 'exit 130' HUP INT TERM
 old_port="$(free_port)"
 new_port="$(free_port)"
 while [[ "$new_port" == "$old_port" ]]; do new_port="$(free_port)"; done
-if [[ "${VPSCTL_IPERF3_LIVE_UFW:-0}" == 1 ]]; then
-    inventory_before="$(vpsctl network ufw rule list --json)"
+if [[ "${VPSCTL_IPERF3_LIVE_NFT:-0}" == 1 ]]; then
+    inventory_before="$(jq '[.rules[],.requirements[]]' "$fw")"
     while ! jq -e --arg old "$old_port" --arg new "$new_port" 'all(.[]; .port!=$old and .port!=$new)' <<<"$inventory_before" >/dev/null; do
         old_port="$(free_port)"
         new_port="$(free_port)"
@@ -237,8 +238,8 @@ vpsctl service iperf3 status
 vpsctl service iperf3
 vpsctl --dry-run --install-deps service iperf3 start --port "$old_port"
 [[ ! -e "$state" && ! -e "$unit" ]] || fail 'read/dry-run deployed service'
-if [[ "${VPSCTL_IPERF3_LIVE_UFW:-0}" == 1 ]]; then
-    ufw allow "$old_port/tcp" comment 'iperf3-accept-manual'
+if [[ "${VPSCTL_IPERF3_LIVE_NFT:-0}" == 1 ]]; then
+    vpsctl network nftables rule add --id "$manual_id" --action allow --family ipv4 --proto tcp --port "$old_port" --comment iperf3-accept-manual
     manual_port="$old_port"
 fi
 owned=1
@@ -246,7 +247,7 @@ vpsctl --install-deps service iperf3 start --port "$old_port"
 check_enabled || fail 'start did not activate and enable service'
 jq -e --argjson port "$old_port" '.schema_version==1 and .port==$port and .enabled==true' "$state" >/dev/null || fail 'start state schema'
 assert_firewall_demand "$old_port"
-if [[ "${VPSCTL_IPERF3_LIVE_UFW:-0}" == 1 ]]; then
+if [[ "${VPSCTL_IPERF3_LIVE_NFT:-0}" == 1 ]]; then
     assert_live_rule "$old_port" iperf3 yes tcp
     assert_live_rule "$old_port" iperf3 yes udp
 fi
@@ -265,9 +266,9 @@ except OSError:
 PY
     ipv6=1
     client_matrix ipv6 ::1 "$old_port"
-    if [[ -f /etc/default/ufw ]] && awk -F= '/^[[:space:]]*IPV6[[:space:]]*=/ {gsub(/[[:space:]"\047]/,"",$2); value=tolower($2)} END {exit(value!="yes")}' /etc/default/ufw; then
+    if [[ -r /proc/sys/net/ipv6/conf/all/disable_ipv6 && "$(</proc/sys/net/ipv6/conf/all/disable_ipv6)" == 0 ]]; then
         jq -e --arg port "$old_port" '[.requirements[] | select(.owner=="iperf3" and .port==$port and .family=="ipv6") | .proto] | sort==["tcp","udp"]' "$fw" >/dev/null || fail 'missing IPv6 firewall demands'
-    else printf 'NOT RUN: UFW IPv6 is not configured; native IPv6 traffic passed\n'; fi
+    else printf 'NOT RUN: system IPv6 is disabled; loopback IPv6 traffic passed\n'; fi
 else printf 'NOT RUN: IPv6 unavailable on host\n'; fi
 
 if [[ "${VPSCTL_IPERF3_NETNS:-0}" == 1 ]]; then
@@ -351,7 +352,7 @@ if [[ -n "$namespace" ]]; then
         probe_closed "$root_ip6" "$old_port"
     fi
 fi
-if [[ "${VPSCTL_IPERF3_LIVE_UFW:-0}" == 1 ]]; then
+if [[ "${VPSCTL_IPERF3_LIVE_NFT:-0}" == 1 ]]; then
     assert_live_rule "$new_port" iperf3 yes tcp
     assert_live_rule "$new_port" iperf3 yes udp
     assert_live_rule "$old_port" iperf3 no tcp
@@ -368,13 +369,13 @@ check_disabled || fail 'stop left service active/enabled'
 jq -e --argjson port "$new_port" '.port==$port and .enabled==false' "$state" >/dev/null || fail 'stop lost port/disabled intent'
 [[ -f "$unit" ]] || fail 'stop removed service configuration'
 probe_closed 127.0.0.1 "$new_port"
-jq -e 'all(.requirements[]; .owner!="iperf3")' "$fw" >/dev/null || fail 'stop retained UFW demand'
+jq -e 'all(.requirements[]; .owner!="iperf3")' "$fw" >/dev/null || fail 'stop retained NFT demand'
 if [[ -n "$namespace" ]]; then
     probe_closed "$root_ip" "$new_port"
     if ((ipv6)); then probe_closed "$root_ip6" "$new_port"; fi
 fi
-if [[ "${VPSCTL_IPERF3_LIVE_UFW:-0}" == 1 ]]; then
-    vpsctl network ufw sync
+if [[ "${VPSCTL_IPERF3_LIVE_NFT:-0}" == 1 ]]; then
+    vpsctl network nftables sync
     assert_live_rule "$new_port" iperf3 no tcp
     assert_live_rule "$new_port" iperf3 no udp
     assert_live_rule "$new_port" node:iperf3-test yes tcp
@@ -382,11 +383,11 @@ if [[ "${VPSCTL_IPERF3_LIVE_UFW:-0}" == 1 ]]; then
     assert_manual_rule
     other_owner clear
     other_owner_seeded=0
-    vpsctl network ufw sync
+    vpsctl network nftables sync
     assert_live_rule "$new_port" iperf3 no tcp
     assert_live_rule "$new_port" iperf3 no udp
     assert_manual_rule
-    printf 'PASS: live UFW borrowed/manual/shared ownership and stopped global sync\n'
+    printf 'PASS: live nftables manual/shared ownership and stopped global sync\n'
 fi
 assert_unrelated_firewall
 vpsctl service iperf3 restart
@@ -397,7 +398,7 @@ vpsctl service iperf3 uninstall
 [[ ! -e "$state" && ! -e "$unit" && ! -e /var/log/vpsctl/iperf3.log && ! -e /run/vpsctl/iperf3.pid && ! -e /run/vpsctl-iperf3.pid ]] || fail 'uninstall left owned files'
 check_disabled || fail 'uninstall left service active/enabled'
 [[ "$(sha256sum "$binary_path")" == "$binary_before" ]] || fail 'uninstall removed/changed native package binary'
-jq -e 'all(.requirements[]; .owner!="iperf3")' "$fw" >/dev/null || fail 'uninstall retained UFW demand'
+jq -e 'all(.requirements[]; .owner!="iperf3")' "$fw" >/dev/null || fail 'uninstall retained NFT demand'
 assert_unrelated_firewall
 owned=0
 printf 'PASS: idempotence, TCP/UDP conflict preservation, port switch, stop/restart/logs/uninstall, retained package\n'

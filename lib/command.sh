@@ -554,7 +554,6 @@ vps_cmd_package_for_tool() {
                 apk | pacman | zypper) printf 'shadow\n' ;;
             esac
             ;;
-        ufw) printf 'ufw\n' ;;
         firewall-cmd) printf 'firewalld\n' ;;
         iptables | ip6tables) printf 'iptables\n' ;;
         getent)

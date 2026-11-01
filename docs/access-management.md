@@ -145,11 +145,13 @@ bash bin/vpsctl security access ssh abort --transaction ID
 
 ## 6. 防火墙协同
 
-`--firewall auto` 只在脚本能够识别受支持的本机防火墙后端并安全记录规则归属时执行。UFW 使用共享规则归属与服务引用，兼容原 `vpsctl security access` 注释，并可接管语义完全等价的已有放行规则（见 [UFW 管理](ufw-management.md)），firewalld 使用固定优先级的精确 rich rule，iptables/ip6tables 同样使用 comment 标记。nftables 检测只把 `inet`、`ip` 或 `ip6` 家族中会限制入站的 `type filter hook input` 基链视为 SSH 入站防火墙；只有容器转发、NAT、output 等非 INPUT 规则，或者只有空的 `policy accept` INPUT 链时，不再误判为需要修改的防火墙。需要放行时，入口会在每条相关的现存 INPUT 基链首部插入带精确 comment 标记的规则，不会创建一个可能仍被后续 drop 基链拦截的独立 accept 基链。
+`--firewall auto` 优先使用[共享 nftables 管理器](nftables-management.md)：共享配置已启用或受管表仍存在时，只更新 `ssh` 所有者的需求，不修改其他 INPUT 链。手工规则与服务需求分别保存，删除 SSH 引用不会删除手工规则。没有活动防火墙时只登记需求，不自动启用防火墙。
+
+未使用共享管理器时，仍兼容 firewalld、持久化 iptables 和已有原生 nftables。firewalld 使用固定优先级的精确 rich rule，iptables/ip6tables 使用 comment 标记。原生 nftables 检测只把会限制入站的真实 INPUT 基链视为 SSH 防火墙；只有容器转发、NAT、output 或空的 accept INPUT 链时，不修改这些链。若共享管理器在原生事务准备后启用，会拒绝继续修改原链。
 
 若已证明 `nftables.service` 与 `/etc/nftables.d/*.nft` include 可用，规则同时写入受管片段 `/etc/nftables.d/zz-vpsctl-access.nft`。若无法证明持久化，交互模式只询问一次：自动添加运行时规则，或本次改由人工管理；非交互模式下显式的 `--firewall auto` 会选择运行时规则并打印警告。运行时规则仍参与 prepare、第二会话验证、commit、abort 和所有权清理，但在重启或其他工具 reload/flush ruleset 后会失效。此时 `status` 的防火墙 `mode` 为 `runtime`；在重启或 reload ruleset 前必须补齐可靠持久化或恢复原 SSH 端口，否则可能失联。vpsctl 不会为了规避这一限制而覆盖未知的 `/etc/nftables.conf` 或伪造独立基链。
 
-prepare 先放行候选端口；commit 在新会话证明通过后才移除本事务不再需要的旧端口规则；abort 恢复事务前的受管规则。UFW 删除前核对记录的规则内容及共享引用，其他后端同时要求状态中的所有权记录与后端中的精确标记匹配。检测到多个活动后端、INPUT 基链无法解析、后端不可用、已有受管持久化片段却发生入口漂移，或无法保证回滚时，自动模式仍会拒绝继续。
+prepare 先保存 `nft.scope.json` 并保留旧、新端口需求，然后更新 SSH；commit 在新会话证明和新端口监听检查通过后释放旧端口。abort/restore 先准备恢复需求，再恢复 SSH 并确认旧端口监听，最后提交共享防火墙事务。失败时保留可重试的事务状态。manual 不创建、恢复或修改共享需求。其他后端仍要求状态中的所有权记录与后端中的精确标记匹配；无法安全解析或恢复时拒绝继续。旧版 UFW prepared 事务和需求快照不能作为原生 nftables 事务继续提交或恢复。
 
 `--firewall manual` 不修改防火墙。操作者必须在 prepare 前确认候选端口已同时通过本机防火墙、云安全组、上游 ACL 和 NAT；commit 后再自行移除旧端口规则。脚本显示的端口计划是提示，不构成外部网络已放行的证明。无论哪种模式，新 SSH 会话验证都是提交的必要条件。
 

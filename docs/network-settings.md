@@ -1,6 +1,6 @@
 # 网络设置
 
-固定的 `network` 领域提供 BBR、DNS、IP 地址族偏好、UFW 和 RFW 五个入口。本文记录公开命令接口、风险边界、落盘位置、失败语义和发布验收要求；UFW 的完整管理及业务联动见 [UFW 管理](ufw-management.md)。实际验证结果以各功能验收记录为准。
+固定的 `network` 领域提供 BBR、DNS、IP 地址族偏好和 nftables 四个入口。本文记录公开命令接口、风险边界、落盘位置、失败语义和发布验收要求；nftables 的完整管理、迁移及业务联动见 [nftables 管理](nftables-management.md)。实际验证结果以各功能验收记录为准。
 
 ## 1. 入口与公共约定
 
@@ -9,8 +9,7 @@
 | `network bbr` | `status`、`enable`、`set`、`restore` | `change` | `optional-root` | 支持 | `linux` | `experimental` |
 | `network dns` | `show`、`test`、`set`、`refresh`、`verify`、`restore` | `disruptive` | `optional-root` | 支持 | `linux` | `experimental` |
 | `network ip-policy` | `status`、`set`、`restore` | `disruptive` | `optional-root` | 支持 | `linux`、`libc:glibc`；帮助不要求 glibc | `experimental` |
-| `network rfw` | `status`、`install`、`update`、`configure`、`start`、`stop`、`restart`、`stats`、`logs`、`uninstall` | `disruptive` | `optional-root` | 支持 | `linux`；帮助和无附加参数的 `status` 不要求 systemd，其余操作要求 `init:systemd` | `experimental` |
-| `network ufw` | 安装/卸载、启停、规则增删改查、联动同步及高级配置 | `disruptive` | `optional-root` | 支持 | `linux`；写操作按实际 UFW/包管理器/init 能力检查 | `experimental` |
+| `network nftables` | 状态、启停、端口规则、来源控制、防护策略及服务同步 | `disruptive` | `optional-root` | 支持 | `linux`；写操作要求 nftables 工具和内核能力，开机恢复支持 systemd/OpenRC | `experimental` |
 
 全局选项必须位于领域前，例如：
 
@@ -20,14 +19,14 @@ bash bin/vpsctl --dry-run --install-deps network dns set --server 1.1.1.1
 
 网络功能的公共约定如下：
 
-- `--install-deps` 为真实非交互调用明确授权按当前动作安装缺失的系统工具；演练无需安装授权；真实执行的交互流程则只在当前动作确有缺失时询问。它支持 `apt-get`、`dnf5`、`dnf`、`yum`、`apk`、`pacman` 与 `zypper`，但不安装或绕过内核、init 系统、CPU 架构、XDP/BPF 等平台能力。
-- `--dry-run` 展示检测结果和计划，不写系统、不安装依赖、不改变服务状态。缺少工具时无需 `--install-deps` 即可展示包管理器计划；DNS 可继续展示后续计划，BBR 和 RFW 在缺失工具妨碍安全验证时会提示安装后重跑。
-- `--yes` 只跳过允许自动同意的普通提示，不绕过能力检查、写前验证或 RFW 的中断性操作强确认。
+- `--install-deps` 为真实非交互调用明确授权按当前动作安装缺失的系统工具；演练无需安装授权；真实执行的交互流程则只在当前动作确有缺失时询问。它支持 `apt-get`、`dnf5`、`dnf`、`yum`、`apk`、`pacman` 与 `zypper`，但不安装或绕过内核、init 系统、CPU 架构、内核等平台能力。
+- `--dry-run` 展示检测结果和计划，不写系统、不安装依赖、不改变服务状态。缺少工具时无需 `--install-deps` 即可展示包管理器计划；DNS 可继续展示后续计划，BBR 和 nftables 在缺失工具妨碍安全验证时会提示安装后重跑。
+- `--yes` 只跳过允许自动同意的普通提示，不绕过能力检查、写前验证或功能自身的危险操作确认。
 - `--non-interactive` 禁止读取终端；缺少必要参数或必要的强确认时立即失败。
-- 修改操作分别使用 `/run/vpsctl/network-bbr.lock`、`/run/vpsctl/network-dns.lock` 和 `/run/vpsctl/network-rfw.lock`，阻止同一功能的并发事务互相覆盖。
+- 修改操作分别使用 `/run/vpsctl/network-bbr.lock`、`/run/vpsctl/network-dns.lock` 和 `/run/vpsctl/network-nftables.lock`，阻止同一功能的并发事务互相覆盖。
 - 普通用户可运行帮助和可读取的状态查询；写 `/etc`、`/usr/local`、systemd 单元或持久状态时需要 root。
 
-这些执行型全局参数只用于直接功能 CLI；主管理菜单进入 BBR、DNS、IP 地址族偏好或 RFW UI 后执行真实动作，不提供演练、依赖授权、自动同意、非交互、静默或详细日志开关。机器可读输出选项、`--force` 与 `--confirm-*` 确认标志也只在直接 CLI 暴露；菜单用编号选择固定值，用经校验的文本输入收集开放值，并在危险动作前执行对应交互确认。
+这些执行型全局参数只用于直接功能 CLI；主管理菜单进入 BBR、DNS、IP 地址族偏好或 nftables UI 后执行真实动作，不提供演练、依赖授权、自动同意、非交互、静默或详细日志开关。机器可读输出选项、`--force` 与 `--confirm-*` 确认标志也只在直接 CLI 暴露；菜单用编号选择固定值，用经校验的文本输入收集开放值，并在危险动作前执行对应交互确认。
 
 ## 2. BBR
 
@@ -129,74 +128,15 @@ bash bin/vpsctl network ip-policy restore
 
 命令将完整 RFC 6724 precedence 表写入 `/etc/gai.conf`。首次受管时，现有文件无论包含有效指令、注释还是为空，都会在一次普通确认后先原样备份，再完整替换；确认默认取消，输入 `y` 或全局 `--yes` 可授权，非交互且未授权时拒绝执行。备份保存原始内容、权限和 SHA-256，后续策略切换保留首次备份，`restore` 恢复原始内容及权限。`--dry-run` 只展示备份和替换计划，不写配置、状态或备份。后续更新和恢复同时校验项目标记及 SHA-256，检测到外部修改或状态损坏后仍拒绝覆盖，`--yes` 不会绕过这些检查。状态写入 `/var/lib/vpsctl/network/ip-policy/state.json`，备份位于 `/var/lib/vpsctl/backups/network/ip-policy/`。写入使用锁、临时文件和原子替换；命令不重启长期运行进程，后者可能继续使用旧缓存。
 
-## 5. RFW
+## 5. nftables
 
-### 5.1 支持边界
+`network nftables` 替代旧 UFW/RFW 两个入口；完整命令、五项菜单、规则与来源模型、服务联动、启停及恢复契约见 [nftables 管理](nftables-management.md)。旧命令不保留别名，旧手工规则不导入。
 
-RFW 入口仅支持以下组合：
-
-- systemd 服务管理器。
-- `x86_64` 或 `aarch64` CPU 架构。
-- Linux 5.15 或更新内核，并具备所选网卡所需的 XDP 能力；启用访问日志时还需可用的 BPF 文件系统。
-- IPv4 规则；它不修改 IPv6 规则，也不代表主机已获得 IPv6 防护。
-
-`install` 和 `update` 只从 [narwhal-cloud/rfw 官方 Releases](https://github.com/narwhal-cloud/rfw/releases)解析最新稳定 release，拒绝 prerelease、草稿、非 HTTPS 下载和无法匹配本机架构的资产。下载的二进制必须按官方 checksum 验证并核对版本后才能替换；校验信息缺失、不匹配或含糊时安全失败，不安装未验证资产。
-
-RFW 会在参数校验以及 Linux、systemd、架构和内核版本门禁通过后，只检查当前动作实际需要的 `curl`、`sha256sum`、`flock`、`ip`，以及启用端口日志时所需的 `mountpoint`。真实执行的交互环境发现这些可安装工具缺失时才列出缺失项并询问是否安装；真实非交互安装仍需预先提供 `--install-deps`，否则返回依赖缺失；`--dry-run` 直接展示依赖安装计划，不询问也不执行安装。`systemctl`、`journalctl`、XDP、BPF 文件系统和 RFW 二进制能力仍按平台或功能前置条件处理，不作为通用软件包自动安装。
-
-### 5.2 子动作和选项
-
-| 子动作 | 用途 | 主要选项 |
-| --- | --- | --- |
-| `status` | 显示安装版本、配置摘要和 systemd 状态 | 无变更选项 |
-| `install` | 安装官方最新稳定 release、配置和 systemd 单元 | `--force` 允许覆盖检测到的既有安装；不自动应用危险规则 |
-| `update` | 校验并替换为官方最新稳定 release | `--force` 允许强制重新安装；更新后延后重启 |
-| `configure` | 校验并写入 RFW 配置 | `--iface`、`--geo-mode none\|blocklist\|whitelist`、`--countries CSV`、`--block-email on\|off`、`--block-http on\|off`、`--block-socks5 on\|off`、`--block-wireguard on\|off`、`--block-quic on\|off`、`--block-all on\|off`、`--fet off\|loose\|strict`、`--xdp-mode auto\|skb\|drv\|hw`、`--log-port-access on\|off`、`--rust-log LEVEL` |
-| `start` | 启动服务 | `--enable`、危险配置时 `--confirm-disruptive` |
-| `stop` | 停止服务 | `--disable` |
-| `restart` | 显式应用当前二进制和配置 | 危险配置时 `--confirm-disruptive` |
-| `stats` | 查询统计 | `--port`、`--ip`、`--blocked-only`、`--allowed-only`、`--group-by-port` |
-| `logs` | 查询 journal 日志 | `--lines`、`--follow`、`--since` |
-| `uninstall` | 停止并移除项目安装的组件 | `--purge` 同时移除项目配置、状态和 RFW 备份；非交互清除还需 `--confirm-purge` |
-
-`configure` 的规则开关均使用明确的 `on` 或 `off`，不得用是否出现参数来表达含糊的继承状态。`--countries CSV` 必须与地理模式一致，并在写入前规范化和校验国家代码。
-
-交互 UI 不要求输入这些 CLI 枚举。配置向导将 Geo 模式、邮件/HTTP/SOCKS5/WireGuard/QUIC/全量拦截开关、FET、XDP 模式、端口访问日志和日志级别列为编号选项；接口、国家代码等开放值输入后再校验。其他动作提供以下交互分支：
-
-- 启动：仅启动，或启动并启用开机启动。
-- 停止：仅停止，或停止并禁用开机启动。
-- 统计：全部、仅拦截或仅允许；端口、IP 为可选过滤条件，并可选择是否按端口分组。
-- 日志：输入并校验行数，选择是否持续跟随，可选填写 `since`。
-- 卸载：保留配置与状态，或彻底清除。彻底清除仍要求输入 `PURGE-RFW` 强确认短语。
-
-首次安装生成的配置将所有过滤规则、FET 和访问日志设为 `off`，不会自动启动服务；至少显式配置一项过滤规则或访问日志后才能启动。上游的 `--block-email` 针对 SMTP 发送流量，其他协议开关和 `--block-all` 针对相应的 IPv4 入站流量。
-
-### 5.3 延后重启与强确认
-
-`configure` 和 `update` 写入成功后不自动启动或重启 RFW；输出明确标记“已暂存、尚未应用”，让现有 SSH 会话保持在可控状态。服务停止时可用 `start` 应用暂存内容；服务已运行且存在暂存内容时必须用 `restart`，避免把一次无操作的 `start` 误判为已应用。
-
-当应用可能封禁管理地址或中断 SSH 的配置时，交互模式必须要求用户输入完整确认短语 `APPLY-RFW`。`--yes` 不能代替该短语；非交互模式必须显式提供 `--confirm-disruptive`，否则拒绝执行。强确认只确认已展示的当前计划，计划发生变化后必须重新确认。
-
-### 5.4 配置、状态与恢复
-
-| 路径 | 用途 |
-| --- | --- |
-| `/usr/local/bin/rfw` | 校验后安装的 RFW 二进制 |
-| `/etc/vpsctl/rfw.conf` | 项目管理的 RFW 配置 |
-| `/etc/systemd/system/rfw.service` | 项目管理的 systemd 单元 |
-| `/sys/fs/bpf/rfw_port_access_log` | 启用端口访问日志时由受管服务独占的固定 BPF pin；不是跨重启持久状态 |
-| `/var/lib/vpsctl/network/rfw/` | 安装元数据、版本/checksum 记录及恢复所需状态 |
-| `/var/lib/vpsctl/backups/network/rfw/` | 更新、配置和失败恢复使用的上一版本备份 |
-
-启用端口访问日志时，受管 systemd 单元会在每次启动前删除遗留的固定 pin，并在进程退出后再次清理；卸载也只在受管单元实际包含 `--log-port-access` 时清理它。该 pin 由运行中的受管 RFW 服务独占，不应被其他程序复用，也不得在服务仍运行时手工删除。因为启动前会重建 BPF map，所以启动或重启服务后，端口访问统计会从零重新累计。
-
-若日志中出现创建该 pin 失败的 `EEXIST`，先执行 `systemctl stop rfw.service`，再用 `systemctl is-active rfw.service` 确认服务已经停止。随后检查 `/etc/systemd/system/rfw.service` 仍带项目管理标记且 `ExecStart` 包含 `--log-port-access`；仅在这两个条件都满足时，执行 `/usr/bin/rm -f -- /sys/fs/bpf/rfw_port_access_log`，最后用 `systemctl start rfw.service` 重新启动。若单元不受管或未启用端口访问日志，应保留该 pin 并先查明其所有者，避免破坏其他 BPF 程序。
-
-替换二进制、配置和单元前必须保留可识别的上一版本状态。安装、更新或卸载发生部分完成时返回 `30`，输出当前二进制版本、服务是否仍运行、哪些路径已改变，以及恢复上一文件或重新安装校验过版本的步骤。`uninstall` 默认保留配置和恢复状态；只有显式 `--purge` 才删除项目管理的数据，而且不得删除范围外文件。清除操作在交互模式要求输入 `PURGE-RFW`，在非交互模式要求额外提供无值标志 `--confirm-purge`；`--yes` 同样不能替代这一确认。
+原生规则仅操作 `inet vpsctl_firewall`，不会全局清空 ruleset。IPv4/IPv6 共用一套规则与服务声明；与独立 PO0 中转配合时仍保留其转发和 NAT 所有权。连接/UDP 包速率防护不提供带宽整形。
 
 ## 6. 退出码
 
-五个入口遵守统一退出码：
+四个入口遵守统一退出码：
 
 | 退出码 | 含义与网络命令示例 |
 | ---: | --- |
@@ -219,7 +159,7 @@ RFW 会在参数校验以及 Linux、systemd、架构和内核版本门禁通过
 - BBR：覆盖可用/不可用内核、重复执行、重启后持久化、`--apply-live-qdisc` 影响和完整恢复。
 - DNS：分别覆盖 systemd-resolved、NetworkManager、openresolv、静态 resolv.conf；在 Alpine 覆盖 DHCP 静态后端拒绝，以及 udhcpc `RESOLV_CONF="no"`/dhcpcd `nohook resolv.conf` 的分别接管；验证 legacy Debian 安全拒绝、候选前测失败零写入、写后失败保留配置并返回 `30`、按备份恢复。
 - IP 地址族偏好：覆盖空/注释/自定义 `/etc/gai.conf`、两种完整 precedence 表、所有权冲突、重复设置、dry-run、精确恢复和新进程实际解析排序。
-- RFW：分别覆盖 systemd 上的 `x86_64`/`aarch64`，校验稳定 release 选择、checksum 不匹配拒绝、IPv6 不受影响、配置/更新延后重启、`APPLY-RFW`/`--confirm-disruptive` 门禁、更新和卸载恢复。
+- nftables：覆盖 IPv4/IPv6、端口与来源控制、服务联动、TCP 连接/UDP 包防护、原子失败恢复、停用后恢复、重启后加载、旧受管防火墙清理和独立 PO0 共存；实际结果另行记录。
 - 四入口：覆盖普通用户/root、`--dry-run`、`--non-interactive`、锁冲突、中断、重复执行及各基础退出码。
 
-RFW 和 DNS 的中断性用例不得在唯一可用的远程管理链路上直接试验；应准备控制台或快照恢复通道。
+nftables 和 DNS 的中断性用例不得在唯一可用的远程管理链路上直接试验；应准备控制台或快照恢复通道。

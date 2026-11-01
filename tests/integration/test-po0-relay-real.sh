@@ -15,7 +15,12 @@ inside() {
     # shellcheck source=/dev/null
     source "$ROOT/scripts/po0-relay.sh"
     PO0_STATE_FILE="$work/state.tsv"
-    PO0_NFT_FILE="$work/nftables.conf"
+    PO0_NFT_FILE="$work/rules.nft"
+    PO0_LEGACY_NFT_FILE="$work/nftables.conf"
+    PO0_SERVICE_FILE="$work/po0-relay.service"
+    PO0_SHARED_STATE="$work/shared/state.json"
+    PO0_SHARED_LOCK="$work/shared.lock"
+    PO0_PROXY_STATE_DIR="$work/proxy"
     PO0_SYSCTL_FILE="$work/ip-forward.conf"
     PO0_BACKUP_DIR="$work/backups"
     PO0_LOCK_FILE="$work/po0.lock"
@@ -26,11 +31,11 @@ inside() {
         printf '\n' >>"$work/systemctl.calls"
         case "${1-}:${2-}" in
             show:ssh.socket | show:sshd.socket) return 0 ;;
-            is-enabled:nftables)
+            is-enabled:po0-relay.service)
                 cat "$work/service-state"
                 [[ "$(cat "$work/service-state")" == enabled ]]
                 ;;
-            enable:nftables)
+            enable:po0-relay.service)
                 if [[ "$SERVICE_FAIL" == 1 ]]; then
                     nft -s list ruleset >"$work/rollback-runtime.at-enable"
                     cp "$PO0_STATE_FILE" "$work/rollback-state.at-enable"
@@ -38,7 +43,8 @@ inside() {
                 fi
                 printf 'enabled\n' >"$work/service-state"
                 ;;
-            disable:nftables) printf 'disabled\n' >"$work/service-state" ;;
+            disable:po0-relay.service) printf 'disabled\n' >"$work/service-state" ;;
+            daemon-reload:) return 0 ;;
             *) fail "unexpected systemctl operation: $*" ;;
         esac
     }
@@ -78,19 +84,34 @@ PY
     mv "$PO0_SYSCTL_FILE" "$work/fresh-ip-forward.conf"
     sysctl -q -w net.ipv4.ip_forward=0
     ok 'fresh installation applies an empty initial rule set'
-    nft -f "$ROOT/tests/fixtures/po0-legacy-multiple.nft"
-    cp "$ROOT/tests/fixtures/po0-legacy-multiple.nft" "$PO0_NFT_FILE"
+    sed 's/198.51.100.2/198.51.100.9/g' "$ROOT/tests/fixtures/po0-legacy-multiple.nft" >"$PO0_LEGACY_NFT_FILE"
+    nft -f "$PO0_LEGACY_NFT_FILE"
     nft -s list ruleset >"$work/legacy-runtime.before"
-    before="$(sha256sum "$PO0_NFT_FILE")"
+    before="$(sha256sum "$PO0_LEGACY_NFT_FILE")"
     po0_load_current || fail 'load current legacy configuration'
     [[ "$PO0_MODE" == legacy && "${#PO0_IDS[@]}" == 2 ]] || fail 'legacy current mode/count'
-    [[ "$before" == "$(sha256sum "$PO0_NFT_FILE")" ]] || fail 'legacy viewing rewrites config'
+    [[ "$before" == "$(sha256sum "$PO0_LEGACY_NFT_FILE")" ]] || fail 'legacy viewing rewrites config'
     [[ ! -e "$PO0_STATE_FILE" ]] || fail 'legacy viewing creates state'
     nft -s list ruleset >"$work/legacy-runtime.after"
     cmp -s "$work/legacy-runtime.before" "$work/legacy-runtime.after" || fail 'legacy viewing changes runtime'
     po0_load_current || fail 'repeat legacy view'
     [[ "${#PO0_IDS[@]}" == 2 ]] || fail 'legacy view duplicates rules'
+    PO0_TABLES=$(nft list tables)
+    po0_validate_legacy_runtime || fail 'legacy runtime proof with nft-reordered anonymous set'
     ok 'legacy inspection preserves runtime and disk without duplicate import'
+
+    po0_write_state | sed '/^meta\tfilter_owner\t/d; 1s/3$/2/' >"$PO0_STATE_FILE"
+    po0_render_previous_config >"$PO0_LEGACY_NFT_FILE"
+    nft -f "$PO0_LEGACY_NFT_FILE"
+    po0_load_current || fail 'load previous state-based generic configuration'
+    [[ $PO0_MODE == previous ]] || fail 'previous generic release not recognized'
+    PO0_TABLES=$(nft list tables)
+    po0_validate_legacy_runtime || fail 'previous generic release runtime proof'
+    rm -f "$PO0_STATE_FILE"
+    cp "$ROOT/tests/fixtures/po0-legacy-multiple.nft" "$PO0_LEGACY_NFT_FILE"
+    nft -f "$PO0_LEGACY_NFT_FILE"
+    po0_load_current
+    ok 'previous v2 state and generic runtime verified for migration'
 
     # A first edit migrates the recognized legacy rules in this isolated netns.
     nft add table inet foreign_po0
@@ -107,11 +128,23 @@ PY
     PO0_PORT[1]=20001 PO0_PORT[2]=20002
     PO0_DEST_IP[1]=198.51.100.2 PO0_DEST_IP[2]=198.51.100.3
     PO0_DEST_PORT[1]=443 PO0_DEST_PORT[2]=8443
+    nft add chain ip nat DOCKER
+    nft -s list ruleset >"$work/modified-legacy.before"
+    if po0_apply; then fail 'migration erased foreign chain in a generic legacy table'; fi
+    nft -s list ruleset >"$work/modified-legacy.after"
+    cmp -s "$work/modified-legacy.before" "$work/modified-legacy.after" || fail 'rejected migration mutated runtime'
+    nft delete chain ip nat DOCKER
     po0_apply || fail 'initial legacy migration apply'
     [[ "$(sysctl -n net.ipv4.ip_forward)" == 1 ]] || fail 'forwarding not enabled'
     [[ -s "$PO0_STATE_FILE" && -s "$PO0_NFT_FILE" && -s "$PO0_SYSCTL_FILE" ]] || fail 'persistent files missing'
     nft -s list table inet foreign_po0 >"$work/foreign.after"
     cmp -s "$work/foreign.before" "$work/foreign.after" || fail 'initial apply changes foreign table'
+    if nft list table inet filter >/dev/null 2>&1; then fail 'legacy filter survives migration'; fi
+    if grep -q '^flush ruleset' "$PO0_LEGACY_NFT_FILE"; then fail 'legacy boot config retains global flush'; fi
+    nft add table ip nat
+    nft add chain ip nat DOCKER
+    nft 'add rule ip nat DOCKER counter comment "foreign Docker marker"'
+    nft -s list table ip nat >"$work/docker.before"
     touch "$work/initial.ready"
     while [[ ! -e "$work/initial.probed" ]]; do sleep 0.1; done
     ok 'initial apply writes persistent files and preserves foreign nft table'
@@ -192,6 +225,8 @@ PY
     while [[ ! -e "$work/reload.probed" ]]; do sleep 0.1; done
     nft -s list table inet foreign_po0 >"$work/foreign.final"
     cmp -s "$work/foreign.before" "$work/foreign.final" || fail 'reload changes foreign table'
+    nft -s list table ip nat >"$work/docker.after"
+    cmp -s "$work/docker.before" "$work/docker.after" || fail 'PO0 changes generic Docker table'
     po0_load_current
     PO0_IDS=("$second")
     unset 'PO0_NAME[$first]' 'PO0_ENABLED[$first]' 'PO0_PROTO[$first]' 'PO0_PORT[$first]' 'PO0_DEST_IP[$first]' 'PO0_DEST_PORT[$first]' 'PO0_URI[3]'
@@ -201,6 +236,124 @@ PY
     touch "$work/delete.ready"
     while [[ ! -e "$work/delete.probed" ]]; do sleep 0.1; done
     ok 'persistent reload is idempotent and delete preserves surviving stable ID'
+
+    # Exercise the real private bridge, keeping systemd and all files isolated.
+    mkdir -p "$work/runtime/lib" "$work/system-root/var/lib/vpsctl/network/nftables"
+    cp "$ROOT/commands/network/nftables/runtime.sh" "$work/runtime/runtime.sh"
+    cp "$ROOT/lib/command.sh" "$ROOT/lib/ui.sh" "$ROOT/lib/offline.sh" "$ROOT/lib/nftables.sh" "$work/runtime/lib/"
+    cp -R "$ROOT/lib/nftables" "$work/runtime/lib/"
+    cat >>"$work/runtime/runtime.sh" <<'SH'
+if [[ ${PO0_INJECT_APPLIED_FAILURE:-0} == 1 ]]; then
+    eval "$(declare -f vps_cmd_atomic_write | sed '1s/vps_cmd_atomic_write/po0_fixture_atomic_write/')"
+    vps_cmd_atomic_write() {
+        if [[ $1 == /var/lib/vpsctl/network/nftables/applied.json && ! -e $PO0_APPLIED_FAIL_MARKER ]]; then
+            touch "$PO0_APPLIED_FAIL_MARKER"
+            return 20
+        fi
+        po0_fixture_atomic_write "$@"
+    }
+fi
+SH
+    export VPSCTL_TESTING=1 VPSCTL_SYSTEM_ROOT="$work/system-root"
+    PO0_SHARED_STATE="$VPSCTL_SYSTEM_ROOT/var/lib/vpsctl/network/nftables/state.json"
+    PO0_SHARED_LOCK="$VPSCTL_SYSTEM_ROOT/run/vpsctl/network-nftables.lock"
+    PO0_SHARED_RUNTIME="$work/runtime/runtime.sh"
+    # shellcheck source=/dev/null
+    source "$PO0_SHARED_RUNTIME"
+    vps_cmd_init network-nftables "$work/runtime"
+    vps_nft_init
+    vps_nft_state | jq '.enabled=true' >"$work/native-initial.json"
+    vps_nft_save_state "$work/native-initial.json"
+    # Manager enable adopts an existing PO0 with both business/nft locks held.
+    exec {business_fd}>"$PO0_LOCK_FILE"
+    flock "$business_fd"
+    vps_nft_lock
+    po0_coop_prepare "$work/adopt" || fail 'prepare manager adoption'
+    jq --slurpfile po0 "$work/adopt/requirements.json" '.requirements=$po0[0]' "$work/native-initial.json" >"$work/native-adopt.json"
+    vps_nft_prepare_state "$work/native-adopt.json" "$work/native-adopt"
+    cat "$work/adopt/batch.nft" "$work/native-adopt/batch.nft" >"$work/adopt-combined.nft"
+    nft -c -f "$work/adopt-combined.nft" && nft -f "$work/adopt-combined.nft"
+    vps_nft_commit_prepared "$work/native-adopt"
+    po0_coop_commit "$work/adopt" || fail 'commit manager adoption'
+    vps_nft_unlock
+    flock -u "$business_fd"
+    exec {business_fd}>&-
+    po0_load_current || fail 'reload adopted PO0'
+    [[ $PO0_FILTER_OWNER == vpsctl ]] || fail 'adoption did not persist filter ownership'
+    if nft list table inet po0_relay_filter >/dev/null 2>&1; then fail 'PO0 DROP survives adoption'; fi
+    touch "$work/cooperative.ready"
+    while [[ ! -e "$work/cooperative.probed" ]]; do sleep 0.1; done
+    ok 'manager adoption atomically transfers access control and forwards real TCP/UDP'
+
+    # PO0 mutation publishes NAT and demand together; a later failure restores both.
+    shared_snapshot() {
+        local table family name
+        for table in 'inet vpsctl_firewall' 'ip po0_relay_nat' 'ip po0_relay_mangle'; do
+            IFS=' ' read -r family name <<<"$table"
+            nft -s list table "$family" "$name"
+        done
+    }
+    cp "$PO0_SHARED_STATE" "$work/shared-before.json"
+    shared_snapshot >"$work/shared-runtime.before"
+    PO0_DEST_PORT[$second]=443
+    printf 'disabled\n' >"$work/service-state"
+    SERVICE_FAIL=1
+    if po0_apply; then fail 'shared transaction service failure accepted'; fi
+    SERVICE_FAIL=0
+    cmp -s "$PO0_SHARED_STATE" "$work/shared-before.json" || fail 'shared demands not rolled back'
+    shared_snapshot >"$work/shared-runtime.after"
+    cmp -s "$work/shared-runtime.before" "$work/shared-runtime.after" || fail 'combined runtime not rolled back'
+    po0_load_current
+    PO0_DEST_PORT[$second]=443
+    if PO0_INJECT_APPLIED_FAILURE=1 PO0_APPLIED_FAIL_MARKER="$work/applied-failure.injected" po0_apply; then fail 'post-nft applied metadata failure accepted'; fi
+    [[ -e $work/applied-failure.injected ]] || fail 'applied metadata failure was not reached'
+    cmp -s "$PO0_SHARED_STATE" "$work/shared-before.json" || fail 'post-nft metadata failure changed demand'
+    shared_snapshot >"$work/shared-runtime.metadata-after"
+    cmp -s "$work/shared-runtime.before" "$work/shared-runtime.metadata-after" || fail 'post-nft metadata failure changed runtime'
+    touch "$work/cooperative-rollback.ready"
+    while [[ ! -e "$work/cooperative-rollback.probed" ]]; do sleep 0.1; done
+    po0_load_current
+    PO0_DEST_PORT[$second]=443
+    po0_apply || fail 'PO0 candidate shared commit'
+    jq -e '.requirements | length == 2 and all(.[]; .port == "443")' "$PO0_SHARED_STATE" >/dev/null || fail 'shared demands stale after PO0 edit'
+    touch "$work/cooperative-edit.ready"
+    while [[ ! -e "$work/cooperative-edit.probed" ]]; do sleep 0.1; done
+    ok 'shared mutation and failure rollback keep PO0 NAT/state and manager demand coherent'
+
+    jq '.enabled=false' "$PO0_SHARED_STATE" >"$work/native-disabled.json"
+    vps_nft_save_state "$work/native-disabled.json"
+    vps_nft_apply
+    po0_load_current
+    po0_apply || fail 'PO0 reapply with disabled manager'
+    nft -f "$PO0_NFT_FILE"
+    nft -f "$PO0_NFT_FILE"
+    if nft list table inet po0_relay_filter >/dev/null 2>&1 || nft list table inet vpsctl_firewall >/dev/null 2>&1; then fail 'disabled manager unexpectedly reinstates DROP'; fi
+    po0_load_current
+    [[ $PO0_FILTER_OWNER == vpsctl ]] || fail 'disabled manager loses ownership mode'
+    touch "$work/cooperative-disabled.ready"
+    while [[ ! -e "$work/cooperative-disabled.probed" ]]; do sleep 0.1; done
+    nft -s list table ip nat >"$work/docker.cooperative"
+    cmp -s "$work/docker.before" "$work/docker.cooperative" || fail 'shared operations alter Docker table'
+    ok 'disabled manager and repeated boot loads retain forwarding without PO0 DROP'
+
+    # Reverse installation order: the manager exists before a fresh PO0 state.
+    po0_render_reset >"$work/po0-reset.nft"
+    nft -f "$work/po0-reset.nft"
+    mv "$PO0_STATE_FILE" "$work/adopted-state.saved"
+    mv "$PO0_NFT_FILE" "$work/adopted-rules.saved"
+    po0_load_current
+    [[ $PO0_MODE == fresh ]] || fail 'fresh PO0 mode after native manager install'
+    PO0_IFACE=wan0 PO0_RELAY_IP=192.0.2.1 PO0_NEXT_ID=2 PO0_IDS=(1)
+    PO0_NAME[1]=fresh PO0_ENABLED[1]=1 PO0_PROTO[1]=both PO0_PORT[1]=24001
+    PO0_DEST_IP[1]=198.51.100.2 PO0_DEST_PORT[1]=443
+    po0_apply || fail 'PO0 first install after native manager'
+    po0_load_current
+    [[ $PO0_FILTER_OWNER == vpsctl ]] || fail 'fresh PO0 failed to use installed manager'
+    if nft list table inet po0_relay_filter >/dev/null 2>&1; then fail 'fresh PO0 adds DROP beside manager'; fi
+    jq -e '.requirements | length == 2 and all(.[]; .original_port == "24001")' "$PO0_SHARED_STATE" >/dev/null || fail 'fresh PO0 demand not registered'
+    touch "$work/cooperative-first-install.ready"
+    while [[ ! -e "$work/cooperative-first-install.probed" ]]; do sleep 0.1; done
+    ok 'PO0 first install after native manager uses cooperative ownership and forwarding'
     return 0
 }
 
@@ -213,7 +366,7 @@ fi
     exit
 }
 ((EUID == 0)) || fail 'root required'
-for tool in ip nft python3 sysctl timeout sha256sum; do command -v "$tool" >/dev/null || fail "missing $tool"; done
+for tool in ip nft python3 jq sysctl timeout sha256sum; do command -v "$tool" >/dev/null || fail "missing $tool"; done
 WORK="${PO0_RESULT_DIR:-$(mktemp -d /var/tmp/po0-relay-real.XXXXXX)}"
 mkdir -p "$WORK"
 WORK="$(cd "$WORK" && pwd -P)"
@@ -355,6 +508,21 @@ probe tcp 20010 BLOCKED
 probe udp 20010 BLOCKED
 probe_line 20002 198.51.100.3 8443
 touch "$WORK/delete.probed"
+wait_stage cooperative
+probe_line 20002 198.51.100.3 8443
+touch "$WORK/cooperative.probed"
+wait_stage cooperative-rollback
+probe_line 20002 198.51.100.3 8443
+touch "$WORK/cooperative-rollback.probed"
+wait_stage cooperative-edit
+probe_line 20002 198.51.100.3 443
+touch "$WORK/cooperative-edit.probed"
+wait_stage cooperative-disabled
+probe_line 20002 198.51.100.3 443
+touch "$WORK/cooperative-disabled.probed"
+wait_stage cooperative-first-install
+probe_line 24001 198.51.100.2 443
+touch "$WORK/cooperative-first-install.probed"
 wait "$INSIDE_PID" || {
     cat "$WORK/inside.log"
     fail 'inside acceptance'

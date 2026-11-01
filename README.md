@@ -17,8 +17,8 @@
 - [命令登记规范](docs/command-registry.md)：新增命令时必须维护的元数据和清单格式。
 - [开发与验收流程](docs/development-workflow.md)：从设计、实现到测试和评审的流程。
 - [主管理脚本与 UI](docs/manager-ui.md)：启动检测、菜单结构、非交互模式和扩展方式。
-- [网络设置](docs/network-settings.md)：BBR、DNS、IP 地址族偏好和 RFW 的接口、安全边界、持久化路径和恢复要求。
-- [UFW 管理](docs/ufw-management.md)：防火墙规则、服务联动、临时租约与恢复边界。
+- [网络设置](docs/network-settings.md)：BBR、DNS、IP 地址族偏好和 nftables 的接口、安全边界、持久化路径和恢复要求。
+- [nftables 管理](docs/nftables-management.md)：防火墙规则、服务联动、临时租约与恢复边界。
 - [系统内核管理](docs/kernel-management.md)：发行版官方内核与 XanMod BBRv3 的安装、固定默认版本、按版本卸载和恢复；另见[验收记录](docs/kernel-validation.md)。
 - [系统重装与 DD](docs/reinstall-management.md)：Linux、Windows 与 RAW DD 快捷菜单、上游参数透传、取消重装及工具缓存清理。
 - [Swap 管理](docs/swap-management.md)：内存与 Swap 状态、自动容量、磁盘 Swap 替换和关闭、开机配置及失败恢复。
@@ -27,7 +27,7 @@
 - [代理管理](docs/proxy-management.md)：Xray/sing-box 内核、节点、出口关联、端口转发、订阅、证书、日志与时间同步。
 - [代理机器接口](docs/proxy-machine-api.md)：可信本机 Agent 的 JSON 快照、版本冲突检查、原生变更与请求回执。
 - [TCPing 测试站点](docs/tcping-management.md)：按需管理独立的 TCP 探测监听服务及其端口。
-- [iperf3 测速服务端](docs/iperf3-management.md)：安装、更新、启停及卸载 TCP/UDP 测速服务，联动 UFW。
+- [iperf3 测速服务端](docs/iperf3-management.md)：安装、更新、启停及卸载 TCP/UDP 测速服务，联动原生 nftables。
 - [访问管理](docs/access-management.md)：用户、密码、公钥与 SSH 双端口验证事务、防火墙协同和恢复。
 - [Fail2ban 管理](docs/fail2ban-management.md)：OpenSSH jail 的安装、均衡递增策略、白名单、验证和恢复。
 - [TLS 证书管理](docs/tls-management.md)：域名证书导入、ACME 申请与自动续期。
@@ -58,8 +58,7 @@ apk add --no-cache bash curl ca-certificates
 | 核心管理入口 | `x86_64`、`aarch64` 支持；要求 Bash 4.4+，安装/更新需要 `curl` 和 CA 证书 |
 | `network bbr` | 支持入口与依赖安装；实际变更仍要求内核暴露所选拥塞控制和 qdisc 能力 |
 | `network dns` | 支持静态 `/etc/resolv.conf` 与 openresolv；检测到 Alpine DHCP 可能回写 plain 后端时，会在零写入状态拒绝并要求 openresolv，或明确禁用 udhcpc/dhcpcd 的 DNS hook |
-| `network rfw` | 帮助和无附加参数的 `status` 可在 Linux 上查询；实际运行不支持 Alpine 默认的 OpenRC，仍要求 systemd、`x86_64`/`aarch64`、Linux 5.15+ 及所需 XDP/BPF 能力 |
-| `network ufw` | 适配 `apk` 和 OpenRC；要求已配置的软件源提供 UFW，实际验证范围见 [UFW 验收记录](docs/ufw-validation.md) |
+| `network nftables` | 写操作要求内核提供 nftables，开机恢复支持 systemd/OpenRC；具体平台验证范围以当前验收记录为准 |
 | `security access` | SSH 服务编排仅支持 systemd；不能把核心的 OpenRC 支持外推为访问管理支持 |
 | `security fail2ban` | 帮助与 `status [--json]` 可在无 systemd 的 Linux 上查询；安装和服务编排不支持 `apk`/OpenRC，仍要求文档列出的包管理器与 Fail2ban 0.11+ |
 | `security tls` | 导入与查看支持 Alpine；续期 timer 需要 systemd；ACME 的 lego 二进制仅 `x86_64`/`aarch64` |
@@ -119,7 +118,9 @@ bash "$tmp_dir/vpsctl.sh" --verified-manifest "$tmp_dir/vpsctl-manifest.tsv"
 
 安装和更新不再保存 `/var/lib/vpsctl/self/vpsctl.sh` 副本。旧版本遗留的副本不会被读取、校验或同步，也不影响更新与普通卸载；`system clean vpsctl` 可清除经核验的旧普通文件，`self uninstall --purge` 仍会随 self 目录将其清除。
 
-schema 2 分发中，`core` 仅包含入口、版本、环境检测、注册表、UI、分发逻辑（含离线资源支持）和 `self` 命令。默认在线安装时，每个非 self 公开命令单独发布 `<domain>-<action>` bundle，例如 `network-bbr`；首次执行功能（包括功能帮助）时才下载该功能及其固定共享依赖，浏览全局帮助、清单、环境、版本、菜单和 `self status` 不下载功能。所有功能依赖 `shared-command`；UFW、访问、TLS、代理、TCP 探测监听和 iperf3 另依赖 `shared-ufw`，两项服务器测试另依赖 `shared-server-test`，三个备份入口另依赖 `shared-backup`。已缓存功能可离线重复使用；`service tcping uninstall` 与 `service iperf3 uninstall` 成功后只删除自身功能包缓存，下次调用会重新下载该包。默认在线跨版本 `self update` 只获取 manifest、安装器和 core，新版本的功能重新按需下载，不预取旧缓存。文件名、版本、SHA-256、路径和文件类型校验仍保留，失败临时下载不会成为有效缓存。
+schema 2 分发中，`core` 仅包含入口、版本、环境检测、注册表、UI、分发逻辑（含离线资源支持）和 `self` 命令。默认在线安装时，每个非 self 公开命令单独发布 `<domain>-<action>` bundle，例如 `network-bbr`；首次执行功能（包括功能帮助）时才下载该功能及其固定共享依赖，浏览全局帮助、清单、环境、版本、菜单和 `self status` 不下载功能。所有功能依赖 `shared-command`；nftables、访问、TLS、代理、TCP 探测监听和 iperf3 另依赖 `shared-nftables`，两项服务器测试另依赖 `shared-server-test`，三个备份入口另依赖 `shared-backup`。已缓存功能可离线重复使用；`service tcping uninstall` 与 `service iperf3 uninstall` 成功后只删除自身功能包缓存，下次调用会重新下载该包。默认在线跨版本 `self update` 只获取 manifest、安装器和 core，新版本的功能重新按需下载，不预取旧缓存。文件名、版本、SHA-256、路径和文件类型校验仍保留，失败临时下载不会成为有效缓存。
+
+`network nftables` 还会缓存同版本的 `service-proxy` 脚本包，用于在移除旧 UFW 前更新已经安装的代理中转后台运行时。这项依赖只提供迁移所需脚本，不安装 Xray/sing-box 二进制或代理服务，也不重启现有代理。
 
 如果旧版升级后启动报 `current/bin/vpsctl: Permission denied`，可能是 core 入口缺少执行位。可在 root shell 中恢复并检查：
 
@@ -161,9 +162,9 @@ vpsctl --yes self update --offline-dir /root/vpsctl-offline
 
 同版本导入可将在线安装补全为离线安装，但包内 manifest 必须与已安装版本完全一致；跨版本导入从本地更新全部项目 bundle。成功后资源保存在 `/usr/local/lib/vpsctl/releases/<version>/.offline/`，原归档与解压目录可以删除。清理或卸载功能包缓存后，再次调用会从这里恢复；本地资源缺失或校验失败会报错，不回退联网下载。未指定 `--offline-dir` 的 `self update` 仍按原有在线流程执行。
 
-包内包含全部项目脚本，以及网络设置、UFW、SSH、Fail2ban、Xray/sing-box、TCPing/iperf3、lego/TLS、Swap 和清理所需的上游资产与系统依赖。Xray、sing-box、lego、RFW 使用构建开始时分别解析的最新稳定版，同次构建各架构版本一致；离线调用仅能使用包内版本，请求其他 tag 或预发布通道会报错。系统包取自对应发行版构建时的软件源，并包含完整依赖闭包。导入资源不会预装全部功能依赖；功能仍按需从本地 APT 仓库安装依赖，非交互调用继续使用全局 `--install-deps` 授权。
+包内包含全部项目脚本，以及网络设置、nftables、SSH、Fail2ban、Xray/sing-box、TCPing/iperf3、lego/TLS、Swap 和清理所需的上游资产与系统依赖。Xray、sing-box、lego 使用构建开始时分别解析的最新稳定版，同次构建各架构版本一致；离线调用仅能使用包内版本，请求其他 tag 或预发布通道会报错。系统包取自对应发行版构建时的软件源，并包含完整依赖闭包。导入资源不会预装全部功能依赖；功能仍按需从本地 APT 仓库安装依赖，非交互调用继续使用全局 `--install-deps` 授权。
 
-离线包免去上述安装内容的外网下载，不改变服务本身的联网要求：ACME 申请与续期、DNS、NTP 和实际业务通信仍需可达的服务。RFW 二进制已包含，但按国家/地区过滤仍会下载 GeoIP 数据。备份、内核、重装和第三方综合测试虽包含本项目入口，其外部依赖未纳入完整离线范围。构建流程见[Release 资产与发布流程](docs/development-workflow.md#4-release-资产与发布流程)。
+离线包免去上述安装内容的外网下载，不改变服务本身的联网要求：ACME 申请与续期、DNS、NTP 和实际业务通信仍需可达的服务。备份、内核、重装和第三方综合测试虽包含本项目入口，其外部依赖未纳入完整离线范围。构建流程见[Release 资产与发布流程](docs/development-workflow.md#4-release-资产与发布流程)。
 
 ## 从源码树运行主管理脚本
 
@@ -193,8 +194,7 @@ vpsctl [global-options] <domain> <action> [command-options]
 bash bin/vpsctl network bbr status
 bash bin/vpsctl network dns show
 bash bin/vpsctl network ip-policy status
-bash bin/vpsctl network rfw status
-bash bin/vpsctl network ufw status
+bash bin/vpsctl network nftables status
 bash bin/vpsctl system kernel status
 bash bin/vpsctl system kernel install --type official --confirm-install INSTALL-KERNEL
 bash bin/vpsctl system kernel switch --release RELEASE --confirm-switch SWITCH-KERNEL
@@ -254,7 +254,7 @@ bash bin/vpsctl test tcpquality
 bash bin/vpsctl --dry-run --install-deps network bbr enable
 bash bin/vpsctl --dry-run --install-deps network dns set --server 1.1.1.1 --server 1.0.0.1
 bash bin/vpsctl --dry-run network ip-policy set --policy prefer_ipv4
-bash bin/vpsctl --dry-run --install-deps network rfw install
+bash bin/vpsctl --dry-run --install-deps network nftables enable
 bash bin/vpsctl --dry-run --install-deps system kernel install --type official
 bash bin/vpsctl --dry-run system swap set --size auto
 bash bin/vpsctl --dry-run system swap disable
@@ -271,9 +271,9 @@ bash bin/vpsctl service proxy update --core xray --version vX.Y.Z
 
 在线模式下，代理内核安装和更新默认查询最新稳定版，也可用 `--release-channel prerelease` 选择最新预发布版，或用 `--version TAG` 精确选择稳定或预发布 Release；后两项互斥。`--core all` 可共享 release channel，但不能共享一个 `--version`，因为 Xray 与 sing-box 的 tag 空间不同。安装时选择的通道不会写入状态；以后不带版本选项执行 `update` 仍查询最新稳定版，但当目标低于当前版本时会在下载资产前成功跳过，不隐式降级。显式指定通道或 tag 允许回退，相同版本仍可重建配置。内核资产继续执行官方来源、唯一资产、SHA-256、解压目标、二进制版本和现有配置兼容性校验，更新完成后不会自动重启服务。
 
-在主管理菜单中选择 BBR、DNS、IP 地址族偏好、RFW、内核管理、重装与 DD、Swap 管理、系统清理、访问管理、Fail2ban、TLS 证书、代理管理或两项服务器测试后，会直接进入对应功能入口，不再经过“命令详情”或输入 `r` 才运行的中间页；菜单选项执行的是真实动作，不提供演练、依赖授权、自动同意、非交互、静默或详细日志等执行型全局参数开关。系统内核菜单以官方标准内核为推荐安装项，并通过编号选择具体切换或卸载版本；代理内核的安装和更新会用编号选择最新稳定版（推荐）、最新预发布版或精确 Release tag。`--dry-run`、`--install-deps`、`--yes`、`--non-interactive`、`--quiet`、`--verbose` 只用于直接功能 CLI，并写在领域之前；重装与服务器测试明确拒绝 `--dry-run`，服务器测试也不承诺非交互自动化。子动作及选项见[网络设置](docs/network-settings.md)、[系统内核管理](docs/kernel-management.md)、[系统重装与 DD](docs/reinstall-management.md)、[Swap 管理](docs/swap-management.md)、[系统清理](docs/system-clean.md)、[访问管理](docs/access-management.md)、[Fail2ban 管理](docs/fail2ban-management.md)、[TLS 证书管理](docs/tls-management.md)、[代理管理](docs/proxy-management.md)和[服务器测试](docs/server-testing.md)。机器可读格式开关、`--force` 和 `--confirm-*` 确认标志同样只用于直接 CLI，菜单中的危险动作改用明确的交互提示和必要的强确认短语。
+在主管理菜单中选择 BBR、DNS、IP 地址族偏好、nftables、内核管理、重装与 DD、Swap 管理、系统清理、访问管理、Fail2ban、TLS 证书、代理管理或两项服务器测试后，会直接进入对应功能入口，不再经过“命令详情”或输入 `r` 才运行的中间页；菜单选项执行的是真实动作，不提供演练、依赖授权、自动同意、非交互、静默或详细日志等执行型全局参数开关。系统内核菜单以官方标准内核为推荐安装项，并通过编号选择具体切换或卸载版本；代理内核的安装和更新会用编号选择最新稳定版（推荐）、最新预发布版或精确 Release tag。`--dry-run`、`--install-deps`、`--yes`、`--non-interactive`、`--quiet`、`--verbose` 只用于直接功能 CLI，并写在领域之前；重装与服务器测试明确拒绝 `--dry-run`，服务器测试也不承诺非交互自动化。子动作及选项见[网络设置](docs/network-settings.md)、[系统内核管理](docs/kernel-management.md)、[系统重装与 DD](docs/reinstall-management.md)、[Swap 管理](docs/swap-management.md)、[系统清理](docs/system-clean.md)、[访问管理](docs/access-management.md)、[Fail2ban 管理](docs/fail2ban-management.md)、[TLS 证书管理](docs/tls-management.md)、[代理管理](docs/proxy-management.md)和[服务器测试](docs/server-testing.md)。机器可读格式开关、`--force` 和 `--confirm-*` 确认标志同样只用于直接 CLI，菜单中的危险动作改用明确的交互提示和必要的强确认短语。
 
-依赖检查按用户当前选择的动作延迟执行：只有该动作实际缺少可安装工具时，真实执行的交互流程才询问是否安装，不会为其他菜单动作预装依赖；真实非交互安装仍必须显式提供 `--install-deps`；`--dry-run` 会直接展示缺失依赖和安装计划，无需该授权且不询问。该授权支持 `apt-get`、`dnf5`、`dnf`、`yum`、`apk`、`pacman` 和 `zypper`，实际安装需要 root，也不会绕过 Linux、init 系统、CPU 架构、内核版本、XDP/BPF 或功能本体等平台门禁。它与 `--dry-run` 组合时只展示固定的软件包安装命令，不实际安装，部分动作会在依赖计划后安全停止并提示安装后重跑。上例中的 `--core` 是直接命令和非交互调用保留的高级消歧参数：只有一个符合条件的内核时通常可自动解析，存在多个候选时应显式指定。
+依赖检查按用户当前选择的动作延迟执行：只有该动作实际缺少可安装工具时，真实执行的交互流程才询问是否安装，不会为其他菜单动作预装依赖；真实非交互安装仍必须显式提供 `--install-deps`；`--dry-run` 会直接展示缺失依赖和安装计划，无需该授权且不询问。该授权支持 `apt-get`、`dnf5`、`dnf`、`yum`、`apk`、`pacman` 和 `zypper`，实际安装需要 root，也不会绕过 Linux、init 系统、CPU 架构、内核能力或功能本体等平台门禁。它与 `--dry-run` 组合时只展示固定的软件包安装命令，不实际安装，部分动作会在依赖计划后安全停止并提示安装后重跑。上例中的 `--core` 是直接命令和非交互调用保留的高级消歧参数：只有一个符合条件的内核时通常可自动解析，存在多个候选时应显式指定。
 
 ## PO0 独立中转脚本
 
@@ -285,7 +285,7 @@ bash bin/vpsctl service proxy update --core xray --version vX.Y.Z
 - 目录骨架：已建立。
 - 当前版本：0.11.0。
 - 管理入口：提供环境检测、终端 UI、固定注册表和安全分发。
-- 功能命令：提供 `network bbr`、`network dns`、`network ip-policy`、`network ufw`、`network rfw`、`system kernel`、`system reinstall`、`system swap`、`system clean`、`system backup`、`system backup-docker`、`system backup-repo`、`security access`、`security fail2ban`、`security tls`、`service proxy`、`service tcping`、`service iperf3`、`test nodequality` 和 `test tcpquality`；均处于 `experimental` 生命周期。
-- UFW：主菜单提供简洁端口管理，进阶功能放在“高级规则管理”。启用后自动维护 SSH、代理节点、中转转发及 HTTP-01 临时端口；支持等价已有规则接管、共享引用和按服务解除联动。安装默认不启用，服务停止但配置保留时规则继续保留。接口和恢复说明见 [UFW 管理](docs/ufw-management.md)。
+- 功能命令：提供 `network bbr`、`network dns`、`network ip-policy`、`network nftables`、`system kernel`、`system reinstall`、`system swap`、`system clean`、`system backup`、`system backup-docker`、`system backup-repo`、`security access`、`security fail2ban`、`security tls`、`service proxy`、`service tcping`、`service iperf3`、`test nodequality` 和 `test tcpquality`；均处于 `experimental` 生命周期。
+- nftables：以端口放行 / 禁止、IP 访问控制、服务联动、更多管理和启用/停用五项组织菜单，统一管理 IPv4/IPv6 规则及连接防护。只管理项目专属表，支持与独立 PO0 中转共存；旧 UFW/RFW 命令已移除，旧手工规则不自动导入。防护速率表示连接数或 UDP 包速率，不是带宽限速。接口和生命周期见 [nftables 管理](docs/nftables-management.md)。
 - 公共函数库：提供环境检测、命令注册、终端 UI 及网络和服务命令所需公共能力。
 - 验收说明：所有项目测试与验证统一通过 `ssh host-vps-scripts` 在专用真实环境中执行；不得在当前系统或 WSL 中测试。发布前仍须按对应功能文档完成真实环境验收。

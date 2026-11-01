@@ -94,3 +94,21 @@ PO0_REAL_TEST=1 PO0_RESULT_DIR=/var/tmp/po0-uri-accept-20261028/tester/real \
 最终脚本 SHA-256 为 `e35e98f6a822269e6a306d9a98fbe0d493b1e058b9f1a087ccd97d9b01ed4148`，与本地交付文件一致，见 `tester/unit-final-state.sha256`。真实转发验收使用的脚本为 `d5db21fb437d9d69db2fb674622b6253332f732c4f335b9e01bc92ac3985aac1`；之后仅调整提示颜色、格式，以及 URI 编辑中非法输入重试和回车保留的交互分支。后续差异保存在 `parent/post-integration.diff`，由最终单元与 PTY 检查覆盖；nft 渲染、应用和回滚逻辑未再改变，复用真实转发结果。
 
 真实转发使用内核网络操作及临时配置文件，systemd 启用仍使用有状态替身；PTY 操作使用隔离状态与提交替身。测试结束清理网络命名空间及进程，保留证据。未运行全仓库测试、机器重启、真实依赖安装或所有代理协议的完整握手；协议参数保留由 URI 语义断言验证，真实网络验收限定为 nft TCP／UDP 转发。未重复执行已验证且未改变的 BBR 内核调优验收。
+
+## 2026-11-01：专用表与统一 nft 协作
+
+本轮全部验证通过 `ssh host-vps-scripts` 执行。证据目录为 `/var/tmp/vpsctl-nft-po0/`；真实网络验收日志为 `cooperative-final.log`，详细文件和失败恢复快照位于 `cooperative-final/`。
+
+| 范围 | 结果 |
+| --- | --- |
+| 最终静态／单元检查 | PASS：`bash -n`、完整默认级别 `shellcheck`、`shfmt -d -i 4 -ci`，以及 `bash tests/unit/test-po0-relay.sh`。含 v1/v2/v3 状态、持久化归属、主中转／HY2 冲突和统一需求更新保留其他服务与脱离联动偏好的覆盖；见 `static-final.log`、`unit-final.log`。 |
+| 独立模式与迁移 | PASS：真实 TCP／UDP 转发、协议分流、区间端口、修改／停用／删除、URI 线路和重复加载；原始模板及上一版 v2 状态对应的通用表可识别，nft 对匿名集合排序不会误拒绝。 |
+| 归属与外部表 | PASS：旧 `ip nat` 加入额外 DOCKER 链后拒绝迁移且运行规则不变；成功迁移移除旧 PO0 通用表，随后创建的外部 `ip nat`／DOCKER 表经更新、回滚和重复加载保持不变。 |
+| 两种安装顺序 | PASS：管理器接管已有 PO0，以及先有管理器再首次安装 PO0；状态持久化 `filter_owner=vpsctl`，PO0 专用 filter 不再存在，真实 TCP／UDP 转发可用。 |
+| 协作提交与回滚 | PASS：修改目标同时更新 NAT 和统一需求；在规则、状态已修改后注入服务启用失败，以及统一 `applied.json` 写入失败，PO0 与统一表及状态全部恢复，原流量继续可用。 |
+| 停用与持久化 | PASS：停用统一防火墙后，PO0 重应用及两次真实 `nft -f` 加载不会恢复默认 DROP，转发仍有效。 |
+| 宿主机隔离 | PASS：测试前后宿主机完整规则一致。所有网络写入均位于临时网络命名空间。 |
+
+真实验收后仅补齐统一状态的 revision 和联动归属元数据，并保留已有 detached 偏好；由最终单元检查覆盖，规则生成、应用和回滚未再改变，复用上述流量结果。最终源码摘要见 `final-code-state.sha256`。
+
+上述真实验收使用实际内核 nftables、接口、路由和 TCP／UDP 探测；服务启用和 daemon-reload 使用有状态替身，文件写入临时目录。未执行机器重启、真实 systemd 服务启用或全仓库测试；开机持久化结论限定为专用规则文件的真实重复加载。

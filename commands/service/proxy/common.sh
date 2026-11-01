@@ -1197,7 +1197,7 @@ proxy_recover_core_switch_transaction() {
         proxy_core_switch_restore_file "$relay_backup" "$relay_existed" "${PROXY_STATE_LOGICAL}/relay.json" 0600 || failed=1
     fi
     proxy_remove_core_switch_cert_files "$created_json" || failed=1
-    proxy_ufw_nodes_sync || failed=1
+    proxy_nft_nodes_sync || failed=1
     proxy_core_switch_restore_service "$target_core" "$target_registered" "$target_active" "$target_enabled" || failed=1
     proxy_core_switch_restore_service "$source_core" "$source_registered" "$source_active" "$source_enabled" || failed=1
     proxy_hy2_runtime_restore "$(jq -c '.runtime // {}' "$PROXY_TRANSACTION")" || failed=1
@@ -1279,7 +1279,7 @@ proxy_recover_transaction() {
         fi
     fi
     ((failed == 0)) || return 30
-    proxy_ufw_nodes_sync || return 30
+    proxy_nft_nodes_sync || return 30
     runtime="$(jq -c '.runtime // {}' "$PROXY_TRANSACTION")" || return 30
     proxy_hy2_runtime_restore "$runtime" || return 30
     rm -f -- "$PROXY_TRANSACTION" || return 30
@@ -1290,7 +1290,7 @@ proxy_recover_transaction() {
 }
 
 proxy_commit_core_switch() {
-    proxy_ufw_nodes_transaction "$3" _proxy_commit_core_switch "$@"
+    proxy_nft_nodes_transaction "$3" _proxy_commit_core_switch "$@"
 }
 
 _proxy_commit_core_switch() {
@@ -1620,7 +1620,7 @@ proxy_pending_can_auto_apply() {
 proxy_commit_manifest_config() {
     # Optional sixth argument names a caller variable: defer an eligible automatic
     # restart and set that variable to 1 so a surrounding transaction can finish.
-    proxy_ufw_nodes_transaction "$2" _proxy_commit_manifest_config "$@"
+    proxy_nft_nodes_transaction "$2" _proxy_commit_manifest_config "$@"
 }
 
 _proxy_commit_manifest_config() {
@@ -1763,7 +1763,7 @@ proxy_save_lkg() {
 }
 
 proxy_restore_pending() {
-    proxy_ufw_restore_pending "$@"
+    proxy_nft_restore_pending "$@"
 }
 
 proxy_prepare_pending_restore() {

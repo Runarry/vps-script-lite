@@ -118,7 +118,7 @@ vpsctl service proxy restart --core sing-box
 
 显式 `restart` 可用全局 `--yes` 或兼容的 `--confirm-disruptive` 授权；交互未授权时进行一次普通确认，非交互未授权时立即失败。确认后才获取锁并执行配置恢复、校验及重启，取消不改变状态。`status` 中“待重启”为“是”表示磁盘配置或二进制尚未由当前进程采用；若服务已在运行，此时再次 `start` 会被拒绝并要求显式 `restart`。若服务未运行，`start` 会尝试待生效版本，失败时自动恢复记录的上一版。`relay status` 会分别显示核心配置待重启状态和转发运行状态。
 
-单个内核回滚时，只恢复该内核的节点、配置、二进制、元数据及其 DNS 设置，保留另一内核后续提交的节点和待生效状态。中转逐项撤销本次修改，独立提交的端口转发继续保留；UFW、转发缓存和 nftables 规则按合并后的状态同步。恢复后的名称或端口冲突、同一中转记录已被后续修改时，会在写入前返回 `30` 并保留当前状态和 pending。运行规则恢复未完成时也保留 pending，下次 `start` 或 `restart` 会先重试恢复。
+单个内核回滚时，只恢复该内核的节点、配置、二进制、元数据及其 DNS 设置，保留另一内核后续提交的节点和待生效状态。中转逐项撤销本次修改，独立提交的端口转发继续保留；nftables、转发缓存和 nftables 规则按合并后的状态同步。恢复后的名称或端口冲突、同一中转记录已被后续修改时，会在写入前返回 `30` 并保留当前状态和 pending。运行规则恢复未完成时也保留 pending，下次 `start` 或 `restart` 会先重试恢复。
 
 旧版仅涉及节点的 pending 可以继续恢复。旧 pending 若涉及中转、缺少逐项撤销记录，且当前中转定义已不同于原备份，则返回 `30`，保留当前定义及恢复材料，避免覆盖后续提交。
 
@@ -200,7 +200,7 @@ Hysteria2 分享 URI 使用 `obfs`、`obfs-password` 和 `pinSHA256` 等字段�
 
 节点新增和编辑可设置 `--hop-ports '20000-20100,21000'`，以 `--hop-ports off` 关闭。端口和递增范围限 1–65535，自动排序、去重和合并；`--port` 始终是内核实际监听端口。分享 URI 在 authority 中保留该数字端口，`mport` 包含实际端口与额外接入端口的集合，例如 `hysteria2://PASSWORD@example.com:8443?sni=example.com&mport=8443%2C20000-20100%2C21000`；`%2C` 是逗号的 URL 编码，IPv6 地址继续用方括号包围。未开启跳跃时不添加 `mport`。节点仅设置可接入的端口，客户端自行决定跳跃间隔。
 
-两个内核均通过脚本受管的 nftables 本机 UDP 映射接入跳跃端口。规则限定本机目的地址及节点监听地址，只在 PREROUTING 转换，不添加 OUTPUT、SNAT 或远端 FORWARD 规则；仅启用跳跃不改变 IP forwarding。跳跃范围与其他 UDP 监听、UDP 节点和 UDP 端口转发冲突时拒绝，与纯 TCP 端口可以共存。UFW 按 NAT 后的实际监听端口放行，防火墙清单不伪造额外的 route 需求。
+两个内核均通过脚本受管的 nftables 本机 UDP 映射接入跳跃端口。规则限定本机目的地址及节点监听地址，只在 PREROUTING 转换，不添加 OUTPUT、SNAT 或远端 FORWARD 规则；仅启用跳跃不改变 IP forwarding。跳跃范围与其他 UDP 监听、UDP 节点和 UDP 端口转发冲突时拒绝，与纯 TCP 端口可以共存。共享防火墙同时记录公网跳跃范围与 NAT 后的实际监听端口；入口限制按真实公网端口匹配，INPUT 放行使用实际监听端口，不伪造 route 需求。
 
 映射与节点配置共同提交、回滚并恢复；停止内核或保留配置卸载时保留声明，删除节点、purge 或关闭跳跃时清理。受管 nft 服务同时维护普通端口转发和 HY2 跳跃，任一类仍存在时继续运行。规则可在开机及重启时恢复，客户端中转出口不需要服务端映射组件。
 
@@ -354,7 +354,7 @@ vpsctl service proxy relay forward refresh [--id FORWARD_ID]
 
 每条转发独立保存 `family`；旧记录缺失时以及新增时默认 `dual`，列表 JSON 始终补出该默认值。`ipv4` 或 `ipv6` 只解析、缓存并渲染指定地址族，若出口是相反族字面量或域名没有所需记录，新增和编辑在提交前失败。`dual` 部署出口所有可用地址族，至少一个族可用即可提交；缺少另一族时在 `relay status` 中标记部分双栈 degraded。它不提供跨地址族优先、失败回退、NAT64 或用户态转发。
 
-nftables 规则只写入独立的 `ip vpsctl_proxy_forward4` 和 `ip6 vpsctl_proxy_forward6` 表，使用 `fib daddr type local` 限定本机 PREROUTING 流量，不创建 OUTPUT 规则，也不刷新全局 ruleset。规则包括受管 DNAT 连接的 FORWARD 放行和 masquerade；IPv4、IPv6 分别渲染，不做 NAT64。候选批次先通过 `nft -c`，再一次提交；状态、DNS 缓存、核心配置或运行规则任一提交失败都会尝试恢复旧版本。UFW 开启时，通过共享接口按 DNAT 后目标 IP、协议和目标端口维护 route allow，并与 DNS 缓存和 nftables 变更共同恢复；检测到其他 FORWARD 链拒绝策略仍只告警，不修改 firewalld、云安全组或第三方表。规则归属和解除联动见 [UFW 管理](ufw-management.md)。
+转发 NAT 规则只写入独立的 `ip vpsctl_proxy_forward4` 和 `ip6 vpsctl_proxy_forward6` 表，使用 `fib daddr type local` 限定本机 PREROUTING 流量，不创建 OUTPUT 规则，也不刷新全局 ruleset。规则包括受管 DNAT 连接的 FORWARD 放行和 masquerade；IPv4、IPv6 分别渲染，不做 NAT64。候选批次先通过 `nft -c`，再一次提交；状态、DNS 缓存、核心配置或运行规则任一提交失败都会尝试恢复旧版本。共享防火墙的 route 需求同时保存公网入口端口和 DNAT 后目标 IP、协议、目标端口：入口限制匹配转换前流量，FORWARD 放行匹配转换后目标。刷新 DNS 时先保留新旧目标，再切换 NAT 和缓存，最后释放旧目标；失败时共同恢复。后台运行时携带原生 nftables 库及私有模块，可独立执行刷新。检测到第三方 FORWARD 链拒绝策略仍只告警，不修改 firewalld、云安全组或第三方表。规则归属和解除联动见 [nftables 管理](nftables-management.md)。
 
 首条转发会按需安装 nftables，启用 IP forwarding，并安装、启用 `vpsctl-proxy-forward` 服务。该服务每 5 分钟重新解析正在使用的域名出口并恢复受管规则，本身不承载流量。多条转发共享出口时，缓存按所有引用记录计算所需地址族并集，成功提交后不再保留无人引用的旧族。每个地址族确定性选取排序后的首个有效地址；解析失败时保留最后可用地址并在 `relay status` 中标记 degraded，没有可用旧地址时拒绝替换规则并保留现有数据面。目标解析到本机时拒绝应用，以避免转发循环。最后一条转发删除后会停止并禁用服务、清除两个受管表和 DNS 运行缓存。
 

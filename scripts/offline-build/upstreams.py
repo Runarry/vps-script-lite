@@ -15,7 +15,6 @@ REPOSITORIES = {
     "xray": "XTLS/Xray-core",
     "sing-box": "SagerNet/sing-box",
     "lego": "go-acme/lego",
-    "rfw": "narwhal-cloud/rfw",
 }
 
 
@@ -47,7 +46,7 @@ def asset_name(component, tag, arch):
         return f"sing-box-{version}-linux-{arch}.tar.gz"
     if component == "lego":
         return f"lego_{version}_linux_{arch}.tar.gz"
-    return f"rfw-{'x86_64' if arch == 'amd64' else 'aarch64'}-unknown-linux-musl"
+    fail(f"unsupported upstream component: {component}")
 
 
 def release_asset(release, repo, tag, name):

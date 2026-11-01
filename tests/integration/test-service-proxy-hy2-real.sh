@@ -82,10 +82,10 @@ export VPSCTL_ENV_INIT=systemd VPSCTL_ENV_PACKAGE_MANAGER=apt-get VPSCTL_ENV_ARC
 export VPSCTL_NON_INTERACTIVE=1 VPSCTL_NO_COLOR=1
 # shellcheck source=../../lib/command.sh
 source "$TEST_ROOT/lib/command.sh"
-# shellcheck source=../../lib/ufw.sh
-source "$TEST_ROOT/lib/ufw.sh"
-# shellcheck source=../../commands/service/proxy/ufw.sh
-source "$TEST_ROOT/commands/service/proxy/ufw.sh"
+# shellcheck source=../../lib/nftables.sh
+source "$TEST_ROOT/lib/nftables.sh"
+# shellcheck source=../../commands/service/proxy/nftables.sh
+source "$TEST_ROOT/commands/service/proxy/nftables.sh"
 vps_cmd_init 'HY2 real acceptance' "$TEST_ROOT"
 for module in common core hysteria2 protocols-sing-box protocols-xray nodes relay-uri relay hysteria2-runtime; do
     # shellcheck disable=SC1090
@@ -418,39 +418,32 @@ chrome_scope() {
         printf 'PARTIAL: latest Xray Chrome on rejects Ed25519; off authenticates TCP but UDP failed (see preserved evidence)\n'
     fi
 }
-ufw_scope() {
+nftables_scope() {
     local node echo_pid
-    command -v ufw >/dev/null || fail 'UFW is not installed on the dedicated host'
-    mkdir -p "$TEST_SYSTEM_ROOT/etc/default"
-    cp -a /etc/ufw "$TEST_SYSTEM_ROOT/etc/ufw"
-    cp /etc/default/ufw "$TEST_SYSTEM_ROOT/etc/default/ufw"
-    mount --bind "$TEST_SYSTEM_ROOT/etc/ufw" /etc/ufw
-    mount --bind "$TEST_SYSTEM_ROOT/etc/default/ufw" /etc/default/ufw
-    ufw --force reset >"$TEST_TEMP/ufw-reset.log" 2>&1
-    ufw default deny incoming >"$TEST_TEMP/ufw-default.log" 2>&1
-    ufw default allow outgoing >>"$TEST_TEMP/ufw-default.log" 2>&1
-    ufw --force enable >"$TEST_TEMP/ufw-enable.log" 2>&1
-    python3 "$FIXTURE" echo 10.73.2.1 53110 >"$TEST_TEMP/ufw-denied-target.log" 2>&1 &
+    vps_nft_state | jq '.enabled=true' >"$TEST_TEMP/firewall.json"
+    vps_nft_save_state "$TEST_TEMP/firewall.json"
+    vps_nft_apply
+    python3 "$FIXTURE" echo 10.73.2.1 53110 >"$TEST_TEMP/nftables-denied-target.log" 2>&1 &
     echo_pid=$!
     PIDS+=("$echo_pid")
     wait_listener udp 53110 "$echo_pid"
-    if nsenter -t "$CLIENT_NS_PID" -n python3 "$FIXTURE" udp 10.73.2.1 53110 >"$TEST_TEMP/ufw-denied.log" 2>&1; then
+    if nsenter -t "$CLIENT_NS_PID" -n python3 "$FIXTURE" udp 10.73.2.1 53110 >"$TEST_TEMP/nftables-denied.log" 2>&1; then
         fail 'default-deny did not block unrelated incoming UDP'
     fi
     node="$(make_node xray salamander 53101-53103 :: 10.73.2.1)"
-    jq -n --argjson node "$node" '{schema_version:1,nodes:[$node]}' >"$TEST_TEMP/ufw-nodes.json"
-    proxy_ufw_nodes_desired "$TEST_TEMP/ufw-nodes.json" >"$TEST_TEMP/ufw-desired.json"
-    vps_ufw_begin proxy-nodes "$TEST_TEMP/ufw-desired.json" force
-    vps_ufw_commit
-    ufw status numbered >"$TEST_TEMP/ufw-status.txt"
-    python3 "$FIXTURE" echo 127.0.0.1 56001 >"$TEST_TEMP/ufw-echo.log" 2>&1 &
+    jq -n --argjson node "$node" '{schema_version:1,nodes:[$node]}' >"$TEST_TEMP/nftables-nodes.json"
+    proxy_nft_nodes_desired "$TEST_TEMP/nftables-nodes.json" >"$TEST_TEMP/nftables-desired.json"
+    vps_nft_begin proxy-nodes "$TEST_TEMP/nftables-desired.json" force
+    vps_nft_commit
+    vps_nft_inventory >"$TEST_TEMP/nftables-status.json"
+    python3 "$FIXTURE" echo 127.0.0.1 56001 >"$TEST_TEMP/nftables-echo.log" 2>&1 &
     ECHO_PID=$!
     PIDS+=("$ECHO_PID")
     wait_listener tcp 56001 "$ECHO_PID"
     run_case xray 26.9.30 sing-box 1.14.2 salamander 5 '{}'
-    nft -j list ruleset >"$TEST_TEMP/ufw-ruleset.json"
-    ufw disable >"$TEST_TEMP/ufw-disable.log" 2>&1
-    printf 'PASS: real UFW default-deny blocks unrelated UDP and project-managed listener rule permits HY2 multi-port TCP/UDP\n'
+    nft -j list ruleset >"$TEST_TEMP/nftables-ruleset.json"
+    vps_nft_clear
+    printf 'PASS: native nftables default-deny blocks unrelated UDP and managed listener rule permits HY2 multi-port TCP/UDP\n'
 }
 server_bbr_scope() {
     local version profile node manifest config
@@ -485,7 +478,7 @@ config) config_matrix ;;
 traffic) traffic_matrix ;;
 nft) nft_scope ;;
 chrome) chrome_scope ;;
-ufw) ufw_scope ;;
+nftables) nftables_scope ;;
 server-bbr) server_bbr_scope ;;
 supplement)
     python3 "$FIXTURE" echo 127.0.0.1 56001 >"$TEST_TEMP/echo.log" 2>&1 &

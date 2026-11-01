@@ -56,11 +56,12 @@ UI 显示以下摘要：
     │   ├── BBR 管理（bbr）
     │   ├── DNS 管理（dns）
     │   ├── IP 地址族偏好（ip-policy）
-    │   ├── UFW 防火墙（ufw）
-    │   │   ├── 安装 / 启停 / 端口增删改查 / 同步 / 卸载
-    │   │   ├── 服务联动：查看 / 解除 / 恢复
-    │   │   └── 高级规则管理：方向、地址、网卡、策略、日志与重置
-    │   └── RFW 管理（rfw）
+    │   └── nftables 防火墙（nftables）
+    │       ├── 端口放行 / 禁止
+    │       ├── IP 访问控制
+    │       ├── 服务联动
+    │       ├── 更多管理
+    │       └── 启用 / 停用
     ├── 系统管理（system）
     │   ├── 内核管理（kernel）
     │   │   ├── 查看版本、来源、关联包、启动完整性与保护状态
@@ -100,7 +101,7 @@ UI 显示以下摘要：
         └── 卸载受管脚本（uninstall）
 ```
 
-主菜单不会扫描目录或推测功能分类，只显示固定注册表中已经登记的真实功能。业务领域登记 `network`、`system`、`security`、`service` 与 `test`，包含 `bbr`、`dns`、`ip-policy`、`ufw`、`rfw`、`kernel`、`reinstall`、`swap`、`clean`、`access`、`fail2ban`、`tls`、`proxy`、`tcping`、`iperf3`、`nodequality`、`tcpquality` 十七个入口，另有常驻 `self` 领域。用户选择功能后，入口立即无附加参数分发该公开脚本，由功能脚本进入自己的交互 UI、开始测试，或像轻量入口 `reinstall` 一样显示本地帮助；不再显示命令详情页，也不再要求输入 `r` 才运行。环境详情仍可通过非菜单命令 `vpsctl env` 查看。
+主菜单不会扫描目录或推测功能分类，只显示固定注册表中已经登记的真实功能。业务领域登记 `network`、`system`、`security`、`service` 与 `test`，包含 `bbr`、`dns`、`ip-policy`、`nftables`、`kernel`、`reinstall`、`swap`、`clean`、`backup`、`backup-docker`、`backup-repo`、`access`、`fail2ban`、`tls`、`proxy`、`tcping`、`iperf3`、`nodequality`、`tcpquality` 十九个入口，另有常驻 `self` 领域。用户选择功能后，入口立即无附加参数分发该公开脚本，由功能脚本进入自己的交互 UI、开始测试，或像轻量入口 `reinstall` 一样显示本地帮助；不再显示命令详情页，也不再要求输入 `r` 才运行。环境详情仍可通过非菜单命令 `vpsctl env` 查看。
 
 `system kernel` 的菜单展示当前运行版本，并以编号选择查看完整状态、安装/更新、固定默认版本或卸载指定版本。状态页按完整 release 汇总内核与启动信息。安装类型默认推荐发行版官方标准内核；Debian 可选 Cloud，Ubuntu LTS 仅在适配 HWE 元包有候选时显示，XanMod 继续提供 auto/main/lts 和 CPU 等级选择。切换与卸载候选由 current、default、next、启动文件完整性和 dpkg 归属状态过滤，用户无需手工输入 release。安装、切换、卸载分别要求 `INSTALL-KERNEL`、`SWITCH-KERNEL`、`REMOVE-KERNEL` 强确认；菜单不会自动重启，流程提示重启核对后再卸载旧版本。
 
@@ -114,7 +115,7 @@ UI 显示以下摘要：
 
 代理菜单中的添加节点提供快速和自定义向导；profile 没有已安装的兼容内核时可引导先安装再继续。节点查看、编辑和删除先展示带所属内核标记的全量列表，再按编号选择；IP 地址族策略还可在选定单一内核后按多个节点、profile 或该内核全部节点原子批量设置。中转菜单中的出口、入口节点、关联和端口转发对象同样只通过编号选择，纯端口转发可选择双栈、仅 IPv4 或仅 IPv6；SS2022 普通/Padding 及多内核协议会显示明确的 profile/内核选择。订阅范围按编号选择“全部”，或选择当前确有普通节点或转发 URI 的 sing-box/Xray；没有内容的内核不会作为范围候选。`--core` 和 `--id` 仍保留给直接命令与非交互自动化，用于多候选场景的精确消歧。
 
-RFW UI 的配置向导将 Geo 模式、各规则开关、FET、XDP 模式、端口访问日志和日志级别等固定值改为编号选择。启动可选“仅启动”或“启动并启用”，停止可选“仅停止”或“停止并禁用”；统计可选全部、仅拦截或仅允许，并可填写端口、IPv4 及是否按端口分组；日志可填写行数、是否跟随和可选的 `since`；卸载可选保留配置状态或彻底清除。彻底清除和中断性应用仍执行原有强确认。
+nftables 主菜单仅保留端口放行 / 禁止、IP 访问控制、服务联动、更多管理和启用/停用五项。端口和来源选择通过编号完成；更多管理集中日志、统计、连接/UDP 包防护、备份恢复与卸载。服务声明与手工规则分开保存，修改 SSH、节点、中转、TCPing、iperf3 或 HTTP-01 临时端口时，由共享引擎自动同步。未启用防火墙时同步只记录需求，不自动启用。
 
 访问管理 UI 将账户、公钥、SSH 设置和活动事务分组。「修改 SSH 设置」中的 root 与密码登录选项在一次普通确认后直接应用，完成备份、配置校验、reload 和失败恢复，不询问回退管理员或要求第二会话证明。端口修改仍在准备阶段并存旧端口与候选端口，界面提示用户另开一个符合目标登录策略的 SSH 会话执行验证，然后返回原会话用事务 ID 强确认提交；用户也可中止并恢复准备前状态。「恢复历史备份」同时支持直接应用和已提交事务的备份。防火墙自动协同只在功能脚本能唯一识别受支持后端且规则可安全管理时提供，否则要求选择手工模式并明确展示需维护的端口。复杂 SSH 配置会在任何写入前停止，菜单不提供绕过开关。
 
@@ -152,11 +153,11 @@ UI 使用 ASCII 边框和可选 ANSI 语义色，适合普通 SSH 终端：青�
 - 各功能已经安装的内核、软件包、服务、规则或其他组件；
 - `/usr/local/libexec/` 及其中的外部二进制。
 
-`--purge` 只扩大删除范围，仍遵守上述保护边界，只额外删除 `/var/lib/vpsctl/self/` 中的安装、自更新与分发缓存元数据；这部分范围会包含在同一次交互确认中。`--confirm-purge` 是授权别名，必须与 `--purge` 一起使用，否则返回 `2`；旧的 `--purge --confirm-uninstall --confirm-purge` 组合继续有效。self 卸载不同于 RFW、代理等功能自身的卸载或 purge；它绝不代替用户逐项卸载已安装组件。
+`--purge` 只扩大删除范围，仍遵守上述保护边界，只额外删除 `/var/lib/vpsctl/self/` 中的安装、自更新与分发缓存元数据；这部分范围会包含在同一次交互确认中。`--confirm-purge` 是授权别名，必须与 `--purge` 一起使用，否则返回 `2`；旧的 `--purge --confirm-uninstall --confirm-purge` 组合继续有效。self 卸载不同于 nftables、代理等功能自身的卸载或 purge；它绝不代替用户逐项卸载已安装组件。
 
 ## 5. 当前边界
 
-管理入口已登记网络功能、系统内核、重装与 DD、Swap 管理、系统清理、访问管理、Fail2ban 防护、TLS 证书、代理管理、TCPing 探测监听与服务器测试。UI 只负责展示元数据、收集用户选择并分发，不实现 BBR、DNS、IP 地址族偏好、RFW、内核、重装、Swap、清理、用户凭据、SSH 事务、Fail2ban、TLS、代理、TCPing 或测试业务逻辑。
+管理入口已登记网络功能、系统内核、重装与 DD、Swap 管理、系统清理、访问管理、Fail2ban 防护、TLS 证书、代理管理、TCPing 探测监听与服务器测试。UI 只负责展示元数据、收集用户选择并分发，不实现 BBR、DNS、IP 地址族偏好、nftables、内核、重装、Swap、清理、用户凭据、SSH 事务、Fail2ban、TLS、代理、TCPing 或测试业务逻辑。
 
 网络功能的当前边界为：
 
@@ -166,11 +167,11 @@ UI 使用 ASCII 边框和可选 ANSI 语义色，适合普通 SSH 终端：青�
 - 系统清理只处理经核验的脚本残留、可重新下载的功能包、原生软件包缓存、既有时效规则下的 `/tmp` 和 `/var/tmp`，以及显式选择的归档 journal；保留配置、功能状态、备份、证书、Swap、外部工具和更新恢复材料，不清空内存缓存、不卸载软件包或内核、不设置清理定时器。
 - DNS 只修改检测到的权威 DNS 后端；候选解析器必须先通过前测，写后验证失败会保留新配置并返回部分完成状态，以便按备份恢复。
 - IP 地址族偏好只管理 glibc 地址排序，不禁用任一地址族，也不作为 sing-box/Xray 节点的隐式默认值。
-- RFW 只支持 systemd、`x86_64`/`aarch64` 和 IPv4；安装只使用官方最新稳定 release 并校验 checksum。配置和更新不会自行重启服务，实际应用危险规则必须显式强确认。
+- nftables 原生管理项目专属 `inet vpsctl_firewall` 表，支持 IPv4/IPv6 规则与服务端口联动；旧 UFW/RFW 入口不再注册，旧手工规则不导入。连接/UDP 包防护只限制连接数或包速率，不提供带宽限速。
 - 代理管理支持 systemd 与 OpenRC，平级管理 Xray 和 sing-box，并提供出口驱动的节点中转和独立 nftables 端口转发；内核安装和更新默认选择最新稳定版，也可选择最新预发布版或精确稳定/预发布 tag。通道不写入状态，后续无版本参数的更新仍默认稳定版；所有通道保持相同的来源、资产、摘要、版本、配置兼容性和原子替换校验。运行中的节点和中转配置变更会自动重启对应内核，内核二进制更新仍不自行重启，端口转发则立即原子生效。卸载默认保留配置与中转状态，彻底清除、级联删除、外部二进制原地更新和中断性重启均有独立确认。
 - 访问管理当前只支持 systemd 上的 SSH 服务编排，不将代理功能已有的 OpenRC 支持外推到 SSH。用户、密码、公钥和登录策略直接应用与 SSH 配置事务分开；SSH 事务需要新的 SSH 会话证明，准备、提交、中止和历史恢复均保留明确入口。
 - Fail2ban 当前只支持 systemd 上的 OpenSSH `sshd` jail；帮助和公开状态可在 init 能力缺失时进入诊断，其余安装、配置、服务、解封、验证和恢复操作仍受 systemd 能力门禁约束。
 - TLS 证书管理导入用户证书或通过钉死版本的 lego 申请 ACME 证书；live 路径是无符号链接的普通文件。续期 timer 仅支持 systemd。本功能不调用代理脚本；`--reload proxy` 只重载已知的代理 unit 名。
 - 服务器测试只在 Linux 上以 root 运行固定官方 HTTPS 地址下载的当前版本脚本，不支持演练或上游参数透传。NodeQuality 保留上游四项交互，TcpQuality 保留当前官方脚本自身的测试选项；两者都可能产生高 CPU、磁盘和网络负载并把报告上传到上游服务。入口只清理当前调用拥有的临时资源，`SIGKILL`、Shell 崩溃和主机异常不保证清理。
 
-详细子动作、路径、恢复和验收要求见 [`docs/network-settings.md`](network-settings.md)、[`docs/kernel-management.md`](kernel-management.md)、[`docs/swap-management.md`](swap-management.md)、[`docs/system-clean.md`](system-clean.md)、[`docs/access-management.md`](access-management.md)、[`docs/fail2ban-management.md`](fail2ban-management.md)、[`docs/tls-management.md`](tls-management.md)、[`docs/proxy-management.md`](proxy-management.md) 与 [`docs/server-testing.md`](server-testing.md)。
+详细子动作、路径、恢复和验收要求见 [`docs/network-settings.md`](network-settings.md)、[`docs/nftables-management.md`](nftables-management.md)、[`docs/kernel-management.md`](kernel-management.md)、[`docs/swap-management.md`](swap-management.md)、[`docs/system-clean.md`](system-clean.md)、[`docs/access-management.md`](access-management.md)、[`docs/fail2ban-management.md`](fail2ban-management.md)、[`docs/tls-management.md`](tls-management.md)、[`docs/proxy-management.md`](proxy-management.md) 与 [`docs/server-testing.md`](server-testing.md)。

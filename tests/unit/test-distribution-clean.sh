@@ -189,7 +189,7 @@ test_bundle_eviction_and_reload() (
     tar -C "$build" -czf "$TEST_ASSETS/vpsctl-service-tcping-1.2.3.tar.gz" commands
     fixture bundles
     cache_bundle shared-command
-    cache_bundle shared-ufw
+    cache_bundle shared-nftables
     cache_bundle service-tcping
     cache_bundle service-iperf3
     if vps_registry_has_command system:clean; then cache_bundle system-clean; fi
@@ -202,7 +202,7 @@ test_bundle_eviction_and_reload() (
     assert_absent "$VPSCTL_PROJECT_ROOT/commands/service/tcping"
     assert_absent "$VPSCTL_PROJECT_ROOT/commands/service/iperf3.sh"
     assert_exists "$VPSCTL_PROJECT_ROOT/lib/command.sh"
-    assert_exists "$VPSCTL_PROJECT_ROOT/lib/ufw.sh"
+    assert_exists "$VPSCTL_PROJECT_ROOT/lib/nftables.sh"
     assert_exists "$VPSCTL_PROJECT_ROOT/.bundles/core.sha256"
     if vps_registry_has_command system:clean; then assert_exists "$VPSCTL_PROJECT_ROOT/commands/system/clean.sh"; fi
     assert_status 0 vps_distribution_clean_bundles
@@ -217,7 +217,9 @@ test_bundle_business_and_download_locks() (
     fixture bundle_locks
     local key feature fd lock
     mkdir -p "$VPSCTL_SYSTEM_ROOT/run/vpsctl"
-    for key in service:proxy service:tcping service:iperf3 network:ufw network:rfw system:reinstall; do
+    mkdir -p "$VPSCTL_PROJECT_ROOT/scripts"
+    printf 'unrelated script\n' >"$VPSCTL_PROJECT_ROOT/scripts/preserve.sh"
+    for key in service:proxy service:tcping service:iperf3 network:nftables system:reinstall; do
         cache_bundle "${key/:/-}"
         case "$key" in
             service:proxy) feature=proxy ;;
@@ -232,6 +234,7 @@ test_bundle_business_and_download_locks() (
         flock -u "$fd"
         exec {fd}>&-
         assert_status 0 vps_distribution_clean_bundles
+        assert_exists "$VPSCTL_PROJECT_ROOT/scripts/preserve.sh"
     done
     cache_bundle service-proxy
     exec {fd}>"$VPSCTL_SYSTEM_ROOT/run/vpsctl/proxy-time.lock"

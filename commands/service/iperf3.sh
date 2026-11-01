@@ -10,8 +10,8 @@ IPERF3_PROJECT_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P
 readonly IPERF3_PROJECT_ROOT
 # shellcheck source=../../lib/command.sh
 source "$IPERF3_PROJECT_ROOT/lib/command.sh"
-# shellcheck source=../../lib/ufw.sh
-source "$IPERF3_PROJECT_ROOT/lib/ufw.sh"
+# shellcheck source=../../lib/nftables.sh
+source "$IPERF3_PROJECT_ROOT/lib/nftables.sh"
 
 readonly IPERF3_STATE_LOGICAL='/var/lib/vpsctl/service/iperf3/state.json'
 readonly IPERF3_LOG_LOGICAL='/var/log/vpsctl/iperf3.log'
@@ -38,8 +38,8 @@ iperf3 测速服务端：供其他机器测试本机 TCP/UDP 吞吐量。
 支持 Linux/systemd 与 OpenRC supervise-daemon，需要 Bash 4.4+。
 使用系统软件源，不编译、不添加第三方源；已有 iperf3 可直接使用。
 服务监听全部接口，支持 TCP、UDP 和可用的 IPv4/IPv6。
-启动联动已有 UFW 的 TCP/UDP 端口；停止和卸载释放本模块需求。
-不会安装或启用 UFW；云安全组和其他防火墙需另行放行。
+启动联动共享 nftables 的 TCP/UDP 端口；停止和卸载释放本模块需求。
+不会启用防火墙；云安全组和其他防火墙需另行放行。
 测速会占用真实带宽和流量；本模块不主动发起测试或修改网络调优参数。
 
 全局选项：--dry-run、--install-deps、--yes、--non-interactive、
@@ -480,11 +480,11 @@ iperf3_update_package() {
 
 iperf3_desired() {
     local port="$1" enabled="$2" ipv6=false
-    vps_ufw_ipv6_available && ipv6=true
+    vps_nft_ipv6_available && ipv6=true
     jq -n --arg port "$port" --argjson enabled "$enabled" --argjson ipv6 "$ipv6" '
         if $enabled then [(["ipv4"] + if $ipv6 then ["ipv6"] else [] end)[] as $family |
             ["tcp","udp"][] | {owner:"iperf3",kind:"input",family:$family,proto:.,port:$port,
-                source:"any",destination:"any",temporary:false,preserve_existing:true}] else [] end'
+                source:"any",destination:"any",temporary:false}] else [] end'
 }
 
 iperf3_save_state() {
@@ -534,7 +534,7 @@ iperf3_restore() {
             fi
         fi
     fi
-    if [[ "${VPS_UFW_DEPTH:-0}" != 0 ]]; then vps_ufw_rollback || status=30; fi
+    if [[ "${VPS_NFT_DEPTH:-0}" != 0 ]]; then vps_nft_rollback || status=30; fi
     return "$status"
 }
 
@@ -547,8 +547,8 @@ iperf3_cleanup() {
             vps_cmd_error "恢复不完整，备份保留于 $IPERF3_WORK；修复后重试 start 或 stop"
             result=30
         fi
-    elif [[ "$IPERF3_COMMITTED" == 1 && "${VPS_UFW_DEPTH:-0}" != 0 ]]; then
-        vps_ufw_commit || result=30
+    elif [[ "$IPERF3_COMMITTED" == 1 && "${VPS_NFT_DEPTH:-0}" != 0 ]]; then
+        vps_nft_commit || result=30
     fi
     if [[ -n "$IPERF3_WORK" && "$restored" == 0 ]]; then rm -rf -- "$IPERF3_WORK" || result=30; fi
     vps_cmd_unlock
@@ -659,8 +659,8 @@ iperf3_mutate() (
         }; fi
         vps_cmd_info "演练：iperf3 $action，端口 $port；不修改配置、服务或防火墙"
         case "$action" in
-            start | restart) vps_cmd_info '部署/启动服务并启用自启，同步 TCP/UDP UFW 需求' ;;
-            stop) vps_cmd_info '停止并取消自启，释放 UFW 需求，保留配置和软件包' ;;
+            start | restart) vps_cmd_info '部署/启动服务并启用自启，同步 TCP/UDP nftables 需求' ;;
+            stop) vps_cmd_info '停止并取消自启，释放 nftables 需求，保留配置和软件包' ;;
             update) vps_cmd_info '只更新对应软件包；原服务运行时重启，保持自启状态' ;;
             uninstall) vps_cmd_info '清理受管服务、配置、日志及功能缓存；保留系统软件包' ;;
         esac
@@ -695,7 +695,7 @@ iperf3_mutate() (
         return 0
     fi
     iperf3_desired "$port" "$([[ "$action" == start || "$action" == restart ]] && printf true || printf false)" >"$IPERF3_WORK/desired.json" || return 20
-    vps_ufw_begin iperf3 "$IPERF3_WORK/desired.json" || return $?
+    vps_nft_begin iperf3 "$IPERF3_WORK/desired.json" || return $?
     if [[ "$action" == start || "$action" == restart ]]; then
         mkdir -p -- "${IPERF3_STATE%/*}" "${IPERF3_UNIT%/*}" "${IPERF3_LOG%/*}" || return 20
         if [[ "$action" == restart || "$port" != "$IPERF3_SAVED_PORT" ]] || ! iperf3_ready "$port"; then
@@ -725,7 +725,7 @@ iperf3_mutate() (
         if [[ -n "$IPERF3_SAVED_PORT" ]]; then iperf3_save_state "$port" false || return $?; fi
     fi
     IPERF3_COMMITTED=1
-    vps_ufw_commit || return $?
+    vps_nft_commit || return $?
     case "$action" in
         uninstall)
             iperf3_remove_runtime || return $?

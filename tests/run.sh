@@ -11,7 +11,8 @@ for syntax_file in \
     "${TEST_ROOT}/bin/vpsctl" \
     "${TEST_ROOT}/lib/environment.sh" \
     "${TEST_ROOT}/lib/command.sh" \
-    "${TEST_ROOT}/lib/ufw.sh" \
+    "${TEST_ROOT}/lib/nftables.sh" \
+    "${TEST_ROOT}"/lib/nftables/*.sh \
     "${TEST_ROOT}/lib/distribution.sh" \
     "${TEST_ROOT}/lib/offline.sh" \
     "${TEST_ROOT}/lib/registry.sh" \
@@ -22,9 +23,8 @@ for syntax_file in \
     "${TEST_ROOT}/commands/network/bbr.sh" \
     "${TEST_ROOT}/commands/network/dns.sh" \
     "${TEST_ROOT}/commands/network/ip-policy.sh" \
-    "${TEST_ROOT}/commands/network/rfw.sh" \
-    "${TEST_ROOT}/commands/network/ufw.sh" \
-    "${TEST_ROOT}"/commands/network/ufw/*.sh \
+    "${TEST_ROOT}/commands/network/nftables.sh" \
+    "${TEST_ROOT}"/commands/network/nftables/*.sh \
     "${TEST_ROOT}/commands/system/kernel.sh" \
     "${TEST_ROOT}/commands/system/reinstall.sh" \
     "${TEST_ROOT}/commands/system/swap.sh" \
@@ -70,12 +70,12 @@ for syntax_file in \
     "${TEST_ROOT}/tests/unit/test-network-bbr.sh" \
     "${TEST_ROOT}/tests/unit/test-network-dns.sh" \
     "${TEST_ROOT}/tests/unit/test-network-ip-policy.sh" \
-    "${TEST_ROOT}/tests/unit/test-network-rfw.sh" \
-    "${TEST_ROOT}/tests/unit/test-ufw-library.sh" \
-    "${TEST_ROOT}/tests/unit/test-network-ufw.sh" \
-    "${TEST_ROOT}/tests/unit/test-proxy-ufw.sh" \
-    "${TEST_ROOT}/tests/unit/test-access-ufw.sh" \
-    "${TEST_ROOT}/tests/unit/test-tls-ufw.sh" \
+    "${TEST_ROOT}/tests/unit/test-nftables-library.sh" \
+    "${TEST_ROOT}/tests/unit/test-network-nftables.sh" \
+    "${TEST_ROOT}/tests/unit/test-nftables-legacy.sh" \
+    "${TEST_ROOT}/tests/unit/test-proxy-nft.sh" \
+    "${TEST_ROOT}/tests/unit/test-access-nft.sh" \
+    "${TEST_ROOT}/tests/unit/test-tls-nft.sh" \
     "${TEST_ROOT}/tests/unit/test-system-kernel.sh" \
     "${TEST_ROOT}/tests/unit/test-system-reinstall.sh" \
     "${TEST_ROOT}/tests/unit/test-system-swap.sh" \
@@ -114,7 +114,7 @@ for syntax_file in \
     "${TEST_ROOT}/tests/integration/test-service-proxy-install-real.sh" \
     "${TEST_ROOT}/tests/integration/test-service-proxy-relay-cores-real.sh" \
     "${TEST_ROOT}/tests/integration/test-service-proxy-relay-real.sh" \
-    "${TEST_ROOT}"/tests/integration/test-*ufw*-real.sh \
+    "${TEST_ROOT}"/tests/integration/test-*nftables*-real.sh \
     "${TEST_ROOT}/tests/integration/test-security-fail2ban-real.sh" \
     "${TEST_ROOT}/tests/integration/test-security-access-pubkey-real.sh" \
     "${TEST_ROOT}/tests/integration/test-security-access-policy-real.sh" \
@@ -143,12 +143,12 @@ bash "${TEST_ROOT}/tests/unit/test-po0-relay.sh"
 bash "${TEST_ROOT}/tests/unit/test-network-bbr.sh"
 bash "${TEST_ROOT}/tests/unit/test-network-dns.sh"
 bash "${TEST_ROOT}/tests/unit/test-network-ip-policy.sh"
-bash "${TEST_ROOT}/tests/unit/test-network-rfw.sh"
-bash "${TEST_ROOT}/tests/unit/test-ufw-library.sh"
-bash "${TEST_ROOT}/tests/unit/test-network-ufw.sh"
-bash "${TEST_ROOT}/tests/unit/test-proxy-ufw.sh"
-bash "${TEST_ROOT}/tests/unit/test-access-ufw.sh"
-bash "${TEST_ROOT}/tests/unit/test-tls-ufw.sh"
+bash "${TEST_ROOT}/tests/unit/test-nftables-library.sh"
+bash "${TEST_ROOT}/tests/unit/test-network-nftables.sh"
+bash "${TEST_ROOT}/tests/unit/test-nftables-legacy.sh"
+bash "${TEST_ROOT}/tests/unit/test-proxy-nft.sh"
+bash "${TEST_ROOT}/tests/unit/test-access-nft.sh"
+bash "${TEST_ROOT}/tests/unit/test-tls-nft.sh"
 bash "${TEST_ROOT}/tests/unit/test-system-kernel.sh"
 bash "${TEST_ROOT}/tests/unit/test-system-reinstall.sh"
 bash "${TEST_ROOT}/tests/unit/test-system-swap.sh"

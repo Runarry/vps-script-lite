@@ -30,7 +30,7 @@ test_module() {
     state="$TEST_SYSTEM_ROOT/var/lib/vpsctl/service/tcping/state.json"
     unit="$TEST_SYSTEM_ROOT/etc/systemd/system/vpsctl-tcping.service"
     runtime="$TEST_SYSTEM_ROOT/usr/local/libexec/vpsctl/tcping/listener.py"
-    fw="$TEST_SYSTEM_ROOT/var/lib/vpsctl/network/ufw/state.json"
+    fw="$TEST_SYSTEM_ROOT/var/lib/vpsctl/network/nftables/state.json"
     port=42691
     mkdir -p "$TEST_SYSTEM_ROOT/run" "$TEST_FAKE_BIN"
     : >"$TEST_LOG"
@@ -91,16 +91,16 @@ case "$action" in
     *) exit 2 ;;
 esac
 SH
-    cat >"$TEST_FAKE_BIN/ufw" <<'SH'
+    cat >"$TEST_FAKE_BIN/nft" <<'SH'
 #!/usr/bin/env bash
-[[ "${1:-}" == status ]] || exit 2
-printf 'Status: inactive\n'
+[[ "$*" == '-j list tables' ]] || exit 2
+printf '{"nftables":[]}\n'
 SH
     cat >"$TEST_FAKE_BIN/apt-get" <<'SH'
 #!/usr/bin/env bash
 printf 'apt-get %s\n' "$*" >>"$MOCK_LOG"
 SH
-    chmod +x "$TEST_FAKE_BIN/systemctl" "$TEST_FAKE_BIN/ufw" "$TEST_FAKE_BIN/apt-get"
+    chmod +x "$TEST_FAKE_BIN/systemctl" "$TEST_FAKE_BIN/nft" "$TEST_FAKE_BIN/apt-get"
 
     assert_status 0 bash "$TEST_COMMAND" --install-deps --help
     assert_status 0 bash "$TEST_COMMAND" --install-deps status
@@ -132,7 +132,7 @@ SH
     ! grep -Fq 'Failed to get unit file state' "$TEST_TEMP/output" || fail 'first start queried missing unit enablement'
     [[ -f "$runtime" && -f "$unit" && -e "$TEST_SYSTEM_ROOT/run/tcping-enabled" ]] || fail 'start did not deploy and enable service'
     jq -e --argjson port "$port" '.schema_version==1 and .port==$port and .enabled==true' "$state" >/dev/null || fail 'start state schema is wrong'
-    jq -e --argjson port "$port" '[.requirements[] | select(.owner=="tcping" and .scope=="tcping" and .port==($port|tostring))] | length==1' "$fw" >/dev/null || fail 'start did not record TCPing UFW demand'
+    jq -e --argjson port "$port" '[.requirements[] | select(.owner=="tcping" and .scope=="tcping" and .proto=="tcp" and .port==($port|tostring))] | map(.family) | sort == ["ipv4","ipv6"]' "$fw" >/dev/null || fail 'start did not record TCPing demand for both listener families'
     rm -f "$TEST_SYSTEM_ROOT/run/vpsctl/tcping-ready.json"
     : >"$TEST_LOG"
     assert_status 0 bash "$TEST_COMMAND" start --port "$port"
@@ -191,13 +191,13 @@ PY
     [[ -e "$TEST_SYSTEM_ROOT/run/tcping-active" && -e "$TEST_SYSTEM_ROOT/run/tcping-enabled" ]] || fail 'failed port change did not restore old service'
     jq -e --argjson port "$port" '.port==$port' "$TEST_SYSTEM_ROOT/run/vpsctl/tcping-ready.json" >/dev/null || fail 'failed port change did not restore old readiness'
 
-    # An unrelated UFW owner must survive release of the TCPing demand.
+    # An unrelated NFT owner must survive release of the TCPing demand.
     jq '.requirements += [(.requirements[0] | .owner="ssh" | .scope="ssh" | .port="22222")] | .links.ssh={scope:"ssh",detached:false}' "$fw" >"$fw.next"
     mv "$fw.next" "$fw"
     assert_status 0 bash "$TEST_COMMAND" stop
     jq -e --argjson port "$port" '.schema_version==1 and .port==$port and .enabled==false' "$state" >/dev/null || fail 'stop did not retain disabled port'
     [[ -f "$runtime" && -f "$unit" && ! -e "$TEST_SYSTEM_ROOT/run/tcping-active" && ! -e "$TEST_SYSTEM_ROOT/run/tcping-enabled" ]] || fail 'stop did not retain files and disable service'
-    jq -e '[.requirements[] | .owner] | index("tcping") == null and index("ssh") != null' "$fw" >/dev/null || fail 'stop changed unrelated UFW owner or retained TCPing demand'
+    jq -e '[.requirements[] | .owner] | index("tcping") == null and index("ssh") != null' "$fw" >/dev/null || fail 'stop changed unrelated NFT owner or retained TCPing demand'
 
     assert_status 0 bash "$TEST_COMMAND" start
     jq -e --argjson port "$port" '.port==$port and .enabled==true' "$state" >/dev/null || fail 'portless restart did not reuse saved port'
@@ -212,36 +212,36 @@ PY
     assert_status 0 bash "$TEST_COMMAND" --yes uninstall
     [[ ! -e "$state" && ! -e "$runtime" && ! -e "$unit" ]] || fail 'uninstall left owned files'
     [[ ! -e "$TEST_SYSTEM_ROOT/run/tcping-enabled" ]] || fail 'uninstall left autostart enabled'
-    jq -e '[.requirements[] | .owner] | index("tcping") == null and index("ssh") != null' "$fw" >/dev/null || fail 'uninstall changed unrelated UFW owner'
+    jq -e '[.requirements[] | .owner] | index("tcping") == null and index("ssh") != null' "$fw" >/dev/null || fail 'uninstall changed unrelated NFT owner'
     : >"$TEST_SYSTEM_ROOT/run/signal-start-once"
     assert_status 143 bash "$TEST_COMMAND" start --port "$port"
     [[ ! -e "$state" && ! -e "$runtime" && ! -e "$unit" && ! -e "$TEST_SYSTEM_ROOT/run/tcping-enabled" ]] ||
         fail 'interrupted start left TCPing files or autostart'
     jq -e '[.requirements[] | .owner] | index("tcping") == null and index("ssh") != null' "$fw" >/dev/null ||
-        fail 'interrupted start left TCPing UFW demand or removed other owner'
+        fail 'interrupted start left TCPing NFT demand or removed other owner'
 
     cat >"$TEST_TEMP/postcommit.sh" <<'SH'
 #!/usr/bin/env bash
 set -Eeuo pipefail
 source "$TEST_COMMAND"
-vps_ufw_begin() { VPS_UFW_DEPTH=1; printf 'begin\n' >>"$POST_LOG"; }
-vps_ufw_commit() {
+vps_nft_begin() { VPS_NFT_DEPTH=1; printf 'begin\n' >>"$POST_LOG"; }
+vps_nft_commit() {
     printf 'commit\n' >>"$POST_LOG"
     if [[ ! -e "$POST_MARK" ]]; then
         touch "$POST_MARK"
         kill -TERM "$BASHPID"
         return 143
     fi
-    VPS_UFW_DEPTH=0
+    VPS_NFT_DEPTH=0
 }
-vps_ufw_rollback() { VPS_UFW_DEPTH=0; printf 'rollback\n' >>"$POST_LOG"; }
+vps_nft_rollback() { VPS_NFT_DEPTH=0; printf 'rollback\n' >>"$POST_LOG"; }
 tcping_main start --port "$POST_PORT"
 SH
     : >"$TEST_TEMP/postcommit.log"
     env TEST_COMMAND="$TEST_COMMAND" POST_LOG="$TEST_TEMP/postcommit.log" POST_MARK="$TEST_TEMP/postcommit-sent" \
         POST_PORT="$port" bash "$TEST_TEMP/postcommit.sh" >"$TEST_TEMP/postcommit-output" 2>&1 || signal_status=$?
     [[ "$signal_status" == 143 ]] || fail "post-commit signal returned $signal_status"
-    [[ "$(grep -Fc 'commit' "$TEST_TEMP/postcommit.log")" == 2 ]] || fail 'post-commit signal did not finish UFW transaction in cleanup'
+    [[ "$(grep -Fc 'commit' "$TEST_TEMP/postcommit.log")" == 2 ]] || fail 'post-commit signal did not finish NFT transaction in cleanup'
     ! grep -Fq 'rollback' "$TEST_TEMP/postcommit.log" || fail 'post-commit signal rolled back committed service'
     jq -e --argjson port "$port" '.port==$port and .enabled==true' "$state" >/dev/null || fail 'post-commit signal lost persisted service state'
     [[ -e "$TEST_SYSTEM_ROOT/run/tcping-active" && -e "$TEST_SYSTEM_ROOT/run/tcping-enabled" ]] ||
@@ -256,7 +256,7 @@ SH
         ! grep -Fq 'Failed to get unit file state' "$TEST_TEMP/menu-output" || fail 'uninstalled menu queried missing unit enablement'
         [[ ! -e "$state" ]] || fail 'interactive menu exit changed state'
     fi
-    printf 'PASS: mock systemd CLI lifecycle, validation, rollback, UFW ownership\n'
+    printf 'PASS: mock systemd CLI lifecycle, validation, rollback, NFT ownership\n'
 }
 
 test_alpine_init_mapping() (

@@ -68,8 +68,8 @@ test_cli() {
     test_contains "$output" "network bbr" "BBR command listing"
     test_contains "$output" "network dns" "DNS command listing"
     test_contains "$output" "network ip-policy" "IP policy command listing"
-    test_contains "$output" "network ufw" "UFW command listing"
-    test_contains "$output" "network rfw" "RFW command listing"
+    test_contains "$output" "network nftables" "nftables command listing"
+    [[ "$output" != *'network ufw'* && "$output" != *'network rfw'* ]] || test_fail 'removed firewall command remains listed'
     test_contains "$output" "system kernel" "kernel command listing"
     test_contains "$output" "system reinstall" "reinstall command listing"
     test_contains "$output" "system swap" "swap command listing"
@@ -187,6 +187,7 @@ test_dispatch_security() (
     mkdir -p "$sandbox/bin" "$sandbox/lib" "$sandbox/commands/network" "$sandbox/commands/system" "$sandbox/commands/security" "$sandbox/commands/service/proxy" "$sandbox/commands/test"
     cp "$TEST_ROOT/bin/vpsctl" "$sandbox/bin/vpsctl"
     cp "$TEST_ROOT"/lib/*.sh "$sandbox/lib/"
+    cp -a "$TEST_ROOT/lib/nftables" "$sandbox/lib/"
     cp "$TEST_ROOT/VERSION" "$sandbox/VERSION"
     cat >>"$sandbox/lib/distribution.sh" <<'EOF'
 
@@ -375,7 +376,6 @@ EOF
     assert_feature_result 3 'systemd' security fail2ban install
     assert_feature_result 3 'systemd 或 OpenRC' service iperf3 start
     assert_feature_result 3 'systemd 或 OpenRC' service tcping start
-    assert_feature_result 3 'systemd' network rfw install
     assert_feature_result 3 'systemd 或 OpenRC' service proxy install --core sing-box
     assert_feature_result 2 '未知' service iperf3 status --unknown
     assert_feature_result 2 '不接受参数' test tcpquality help extra

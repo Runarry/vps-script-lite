@@ -39,7 +39,7 @@ proxy_mktemp_json() { mktemp "$1/.$2.XXXXXX"; }
 vps_cmd_lock() { :; }
 vps_cmd_unlock() { :; }
 proxy_recover_transaction() { :; }
-proxy_ufw_relay_transaction() { "$@"; }
+proxy_nft_relay_transaction() { "$@"; }
 _proxy_relay_commit_candidate() {
     proxy_relay_validate_file "$1" || return $?
     printf '%s' "${3-}" >"$TEST_TEMP/commit-core"

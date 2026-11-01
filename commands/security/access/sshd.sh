@@ -837,7 +837,7 @@ access_ssh_prepare_rollback() {
 
     access_sshd_restore_backup_config "$backup_dir" || failed=1
     access_sshd_reload || failed=1
-    if ((failed == 0)) || [[ "$backend" != ufw || "$added" != ufw-shared ]]; then
+    if ((failed == 0)) || [[ "$backend" != nft || "$added" != nft-shared ]]; then
         access_firewall_abort "$backend" "$new_port" "$added" "$previous_backend" "$previous_port" "$previous_mode" "$backup_dir" || failed=1
     fi
     if ((failed)); then
@@ -1493,6 +1493,10 @@ access_ssh_commit() {
         vps_cmd_unlock
         return 30
     }
+    access_firewall_require_supported_backend "$firewall_backend" || {
+        vps_cmd_unlock
+        return 30
+    }
     firewall_mode="$(access_kv_get "$state" firewall_mode)" || {
         vps_cmd_unlock
         return 30
@@ -1588,7 +1592,7 @@ access_ssh_commit() {
 }
 
 access_ssh_abort() {
-    local tx_id="$1" tx_dir state status backup_id backup_dir backend added old_port new_port previous_backend previous_port previous_mode failed=0 ufw_restore=0
+    local tx_id="$1" tx_dir state status backup_id backup_dir backend added old_port new_port previous_backend previous_port previous_mode failed=0 nft_restore=0
 
     vps_cmd_require_root || return $?
     access_prepare_layout || return $?
@@ -1624,6 +1628,10 @@ access_ssh_abort() {
         vps_cmd_unlock
         return 30
     }
+    access_firewall_require_supported_backend "$backend" || {
+        vps_cmd_unlock
+        return 30
+    }
     added="$(access_kv_get "$state" firewall_added)" || {
         vps_cmd_unlock
         return 30
@@ -1646,26 +1654,26 @@ access_ssh_abort() {
         vps_cmd_info "演练：将从备份 $backup_id 恢复 prepare 前配置、reload SSH 并仅撤销本事务防火墙规则"
         return 0
     fi
-    if [[ "$backend" == ufw && "$added" == ufw-shared ]]; then
+    if [[ "$backend" == nft && "$added" == nft-shared ]]; then
         if ! old_port="$(access_kv_get "$state" old_port)" || ! access_validate_port "$old_port"; then
             vps_cmd_unlock
             return 30
         fi
-        access_firewall_ufw_restore_begin "$backup_dir" || {
+        access_firewall_nft_restore_begin "$backup_dir" || {
             vps_cmd_unlock
             return 30
         }
-        ufw_restore=1
+        nft_restore=1
     fi
     access_sshd_restore_backup_config "$backup_dir" || failed=1
     ((failed)) || access_sshd_reload || failed=1
-    if ((ufw_restore)); then
+    if ((nft_restore)); then
         ((failed)) || access_sshd_port_listening "$old_port" || failed=1
         if ((failed)); then
-            vps_ufw_rollback || true
+            vps_nft_rollback || true
         else
-            vps_ufw_commit || failed=1
-            ((failed)) || access_firewall_ufw_restore_state "$backup_dir" || failed=1
+            vps_nft_commit || failed=1
+            ((failed)) || access_firewall_nft_restore_state "$backup_dir" || failed=1
         fi
     elif ((failed == 0)); then
         access_firewall_abort "$backend" "$new_port" "$added" "$previous_backend" "$previous_port" "$previous_mode" "$backup_dir" || failed=1
@@ -1692,7 +1700,7 @@ access_ssh_abort() {
 access_ssh_restore() {
     local backup_id="$1" backup_dir manifest lifecycle applied current current_copy kind prompt failed=0
     local previous_backend='' previous_port='' previous_mode='' current_backend='' current_port='' current_mode=''
-    local firewall_mode=manual ufw_restore=0 restored_port
+    local firewall_mode=manual nft_restore=0 restored_port
 
     vps_cmd_require_root || return $?
     [[ -z "$(access_active_transaction 2>/dev/null || true)" ]] || {
@@ -1709,6 +1717,11 @@ access_ssh_restore() {
     kind="$(access_kv_get "$manifest" kind)" || return 30
     if [[ "$kind" != ssh-policy ]]; then
         firewall_mode="$(access_firewall_backup_mode "$backup_dir")" || return 30
+    fi
+    if [[ "$firewall_mode" == auto && ! -f "$backup_dir/nft.scope.json" ]] &&
+        { [[ -f "$backup_dir/ufw.scope.json" ]] || [[ "$(access_kv_get "$backup_dir/firewall.state" backend 2>/dev/null || true)" == ufw ]]; }; then
+        vps_cmd_error "备份包含旧版 UFW 防火墙状态，无法作为 nftables 快照恢复"
+        return 30
     fi
     [[ "$lifecycle" == committed ]] || {
         vps_cmd_error "只允许恢复已生效配置的备份（当前：$lifecycle）"
@@ -1755,13 +1768,13 @@ access_ssh_restore() {
         vps_cmd_unlock
         return 20
     }
-    if [[ "$firewall_mode" == auto && -f "$backup_dir/ufw.scope.json" ]]; then
-        access_firewall_ufw_restore_begin "$backup_dir" || {
+    if [[ "$firewall_mode" == auto && -f "$backup_dir/nft.scope.json" ]]; then
+        access_firewall_nft_restore_begin "$backup_dir" || {
             rm -f -- "$current_copy"
             vps_cmd_unlock
             return 30
         }
-        ufw_restore=1
+        nft_restore=1
     fi
     access_sshd_restore_backup_config "$backup_dir" || failed=1
     if ((failed == 0)); then
@@ -1774,14 +1787,14 @@ access_ssh_restore() {
         fi
     fi
     ((failed)) || access_sshd_reload || failed=1
-    if ((failed == 0 && ufw_restore == 1)); then
+    if ((failed == 0 && nft_restore == 1)); then
         restored_port="$(access_kv_get "$manifest" old_port)" || failed=1
         ((failed)) || access_sshd_port_listening "$restored_port" || failed=1
     fi
     if ((failed)); then
         access_sshd_install_candidate "$current_copy" || true
         access_sshd_reload || true
-        ((ufw_restore == 0)) || vps_ufw_rollback || true
+        ((nft_restore == 0)) || vps_nft_rollback || true
         rm -f -- "$current_copy"
         vps_cmd_unlock
         vps_cmd_error "恢复后的 SSH 配置验证失败，已尝试回到恢复前状态"
@@ -1796,9 +1809,9 @@ access_ssh_restore() {
         vps_cmd_success "已恢复 SSH 登录策略备份 $backup_id"
         return 0
     fi
-    if ((ufw_restore)); then
-        vps_ufw_commit || failed=1
-        ((failed)) || access_firewall_ufw_restore_state "$backup_dir" || failed=1
+    if ((nft_restore)); then
+        vps_nft_commit || failed=1
+        ((failed)) || access_firewall_nft_restore_state "$backup_dir" || failed=1
     elif [[ "$firewall_mode" == auto ]]; then
         access_firewall_load_managed
         current_backend="$ACCESS_FW_PREVIOUS_BACKEND"

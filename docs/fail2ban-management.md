@@ -46,7 +46,7 @@ vpsctl [--yes] security fail2ban uninstall [--confirm-uninstall REMOVE-VPSCTL-FA
 
 `install` 本身就是安装 Fail2ban 的明确授权，不需要额外提供 `--install-deps`。apt 系安装 Fail2ban 和 systemd Python 支持；RPM 系安装 Fail2ban 及 systemd 支持；pacman/zypper 使用发行版包。软件源缺少所需包时操作失败并保留诊断，不修改软件源配置。
 
-封禁动作按当前能力选择：活动 firewalld 使用 `firewallcmd-rich-rules`，活动 UFW 使用 `ufw`，否则优先使用 nftables，再回退到 `iptables-multiport`。同时检测到 UFW 和 firewalld 时拒绝自动配置。日志 backend 不在受管文件中硬编码，继续使用发行版的 `%(sshd_backend)s`。
+共享 nftables 防火墙已启用或其表仍在运行时，受管 jail 使用 `nftables-multiport`，封禁规则保留在 Fail2ban 自有表中。未使用共享管理器时，活动 firewalld 使用 `firewallcmd-rich-rules`，否则优先使用 `nftables-multiport`，再回退到 `iptables-multiport`。应用配置会重新选择动作，通过 `reload --restart sshd` 更新 jail；失败时恢复配置和原服务状态。日志 backend 不在受管文件中硬编码，继续使用发行版的 `%(sshd_backend)s`。
 
 `security access` 修改 SSH 端口后不会跨功能改写 Fail2ban。`status` 会比较 `sshd -T` 与受管端口；发现漂移时使用 `sync-ssh-port`。同步仍经过完整的备份、配置测试、reload 和回滚流程。
 

@@ -24,11 +24,11 @@ ETC_MARKER="/etc/vpsctl/${MARKER_ID}"
 STATE_MARKER="/var/lib/vpsctl/network/${MARKER_ID}"
 LIBEXEC_MARKER="/usr/local/libexec/${MARKER_ID}"
 BACKUP_MARKER="/var/backups/vpsctl/${MARKER_ID}"
-CACHE_UFW_STATE_DIR=/var/lib/vpsctl/network/ufw
-CACHE_UFW_LOCK=/run/vpsctl/network-ufw.lock
-CACHE_UFW_BACKUP="$TEST_TEMP/cache-ufw-baseline"
-CACHE_UFW_BASELINE_TAKEN=0
-CACHE_UFW_LOCK_PARENT_EXISTED=0
+CACHE_NFT_STATE_DIR=/var/lib/vpsctl/network/nftables
+CACHE_NFT_LOCK=/run/vpsctl/network-nftables.lock
+CACHE_NFT_BACKUP="$TEST_TEMP/cache-nftables-baseline"
+CACHE_NFT_BASELINE_TAKEN=0
+CACHE_NFT_LOCK_PARENT_EXISTED=0
 CLEAN_ACCEPT_UNIT=''
 
 fail() {
@@ -52,37 +52,37 @@ restore_path() {
     fi
 }
 
-snapshot_feature_cache_ufw() {
+snapshot_feature_cache_nftables() {
     local path
     for path in /var/lib/vpsctl /var/lib/vpsctl/network /run/vpsctl; do
-        [[ ! -L "$path" ]] || fail "shared UFW parent path is a symlink: $path"
+        [[ ! -L "$path" ]] || fail "shared NFTABLES parent path is a symlink: $path"
     done
-    [[ ! -L "$CACHE_UFW_STATE_DIR" && ( ! -e "$CACHE_UFW_STATE_DIR" || -d "$CACHE_UFW_STATE_DIR" ) ]] || fail 'unsafe shared UFW state directory before feature cache test'
-    [[ ! -e "$CACHE_UFW_STATE_DIR/pending.json" && ! -L "$CACHE_UFW_STATE_DIR/pending.json" ]] || fail 'shared UFW recovery is pending before feature cache test'
-    [[ ! -L "$CACHE_UFW_LOCK" && ( ! -e "$CACHE_UFW_LOCK" || -f "$CACHE_UFW_LOCK" ) ]] || fail 'unsafe shared UFW lock before feature cache test'
-    rm -rf -- "$CACHE_UFW_BACKUP"
-    mkdir -p -- "$CACHE_UFW_BACKUP"
-    CACHE_UFW_LOCK_PARENT_EXISTED=0
-    [[ ! -d "${CACHE_UFW_LOCK%/*}" ]] || CACHE_UFW_LOCK_PARENT_EXISTED=1
-    if [[ -d "$CACHE_UFW_STATE_DIR" ]]; then cp -a -- "$CACHE_UFW_STATE_DIR" "$CACHE_UFW_BACKUP/state"; fi
-    if [[ -f "$CACHE_UFW_LOCK" ]]; then cp -a -- "$CACHE_UFW_LOCK" "$CACHE_UFW_BACKUP/lock"; fi
-    CACHE_UFW_BASELINE_TAKEN=1
+    [[ ! -L "$CACHE_NFT_STATE_DIR" && ( ! -e "$CACHE_NFT_STATE_DIR" || -d "$CACHE_NFT_STATE_DIR" ) ]] || fail 'unsafe shared NFTABLES state directory before feature cache test'
+    [[ ! -e "$CACHE_NFT_STATE_DIR/pending.json" && ! -L "$CACHE_NFT_STATE_DIR/pending.json" ]] || fail 'shared NFTABLES recovery is pending before feature cache test'
+    [[ ! -L "$CACHE_NFT_LOCK" && ( ! -e "$CACHE_NFT_LOCK" || -f "$CACHE_NFT_LOCK" ) ]] || fail 'unsafe shared NFTABLES lock before feature cache test'
+    rm -rf -- "$CACHE_NFT_BACKUP"
+    mkdir -p -- "$CACHE_NFT_BACKUP"
+    CACHE_NFT_LOCK_PARENT_EXISTED=0
+    [[ ! -d "${CACHE_NFT_LOCK%/*}" ]] || CACHE_NFT_LOCK_PARENT_EXISTED=1
+    if [[ -d "$CACHE_NFT_STATE_DIR" ]]; then cp -a -- "$CACHE_NFT_STATE_DIR" "$CACHE_NFT_BACKUP/state"; fi
+    if [[ -f "$CACHE_NFT_LOCK" ]]; then cp -a -- "$CACHE_NFT_LOCK" "$CACHE_NFT_BACKUP/lock"; fi
+    CACHE_NFT_BASELINE_TAKEN=1
 }
 
-restore_feature_cache_ufw() {
-    [[ "$CACHE_UFW_BASELINE_TAKEN" == 1 ]] || return 0
-    rm -rf -- "$CACHE_UFW_STATE_DIR" || return 1
-    if [[ -d "$CACHE_UFW_BACKUP/state" ]]; then
-        cp -a -- "$CACHE_UFW_BACKUP/state" "$CACHE_UFW_STATE_DIR" || return 1
+restore_feature_cache_nftables() {
+    [[ "$CACHE_NFT_BASELINE_TAKEN" == 1 ]] || return 0
+    rm -rf -- "$CACHE_NFT_STATE_DIR" || return 1
+    if [[ -d "$CACHE_NFT_BACKUP/state" ]]; then
+        cp -a -- "$CACHE_NFT_BACKUP/state" "$CACHE_NFT_STATE_DIR" || return 1
     fi
-    rm -f -- "$CACHE_UFW_LOCK" || return 1
-    if [[ -f "$CACHE_UFW_BACKUP/lock" ]]; then
-        mkdir -p -- "${CACHE_UFW_LOCK%/*}" || return 1
-        cp -a -- "$CACHE_UFW_BACKUP/lock" "$CACHE_UFW_LOCK" || return 1
-    elif [[ "$CACHE_UFW_LOCK_PARENT_EXISTED" == 0 && -d "${CACHE_UFW_LOCK%/*}" ]]; then
-        rmdir -- "${CACHE_UFW_LOCK%/*}" || return 1
+    rm -f -- "$CACHE_NFT_LOCK" || return 1
+    if [[ -f "$CACHE_NFT_BACKUP/lock" ]]; then
+        mkdir -p -- "${CACHE_NFT_LOCK%/*}" || return 1
+        cp -a -- "$CACHE_NFT_BACKUP/lock" "$CACHE_NFT_LOCK" || return 1
+    elif [[ "$CACHE_NFT_LOCK_PARENT_EXISTED" == 0 && -d "${CACHE_NFT_LOCK%/*}" ]]; then
+        rmdir -- "${CACHE_NFT_LOCK%/*}" || return 1
     fi
-    CACHE_UFW_BASELINE_TAKEN=0
+    CACHE_NFT_BASELINE_TAKEN=0
 }
 
 feature_release_hashes() (
@@ -93,7 +93,7 @@ feature_release_hashes() (
 cleanup() {
     local restore_status=0
     if [[ -n "$CLEAN_ACCEPT_UNIT" ]]; then systemctl stop "$CLEAN_ACCEPT_UNIT" || restore_status=1; fi
-    restore_feature_cache_ufw || restore_status=1
+    restore_feature_cache_nftables || restore_status=1
     rm -f -- "$ENTRY"
     rm -rf -- "$INSTALL_ROOT" "$SELF_ROOT"
     restore_path "$ENTRY"
@@ -103,7 +103,7 @@ cleanup() {
     if [[ "$restore_status" == 0 ]]; then
         rm -rf -- "$TEST_TEMP"
     else
-        printf 'FAIL: shared UFW metadata restore failed; baseline retained at %s\n' "$CACHE_UFW_BACKUP" >&2
+        printf 'FAIL: shared NFTABLES metadata restore failed; baseline retained at %s\n' "$CACHE_NFT_BACKUP" >&2
         return 1
     fi
 }
@@ -204,7 +204,7 @@ PATH="$MOCK_BIN:$PATH" bash "$RELEASE_DIR/vpsctl.sh" \
 VPSCTL_TEST_CURL_FAIL=1 PATH="$MOCK_BIN:$PATH" "$ENTRY" --version >/dev/null ||
     fail 'reinstall did not repair the existing release entry permissions'
 [[ "$(find "$release_root/.bundles" -type f -printf '%f\n')" == core.sha256 ]] || fail 'non-core bundle installed eagerly'
-[[ ! -e "$release_root/lib/command.sh" && ! -e "$release_root/lib/ufw.sh" && ! -e "$release_root/lib/server-test.sh" ]] ||
+[[ ! -e "$release_root/lib/command.sh" && ! -e "$release_root/lib/nftables.sh" && ! -e "$release_root/lib/server-test.sh" ]] ||
     fail 'core contains feature shared libraries'
 : >"$VPSCTL_TEST_DOWNLOAD_TRACE"
 for builtin in --help --version list env; do
@@ -225,14 +225,14 @@ grep -Fq '主菜单 / 网络设置' "$TEST_TEMP/menu.log" || fail 'network categ
 PATH="$MOCK_BIN:$PATH" "$ENTRY" network bbr --help >/dev/null
 [[ "$(sort "$VPSCTL_TEST_DOWNLOAD_TRACE")" == "$(printf '%s\n' "vpsctl-shared-command-${RELEASE_VERSION}.tar.gz" "vpsctl-network-bbr-${RELEASE_VERSION}.tar.gz" | sort)" ]] ||
     fail 'first BBR invocation downloaded unrelated bundles'
-[[ ! -e "$release_root/commands/network/dns.sh" && ! -e "$release_root/lib/ufw.sh" ]] || fail 'BBR cache contains unrelated code'
-features=(network-bbr network-dns network-ip-policy network-ufw network-rfw system-kernel system-reinstall security-access security-fail2ban security-tls service-proxy service-tcping service-iperf3 test-nodequality test-tcpquality)
+[[ ! -e "$release_root/commands/network/dns.sh" && ! -e "$release_root/lib/nftables.sh" ]] || fail 'BBR cache contains unrelated code'
+features=(network-bbr network-dns network-ip-policy network-nftables system-kernel system-reinstall security-access security-fail2ban security-tls service-proxy service-tcping service-iperf3 test-nodequality test-tcpquality)
 for feature in "${features[@]}"; do
     PATH="$MOCK_BIN:$PATH" "$ENTRY" "${feature%%-*}" "${feature#*-}" --help >/dev/null
     [[ -f "$release_root/.bundles/${feature}.sha256" ]] || fail "$feature was not cached on demand"
 done
 [[ -f "$release_root/commands/service/tcping/listener.py" ]] || fail 'tcping private listener was not cached'
-for shared in command ufw server-test; do
+for shared in command nftables server-test; do
     [[ "$(grep -Fc "vpsctl-shared-${shared}-${RELEASE_VERSION}.tar.gz" "$VPSCTL_TEST_DOWNLOAD_TRACE")" == 1 ]] ||
         fail "shared $shared fetched more than once"
 done
@@ -286,7 +286,7 @@ if [[ "${VPSCTL_TEST_CLEAN_ONLY:-0}" == 1 ]]; then
         [[ ! -e "$release_root/.bundles/$feature.sha256" &&
             ! -e "$release_root/commands/${feature%%-*}/${feature#*-}.sh" ]] || fail "$feature survived bundle eviction"
     done
-    for bundle in core shared-command shared-ufw shared-server-test system-clean; do
+    for bundle in core shared-command shared-nftables shared-server-test system-clean; do
         [[ -f "$release_root/.bundles/$bundle.sha256" ]] || fail "$bundle was evicted"
     done
     [[ -f "$ETC_MARKER" && -f "$STATE_MARKER" && -f "$LIBEXEC_MARKER" && -f "$BACKUP_MARKER" ]] ||
@@ -340,13 +340,17 @@ for cache_feature in tcping iperf3; do
         { systemctl is-active --quiet "vpsctl-${cache_feature}.service" || systemctl is-enabled --quiet "vpsctl-${cache_feature}.service"; }; then
         fail "pre-existing $cache_feature systemd service blocks cache eviction acceptance"
     fi
-    snapshot_feature_cache_ufw
-    cat >"$MOCK_BIN/ufw" <<'MOCK_UFW'
+    snapshot_feature_cache_nftables
+    # Exercise service cache removal against a fresh inactive firewall state.
+    rm -rf -- "$CACHE_NFT_STATE_DIR"
+    cat >"$MOCK_BIN/nft" <<'MOCK_NFT'
 #!/usr/bin/env bash
-[[ "$#" == 1 && "$1" == status ]] || exit 89
-printf 'Status: inactive\n'
-MOCK_UFW
-    chmod 0755 "$MOCK_BIN/ufw"
+case "$*" in
+    'list table inet vpsctl_firewall' | '-j list table inet vpsctl_firewall') exit 1 ;;
+    *) exit 89 ;;
+esac
+MOCK_NFT
+    chmod 0755 "$MOCK_BIN/nft"
     feature_release_hashes >"$TEST_TEMP/${cache_feature}-release-before.sha256"
     awk -v feature="$cache_feature" '$2 != "./.bundles/service-" feature ".sha256" &&
          $2 != "./commands/service/" feature ".sh" &&
@@ -367,8 +371,8 @@ MOCK_UFW
     feature_release_hashes >"$TEST_TEMP/${cache_feature}-release-after.sha256"
     cmp -s -- "$TEST_TEMP/${cache_feature}-release-expected-after.sha256" "$TEST_TEMP/${cache_feature}-release-after.sha256" ||
         fail "installed $cache_feature uninstall changed other release files"
-    restore_feature_cache_ufw || fail "shared UFW metadata restore failed after $cache_feature uninstall"
-    rm -- "$MOCK_BIN/ufw"
+    restore_feature_cache_nftables || fail "shared NFTABLES metadata restore failed after $cache_feature uninstall"
+    rm -- "$MOCK_BIN/nft"
 
     : >"$VPSCTL_TEST_DOWNLOAD_TRACE"
     PATH="$MOCK_BIN:$PATH" "$ENTRY" service "$cache_feature" help >/dev/null || fail "$cache_feature help did not re-download the evicted bundle"

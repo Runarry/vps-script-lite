@@ -2,7 +2,13 @@
 # Standalone IPv4 relay manager. This file deliberately has no repository imports.
 
 PO0_STATE_FILE=/etc/po0-relay/state.tsv
-PO0_NFT_FILE=/etc/nftables.conf
+PO0_NFT_FILE=/etc/po0-relay/rules.nft
+PO0_LEGACY_NFT_FILE=/etc/nftables.conf
+PO0_SERVICE_FILE=/etc/systemd/system/po0-relay.service
+PO0_SHARED_STATE=/var/lib/vpsctl/network/nftables/state.json
+PO0_SHARED_RUNTIME=/usr/local/lib/vpsctl/nftables/runtime.sh
+PO0_SHARED_LOCK=/run/vpsctl/network-nftables.lock
+PO0_PROXY_STATE_DIR=/var/lib/vpsctl/service/proxy
 PO0_SYSCTL_FILE=/etc/sysctl.d/99-po0-relay.conf
 PO0_BBR_SYSCTL_FILE=/etc/sysctl.d/99-po0-relay-bbr.conf
 PO0_BBR_MODULES_FILE=/etc/modules-load.d/99-po0-relay-bbr.conf
@@ -15,10 +21,13 @@ PO0_PUBLIC_IP=''
 PO0_NEXT_ID=1
 PO0_BASE_STATE=''
 PO0_BASE_CONFIG=''
+PO0_BASE_LEGACY=''
+PO0_FILTER_OWNER=standalone
+PO0_LEGACY_CONFIG=0
 PO0_ANSWER=''
 PO0_CHOSEN_PORT=''
-declare -a PO0_IDS=() PO0_SSH_PORTS=(22) PO0_LISTEN_TCP=() PO0_LISTEN_UDP=() PO0_LOCAL_IPS=()
-declare -A PO0_NAME=() PO0_ENABLED=() PO0_PROTO=() PO0_PORT=() PO0_DEST_IP=() PO0_DEST_PORT=() PO0_URI=()
+declare -ga PO0_IDS=() PO0_SSH_PORTS=(22) PO0_LISTEN_TCP=() PO0_LISTEN_UDP=() PO0_LOCAL_IPS=()
+declare -gA PO0_NAME=() PO0_ENABLED=() PO0_PROTO=() PO0_PORT=() PO0_DEST_IP=() PO0_DEST_PORT=() PO0_URI=()
 
 po0_message() {
     local color=$1
@@ -38,7 +47,7 @@ po0_heading() {
 
 po0_reset_state() {
     PO0_IDS=() PO0_NAME=() PO0_ENABLED=() PO0_PROTO=() PO0_PORT=() PO0_DEST_IP=() PO0_DEST_PORT=() PO0_URI=()
-    PO0_IFACE='' PO0_RELAY_IP='' PO0_PUBLIC_IP='' PO0_NEXT_ID=1 PO0_SSH_PORTS=(22)
+    PO0_IFACE='' PO0_RELAY_IP='' PO0_PUBLIC_IP='' PO0_NEXT_ID=1 PO0_SSH_PORTS=(22) PO0_FILTER_OWNER=standalone
 }
 
 po0_valid_port() {
@@ -86,6 +95,7 @@ po0_protocols_overlap() { [[ $1 == both || $2 == both || $1 == "$2" ]]; }
 po0_validate_state() {
     local id other ssh_port has_22=0
     local -A seen=()
+    [[ $PO0_FILTER_OWNER == standalone || $PO0_FILTER_OWNER == vpsctl ]] || return 10
     po0_valid_iface "$PO0_IFACE" && po0_valid_ipv4 "$PO0_RELAY_IP" && po0_valid_id "$PO0_NEXT_ID" || {
         po0_error '状态中的网卡、内网 IPv4 或 next_id 无效。'
         return 10
@@ -163,7 +173,7 @@ po0_validate_state() {
 po0_write_state() {
     local id port
     po0_validate_state || return $?
-    printf 'PO0-RELAY\t2\nmeta\tinterface\t%s\nmeta\trelay_ip\t%s\nmeta\tnext_id\t%s\n' "$PO0_IFACE" "$PO0_RELAY_IP" "$PO0_NEXT_ID"
+    printf 'PO0-RELAY\t3\nmeta\tinterface\t%s\nmeta\trelay_ip\t%s\nmeta\tnext_id\t%s\nmeta\tfilter_owner\t%s\n' "$PO0_IFACE" "$PO0_RELAY_IP" "$PO0_NEXT_ID" "$PO0_FILTER_OWNER"
     [[ -z $PO0_PUBLIC_IP ]] || printf 'meta\tpublic_ip\t%s\n' "$PO0_PUBLIC_IP"
     for port in "${PO0_SSH_PORTS[@]}"; do printf 'ssh\t%s\n' "$port"; done
     for id in "${PO0_IDS[@]}"; do
@@ -185,7 +195,7 @@ po0_load_state() {
     while IFS= read -r line || [[ -n $line ]]; do
         n=$((n + 1))
         if ((n == 1)); then
-            [[ $line == $'PO0-RELAY\t1' || $line == $'PO0-RELAY\t2' ]] || {
+            [[ $line == $'PO0-RELAY\t1' || $line == $'PO0-RELAY\t2' || $line == $'PO0-RELAY\t3' ]] || {
                 po0_error '状态版本不支持。'
                 return 10
             }
@@ -210,8 +220,12 @@ po0_load_state() {
                     interface) PO0_IFACE=${fields[2]} ;;
                     relay_ip) PO0_RELAY_IP=${fields[2]} ;;
                     next_id) PO0_NEXT_ID=${fields[2]} ;;
+                    filter_owner)
+                        [[ $version == 3 ]] || return 10
+                        PO0_FILTER_OWNER=${fields[2]}
+                        ;;
                     public_ip)
-                        [[ $version == 2 ]] || return 10
+                        [[ $version != 1 ]] || return 10
                         PO0_PUBLIC_IP=${fields[2]}
                         ;;
                     *)
@@ -221,7 +235,7 @@ po0_load_state() {
                 esac
                 ;;
             uri)
-                [[ $version == 2 && ${#fields[@]} == 3 ]] || return 10
+                [[ $version != 1 && ${#fields[@]} == 3 ]] || return 10
                 id=${fields[1]}
                 po0_valid_id "$id" || return 10
                 [[ ! ${PO0_URI[$id]+yes} ]] || return 10
@@ -259,6 +273,7 @@ po0_load_state() {
         po0_error '状态文件不完整。'
         return 10
     }
+    [[ $version != 3 || ${meta[filter_owner]+yes} ]] || return 10
     po0_validate_state
 }
 
@@ -631,8 +646,9 @@ po0_proto_match() {
 po0_render_rules() {
     local id port match
     po0_validate_state || return $?
-    cat <<EOF
-table inet filter {
+    if [[ $PO0_FILTER_OWNER == standalone ]]; then
+        cat <<EOF
+table inet po0_relay_filter {
     comment "po0-relay:1"
     chain input {
         type filter hook input priority 0; policy drop;
@@ -640,21 +656,23 @@ table inet filter {
         iif "lo" accept
         ip protocol icmp accept
 EOF
-    for port in "${PO0_SSH_PORTS[@]}"; do
-        printf '        tcp dport %s ct state new limit rate 10/minute burst 5 packets accept\n        tcp dport %s ct state established accept\n' "$port" "$port"
-    done
-    for id in "${PO0_IDS[@]}"; do
-        [[ ${PO0_ENABLED[$id]} == 1 ]] || continue
-        match=$(po0_proto_match "${PO0_PROTO[$id]}")
-        printf '        iifname "%s" %s %s accept\n' "$PO0_IFACE" "$match" "${PO0_PORT[$id]}"
-    done
-    printf '    }\n    chain forward {\n        type filter hook forward priority 0; policy drop;\n        ct state { established, related } accept\n'
-    for id in "${PO0_IDS[@]}"; do
-        [[ ${PO0_ENABLED[$id]} == 1 ]] || continue
-        match=$(po0_proto_match "${PO0_PROTO[$id]}")
-        printf '        ip daddr %s %s %s accept\n' "${PO0_DEST_IP[$id]}" "$match" "${PO0_DEST_PORT[$id]}"
-    done
-    printf '    }\n    chain output { type filter hook output priority 0; policy accept; }\n}\ntable ip nat {\n    comment "po0-relay:1"\n    chain prerouting {\n        type nat hook prerouting priority dstnat; policy accept;\n'
+        for port in "${PO0_SSH_PORTS[@]}"; do
+            printf '        tcp dport %s ct state new limit rate 10/minute burst 5 packets accept\n        tcp dport %s ct state established accept\n' "$port" "$port"
+        done
+        for id in "${PO0_IDS[@]}"; do
+            [[ ${PO0_ENABLED[$id]} == 1 ]] || continue
+            match=$(po0_proto_match "${PO0_PROTO[$id]}")
+            printf '        iifname "%s" %s %s accept\n' "$PO0_IFACE" "$match" "${PO0_PORT[$id]}"
+        done
+        printf '    }\n    chain forward {\n        type filter hook forward priority 0; policy drop;\n        ct state { established, related } accept\n'
+        for id in "${PO0_IDS[@]}"; do
+            [[ ${PO0_ENABLED[$id]} == 1 ]] || continue
+            match=$(po0_proto_match "${PO0_PROTO[$id]}")
+            printf '        ip daddr %s %s %s accept\n' "${PO0_DEST_IP[$id]}" "$match" "${PO0_DEST_PORT[$id]}"
+        done
+        printf '    }\n    chain output { type filter hook output priority 0; policy accept; }\n}\n'
+    fi
+    printf 'table ip po0_relay_nat {\n    comment "po0-relay:1"\n    chain prerouting {\n        type nat hook prerouting priority dstnat; policy accept;\n'
     for id in "${PO0_IDS[@]}"; do
         [[ ${PO0_ENABLED[$id]} == 1 ]] || continue
         match=$(po0_proto_match "${PO0_PROTO[$id]}")
@@ -666,7 +684,7 @@ EOF
         match=$(po0_proto_match "${PO0_PROTO[$id]}")
         printf '        ip daddr %s %s %s snat to %s\n' "${PO0_DEST_IP[$id]}" "$match" "${PO0_DEST_PORT[$id]}" "$PO0_RELAY_IP"
     done
-    printf '    }\n}\ntable ip mangle {\n    comment "po0-relay:1"\n    chain forward {\n        type filter hook forward priority mangle; policy accept;\n'
+    printf '    }\n}\ntable ip po0_relay_mangle {\n    comment "po0-relay:1"\n    chain forward {\n        type filter hook forward priority mangle; policy accept;\n'
     for id in "${PO0_IDS[@]}"; do
         [[ ${PO0_ENABLED[$id]} == 1 && ${PO0_PROTO[$id]} != udp ]] || continue
         printf '        ip daddr %s tcp flags syn tcp option maxseg size set 1452\n' "${PO0_DEST_IP[$id]}"
@@ -677,14 +695,98 @@ EOF
 po0_render_reset() {
     # `add table` is idempotent on supported nftables; the following delete and
     # recreation happen together in one atomic netlink batch, even at boot.
-    printf 'add table inet filter\ndelete table inet filter\nadd table ip nat\ndelete table ip nat\nadd table ip mangle\ndelete table ip mangle\n'
+    printf 'add table inet po0_relay_filter\ndelete table inet po0_relay_filter\nadd table ip po0_relay_nat\ndelete table ip po0_relay_nat\nadd table ip po0_relay_mangle\ndelete table ip po0_relay_mangle\n'
 }
 
 po0_render_config() {
-    printf '#!/usr/sbin/nft -f\n# Managed by po0-relay, schema 1. Edit through po0-relay.sh.\n'
+    printf '#!/usr/sbin/nft -f\n# Managed by po0-relay, schema 2. Edit through po0-relay.sh.\n'
     po0_render_reset
     po0_render_rules
 }
+
+# Only used to verify the preceding single-file release before migrating its
+# generic table names. Keep its exact renderer/header for ownership checks.
+po0_render_previous_config() (
+    PO0_FILTER_OWNER=standalone
+    po0_render_config | sed 's/po0_relay_filter/filter/g; s/po0_relay_nat/nat/g; s/po0_relay_mangle/mangle/g; s/schema 2/schema 1/'
+)
+
+po0_render_service() {
+    cat <<EOF
+# Managed by po0-relay.
+[Unit]
+Description=PO0 IPv4 relay rules
+After=network-pre.target nftables.service vpsctl-nftables.service
+Before=network.target
+Wants=network-pre.target
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f "$PO0_NFT_FILE"
+ExecReload=/usr/sbin/nft -f "$PO0_NFT_FILE"
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
+po0_table_names() {
+    printf 'inet po0_relay_filter\nip po0_relay_nat\nip po0_relay_mangle\n'
+    [[ $PO0_LEGACY_CONFIG != 1 ]] || printf 'inet filter\nip nat\nip mangle\n'
+}
+
+po0_extract_table() {
+    awk -v wanted="table $1 $2 {" '
+        $0 == wanted { active=1 }
+        active { print; line=$0; depth+=gsub(/\{/, "", line); line=$0; depth-=gsub(/\}/, "", line); if (!depth) exit }
+    '
+}
+
+po0_normalize_runtime() {
+    # Anonymous sets are unordered; nft sorts their values and folds singletons.
+    local line matched values replacement
+    local set_pattern='\{[[:space:]]*([[:alnum:]_.:-]+([[:space:]]*,[[:space:]]*[[:alnum:]_.:-]+)*)[[:space:]]*\}'
+    while IFS= read -r line; do
+        while [[ $line =~ $set_pattern ]]; do
+            matched=${BASH_REMATCH[0]}
+            values=$(printf '%s' "${BASH_REMATCH[1]}" | tr -d '[:space:]' | tr ',' '\n' | LC_ALL=C sort -u | paste -sd, -) || return 20
+            replacement=$values
+            [[ $values != *,* ]] || replacement="SET[$values]"
+            line=${line/"$matched"/$replacement}
+        done
+        printf '%s\n' "${line//priority filter/priority 0}"
+    done | tr -d '[:space:]'
+}
+
+# Compare every executable statement, not just a marker: Docker can append
+# chains to these old generic tables even when their PO0 comment survives.
+po0_validate_legacy_runtime() (
+    local expected actual id table family name
+    [[ $PO0_LEGACY_CONFIG == 1 ]] || return 0
+    if [[ $PO0_MODE == previous ]]; then
+        po0_load_state "$PO0_STATE_FILE" || return $?
+        expected=$(po0_render_previous_config) || return $?
+    else
+        po0_import_legacy "$PO0_LEGACY_NFT_FILE" || return $?
+        expected=$(po0_render_legacy_template) || return $?
+        expected=${expected//\$RELAY_LAN_IP/$PO0_RELAY_IP}
+        # Replace larger IDs first, so $DEST_IP_1 cannot truncate $DEST_IP_10.
+        for ((id = ${#PO0_IDS[@]}; id >= 1; id--)); do
+            expected=${expected//\$DEST_IP_$id/${PO0_DEST_IP[$id]}}
+            expected=${expected//\$DEST_PORT_$id/${PO0_DEST_PORT[$id]}}
+            expected=${expected//\$PORT_IN_$id/${PO0_PORT[$id]}}
+        done
+    fi
+    for table in 'inet filter' 'ip nat' 'ip mangle'; do
+        IFS=' ' read -r family name <<<"$table"
+        if [[ $'\n'$PO0_TABLES$'\n' == *$'\n'"table $table"$'\n'* ]]; then
+            actual=$(nft -s list table "$family" "$name" | po0_normalize_runtime) || return 20
+            [[ $actual == "$(printf '%s\n' "$expected" | po0_extract_table "$family" "$name" | po0_normalize_runtime)" ]] || {
+                po0_error "旧 $table 含非 PO0 规则或已变更；保留原表，请先分离其他规则。"
+                return 10
+            }
+        fi
+    done
+)
 
 po0_file_fingerprint() {
     if [[ -f $1 && ! -L $1 ]]; then
@@ -697,21 +799,24 @@ po0_file_fingerprint() {
     fi
 }
 
-po0_is_empty_starter() {
-    local text
-    [[ ! -e $1 ]] && return 0
-    text=$(po0_normalize_legacy <"$1") || return 20
-    [[ -z $text || $text == 'flushrulesettableinetfilter{chaininput{typefilterhookinputpriorityfilter;}chainforward{typefilterhookforwardpriorityfilter;}chainoutput{typefilterhookoutputpriorityfilter;}}' ||
-        $text == 'flushrulesettableinetfilter{chaininput{typefilterhookinputpriority0;}chainforward{typefilterhookforwardpriority0;}chainoutput{typefilterhookoutputpriority0;}}' ||
-        $text == 'flushrulesettableinetfilter{chaininput{typefilterhookinputpriorityfilter;policyaccept;}chainforward{typefilterhookforwardpriorityfilter;policyaccept;}chainoutput{typefilterhookoutputpriorityfilter;policyaccept;}}' ]]
-}
-
 po0_load_current() {
     local rendered actual
+    PO0_LEGACY_CONFIG=0
     PO0_BASE_STATE=$(po0_file_fingerprint "$PO0_STATE_FILE") || return $?
     PO0_BASE_CONFIG=$(po0_file_fingerprint "$PO0_NFT_FILE") || return $?
+    PO0_BASE_LEGACY=$(po0_file_fingerprint "$PO0_LEGACY_NFT_FILE") || return $?
     if [[ -e $PO0_STATE_FILE ]]; then
         po0_load_state "$PO0_STATE_FILE" || return $?
+        if [[ ! -e $PO0_NFT_FILE && -f $PO0_LEGACY_NFT_FILE ]]; then
+            rendered=$(po0_render_previous_config) || return $?
+            actual=$(cat -- "$PO0_LEGACY_NFT_FILE") || return 20
+            [[ $actual == "$rendered" ]] || {
+                po0_error '旧受管配置与状态不一致；拒绝接管。'
+                return 10
+            }
+            PO0_LEGACY_CONFIG=1 PO0_MODE=previous
+            return 0
+        fi
         [[ -f $PO0_NFT_FILE ]] || {
             po0_error '受管状态存在但 nft 配置缺失；请使用备份恢复。'
             return 10
@@ -723,12 +828,18 @@ po0_load_current() {
             return 10
         }
         PO0_MODE=managed
-    elif po0_is_empty_starter "$PO0_NFT_FILE"; then
+    elif [[ -e $PO0_NFT_FILE ]]; then
+        po0_error '独立规则文件存在但缺少状态；请使用备份恢复。'
+        return 10
+    elif [[ -f $PO0_LEGACY_NFT_FILE ]] && (po0_import_legacy "$PO0_LEGACY_NFT_FILE") 2>/dev/null; then
+        po0_import_legacy "$PO0_LEGACY_NFT_FILE" || return $?
+        PO0_MODE=legacy PO0_LEGACY_CONFIG=1
+    elif [[ -f $PO0_LEGACY_NFT_FILE ]] && grep -Eq '^[[:space:]]*(define[[:space:]]+RELAY_LAN_IP|#[[:space:]]*Managed by po0-relay)' "$PO0_LEGACY_NFT_FILE"; then
+        po0_error '旧 PO0 配置不完整或缺少对应状态；请使用备份恢复。'
+        return 10
+    else
         po0_reset_state
         PO0_MODE=fresh
-    else
-        po0_import_legacy "$PO0_NFT_FILE" || return $?
-        PO0_MODE=legacy
     fi
 }
 
@@ -922,7 +1033,128 @@ po0_check_host_state() {
         [[ ${PO0_ENABLED[$id]} == 1 ]] || continue
         po0_check_conflicts "${PO0_PORT[$id]}" "${PO0_PROTO[$id]}" "$id" || return $?
     done
+    po0_check_configured_conflicts
 }
+
+po0_check_configured_conflicts() {
+    local records='' file row proto ports port id
+    local -a pieces=()
+    for file in "$PO0_PROXY_STATE_DIR/relay.json" "$PO0_PROXY_STATE_DIR/nodes.json"; do
+        [[ -e $file || -L $file ]] || continue
+        [[ -f $file && ! -L $file ]] || return 10
+        command -v jq >/dev/null 2>&1 || {
+            po0_error '检查已有 vpsctl 端口配置需要 jq。'
+            return 3
+        }
+        if [[ $file == */relay.json ]]; then
+            row=$(jq -er '[.forwards[]? | select((.family // "dual") != "ipv6") |
+                [.network, "\(.listen_port_start)-\(.listen_port_end)"] | @tsv] | join("\n")' "$file") || return 10
+        else
+            row=$(jq -er '[.nodes[]? | select((.listen // "::") as $address | $address == "::" or ($address | contains(":") | not)) |
+                [(if .profile == "hysteria2" or .profile == "tuic-v5" then "udp"
+                  elif (.profile | startswith("shadowsocks-")) then "both" else "tcp" end),
+                 ((.port | tostring) + (if (.options.hop_ports // "") != "" then "," + .options.hop_ports else "" end))] | @tsv] | join("\n")' "$file") || return 10
+        fi
+        records+="${row}"$'\n'
+    done
+    while IFS=$'\t' read -r proto ports; do
+        [[ -n $proto ]] || continue
+        [[ $proto =~ ^(tcp|udp|both)$ ]] || return 10
+        IFS=, read -r -a pieces <<<"$ports"
+        for port in "${pieces[@]}"; do
+            po0_valid_port_spec "$port" || return 10
+            for id in "${PO0_IDS[@]}"; do
+                [[ ${PO0_ENABLED[$id]} == 1 ]] || continue
+                if po0_protocols_overlap "$proto" "${PO0_PROTO[$id]}" && po0_ports_overlap "$port" "${PO0_PORT[$id]}"; then
+                    po0_error "线路 $id 与 vpsctl 已配置入口 $proto/$port 冲突。"
+                    return 10
+                fi
+            done
+        done
+    done <<<"$records"
+}
+
+po0_requirements_json() {
+    po0_write_state | jq -Rn '
+        [inputs | split("\t")] as $rows |
+        ($rows | map(select(.[0] == "meta" and .[1] == "interface"))[0][2]) as $iface |
+        [$rows[] | select(.[0] == "rule" and .[2] == "1") | . as $rule |
+         (if .[3] == "both" then ["tcp", "udp"] else [.[3]] end)[] |
+         {scope:"po0", owner:("po0:" + $rule[1]), kind:"route", family:"ipv4", proto:.,
+          port:$rule[6], source:"any", destination:$rule[5], original_port:$rule[4],
+          original_destination:"any", temporary:false, interfaces:{in:$iface,out:""}}]'
+}
+
+po0_shared_prepare() {
+    local directory=$1 state proto ports port id
+    local -a pieces=()
+    state=$(vps_nft_state) || return $?
+    while IFS=$'\t' read -r proto ports; do
+        [[ -n $proto && -n $ports && $ports != any ]] || continue
+        IFS=, read -r -a pieces <<<"$ports"
+        for port in "${pieces[@]}"; do
+            po0_valid_port_spec "$port" || return 10
+            for id in "${PO0_IDS[@]}"; do
+                [[ ${PO0_ENABLED[$id]} == 1 ]] || continue
+                if po0_protocols_overlap "$proto" "${PO0_PROTO[$id]}" && po0_ports_overlap "$port" "${PO0_PORT[$id]}"; then
+                    po0_error "线路 $id 与统一管理器的 $proto/$port 入口冲突。"
+                    return 10
+                fi
+            done
+        done
+    done < <(jq -r '.requirements[] | select(.scope != "po0" and .family == "ipv4") |
+        [.proto, (.original_port // .port)] | @tsv' <<<"$state")
+    po0_requirements_json >"$directory/requirements.json" || return $?
+    jq --slurpfile requirements "$directory/requirements.json" \
+        '.revision += 1 |
+         .requirements = ([.requirements[] | select(.scope != "po0")] + $requirements[0]) |
+         reduce $requirements[0][] as $rule (.;
+             .links[$rule.owner] = ((.links[$rule.owner] // {detached:false}) + {scope:"po0"}))' \
+        <<<"$state" >"$directory/shared-state.candidate" || return 20
+    vps_nft_prepare_state "$directory/shared-state.candidate" "$directory/shared-candidate"
+}
+
+# Private cooperation entrypoints. The manager holds all business locks before
+# its nft lock; these helpers never acquire locks or invoke public commands.
+po0_coop_prepare() (
+    local directory=$1
+    po0_load_current || return $?
+    [[ $PO0_MODE != fresh ]] || return 0
+    PO0_COOP_DIR=$directory po0_apply
+)
+
+po0_coop_read_before() {
+    local key value
+    PO0_TX_DIR=$1
+    while IFS='=' read -r key value; do
+        case $key in
+            ip_forward) PO0_OLD_FORWARD=$value ;;
+            service_enabled) PO0_OLD_SERVICE=$value ;;
+            legacy_config) PO0_LEGACY_CONFIG=$value ;;
+        esac
+    done <"$PO0_TX_DIR/before.txt"
+}
+
+po0_coop_commit() (
+    [[ -f $1/present ]] || return 0
+    po0_coop_read_before "$1" || return $?
+    po0_atomic_write "$PO0_TX_DIR/nftables.candidate" "$PO0_NFT_FILE" 644 || return $?
+    po0_atomic_write "$PO0_TX_DIR/state.candidate" "$PO0_STATE_FILE" 600 || return $?
+    po0_atomic_write "$PO0_TX_DIR/sysctl.candidate" "$PO0_SYSCTL_FILE" 644 || return $?
+    po0_atomic_write "$PO0_TX_DIR/service.candidate" "$PO0_SERVICE_FILE" 644 || return $?
+    [[ $PO0_LEGACY_CONFIG != 1 ]] || po0_atomic_write "$PO0_TX_DIR/legacy.candidate" "$PO0_LEGACY_NFT_FILE" 644 || return $?
+    sysctl -q -w net.ipv4.ip_forward=1 || return 20
+    systemctl daemon-reload && systemctl enable po0-relay.service
+)
+
+# Flags are consumed synchronously by po0_rollback in this same subshell.
+# shellcheck disable=SC2030
+po0_coop_restore() (
+    [[ -f $1/present ]] || return 0
+    po0_coop_read_before "$1" || return $?
+    PO0_RUNTIME_TOUCHED=0 PO0_FILES_TOUCHED=1 PO0_SYSCTL_TOUCHED=1 PO0_SERVICE_TOUCHED=1 PO0_SHARED_TOUCHED=0
+    po0_rollback
+)
 
 po0_atomic_write() {
     local source=$1 target=$2 mode=$3 temporary
@@ -948,22 +1180,38 @@ po0_restore_file() {
 
 po0_restore_service() {
     case $PO0_OLD_SERVICE in
-        enabled) systemctl enable nftables >/dev/null ;;
-        enabled-runtime) systemctl disable nftables >/dev/null && systemctl enable --runtime nftables >/dev/null ;;
-        disabled) systemctl disable nftables >/dev/null ;;
+        enabled) systemctl enable po0-relay.service >/dev/null ;;
+        enabled-runtime) systemctl disable po0-relay.service >/dev/null && systemctl enable --runtime po0-relay.service >/dev/null ;;
+        disabled) systemctl disable po0-relay.service >/dev/null ;;
+        not-found) systemctl disable po0-relay.service >/dev/null 2>&1 || [[ ! -e $PO0_SERVICE_FILE ]] ;;
         *) return 0 ;;
     esac
 }
 
+# Both transaction callers initialize these flags in their own subshell.
+# shellcheck disable=SC2031
 po0_rollback() {
-    local failed=0
+    local failed=0 batch="$PO0_TX_DIR/runtime-restore.nft"
     if [[ $PO0_RUNTIME_TOUCHED == 1 ]]; then
-        nft -c -f "$PO0_TX_DIR/runtime-restore.nft" && nft -f "$PO0_TX_DIR/runtime-restore.nft" || failed=1
+        if [[ ${PO0_SHARED_TOUCHED:-0} == 1 ]]; then
+            vps_nft_prepare_restore "$PO0_TX_DIR/shared-before" "$PO0_TX_DIR/shared-restore" || failed=1
+            batch="$PO0_TX_DIR/runtime-rollback.nft"
+            [[ $failed != 0 ]] || cat "$PO0_TX_DIR/runtime-restore.nft" "$PO0_TX_DIR/shared-restore/batch.nft" >"$batch" || failed=1
+        fi
+        if [[ $failed == 0 ]]; then
+            nft -c -f "$batch" && nft -f "$batch" || failed=1
+            if [[ $failed == 0 && ${PO0_SHARED_TOUCHED:-0} == 1 ]]; then
+                vps_nft_commit_prepared "$PO0_TX_DIR/shared-restore" || failed=1
+            fi
+        fi
     fi
     if [[ $PO0_FILES_TOUCHED == 1 ]]; then
         po0_restore_file "$PO0_TX_DIR/state.before" "$PO0_STATE_FILE" || failed=1
         po0_restore_file "$PO0_TX_DIR/nftables.before" "$PO0_NFT_FILE" || failed=1
         po0_restore_file "$PO0_TX_DIR/sysctl.before" "$PO0_SYSCTL_FILE" || failed=1
+        [[ $PO0_LEGACY_CONFIG != 1 ]] || po0_restore_file "$PO0_TX_DIR/legacy.before" "$PO0_LEGACY_NFT_FILE" || failed=1
+        po0_restore_file "$PO0_TX_DIR/service.before" "$PO0_SERVICE_FILE" || failed=1
+        systemctl daemon-reload || failed=1
     fi
     if [[ $PO0_SYSCTL_TOUCHED == 1 ]]; then sysctl -q -w "net.ipv4.ip_forward=$PO0_OLD_FORWARD" || failed=1; fi
     if [[ $PO0_SERVICE_TOUCHED == 1 ]]; then po0_restore_service || failed=1; fi
@@ -992,20 +1240,36 @@ po0_make_recovery() {
     local original target
     {
         printf '#!/usr/bin/env bash\nset -euo pipefail\n[[ $EUID == 0 ]] || { echo "Run as root" >&2; exit 4; }\n'
-        printf 'exec 9>%q\nflock -w 10 9\nnft -c -f %q\nnft -f %q\n' "$PO0_LOCK_FILE" "$PO0_TX_DIR/runtime-restore.nft" "$PO0_TX_DIR/runtime-restore.nft"
-        for original in state nftables sysctl; do
-            case $original in state) target=$PO0_STATE_FILE ;; nftables) target=$PO0_NFT_FILE ;; sysctl) target=$PO0_SYSCTL_FILE ;; esac
+        printf 'exec 9>%q\nflock -w 10 9\n' "$PO0_LOCK_FILE"
+        if [[ ${PO0_SHARED_ACTIVE:-0} == 1 ]]; then
+            printf 'source %q\nvps_cmd_init network-nftables %q\nvps_nft_init\nvps_nft_lock\n' "$PO0_SHARED_RUNTIME" "${PO0_SHARED_RUNTIME%/*}"
+            printf 'vps_nft_prepare_restore %q %q\ncat %q %q >%q\nnft -c -f %q\nnft -f %q\nvps_nft_commit_prepared %q\n' \
+                "$PO0_TX_DIR/shared-before" "$PO0_TX_DIR/manual-shared-restore" \
+                "$PO0_TX_DIR/runtime-restore.nft" "$PO0_TX_DIR/manual-shared-restore/batch.nft" "$PO0_TX_DIR/manual-restore.nft" \
+                "$PO0_TX_DIR/manual-restore.nft" "$PO0_TX_DIR/manual-restore.nft" "$PO0_TX_DIR/manual-shared-restore"
+        else
+            printf 'mkdir -p %q\nexec 8>%q\nflock -w 10 8\n' "$(dirname -- "$PO0_SHARED_LOCK")" "$PO0_SHARED_LOCK"
+            printf 'nft -c -f %q\nnft -f %q\n' "$PO0_TX_DIR/runtime-restore.nft" "$PO0_TX_DIR/runtime-restore.nft"
+        fi
+        for original in state nftables sysctl service legacy; do
+            case $original in state) target=$PO0_STATE_FILE ;; nftables) target=$PO0_NFT_FILE ;; sysctl) target=$PO0_SYSCTL_FILE ;; service) target=$PO0_SERVICE_FILE ;; legacy)
+                [[ $PO0_LEGACY_CONFIG == 1 ]] || continue
+                target=$PO0_LEGACY_NFT_FILE
+                ;;
+            esac
             if [[ -f $PO0_TX_DIR/$original.before ]]; then
                 printf 'temporary=$(mktemp %q)\ncp -p -- %q "$temporary"\nmv -f -- "$temporary" %q\n' "${target}.restore.XXXXXX" "$PO0_TX_DIR/$original.before" "$target"
             else
                 printf 'rm -f -- %q\n' "$target"
             fi
         done
+        printf 'systemctl daemon-reload\n'
         printf 'sysctl -q -w net.ipv4.ip_forward=%q\n' "$PO0_OLD_FORWARD"
         case $PO0_OLD_SERVICE in
-            enabled) printf 'systemctl enable nftables\n' ;;
-            enabled-runtime) printf 'systemctl disable nftables\nsystemctl enable --runtime nftables\n' ;;
-            disabled) printf 'systemctl disable nftables\n' ;;
+            enabled) printf 'systemctl enable po0-relay.service\n' ;;
+            enabled-runtime) printf 'systemctl disable po0-relay.service\nsystemctl enable --runtime po0-relay.service\n' ;;
+            disabled) printf 'systemctl disable po0-relay.service\n' ;;
+            not-found) printf 'systemctl disable po0-relay.service || [[ ! -e %q ]]\n' "$PO0_SERVICE_FILE" ;;
         esac
         printf 'echo "PO0 previous state restored; foreign nft tables were retained."\n'
     } >"$PO0_TX_DIR/recover.sh" || return 20
@@ -1014,22 +1278,42 @@ po0_make_recovery() {
 
 # Caller supplies desired in-memory state after po0_load_current. The subshell
 # owns the lock and traps; explicit error handling also works inside `if` calls.
+# shellcheck disable=SC2030
 po0_apply() (
     set -Eeuo pipefail
     IFS=$'\n\t'
     umask 077
-    local lock_fd state_dir tables table family name listing current fingerprint
-    PO0_TX_DIR='' PO0_TX_READY=0 PO0_COMMITTED=0 PO0_RUNTIME_TOUCHED=0 PO0_FILES_TOUCHED=0 PO0_SYSCTL_TOUCHED=0 PO0_SERVICE_TOUCHED=0
+    local lock_fd nft_lock_fd state_dir table family name listing current fingerprint
+    PO0_TX_DIR='' PO0_TX_READY=0 PO0_COMMITTED=0 PO0_RUNTIME_TOUCHED=0 PO0_FILES_TOUCHED=0 PO0_SYSCTL_TOUCHED=0 PO0_SERVICE_TOUCHED=0 PO0_SHARED_TOUCHED=0 PO0_SHARED_ACTIVE=0
     [[ $EUID == 0 ]] || {
         po0_error '应用规则需要 root。'
         exit 4
     }
     po0_require_tools nft ip ss flock sysctl systemctl sha256sum mktemp || exit $?
-    exec {lock_fd}>"$PO0_LOCK_FILE" || exit 20
-    flock -w 10 "$lock_fd" || {
-        po0_error '另一个 PO0 操作正在执行，请稍后重试。'
-        exit 3
-    }
+    if [[ -z ${PO0_COOP_DIR:-} ]]; then
+        exec {lock_fd}>"$PO0_LOCK_FILE" || exit 20
+        flock -w 10 "$lock_fd" || {
+            po0_error '另一个 PO0 操作正在执行，请稍后重试。'
+            exit 3
+        }
+        if [[ -f $PO0_SHARED_STATE ]]; then
+            [[ -f $PO0_SHARED_RUNTIME && ! -L $PO0_SHARED_RUNTIME ]] || {
+                po0_error '统一 nft 管理器已安装，但私有运行库缺失。'
+                exit 3
+            }
+            # Optional cooperation is the only import; standalone needs none.
+            # shellcheck source=/dev/null
+            source "$PO0_SHARED_RUNTIME" || exit $?
+            vps_cmd_init network-nftables "${PO0_SHARED_RUNTIME%/*}" || exit $?
+            vps_nft_init || exit $?
+            vps_nft_lock || exit $?
+            PO0_SHARED_ACTIVE=1
+        else
+            mkdir -p -- "$(dirname -- "$PO0_SHARED_LOCK")" || exit 20
+            exec {nft_lock_fd}>"$PO0_SHARED_LOCK" || exit 20
+            flock -w 10 "$nft_lock_fd" || exit 3
+        fi
+    fi
     fingerprint=$(po0_file_fingerprint "$PO0_STATE_FILE") || exit $?
     [[ $fingerprint == "$PO0_BASE_STATE" ]] || {
         po0_error '状态已被其他操作更新；请重新打开操作。'
@@ -1040,6 +1324,9 @@ po0_apply() (
         po0_error 'nft 配置已改变；拒绝覆盖，请重新加载。'
         exit 10
     }
+    fingerprint=$(po0_file_fingerprint "$PO0_LEGACY_NFT_FILE") || exit $?
+    [[ $fingerprint == "$PO0_BASE_LEGACY" ]] || exit 10
+    if [[ $PO0_SHARED_ACTIVE == 1 || -n ${PO0_COOP_DIR:-} ]]; then PO0_FILTER_OWNER=vpsctl; fi
     po0_collect_host || exit $?
     po0_check_host_state || exit $?
     if [[ -L $PO0_SYSCTL_FILE || (-e $PO0_SYSCTL_FILE && ! -f $PO0_SYSCTL_FILE) ]]; then
@@ -1053,10 +1340,11 @@ po0_apply() (
             exit 10
         }
     fi
-    if PO0_OLD_SERVICE=$(systemctl is-enabled nftables 2>/dev/null); then :; else :; fi
-    case $PO0_OLD_SERVICE in enabled | enabled-runtime | disabled) ;;
+    if PO0_OLD_SERVICE=$(systemctl is-enabled po0-relay.service 2>/dev/null); then :; else :; fi
+    [[ -n $PO0_OLD_SERVICE || -e $PO0_SERVICE_FILE ]] || PO0_OLD_SERVICE=not-found
+    case $PO0_OLD_SERVICE in enabled | enabled-runtime | disabled | not-found) ;;
     *)
-        po0_error "nftables 服务状态为 $PO0_OLD_SERVICE；请先确认服务已安装且未被屏蔽。"
+        po0_error "po0-relay 服务状态为 $PO0_OLD_SERVICE；请先确认未被屏蔽。"
         exit 3
         ;;
     esac
@@ -1065,28 +1353,33 @@ po0_apply() (
         po0_error '无法确认原 ip_forward。'
         exit 20
     }
-    tables=$(nft list tables) || {
+    if [[ -e $PO0_SERVICE_FILE || -L $PO0_SERVICE_FILE ]]; then
+        [[ -f $PO0_SERVICE_FILE && ! -L $PO0_SERVICE_FILE && $(cat -- "$PO0_SERVICE_FILE") == "$(po0_render_service)" ]] || {
+            po0_error '拒绝覆盖非受管 po0-relay.service。'
+            exit 10
+        }
+    fi
+    PO0_TABLES=$(nft list tables) || {
         po0_error '无法读取现有 nft 表。'
         exit 20
     }
-    for table in 'inet filter' 'ip nat' 'ip mangle'; do
+    po0_validate_legacy_runtime || exit $?
+    for table in 'inet po0_relay_filter' 'ip po0_relay_nat' 'ip po0_relay_mangle'; do
         IFS=' ' read -r family name <<<"$table"
-        if [[ $'\n'$tables$'\n' == *$'\n'"table $table"$'\n'* ]]; then
+        if [[ $'\n'$PO0_TABLES$'\n' == *$'\n'"table $table"$'\n'* ]]; then
             [[ $PO0_MODE != fresh ]] || {
                 po0_error "已有 $table 表；拒绝接管无关防火墙。"
                 exit 10
             }
-            if [[ $PO0_MODE == managed ]]; then
-                listing=$(nft -s list table "$family" "$name") || exit 20
-                [[ $listing == *'comment "po0-relay:1"'* ]] || {
-                    po0_error "$table 不含 PO0 所有权标记，拒绝覆盖。"
-                    exit 10
-                }
-            fi
+            listing=$(nft -s list table "$family" "$name") || exit 20
+            [[ $listing == *'comment "po0-relay:1"'* ]] || {
+                po0_error "$table 不含 PO0 所有权标记，拒绝覆盖。"
+                exit 10
+            }
         fi
     done
     state_dir=$(dirname -- "$PO0_STATE_FILE") || exit 20
-    for current in "$state_dir" "$PO0_BACKUP_DIR" "$(dirname -- "$PO0_NFT_FILE")" "$(dirname -- "$PO0_SYSCTL_FILE")"; do
+    for current in "$state_dir" "$PO0_BACKUP_DIR" "$(dirname -- "$PO0_NFT_FILE")" "$(dirname -- "$PO0_SYSCTL_FILE")" "$(dirname -- "$PO0_SERVICE_FILE")"; do
         [[ ! -L $current ]] || {
             po0_error "拒绝符号链接目录: $current"
             exit 10
@@ -1094,7 +1387,12 @@ po0_apply() (
     done
     mkdir -p -- "$state_dir" "$PO0_BACKUP_DIR" || exit 20
     chmod 700 "$state_dir" "$PO0_BACKUP_DIR" || exit 20
-    PO0_TX_DIR=$(mktemp -d "$PO0_BACKUP_DIR/$(date -u +%Y%m%dT%H%M%SZ).XXXXXX") || exit 20
+    if [[ -n ${PO0_COOP_DIR:-} ]]; then
+        PO0_TX_DIR=$PO0_COOP_DIR
+        mkdir -p -- "$PO0_TX_DIR" || exit 20
+    else
+        PO0_TX_DIR=$(mktemp -d "$PO0_BACKUP_DIR/$(date -u +%Y%m%dT%H%M%SZ).XXXXXX") || exit 20
+    fi
     trap 'po0_transaction_exit $?' EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM
@@ -1102,19 +1400,40 @@ po0_apply() (
     [[ ! -f $PO0_STATE_FILE ]] || cp -p -- "$PO0_STATE_FILE" "$PO0_TX_DIR/state.before" || exit 20
     [[ ! -f $PO0_NFT_FILE ]] || cp -p -- "$PO0_NFT_FILE" "$PO0_TX_DIR/nftables.before" || exit 20
     [[ ! -f $PO0_SYSCTL_FILE ]] || cp -p -- "$PO0_SYSCTL_FILE" "$PO0_TX_DIR/sysctl.before" || exit 20
-    printf 'ip_forward=%s\nnftables_enabled=%s\nsource_mode=%s\n' "$PO0_OLD_FORWARD" "$PO0_OLD_SERVICE" "$PO0_MODE" >"$PO0_TX_DIR/before.txt" || exit 20
-    po0_render_reset >"$PO0_TX_DIR/runtime-restore.nft" || exit 20
-    for table in 'inet filter' 'ip nat' 'ip mangle'; do
+    [[ ! -f $PO0_SERVICE_FILE ]] || cp -p -- "$PO0_SERVICE_FILE" "$PO0_TX_DIR/service.before" || exit 20
+    [[ $PO0_LEGACY_CONFIG != 1 ]] || cp -p -- "$PO0_LEGACY_NFT_FILE" "$PO0_TX_DIR/legacy.before" || exit 20
+    printf 'ip_forward=%s\nservice_enabled=%s\nsource_mode=%s\nlegacy_config=%s\n' "$PO0_OLD_FORWARD" "$PO0_OLD_SERVICE" "$PO0_MODE" "$PO0_LEGACY_CONFIG" >"$PO0_TX_DIR/before.txt" || exit 20
+    : >"$PO0_TX_DIR/runtime-restore.nft"
+    while IFS= read -r table; do
         IFS=' ' read -r family name <<<"$table"
-        if [[ $'\n'$tables$'\n' == *$'\n'"table $table"$'\n'* ]]; then
+        printf 'add table %s\ndelete table %s\n' "$table" "$table" >>"$PO0_TX_DIR/runtime-restore.nft" || exit 20
+        if [[ $'\n'$PO0_TABLES$'\n' == *$'\n'"table $table"$'\n'* ]]; then
             nft -s list table "$family" "$name" >>"$PO0_TX_DIR/runtime-restore.nft" || exit 20
         fi
-    done
+    done < <(po0_table_names)
     po0_write_state >"$PO0_TX_DIR/state.candidate" || exit $?
     po0_render_config >"$PO0_TX_DIR/nftables.candidate" || exit $?
+    po0_render_service >"$PO0_TX_DIR/service.candidate" || exit $?
+    cp -- "$PO0_TX_DIR/nftables.candidate" "$PO0_TX_DIR/batch.nft" || exit 20
+    if [[ $PO0_LEGACY_CONFIG == 1 ]]; then
+        for table in 'inet filter' 'ip nat' 'ip mangle'; do
+            printf 'add table %s\ndelete table %s\n' "$table" "$table" >>"$PO0_TX_DIR/batch.nft" || exit 20
+        done
+        printf '# PO0 rules migrated to %s; loaded by po0-relay.service.\n' "$PO0_NFT_FILE" >"$PO0_TX_DIR/legacy.candidate" || exit 20
+    fi
     printf '# Managed by po0-relay. Existing tuning in other files is preserved.\nnet.ipv4.ip_forward = 1\n' >"$PO0_TX_DIR/sysctl.candidate" || exit 20
+    if [[ -n ${PO0_COOP_DIR:-} ]]; then
+        po0_requirements_json >"$PO0_TX_DIR/requirements.json" || exit $?
+        touch "$PO0_TX_DIR/present" || exit 20
+        exit 0
+    fi
+    if [[ $PO0_SHARED_ACTIVE == 1 ]]; then
+        vps_nft_snapshot "$PO0_TX_DIR/shared-before" || exit $?
+        po0_shared_prepare "$PO0_TX_DIR" || exit $?
+        cat "$PO0_TX_DIR/shared-candidate/batch.nft" >>"$PO0_TX_DIR/batch.nft" || exit 20
+    fi
     po0_make_recovery || exit $?
-    nft -c -f "$PO0_TX_DIR/nftables.candidate" || {
+    nft -c -f "$PO0_TX_DIR/batch.nft" || {
         po0_error 'nft 候选配置检查失败，未修改运行规则。'
         exit 10
     }
@@ -1122,7 +1441,8 @@ po0_apply() (
     # Set flags BEFORE each external operation so signal delivery immediately
     # after a successful operation still causes its rollback.
     PO0_RUNTIME_TOUCHED=1
-    nft -f "$PO0_TX_DIR/nftables.candidate" || {
+    PO0_SHARED_TOUCHED=$PO0_SHARED_ACTIVE
+    nft -f "$PO0_TX_DIR/batch.nft" || {
         po0_error 'nft 原子应用失败。'
         exit 20
     }
@@ -1134,9 +1454,13 @@ po0_apply() (
     po0_atomic_write "$PO0_TX_DIR/sysctl.candidate" "$PO0_SYSCTL_FILE" 644 || exit $?
     po0_atomic_write "$PO0_TX_DIR/nftables.candidate" "$PO0_NFT_FILE" 644 || exit $?
     po0_atomic_write "$PO0_TX_DIR/state.candidate" "$PO0_STATE_FILE" 600 || exit $?
+    po0_atomic_write "$PO0_TX_DIR/service.candidate" "$PO0_SERVICE_FILE" 644 || exit $?
+    [[ $PO0_LEGACY_CONFIG != 1 ]] || po0_atomic_write "$PO0_TX_DIR/legacy.candidate" "$PO0_LEGACY_NFT_FILE" 644 || exit $?
+    if [[ $PO0_SHARED_ACTIVE == 1 ]]; then vps_nft_commit_prepared "$PO0_TX_DIR/shared-candidate" || exit $?; fi
+    systemctl daemon-reload || exit 20
     if [[ $PO0_OLD_SERVICE != enabled ]]; then
         PO0_SERVICE_TOUCHED=1
-        systemctl enable nftables || exit 20
+        systemctl enable po0-relay.service || exit 20
     fi
     PO0_COMMITTED=1
     po0_message 32 "已应用。备份: $PO0_TX_DIR"
@@ -1347,29 +1671,31 @@ po0_list() {
     [[ $PO0_MODE != legacy ]] || printf '旧配置仅导入内存；首次确认变更时才备份并迁移。\n'
 }
 
+# Every status action reloads the persisted owner; apply's subshell is isolated.
+# shellcheck disable=SC2031
 po0_status() {
     local table family name value
     po0_list
-    printf '\n状态文件: %s\nnft 配置: %s\n' "$PO0_STATE_FILE" "$PO0_NFT_FILE"
+    printf '\n状态文件: %s\nnft 配置: %s\n访问控制归属: %s\n' "$PO0_STATE_FILE" "$PO0_NFT_FILE" "$PO0_FILTER_OWNER"
     if command -v sysctl >/dev/null 2>&1; then
         value=$(sysctl -n net.ipv4.ip_forward) || return 20
         printf 'IPv4 转发: %s\n' "$value"
         po0_bbr_status
     else printf 'IPv4 转发: 缺少 sysctl，未查询\n'; fi
     if command -v systemctl >/dev/null 2>&1; then
-        if value=$(systemctl is-enabled nftables 2>/dev/null); then :; else :; fi
-        printf 'nftables 开机启用状态: %s\n' "${value:-未知}"
-        if value=$(systemctl is-active nftables 2>/dev/null); then :; else :; fi
-        printf 'nftables 服务状态: %s（运行规则以 nft 为准）\n' "${value:-未知}"
+        if value=$(systemctl is-enabled po0-relay.service 2>/dev/null); then :; else :; fi
+        printf 'po0-relay 开机启用状态: %s\n' "${value:-未知}"
+        if value=$(systemctl is-active po0-relay.service 2>/dev/null); then :; else :; fi
+        printf 'po0-relay 服务状态: %s（运行规则以 nft 为准）\n' "${value:-未知}"
     fi
     if command -v nft >/dev/null 2>&1; then
-        for table in 'inet filter' 'ip nat' 'ip mangle'; do
+        while IFS= read -r table; do
             IFS=' ' read -r family name <<<"$table"
             printf '\n--- %s ---\n' "$table"
             if ! nft -s list table "$family" "$name"; then
                 po0_error "$table 不存在或无法读取；可在检查配置后选择重新应用。"
             fi
-        done
+        done < <(po0_table_names)
     else printf '缺少 nft，未查询运行规则；查看状态不会安装依赖。\n'; fi
     printf '\n禁用、删除、修改规则影响新连接；已有连接等待 conntrack 自然过期。\n'
 }
@@ -1603,10 +1929,10 @@ po0_confirm_change() {
     po0_validate_state || return $?
     po0_list brief
     printf '\n本次变更: %s\n' "$operation"
-    printf '只更新 inet filter / ip nat / ip mangle；INPUT/FORWARD 默认丢弃。\n'
+    printf '只更新 PO0 专用表；独立模式保留 INPUT/FORWARD 默认丢弃，协作模式由 vpsctl 管理访问控制。\n'
     printf '保留 SSH TCP 端口: '
     printf '%s ' "${PO0_SSH_PORTS[@]}"
-    printf '\nIPv4 转发设为 1，其他现有 sysctl 调优保留；启用 nftables 开机加载。\n'
+    printf '\nIPv4 转发设为 1，其他现有 sysctl 调优保留；启用 po0-relay.service 开机加载。\n'
     printf '已有连接自然过期；不清空 conntrack。备份和 root 恢复脚本将保存在 %s。\n' "$PO0_BACKUP_DIR"
     printf '更改防火墙可能影响 SSH，请保留当前会话及服务商 root 控制台。\n'
     read -r -p '确认这次变更？[y/N] ' reply || return 130
@@ -1810,7 +2136,9 @@ HY2 跳跃端口选一个固定目标，导出移除 mport；保留凭据、SNI�
 
 状态: /etc/po0-relay/state.tsv（版本化纯 TSV，不作为 Shell 执行）
 旧版: 完整识别原始 /etc/nftables.conf，查看不落盘；首次确认变更时迁移。
-仅管理 inet filter、ip nat、ip mangle，其他表保留；从不全局 flush 或重启 nftables。
+仅管理 po0_relay_filter、po0_relay_nat、po0_relay_mangle，其他表保留；从不全局 flush 或重启 nftables。
+规则: /etc/po0-relay/rules.nft，由 po0-relay.service 开机加载。
+安装统一 nft 管理器后移交访问控制，仅保留 NAT/MSS；停用统一防火墙不会恢复 PO0 默认丢弃。
 INPUT/FORWARD 默认丢弃，保留本机发现的 SSH TCP 端口和原 22、MSS 1452。
 转发管理设置 ip_forward=1，保留旧调优；菜单 8 可单独开启 BBR+FQ 并保存开机配置。
 BBR 用于本机新建 TCP 连接；FQ 设置为默认队列，现有网卡队列保持当前配置。

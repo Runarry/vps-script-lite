@@ -27,8 +27,8 @@ readonly TLS_MODULE_DIR="${TLS_PROJECT_ROOT}/commands/security/tls"
 
 # shellcheck source=../../lib/command.sh
 source "${TLS_PROJECT_ROOT}/lib/command.sh"
-# shellcheck source=../../lib/ufw.sh
-source "${TLS_PROJECT_ROOT}/lib/ufw.sh"
+# shellcheck source=../../lib/nftables.sh
+source "${TLS_PROJECT_ROOT}/lib/nftables.sh"
 
 tls_load_module() {
     local name="$1" path
@@ -49,7 +49,7 @@ tls_load_module() {
 tls_load_module common.sh || exit $?
 tls_load_module store.sh || exit $?
 tls_load_module issue.sh || exit $?
-tls_load_module ufw.sh || exit $?
+tls_load_module nftables.sh || exit $?
 tls_load_module timer.sh || exit $?
 
 TLS_ARGS=()

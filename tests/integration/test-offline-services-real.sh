@@ -11,15 +11,15 @@ umask 077
 [[ -d /run/systemd/system ]] || { printf 'FAIL: requires real systemd\n' >&2; exit 3; }
 PACKAGE="${VPSCTL_OFFLINE_PACKAGE:?set VPSCTL_OFFLINE_PACKAGE to the final offline tar.gz}"
 [[ -f "$PACKAGE" && ! -L "$PACKAGE" ]] || { printf 'FAIL: package is not an ordinary file\n' >&2; exit 3; }
-for tool in bash jq python3 sha256sum systemctl tar timeout iptables-save ip6tables-save apt-get; do
+for tool in bash jq python3 sha256sum systemctl tar timeout iptables-save ip6tables-save nft apt-get; do
     command -v "$tool" >/dev/null || { printf 'FAIL: missing %s\n' "$tool" >&2; exit 3; }
 done
-# This focused host acceptance preserves its inactive firewall. Live UFW rule
-# mutation is covered by the existing UFW acceptance, outside this test's scope.
-[[ "$(LC_ALL=C ufw status | head -n 1)" == 'Status: inactive' ]] || {
-    printf 'FAIL: this dedicated-host test requires the baseline UFW to be inactive\n' >&2
+# This focused acceptance keeps the native managed firewall inactive.
+# Live rule behavior belongs to the separate nftables acceptance.
+if nft list table inet vpsctl_firewall >/dev/null 2>&1; then
+    printf 'FAIL: this test requires the managed nftables table to be absent\n' >&2
     exit 3
-}
+fi
 TEST_TEMP="$(mktemp -d /root/vpsctl-offline-services.XXXXXX)"
 RESULT_DIR="${VPSCTL_OFFLINE_SERVICES_RESULT_DIR:-$TEST_TEMP/evidence}"
 BACKUP="$TEST_TEMP/baseline"
@@ -46,7 +46,7 @@ MOVE_PATHS=(
     /var/lib/vpsctl/service/tcping /usr/local/libexec/vpsctl/tcping /var/log/vpsctl/tcping.log
     /run/vpsctl/tcping-ready.json /run/vpsctl-tcping.pid
     /var/lib/vpsctl/service/iperf3 /var/log/vpsctl/iperf3.log /run/vpsctl/iperf3.pid /run/vpsctl-iperf3.pid
-    /var/lib/vpsctl/network/ufw /run/vpsctl/network-ufw.lock
+    /var/lib/vpsctl/network/nftables /run/vpsctl/network-nftables.lock
     /run/vpsctl/proxy.lock /run/vpsctl/tcping.lock /run/vpsctl/iperf3.lock
     /var/cache/apt/archives
 )
@@ -54,7 +54,7 @@ for unit in "${UNITS[@]}"; do
     [[ "$unit" != iperf3.service ]] || continue
     MOVE_PATHS+=("/etc/systemd/system/$unit" "/etc/systemd/system/$unit.d" "/etc/systemd/system/multi-user.target.wants/$unit")
 done
-COPY_PATHS=(/etc/ufw /etc/default/ufw)
+COPY_PATHS=()
 MOVED_PATHS=()
 BASELINE_READY=0
 MUTATED=0
@@ -126,7 +126,7 @@ cleanup() {
         done
         firewall_snapshot >"$RESULT_DIR/firewall-after.txt"
         cmp -s "$RESULT_DIR/firewall-before.txt" "$RESULT_DIR/firewall-after.txt" || restored=1
-        [[ "$(LC_ALL=C ufw status | head -n 1)" == 'Status: inactive' ]] || restored=1
+        if nft list table inet vpsctl_firewall >/dev/null 2>&1; then restored=1; fi
     fi
     dpkg-query -W >"$RESULT_DIR/packages-after.tsv"
     diff -u "$RESULT_DIR/packages-before.tsv" "$RESULT_DIR/packages-after.tsv" >"$RESULT_DIR/package-changes.diff" || true

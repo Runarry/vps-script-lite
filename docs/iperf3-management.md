@@ -17,7 +17,7 @@ vpsctl service iperf3 start
 vpsctl --yes service iperf3 uninstall
 ```
 
-无参数且连接交互终端时显示编号菜单；非交互时只显示帮助。首次 `start` 默认使用 5201，后续沿用保存端口；`--port` 接受 1–65535 的整数。同端口且服务正常时不重启进程。`start --port` 更改端口，失败时恢复原配置、服务和 UFW 需求，不终止占用端口的其他程序。
+无参数且连接交互终端时显示编号菜单；非交互时只显示帮助。首次 `start` 默认使用 5201，后续沿用保存端口；`--port` 接受 1–65535 的整数。同端口且服务正常时不重启进程。`start --port` 更改端口，失败时恢复原配置、服务和 nftables 需求，不终止占用端口的其他程序。
 
 `start` 和 `restart` 启用开机启动；`restart` 要求已有受管服务与配置。`stop` 停止并取消自启、释放本模块的端口需求，保留配置和软件包。再次 `start` 恢复服务与自启。
 
@@ -52,24 +52,24 @@ iperf3 -c SERVER_ADDRESS -p 25201 -u -b 10M
 
 ## 防火墙与运行数据
 
-scope/owner 均为 `iperf3`，申请所选端口的 TCP、UDP、IPv4 和可用 IPv6 需求。复用共享 UFW 事务，`preserve_existing:true` 保留已有等价手工规则；停止和卸载不删除其他功能仍在使用的规则。
+scope/owner 均为 `iperf3`，申请所选端口的 TCP、UDP、IPv4 和可用 IPv6 需求。复用共享 nftables 事务，手工规则与服务需求分别保存；停止和卸载不删除手工规则或其他功能仍需的放行。
 
-UFW 未安装或未启用时只记录需求，不安装或开启 UFW。后续 `network ufw sync` 或启用 UFW 会读取持久配置；尊重已解除的联动和现有规则冲突。外部手工停止进程不改变保存的启用意图，需要关闭服务、自启与端口需求时使用 `stop`。
+共享防火墙未启用时只记录需求，不自动开启防火墙。后续 `network nftables sync` 或启用共享防火墙会读取持久配置，并尊重已解除的联动。外部手工停止进程不改变保存的启用意图，需要关闭服务、自启与端口需求时使用 `stop`。
 
 | 路径 / 服务 | 用途 |
 | --- | --- |
-| `/var/lib/vpsctl/service/iperf3/state.json` | `schema_version:1`、整数 `port`、布尔 `enabled`；全局 UFW 同步契约 |
+| `/var/lib/vpsctl/service/iperf3/state.json` | `schema_version:1`、整数 `port`、布尔 `enabled`；全局 nftables 同步契约 |
 | `/etc/systemd/system/vpsctl-iperf3.service` | systemd 服务定义，日志使用 journal |
 | `/etc/init.d/vpsctl-iperf3` | OpenRC 服务定义 |
 | `/run/vpsctl/iperf3.pid` | OpenRC 下原生 iperf3 进程 PID |
 | `/run/vpsctl-iperf3.pid` | OpenRC 监督进程 PID |
 | `/var/log/vpsctl/iperf3.log` | OpenRC 专属日志 |
 
-`service-iperf3` 为独立按需功能包，依赖 `shared-command` 和 `shared-ufw`。功能帮助也会下载尚未缓存的功能包；浏览全局菜单、帮助和清单不会下载。未新增分发格式或迁移要求。
+`service-iperf3` 为独立按需功能包，依赖 `shared-command` 和 `shared-nftables`。功能帮助也会下载尚未缓存的功能包；浏览全局菜单、帮助和清单不会下载。未新增分发格式或迁移要求。
 
 ## 卸载与失败恢复
 
-`uninstall` 确认一次；非交互使用 `--yes`。先停止并取消自启，释放本模块 UFW 需求，再删除受管服务定义、状态、专属 PID/日志及当前受管 release 的自身功能缓存。下次进入会重新下载功能包。源码运行不删除仓库源码。
+`uninstall` 确认一次；非交互使用 `--yes`。先停止并取消自启，释放本模块 nftables 需求，再删除受管服务定义、状态、专属 PID/日志及当前受管 release 的自身功能缓存。下次进入会重新下载功能包。源码运行不删除仓库源码。
 
 系统 iperf3 软件包、共享依赖和库、系统 journal、其他服务及手工规则均保留。只删除固定受管资源，遇到非受管同名服务、符号链接或异常文件类型时报告错误。多步卸载的清理失败返回 30，保留可重试路径；不会为恢复已清理资源而重新安装。
 

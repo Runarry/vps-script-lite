@@ -13,28 +13,57 @@ ACCESS_FW_NFT_MODE='auto'
 
 access_firewall_init() {
     ACCESS_FW_STATE="$(vps_cmd_system_path "$ACCESS_FW_STATE_LOGICAL")" || return $?
-    vps_ufw_init
+    vps_nft_init
 }
 
 access_firewall_service_enabled() {
     systemctl is-enabled --quiet "$1" >/dev/null 2>&1
 }
 
+access_firewall_shared_active() {
+    local status
+    if vps_nft_enabled; then return 0; else status=$?; fi
+    ((status == 1)) || return "$status"
+    vps_nft_is_active
+}
+
+access_firewall_require_supported_backend() {
+    case "$1" in
+        none | nft | firewalld | iptables) return 0 ;;
+        nftables)
+            if access_firewall_shared_active; then
+                vps_cmd_error "SSH 事务准备后已启用共享 nftables 管理，拒绝继续修改原 INPUT 链"
+                return 30
+            else
+                local status=$?
+                ((status == 1)) || return "$status"
+            fi
+            ;;
+        *)
+            vps_cmd_error "事务记录使用已停用或未知的防火墙后端：$1；请先处理原事务再迁移"
+            return 30
+            ;;
+    esac
+}
+
 access_firewall_detect() {
-    local ufw_status='' iptables_version iptables_rules
+    local iptables_version iptables_rules status
     local -a detected=()
 
-    if command -v ufw >/dev/null 2>&1; then
-        ufw_status="$(LC_ALL=C ufw status 2>/dev/null | head -n 1 || true)"
-        if [[ "$ufw_status" == 'Status: active' ]]; then
-            detected+=(ufw)
-        fi
+    # The shared manager owns its table. Never add rules to another INPUT chain
+    # when its saved configuration or its runtime table is present.
+    if access_firewall_shared_active; then
+        printf 'nft\n'
+        return 0
+    else
+        status=$?
+        ((status == 1)) || return "$status"
     fi
     if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
         detected+=(firewalld)
     fi
     if ((${#detected[@]} == 0)); then
-        if command -v nft >/dev/null 2>&1 && access_firewall_nft_targets; then
+        if command -v nft >/dev/null 2>&1 && access_firewall_native_nft_targets; then
             detected+=(nftables)
         fi
         if command -v iptables >/dev/null 2>&1; then
@@ -51,26 +80,25 @@ access_firewall_detect() {
     fi
     if ((${#detected[@]} == 1)); then
         printf '%s\n' "${detected[0]}"
-    elif [[ "$ufw_status" == 'Status: inactive' ]]; then
-        printf 'ufw\n'
     else
-        printf 'none\n'
+        printf 'nft\n'
     fi
 }
 
-access_firewall_nft_persistent() {
+access_firewall_native_nft_persistent() {
     local config
 
     config="$(vps_cmd_system_path /etc/nftables.conf)" || return $?
     access_firewall_service_enabled nftables.service || return 1
     [[ -f "$config" && ! -L "$config" ]] || return 1
     grep -Eq '^[[:space:]]*include[[:space:]]+[\"]?/etc/nftables\.d/\*\.nft[\"]?[[:space:]]*$' "$config" || return 1
-    access_firewall_nft_targets
+    access_firewall_native_nft_targets
 }
 
-access_firewall_nft_targets() {
+access_firewall_native_nft_targets() {
     local output family table chain found=0
 
+    access_firewall_require_supported_backend nftables || return $?
     output="$(nft -a list ruleset 2>/dev/null | awk '
         $1 == "table" && ($2 == "inet" || $2 == "ip" || $2 == "ip6") {
             family=$2
@@ -135,21 +163,21 @@ access_firewall_require_auto_backend() {
     local backend="$1" requested_mode="${2:-auto}" choice nft_file
 
     case "$backend" in
-        none | ufw | firewalld) return 0 ;;
+        none | nft | firewalld) return 0 ;;
         nftables)
-            access_firewall_nft_targets || {
+            access_firewall_native_nft_targets || {
                 vps_cmd_error "检测到 nftables，但无法定位现有 INPUT 基链；请使用 --firewall manual"
                 return 3
             }
             if [[ "$requested_mode" == persistent ]]; then
-                access_firewall_nft_persistent || {
+                access_firewall_native_nft_persistent || {
                     vps_cmd_error "事务记录要求 nftables 持久化模式，但 nftables.service 或 /etc/nftables.d/*.nft include 已漂移"
                     return 3
                 }
                 ACCESS_FW_NFT_MODE=persistent
                 return 0
             fi
-            if [[ "$requested_mode" == auto ]] && access_firewall_nft_persistent; then
+            if [[ "$requested_mode" == auto ]] && access_firewall_native_nft_persistent; then
                 ACCESS_FW_NFT_MODE=persistent
                 return 0
             fi
@@ -168,9 +196,9 @@ access_firewall_require_auto_backend() {
                 vps_cmd_warning "已选择人工管理 nftables；请自行确保候选 SSH 端口可达"
                 return 0
             fi
-            nft_file="$(access_firewall_nft_file)" || return $?
+            nft_file="$(access_firewall_native_nft_file)" || return $?
             if [[ -e "$nft_file" ]]; then
-                access_firewall_nft_validate_file "$nft_file" || {
+                access_firewall_native_nft_validate_file "$nft_file" || {
                     vps_cmd_error "存在不受管的 nftables 片段，拒绝运行时回退：/etc/nftables.d/zz-vpsctl-access.nft"
                     return 3
                 }
@@ -201,7 +229,7 @@ access_firewall_load_managed() {
     ACCESS_FW_PREVIOUS_OWNED="$(access_kv_get "$ACCESS_FW_STATE" owned 2>/dev/null || true)"
     ACCESS_FW_PREVIOUS_MODE="$(access_kv_get "$ACCESS_FW_STATE" mode 2>/dev/null || true)"
     case "$ACCESS_FW_PREVIOUS_BACKEND" in
-        ufw | firewalld | nftables | iptables) ;;
+        nft | firewalld | nftables | iptables) ;;
         *)
             ACCESS_FW_PREVIOUS_BACKEND=''
             ACCESS_FW_PREVIOUS_PORT=''
@@ -213,7 +241,7 @@ access_firewall_load_managed() {
     else
         ACCESS_FW_PREVIOUS_MODE=''
     fi
-    if [[ "$ACCESS_FW_PREVIOUS_BACKEND" == ufw ]] && vps_ufw_owner_detached ssh; then
+    if [[ "$ACCESS_FW_PREVIOUS_BACKEND" == nft ]] && vps_nft_owner_detached ssh; then
         ACCESS_FW_PREVIOUS_OWNED=0
     fi
     [[ "$ACCESS_FW_PREVIOUS_OWNED" == 1 ]] && access_validate_port "$ACCESS_FW_PREVIOUS_PORT" || {
@@ -224,44 +252,27 @@ access_firewall_load_managed() {
     }
 }
 
-access_firewall_ufw_has_port() {
-    LC_ALL=C ufw status 2>/dev/null | awk -v port="$1" '
-        $1 == port || $1 == port "/tcp" { if ($2 == "ALLOW" || $2 == "ALLOW IN") found=1 }
-        END { exit(found ? 0 : 1) }
-    '
+access_firewall_nft_has_port() {
+    access_firewall_nft_has_owned_port "$1"
 }
 
-access_firewall_ufw_owned_numbers() {
-    LC_ALL=C ufw status numbered 2>/dev/null | awk -v port="$1" '
-        index($0, "# vpsctl security access") && $0 ~ ("\\][[:space:]]*" port "(/tcp)?([[:space:]]|$)") {
-            number=$0
-            sub(/\].*$/, "", number)
-            gsub(/[^0-9]/, "", number)
-            if (number != "") print number
-        }
-    ' | sort -rn
-}
-
-access_firewall_ufw_has_owned_port() {
+access_firewall_nft_has_owned_port() {
     local port="$1" desired
 
-    vps_ufw_owner_detached ssh && return 1
-    if desired="$(vps_ufw_scope_desired ssh 2>/dev/null)" &&
-        jq -e --arg port "$port" 'any(.[]; .owner == "ssh" and .kind == "input" and .proto == "tcp" and .port == $port)' <<<"$desired" >/dev/null; then
-        return 0
-    fi
-    [[ -n "$(access_firewall_ufw_owned_numbers "$port")" ]]
+    vps_nft_owner_detached ssh && return 1
+    desired="$(vps_nft_scope_desired ssh 2>/dev/null)" || return $?
+    jq -e --arg port "$port" 'any(.[]; .owner == "ssh" and .kind == "input" and .proto == "tcp" and .port == $port)' <<<"$desired" >/dev/null
 }
 
-access_firewall_ufw_desired_ports() {
+access_firewall_nft_desired_ports() {
     local output="$1" port family separator='' ipv6=0
     local -A seen=()
     shift
 
-    if vps_ufw_ipv6_available; then
+    if vps_nft_ipv6_available; then
         ipv6=1
     else
-        vps_cmd_warning "UFW 未启用 IPv6；本次只登记 IPv4 SSH 端口需求"
+        vps_cmd_warning "系统未启用 IPv6；本次只登记 IPv4 SSH 端口需求"
     fi
     {
         printf '['
@@ -280,83 +291,55 @@ access_firewall_ufw_desired_ports() {
     } >"$output"
 }
 
-access_firewall_ufw_apply_ports() {
+access_firewall_nft_apply_ports() {
     local snapshot="${1:-}" desired status=0 locked=0
     shift
 
-    vps_ufw_require_tools || return $?
+    vps_nft_require_tools || return $?
     desired="$(mktemp)" || return 20
-    access_firewall_ufw_desired_ports "$desired" "$@" || {
+    access_firewall_nft_desired_ports "$desired" "$@" || {
         rm -f -- "$desired"
         return 20
     }
     if [[ -n "$snapshot" && "${VPSCTL_DRY_RUN:-0}" != 1 ]]; then
-        vps_ufw_lock || {
+        vps_nft_lock || {
             rm -f -- "$desired"
             return 20
         }
         locked=1
-        vps_ufw_scope_snapshot ssh "$snapshot" || status=$?
+        vps_nft_scope_snapshot ssh "$snapshot" || status=$?
     fi
     if ((status == 0)); then
-        vps_ufw_begin ssh "$desired" || status=$?
+        vps_nft_begin ssh "$desired" || status=$?
         if ((status == 0)); then
-            ACCESS_FW_ADDED=ufw-shared
-            vps_ufw_commit || status=$?
+            ACCESS_FW_ADDED=nft-shared
+            vps_nft_commit || status=$?
         fi
     fi
-    ((locked == 0)) || vps_ufw_unlock
+    ((locked == 0)) || vps_nft_unlock
     rm -f -- "$desired"
     return "$status"
 }
 
-access_firewall_ufw_import_legacy() {
-    local port="$1" directory status=0
-
-    vps_ufw_require_tools || return $?
-    vps_ufw_owner_detached ssh && return 0
-    directory="$(mktemp -d)" || return 20
-    vps_ufw_scope_desired ssh >"$directory/desired.json" || status=$?
-    ((status)) || vps_ufw_inventory >"$directory/inventory.json" || status=$?
-    if ((status == 0)); then
-        jq -s --arg port "$port" '
-            .[0] + [.[1][] | select(.simple and .kind == "input" and .action == "allow"
-                and .proto == "tcp" and .port == $port and .source == "any" and .destination == "any"
-                and .comment == "vpsctl security access") |
-                {owner:"ssh",kind:.kind,family:.family,proto:.proto,port:.port,
-                 source:.source,destination:.destination,temporary:false}]
-            | unique_by([.owner,.kind,.family,.proto,.port,.source,.destination])
-        ' "$directory/desired.json" "$directory/inventory.json" >"$directory/import.json" || status=30
-    fi
-    if ((status == 0)); then
-        vps_ufw_begin ssh "$directory/import.json" || status=$?
-        ((status)) || vps_ufw_commit || status=$?
-    fi
-    rm -f -- "$directory/desired.json" "$directory/inventory.json" "$directory/import.json"
-    rmdir -- "$directory" || true
-    return "$status"
-}
-
-access_firewall_ufw_release_port() {
+access_firewall_nft_release_port() {
     local port="$1" desired status=0
 
-    vps_ufw_owner_detached ssh && return 0
-    vps_ufw_lock || return $?
-    access_firewall_ufw_import_legacy "$port" || status=$?
+    vps_nft_owner_detached ssh && return 0
+    vps_nft_lock || return $?
     if ((status == 0)); then
         desired="$(mktemp)" || status=20
         if ((status == 0)); then
-            vps_ufw_scope_desired ssh | jq --arg port "$port" '
+            vps_nft_scope_desired ssh | jq --arg port "$port" '
                 map(select(.owner != "ssh" or .kind != "input" or .proto != "tcp" or .port != $port))
             ' >"$desired" || status=30
             if ((status == 0)); then
-                vps_ufw_begin ssh "$desired" || status=$?
-                ((status)) || vps_ufw_commit || status=$?
+                vps_nft_begin ssh "$desired" || status=$?
+                ((status)) || vps_nft_commit || status=$?
             fi
             rm -f -- "$desired"
         fi
     fi
-    vps_ufw_unlock
+    vps_nft_unlock
     return "$status"
 }
 
@@ -383,21 +366,22 @@ access_firewall_backup_mode_write() {
     chmod 0600 -- "$backup_dir/firewall.mode" || return 20
 }
 
-access_firewall_ufw_restore_begin() {
+access_firewall_nft_restore_begin() {
     local backup_dir="$1"
 
-    vps_ufw_require_tools || return $?
-    [[ -f "$backup_dir/ufw.scope.json" && ! -L "$backup_dir/ufw.scope.json" ]] || {
-        vps_cmd_error "缺少 SSH UFW 需求快照，拒绝推测回退规则"
+    vps_nft_require_tools || return $?
+    [[ -f "$backup_dir/nft.scope.json" && ! -L "$backup_dir/nft.scope.json" ]] || {
+        vps_cmd_error "缺少 SSH NFT 需求快照，拒绝推测回退规则"
         return 30
     }
-    vps_ufw_scope_restore_begin ssh "$backup_dir/ufw.scope.json"
+    vps_nft_scope_restore_begin ssh "$backup_dir/nft.scope.json"
 }
 
-access_firewall_ufw_restore_state() {
+access_firewall_nft_restore_state() {
     local backup_dir="$1"
 
-    if vps_ufw_owner_detached ssh || [[ ! -f "$backup_dir/firewall.state" ]]; then
+    if vps_nft_owner_detached ssh || [[ ! -f "$backup_dir/firewall.state" ]] ||
+        [[ "$(access_kv_get "$backup_dir/firewall.state" backend 2>/dev/null || true)" == ufw ]]; then
         access_firewall_write_state '' ''
     else
         access_atomic_from_file "$backup_dir/firewall.state" "$ACCESS_FW_STATE" 0644
@@ -444,18 +428,18 @@ access_firewall_has_owned_port() {
     local backend="$1" port="$2"
 
     case "$backend" in
-        ufw) access_firewall_ufw_has_owned_port "$port" ;;
+        nft) access_firewall_nft_has_owned_port "$port" ;;
         firewalld) access_firewall_firewalld_has_owned_port "$port" ;;
-        nftables) access_firewall_nft_has_port "$port" ;;
+        nftables) access_firewall_native_nft_has_port "$port" ;;
         iptables) access_firewall_iptables_has_owned_port "$port" ;;
         *) return 1 ;;
     esac
 }
 
-access_firewall_nft_has_port() {
+access_firewall_native_nft_has_port() {
     local port="$1" family table chain rules found=0
 
-    access_firewall_nft_targets || return 1
+    access_firewall_native_nft_targets || return 1
     while IFS=$'\t' read -r family table chain; do
         [[ -n "$family" ]] || continue
         rules="$(nft -a list chain "$family" "$table" "$chain" 2>/dev/null)" || return 1
@@ -474,11 +458,11 @@ access_firewall_iptables_has_owned_port() {
     fi
 }
 
-access_firewall_nft_file() {
+access_firewall_native_nft_file() {
     vps_cmd_system_path /etc/nftables.d/zz-vpsctl-access.nft
 }
 
-access_firewall_nft_validate_file() {
+access_firewall_native_nft_validate_file() {
     local file="$1"
 
     [[ -f "$file" && ! -L "$file" ]] || return 1
@@ -499,7 +483,7 @@ access_firewall_nft_validate_file() {
     ' "$file"
 }
 
-access_firewall_nft_render() {
+access_firewall_native_nft_render() {
     local port="$1" old_port="${2:-}" family table chain
 
     printf '%s\n' "$ACCESS_MANAGED_MARKER"
@@ -511,11 +495,11 @@ access_firewall_nft_render() {
     done <<<"$ACCESS_FW_NFT_TARGETS"
 }
 
-access_firewall_nft_delete_owned_rules() {
+access_firewall_native_nft_delete_owned_rules() {
     local family table chain output handle
     local -a handles=()
 
-    access_firewall_nft_targets || return 30
+    access_firewall_native_nft_targets || return 30
     while IFS=$'\t' read -r family table chain; do
         [[ -n "$family" ]] || continue
         output="$(nft -a list chain "$family" "$table" "$chain" 2>/dev/null)" || return 20
@@ -531,7 +515,7 @@ access_firewall_nft_delete_owned_rules() {
     done <<<"$ACCESS_FW_NFT_TARGETS"
 }
 
-access_firewall_nft_snapshot_owned() {
+access_firewall_native_nft_snapshot_owned() {
     local destination="$1" family table chain output
 
     printf '%s\n' "$ACCESS_MANAGED_MARKER" >"$destination" || return 20
@@ -552,7 +536,7 @@ access_firewall_nft_snapshot_owned() {
     done <<<"$ACCESS_FW_NFT_TARGETS"
 }
 
-access_firewall_nft_apply_runtime() {
+access_firewall_native_nft_apply_runtime() {
     local port="$1" old_port="${2:-}" tmp old_file delete_status=0
 
     tmp="$(mktemp)" || return 20
@@ -560,7 +544,7 @@ access_firewall_nft_apply_runtime() {
         rm -f -- "$tmp"
         return 20
     }
-    access_firewall_nft_render "$port" "$old_port" >"$tmp" || {
+    access_firewall_native_nft_render "$port" "$old_port" >"$tmp" || {
         rm -f -- "$tmp" "$old_file"
         return 20
     }
@@ -573,17 +557,17 @@ access_firewall_nft_apply_runtime() {
         rm -f -- "$tmp" "$old_file"
         return 10
     }
-    access_firewall_nft_snapshot_owned "$old_file" || {
+    access_firewall_native_nft_snapshot_owned "$old_file" || {
         rm -f -- "$tmp" "$old_file"
         return 20
     }
-    access_firewall_nft_delete_owned_rules || delete_status=$?
+    access_firewall_native_nft_delete_owned_rules || delete_status=$?
     if ((delete_status)); then
         rm -f -- "$tmp" "$old_file"
         return "$delete_status"
     fi
     if ! nft -f "$tmp"; then
-        access_firewall_nft_delete_owned_rules >/dev/null 2>&1 || true
+        access_firewall_native_nft_delete_owned_rules >/dev/null 2>&1 || true
         nft -f "$old_file" >/dev/null 2>&1 || true
         rm -f -- "$tmp" "$old_file"
         return 20
@@ -593,15 +577,15 @@ access_firewall_nft_apply_runtime() {
     [[ -z "$old_port" || "$old_port" == "$port" ]] || access_firewall_has_port nftables "$old_port" || return 30
 }
 
-access_firewall_nft_apply_persistent() {
+access_firewall_native_nft_apply_persistent() {
     local port="$1" old_port="${2:-}" nft_file nft_dir tmp old_file='' had_file=0 delete_status=0
 
-    access_firewall_nft_persistent || return 3
-    nft_file="$(access_firewall_nft_file)" || return $?
+    access_firewall_native_nft_persistent || return 3
+    nft_file="$(access_firewall_native_nft_file)" || return $?
     nft_dir="${nft_file%/*}"
     vps_cmd_require_no_symlink_components "$nft_dir" || return $?
     vps_cmd_require_no_symlink_components "$nft_file" || return $?
-    if [[ -e "$nft_file" ]] && ! access_firewall_nft_validate_file "$nft_file"; then
+    if [[ -e "$nft_file" ]] && ! access_firewall_native_nft_validate_file "$nft_file"; then
         vps_cmd_error "nftables 持久化文件已存在但不属于 vpsctl：/etc/nftables.d/zz-vpsctl-access.nft"
         return 3
     fi
@@ -612,7 +596,7 @@ access_firewall_nft_apply_persistent() {
     mkdir -p -- "$nft_dir" || return 20
     chmod 0755 -- "$nft_dir" || return 20
     tmp="$(mktemp "${nft_dir}/.vpsctl-access.XXXXXX")" || return 20
-    access_firewall_nft_render "$port" "$old_port" >"$tmp" || {
+    access_firewall_native_nft_render "$port" "$old_port" >"$tmp" || {
         rm -f -- "$tmp"
         return 20
     }
@@ -635,20 +619,20 @@ access_firewall_nft_apply_persistent() {
         }
         had_file=1
     fi
-    access_firewall_nft_delete_owned_rules || delete_status=$?
+    access_firewall_native_nft_delete_owned_rules || delete_status=$?
     if ((delete_status)); then
         rm -f -- "$tmp" "$old_file"
         return "$delete_status"
     fi
     if ! nft -f "$tmp"; then
-        access_firewall_nft_delete_owned_rules >/dev/null 2>&1 || true
+        access_firewall_native_nft_delete_owned_rules >/dev/null 2>&1 || true
         ((had_file == 0)) || nft -f "$old_file" >/dev/null 2>&1 || true
         rm -f -- "$tmp"
         rm -f -- "$old_file"
         return 20
     fi
     if ! mv -f -- "$tmp" "$nft_file"; then
-        access_firewall_nft_delete_owned_rules >/dev/null 2>&1 || true
+        access_firewall_native_nft_delete_owned_rules >/dev/null 2>&1 || true
         ((had_file == 0)) || nft -f "$old_file" >/dev/null 2>&1 || true
         ((had_file == 0)) || cp -p -- "$old_file" "$nft_file" >/dev/null 2>&1 || true
         rm -f -- "$old_file"
@@ -659,19 +643,19 @@ access_firewall_nft_apply_persistent() {
     [[ -z "$old_port" || "$old_port" == "$port" ]] || access_firewall_has_port nftables "$old_port" || return 30
 }
 
-access_firewall_nft_apply() {
+access_firewall_native_nft_apply() {
     local port="$1" old_port="${2:-}" mode="${3:-auto}"
 
-    access_firewall_nft_targets || {
+    access_firewall_native_nft_targets || {
         vps_cmd_error "nftables INPUT 基链已消失或无法安全解析"
         return 30
     }
     if [[ "$mode" == auto ]]; then
-        access_firewall_nft_persistent && mode=persistent || mode=runtime
+        access_firewall_native_nft_persistent && mode=persistent || mode=runtime
     fi
     case "$mode" in
-        persistent) access_firewall_nft_apply_persistent "$port" "$old_port" ;;
-        runtime) access_firewall_nft_apply_runtime "$port" "$old_port" ;;
+        persistent) access_firewall_native_nft_apply_persistent "$port" "$old_port" ;;
+        runtime) access_firewall_native_nft_apply_runtime "$port" "$old_port" ;;
         *) return 70 ;;
     esac
 }
@@ -697,12 +681,12 @@ access_firewall_has_port() {
 
     case "$backend" in
         none) return 1 ;;
-        ufw) access_firewall_ufw_has_port "$port" ;;
+        nft) access_firewall_nft_has_port "$port" ;;
         firewalld)
             firewall-cmd --quiet --query-port="${port}/tcp" >/dev/null 2>&1 ||
                 access_firewall_firewalld_has_owned_port "$port"
             ;;
-        nftables) access_firewall_nft_has_port "$port" ;;
+        nftables) access_firewall_native_nft_has_port "$port" ;;
         iptables) access_firewall_iptables_has_owned_port "$port" ;;
         *) return 1 ;;
     esac
@@ -712,9 +696,9 @@ access_firewall_open() {
     local backend="$1" port="$2" old_port="${3:-}" require_owned="${4:-0}" backup_dir="${5:-}" runtime_had=0 permanent_had=0 added_runtime=0 added_permanent=0 ipv6_added=0 rule zone snapshot=''
 
     ACCESS_FW_ADDED=0
-    if [[ "$backend" == ufw ]]; then
-        [[ -z "$backup_dir" ]] || snapshot="$backup_dir/ufw.scope.json"
-        access_firewall_ufw_apply_ports "$snapshot" "$old_port" "$port"
+    if [[ "$backend" == nft ]]; then
+        [[ -z "$backup_dir" ]] || snapshot="$backup_dir/nft.scope.json"
+        access_firewall_nft_apply_ports "$snapshot" "$old_port" "$port"
         return $?
     fi
     if [[ "$backend" != firewalld ]]; then
@@ -765,7 +749,7 @@ access_firewall_open() {
             ACCESS_FW_ADDED="firewalld-r${added_runtime}-p${added_permanent}"
             ;;
         nftables)
-            access_firewall_nft_apply "$port" "$old_port" "$ACCESS_FW_NFT_MODE" || return $?
+            access_firewall_native_nft_apply "$port" "$old_port" "$ACCESS_FW_NFT_MODE" || return $?
             ACCESS_FW_ADDED="nft-${ACCESS_FW_NFT_MODE}"
             ;;
         iptables)
@@ -801,12 +785,12 @@ access_firewall_close() {
 
     case "$backend" in
         none | '') return 0 ;;
-        ufw)
+        nft)
             [[ "$owned" == 1 ]] || {
-                vps_cmd_error "拒绝删除没有 vpsctl 所有权记录的 UFW 规则"
+                vps_cmd_error "拒绝删除没有 vpsctl 所有权记录的 NFT 规则"
                 return 30
             }
-            access_firewall_ufw_release_port "$port"
+            access_firewall_nft_release_port "$port"
             return $?
             ;;
         firewalld)
@@ -831,15 +815,15 @@ access_firewall_close() {
                 vps_cmd_error "拒绝删除没有 vpsctl 所有权记录的 nftables 规则"
                 return 30
             }
-            access_firewall_nft_delete_owned_rules || return $?
+            access_firewall_native_nft_delete_owned_rules || return $?
             local nft_file
-            nft_file="$(access_firewall_nft_file)" || return $?
+            nft_file="$(access_firewall_native_nft_file)" || return $?
             if [[ -e "$nft_file" ]]; then
                 [[ "$mode" != runtime ]] || {
                     vps_cmd_error "运行时 nftables 状态与持久化片段发生冲突；拒绝删除未知来源文件"
                     return 30
                 }
-                access_firewall_nft_validate_file "$nft_file" || return 30
+                access_firewall_native_nft_validate_file "$nft_file" || return 30
                 vps_cmd_run rm -f -- "$nft_file" || return 20
             fi
             ;;
@@ -897,15 +881,12 @@ access_firewall_commit() {
     local backend="$1" old_port="$2" new_port="$3" added="$4" previous_backend="$5" previous_port="$6" previous_mode="${7:-}" firewall_mode="${8:-auto}" mode=''
 
     [[ "$firewall_mode" != manual ]] || return 0
-    if [[ "$backend" == ufw ]]; then
-        if [[ "$added" != ufw-shared && "$previous_backend" == ufw && -n "$previous_port" ]]; then
-            access_firewall_ufw_import_legacy "$previous_port" || return $?
-        fi
-        access_firewall_ufw_apply_ports '' "$new_port" || return $?
-        if vps_ufw_owner_detached ssh; then
+    if [[ "$backend" == nft ]]; then
+        access_firewall_nft_apply_ports '' "$new_port" || return $?
+        if vps_nft_owner_detached ssh; then
             access_firewall_write_state '' ''
         else
-            access_firewall_write_state ufw "$new_port"
+            access_firewall_write_state nft "$new_port"
         fi
         return $?
     fi
@@ -915,7 +896,7 @@ access_firewall_commit() {
             nft-persistent) mode=persistent ;;
             *) mode="${previous_mode:-auto}" ;;
         esac
-        access_firewall_nft_apply "$new_port" '' "$mode" || return $?
+        access_firewall_native_nft_apply "$new_port" '' "$mode" || return $?
     elif [[ "$old_port" != "$new_port" && "$previous_backend" == "$backend" && "$previous_port" == "$old_port" ]]; then
         access_firewall_close "$backend" "$old_port" 1 || return $?
     fi
@@ -930,10 +911,10 @@ access_firewall_abort() {
     local backend="$1" new_port="$2" added="$3" previous_backend="${4:-}" previous_port="${5:-}" previous_mode="${6:-}" backup_dir="${7:-}" mode=auto
 
     [[ "$added" != 0 ]] || return 0
-    if [[ "$backend" == ufw && "$added" == ufw-shared ]]; then
-        access_firewall_ufw_restore_begin "$backup_dir" || return $?
-        vps_ufw_commit || return $?
-        access_firewall_ufw_restore_state "$backup_dir"
+    if [[ "$backend" == nft && "$added" == nft-shared ]]; then
+        access_firewall_nft_restore_begin "$backup_dir" || return $?
+        vps_nft_commit || return $?
+        access_firewall_nft_restore_state "$backup_dir"
         return $?
     fi
     case "$added" in
@@ -941,7 +922,7 @@ access_firewall_abort() {
         nft-persistent) mode=persistent ;;
     esac
     if [[ "$backend" == nftables && "$previous_backend" == nftables && -n "$previous_port" ]]; then
-        access_firewall_nft_apply "$previous_port" '' "${previous_mode:-auto}"
+        access_firewall_native_nft_apply "$previous_port" '' "${previous_mode:-auto}"
         return $?
     fi
     access_firewall_close "$backend" "$new_port" 1 "$mode"

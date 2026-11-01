@@ -458,7 +458,8 @@ vps_distribution_remove_command_cache() {
     # Check every target before unlinking any file; the registry is the only
     # source of paths, and this operation must never reach shared/core files.
     for relative in "${bundle_files[@]}"; do
-        if [[ "$relative" != "commands/${domain}/${action}.sh" && "$relative" != "commands/${domain}/${action}/"* ]]; then
+        if [[ "$relative" != "commands/${domain}/${action}.sh" && "$relative" != "commands/${domain}/${action}/"* &&
+            ! ( "$bundle" == network-nftables && "$relative" == scripts/po0-relay.sh ) ]]; then
             vps_distribution_error "功能缓存路径超出命令范围：$relative"
             status=3
             break
@@ -684,7 +685,7 @@ vps_distribution_self_status() {
         if vps_offline_runtime_root; then
             printf '离线来源：%s %s %s（构建于 %s）\n' "$VPS_OFFLINE_OS" "$VPS_OFFLINE_OS_VERSION" "$VPS_OFFLINE_ARCH" "$VPS_OFFLINE_BUILT_AT"
             local component
-            for component in xray sing-box lego rfw; do
+            for component in xray sing-box lego; do
                 vps_offline_read_components "$VPS_OFFLINE_ROOT" "$component" || return $?
                 printf '离线组件 %s：%s\n' "$component" "$VPS_OFFLINE_COMPONENT_TAG"
             done

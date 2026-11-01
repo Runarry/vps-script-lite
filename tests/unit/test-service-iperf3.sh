@@ -115,10 +115,10 @@ cat >"$TEST_FAKE_BIN/iperf3" <<'SH'
 #!/usr/bin/env bash
 printf 'iperf 3.17 (mock)\n'
 SH
-cat >"$TEST_FAKE_BIN/ufw" <<'SH'
+cat >"$TEST_FAKE_BIN/nft" <<'SH'
 #!/usr/bin/env bash
-[[ "${1:-}" == status ]] || exit 2
-printf 'Status: inactive\n'
+[[ "$*" == '-j list tables' ]] || exit 2
+printf '{"nftables":[]}\n'
 SH
 cat >"$TEST_FAKE_BIN/apt-get" <<'SH'
 #!/usr/bin/env bash
@@ -147,7 +147,7 @@ SH
 chmod +x "$TEST_FAKE_BIN/"*
 state="$TEST_SYSTEM_ROOT/var/lib/vpsctl/service/iperf3/state.json"
 unit="$TEST_SYSTEM_ROOT/etc/systemd/system/vpsctl-iperf3.service"
-fw="$TEST_SYSTEM_ROOT/var/lib/vpsctl/network/ufw/state.json"
+fw="$TEST_SYSTEM_ROOT/var/lib/vpsctl/network/nftables/state.json"
 
 # Read commands and a nonexistent stop never install or deploy a service.
 for action in help status stop logs ''; do
@@ -237,7 +237,7 @@ before="$(snapshot)"
 for proto in t u uc; do
     printf '%s %s\n' "$proto" "$port" >"$TEST_SYSTEM_ROOT/run/conflict"
     assert_status 3 bash "$TEST_COMMAND" start --port "$port"
-    [[ "$(snapshot)" == "$before" ]] || fail "$proto port conflict changed state/unit/UFW"
+    [[ "$(snapshot)" == "$before" ]] || fail "$proto port conflict changed state/unit/NFT"
     assert_running
 done
 rm -f "$TEST_SYSTEM_ROOT/run/conflict"
@@ -248,7 +248,7 @@ for fault in fail-start-once fail-enable-once signal-start-once; do
     expected=20
     [[ "$fault" != signal-start-once ]] || expected=143
     assert_status "$expected" bash "$TEST_COMMAND" start --port "$port"
-    [[ "$(snapshot)" == "$before" ]] || fail "$fault did not restore state/unit/UFW"
+    [[ "$(snapshot)" == "$before" ]] || fail "$fault did not restore state/unit/NFT"
     [[ -e "$TEST_SYSTEM_ROOT/run/iperf3-active" && ! -e "$TEST_SYSTEM_ROOT/run/iperf3-enabled" ]] || fail "$fault did not restore actual active/enabled status"
     [[ "$(cat "$TEST_SYSTEM_ROOT/run/iperf3-port")" == 5201 ]] || fail "$fault did not restore original listener port"
 done
@@ -285,7 +285,7 @@ done
 : >"$TEST_SYSTEM_ROOT/run/fail-package-once"
 before="$(snapshot)"
 assert_status 20 bash "$TEST_COMMAND" update
-[[ "$(snapshot)" == "$before" ]] || fail 'failed update changed prior service configuration/UFW'
+[[ "$(snapshot)" == "$before" ]] || fail 'failed update changed prior service configuration/NFT'
 assert_running
 # Package ownership is a precondition; rejection cannot touch the deployed
 # service, including actual runtime and boot state that differ from saved intent.
@@ -294,7 +294,7 @@ assert_running
 before="$(snapshot)"
 runtime_before="$(sha256sum "$TEST_SYSTEM_ROOT/run/iperf3-port" "$TEST_FAKE_BIN/iperf3")"
 assert_status 3 bash "$TEST_COMMAND" update
-[[ "$(snapshot)" == "$before" ]] || fail 'unowned update changed state/unit/UFW'
+[[ "$(snapshot)" == "$before" ]] || fail 'unowned update changed state/unit/NFT'
 [[ "$(sha256sum "$TEST_SYSTEM_ROOT/run/iperf3-port" "$TEST_FAKE_BIN/iperf3")" == "$runtime_before" ]] || fail 'unowned update changed runtime/binary'
 assert_running
 ! grep -Fq 'apt-get ' "$TEST_LOG" || fail 'unowned deployed binary triggered package operations'
@@ -308,7 +308,7 @@ mv "$fw.next" "$fw"
 assert_status 0 bash "$TEST_COMMAND" stop
 assert_state "$port" false
 [[ -f "$unit" && ! -e "$TEST_SYSTEM_ROOT/run/iperf3-active" && ! -e "$TEST_SYSTEM_ROOT/run/iperf3-enabled" ]] || fail 'stop did not disable service and retain files'
-jq -e '[.requirements[].owner] | index("iperf3")==null and index("ssh")!=null' "$fw" >/dev/null || fail 'stop corrupted UFW owner isolation'
+jq -e '[.requirements[].owner] | index("iperf3")==null and index("ssh")!=null' "$fw" >/dev/null || fail 'stop corrupted NFT owner isolation'
 assert_status 0 bash "$TEST_COMMAND" restart
 assert_state "$port" true
 assert_running
@@ -321,7 +321,7 @@ assert_status 0 bash "$TEST_COMMAND" --yes uninstall
 [[ ! -e "$state" && ! -e "$unit" && ! -e "$TEST_SYSTEM_ROOT/var/log/vpsctl/iperf3.log" ]] || fail 'uninstall left owned files'
 [[ "$(sha256sum "$TEST_FAKE_BIN/iperf3")" == "$binary_before" ]] || fail 'uninstall removed/changed system binary'
 ! grep -Eq '^apt-get (remove|purge|autoremove)' "$TEST_LOG" || fail 'uninstall removed system packages'
-jq -e '[.requirements[].owner] | index("iperf3")==null and index("ssh")!=null' "$fw" >/dev/null || fail 'uninstall changed unrelated UFW owner'
+jq -e '[.requirements[].owner] | index("iperf3")==null and index("ssh")!=null' "$fw" >/dev/null || fail 'uninstall changed unrelated NFT owner'
 : >"$TEST_SYSTEM_ROOT/run/signal-start-once"
 assert_status 143 bash "$TEST_COMMAND" start --port "$port"
 [[ ! -e "$state" && ! -e "$unit" && ! -e "$TEST_SYSTEM_ROOT/run/iperf3-enabled" ]] || fail 'interrupted fresh install leaked owned resources'
@@ -334,17 +334,17 @@ cat >"$TEST_TEMP/postcommit.sh" <<'SH'
 #!/usr/bin/env bash
 set -Eeuo pipefail
 source "$TEST_COMMAND"
-vps_ufw_begin() { VPS_UFW_DEPTH=1; printf 'begin\n' >>"$POST_LOG"; }
-vps_ufw_commit() {
+vps_nft_begin() { VPS_NFT_DEPTH=1; printf 'begin\n' >>"$POST_LOG"; }
+vps_nft_commit() {
     printf 'commit\n' >>"$POST_LOG"
     if [[ ! -e "$POST_MARK" ]]; then
         touch "$POST_MARK"
         kill -TERM "$BASHPID"
         return 143
     fi
-    VPS_UFW_DEPTH=0
+    VPS_NFT_DEPTH=0
 }
-vps_ufw_rollback() { VPS_UFW_DEPTH=0; printf 'rollback\n' >>"$POST_LOG"; }
+vps_nft_rollback() { VPS_NFT_DEPTH=0; printf 'rollback\n' >>"$POST_LOG"; }
 iperf3_main start --port "$POST_PORT"
 SH
 : >"$TEST_TEMP/postcommit.log"

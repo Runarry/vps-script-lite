@@ -16,7 +16,7 @@ import tempfile
 import zipfile
 
 TARGETS = (("debian", "12"), ("debian", "13"), ("ubuntu", "22.04"), ("ubuntu", "24.04"))
-COMPONENTS = ("xray", "sing-box", "lego", "rfw")
+COMPONENTS = ("xray", "sing-box", "lego")
 
 
 def require(condition, message):
@@ -71,7 +71,7 @@ def online_files(root, version):
 
 def component_rows(root):
     rows = [line.split("\t") for line in (root / "components.tsv").read_text().splitlines()]
-    require(len(rows) == 4, "snapshot must contain exactly four components")
+    require(len(rows) == len(COMPONENTS), "snapshot must contain exactly three components")
     require([row[1] for row in rows if len(row) == 7] == list(COMPONENTS), "invalid component record/order")
     for kind, identifier, tag, name, digest, relative, url in rows:
         safe_path(relative)
@@ -131,15 +131,14 @@ apt/dpkg、tar/gzip、sha256sum 和 systemd 基础环境。Alpine 不适用。
 资源缺失或损坏会失败，不会回退联网下载；不带 --offline-dir 的
 self update 仍使用原有在线更新流程。
 
-包括：全部项目脚本，以及网络设置、UFW、SSH、Fail2ban、
+包括：全部项目脚本，以及网络设置、nftables、SSH、Fail2ban、
 Xray/sing-box、TCPing/iperf3、lego/TLS、Swap 和清理的依赖资产。
 components.tsv 记录本次固定的上游实际版本、原始文件名、来源与摘要；
 离线调用只能使用包内版本。apt/packages.tsv 记录系统包来源与摘要。
 备份、内核、重装和第三方综合测试虽保留入口，其外部依赖未完整覆盖。
 
 离线安装不取消服务自身的联网要求：ACME 申请/续期、DNS 查询、
-NTP 时间同步及实际业务通信仍需相应网络服务。RFW 二进制已包含，
-但国家/地区过滤的 GeoIP 数据仍需下载；默认离线验收不启用此策略。
+NTP 时间同步及实际业务通信仍需相应网络服务。
 """, encoding="utf-8")
 
 
@@ -167,9 +166,7 @@ def smoke(root):
         for _, identifier, tag, _, _, relative, _ in component_rows(root):
             source = root / relative
             target = Path(temporary) / identifier
-            if identifier == "rfw":
-                shutil.copyfile(source, target)
-            elif identifier == "xray":
+            if identifier == "xray":
                 with zipfile.ZipFile(source) as archive:
                     members = [member for member in archive.infolist() if member.filename == "xray" and not member.is_dir()]
                     require(len(members) == 1, "Xray archive has no unique xray binary")
@@ -252,7 +249,7 @@ def aggregate(output, version):
             online_manifest = current_online
             current_components = read_regular("components.tsv")
             rows = [line.split("\t") for line in current_components.decode().splitlines()]
-            require(len(rows) == 4 and [row[1] for row in rows if len(row) == 7] == list(COMPONENTS),
+            require(len(rows) == len(COMPONENTS) and [row[1] for row in rows if len(row) == 7] == list(COMPONENTS),
                     f"{name}: invalid component manifest")
             current_tags = [(row[1], row[2]) for row in rows]
             require(tags is None or current_tags == tags, "matrix contains different upstream release tags")

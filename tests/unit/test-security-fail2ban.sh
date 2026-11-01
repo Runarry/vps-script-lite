@@ -122,8 +122,7 @@ make_mock sshd '
 while IFS= read -r port; do printf "port %s\n" "$port"; done <"${VPSCTL_SYSTEM_ROOT}/run/ssh-port"'
 
 make_mock firewall-cmd 'exit 1'
-make_mock ufw 'printf "Status: inactive\n"'
-make_mock nft 'exit 0'
+make_mock nft '[[ "$*" != "-j list tables" ]] || printf "{\"nftables\":[]}\n"'
 make_mock journalctl '
 printf "journalctl" >>"${MOCK_LOG}"
 printf " %s" "$@" >>"${MOCK_LOG}"

@@ -14,8 +14,6 @@ mkdir -p "$VPSCTL_SYSTEM_ROOT" "$TEST_TEMP/project/.offline" "$TEST_TEMP/assets"
 
 # shellcheck source=../../commands/service/iperf3.sh
 source "$TEST_ROOT/commands/service/iperf3.sh"
-# shellcheck source=../../commands/network/rfw.sh
-source "$TEST_ROOT/commands/network/rfw.sh" help >/dev/null
 # shellcheck source=../../commands/service/proxy/common.sh
 source "$TEST_ROOT/commands/service/proxy/common.sh"
 # shellcheck source=../../commands/service/proxy/core.sh
@@ -132,16 +130,6 @@ _proxy_core_fetch_release xray stable '' "$TEST_TEMP/out/xray" "$TEST_TEMP/xray-
 jq -e '.version == "9.8.7" and .release_tag == "v9.8.7"' "$TEST_TEMP/xray-info.json" >/dev/null || fail 'Xray provenance'
 fixture_tags[xray]=v9.8.6
 expect_failure _proxy_core_fetch_release xray stable '' "$TEST_TEMP/out/xray-mismatch" "$TEST_TEMP/xray-mismatch-info.json"
-
-printf '#!/usr/bin/env bash\nprintf "rfw 9.8.7\\n"\n' >"$TEST_TEMP/assets/rfw-x86_64-unknown-linux-musl"
-register_asset rfw v9.8.7 rfw-x86_64-unknown-linux-musl
-rfw_fetch_binary "$TEST_TEMP/out/rfw"
-[[ "$RFW_FETCHED_TAG" == v9.8.7 && "$RFW_FETCHED_SHA256" == "${fixture_hashes[rfw]}" ]] || fail 'RFW provenance'
-fixture_tags[rfw]=v9.8.6
-expect_failure rfw_fetch_binary "$TEST_TEMP/out/rfw-mismatch"
-fixture_tags[rfw]=v9.8.7
-mv "$TEST_TEMP/assets/${fixture_assets[rfw]}" "$TEST_TEMP/assets/rfw.saved"
-expect_failure rfw_fetch_binary "$TEST_TEMP/out/rfw-missing"
 
 printf '#!/usr/bin/env bash\nprintf "lego version 9.8.7\\n"\n' >"$TEST_TEMP/archive/lego"
 tar -czf "$TEST_TEMP/assets/lego_v9.8.7_linux_amd64.tar.gz" -C "$TEST_TEMP/archive" lego

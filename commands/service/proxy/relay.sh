@@ -292,7 +292,7 @@ proxy_relay_commit_candidate() {
     proxy_relay_normalize_file "$1" "$normalized" "$PROXY_MANIFEST" "${3:-}" || { status=$?; rm -f -- "$normalized"; return "$status"; }
     shift
     if [[ "${3:-0}" == 1 ]]; then
-        proxy_ufw_relay_transaction _proxy_relay_commit_candidate "$normalized" "$@" || status=$?
+        proxy_nft_relay_transaction _proxy_relay_commit_candidate "$normalized" "$@" || status=$?
     else
         _proxy_relay_commit_candidate "$normalized" "$@" || status=$?
     fi

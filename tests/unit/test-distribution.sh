@@ -79,7 +79,8 @@ make_core_asset() {
 
 make_feature_assets() {
     local version="$1" build="${TEST_TEMP}/build-feature" bundle files path
-    for bundle in shared-command shared-ufw shared-backup network-bbr network-dns network-ufw system-reinstall system-swap system-backup system-backup-docker system-backup-repo service-tcping service-iperf3; do
+    local -a bundle_paths=()
+    for bundle in shared-command shared-nftables shared-backup network-bbr network-dns network-nftables system-reinstall system-swap system-backup system-backup-docker system-backup-repo service-proxy service-tcping service-iperf3; do
         rm -rf -- "$build"
         mkdir -p "$build"
         files="$(vps_registry_bundle_files "$bundle")"
@@ -87,7 +88,8 @@ make_feature_assets() {
             mkdir -p "$build/${path%/*}"
             printf '#!/usr/bin/env bash\n# feature fixture\n' >"$build/$path"
         done <<<"$files"
-        tar -C "$build" -czf "${TEST_ASSETS}/vpsctl-${bundle}-${version}.tar.gz" "${files%%/*}"
+        mapfile -t bundle_paths <<<"$files"
+        tar -C "$build" -czf "${TEST_ASSETS}/vpsctl-${bundle}-${version}.tar.gz" "${bundle_paths[@]}"
     done
 }
 
@@ -213,7 +215,7 @@ LAUNCHER
 
 test_failed_downloads_retry_and_lock_recheck() (
     local release="$TEST_INSTALL_ROOT/releases/0.1.0" status scenario expected calls=0
-    local archive="$TEST_ASSETS/vpsctl-network-ufw-0.1.0.tar.gz"
+    local archive="$TEST_ASSETS/vpsctl-network-nftables-0.1.0.tar.gz"
     make_feature_assets 0.1.0
     mkdir -p "$release/.release" "$release/.bundles"
     printf '0.1.0\n' >"$release/VERSION"
@@ -221,11 +223,11 @@ test_failed_downloads_retry_and_lock_recheck() (
     VPSCTL_DISTRIBUTED=1
     VPSCTL_PROJECT_ROOT="$release"
     vps_distribution_download() { cp -- "${TEST_ASSETS}/${1##*/}" "$2"; }
-    vps_distribution_ensure_command network:ufw || fail 'initial UFW load failed'
-    expected="$(<"$release/.bundles/network-ufw.sha256")"
+    vps_distribution_ensure_command network:nftables || fail 'initial nftables load failed'
+    expected="$(<"$release/.bundles/network-nftables.sha256")"
     cp "$archive" "$archive.good"
     for scenario in interrupted hash missing-module; do
-        rm "$release/commands/network/ufw/menu.sh"
+        rm "$release/commands/network/nftables/menu.sh"
         case "$scenario" in
             interrupted) vps_distribution_download() {
                 printf 'partial' >"$2"
@@ -236,42 +238,42 @@ test_failed_downloads_retry_and_lock_recheck() (
                 rm -rf "$TEST_TEMP/incomplete"
                 mkdir -p "$TEST_TEMP/incomplete"
                 tar -xzf "$archive.good" -C "$TEST_TEMP/incomplete"
-                rm "$TEST_TEMP/incomplete/commands/network/ufw/menu.sh"
-                tar -C "$TEST_TEMP/incomplete" -czf "$archive" commands
+                rm "$TEST_TEMP/incomplete/commands/network/nftables/menu.sh"
+                tar -C "$TEST_TEMP/incomplete" -czf "$archive" commands scripts
                 write_manifest "$release/.release/manifest.tsv" 0.1.0 "$expected" "$(sha_file "$TEST_ASSETS/vpsctl-network-bbr-0.1.0.tar.gz")"
                 vps_distribution_download() { cp -- "${TEST_ASSETS}/${1##*/}" "$2"; }
                 ;;
         esac
         status=0
-        vps_distribution_ensure_command network:ufw >/dev/null 2>&1 || status=$?
+        vps_distribution_ensure_command network:nftables >/dev/null 2>&1 || status=$?
         if [[ "$scenario" == interrupted ]]; then
             assert_equal 20 "$status" 'interrupted download status'
         else
             assert_equal 10 "$status" "$scenario rejected"
         fi
-        [[ ! -e "$release/.bundles/network-ufw.sha256" ]] || fail 'failed repair retained success marker'
+        [[ ! -e "$release/.bundles/network-nftables.sha256" ]] || fail 'failed repair retained success marker'
         [[ -z "$(find "$release/.bundles" -mindepth 1 ! -name '*.sha256' -print -quit)" ]] || fail 'failure left temporary download or lock'
         cp "$archive.good" "$archive"
         write_manifest "$release/.release/manifest.tsv" 0.1.0 "$expected" "$(sha_file "$TEST_ASSETS/vpsctl-network-bbr-0.1.0.tar.gz")"
         vps_distribution_download() { cp -- "${TEST_ASSETS}/${1##*/}" "$2"; }
-        vps_distribution_ensure_command network:ufw || fail "$scenario retry failed"
-        assert_equal "$expected" "$(<"$release/.bundles/network-ufw.sha256")" 'repaired marker'
+        vps_distribution_ensure_command network:nftables || fail "$scenario retry failed"
+        assert_equal "$expected" "$(<"$release/.bundles/network-nftables.sha256")" 'repaired marker'
     done
-    rm "$release/.bundles/network-ufw.sha256"
+    rm "$release/.bundles/network-nftables.sha256"
     vps_distribution_acquire_lock() {
         mkdir "$1"
-        printf '%s\n' "$expected" >"$release/.bundles/network-ufw.sha256"
+        printf '%s\n' "$expected" >"$release/.bundles/network-nftables.sha256"
     }
     vps_distribution_download() {
         calls=$((calls + 1))
         return 20
     }
-    vps_distribution_ensure_bundle network-ufw || fail 'cache was not rechecked under lock'
+    vps_distribution_ensure_bundle network-nftables || fail 'cache was not rechecked under lock'
     assert_equal 0 "$calls" 'lock recheck repeated download'
 )
 
 test_lazy_feature_install_and_cache() (
-    local release="${TEST_INSTALL_ROOT}/releases/0.1.0" manifest network_sha calls=0
+    local release="${TEST_INSTALL_ROOT}/releases/0.1.0" manifest network_sha calls=0 downloads=''
     make_feature_assets 0.1.0
     network_sha="$(sha_file "${TEST_ASSETS}/vpsctl-network-bbr-0.1.0.tar.gz")"
     mkdir -p "$release/.release" "$release/.bundles"
@@ -282,6 +284,7 @@ test_lazy_feature_install_and_cache() (
     VPSCTL_PROJECT_ROOT="$release"
     vps_distribution_download() {
         calls=$((calls + 1))
+        downloads+="${1##*/}"$'\n'
         cp -- "${TEST_ASSETS}/${1##*/}" "$2"
     }
     vps_distribution_ensure_command network:bbr || fail 'lazy network install failed'
@@ -289,7 +292,7 @@ test_lazy_feature_install_and_cache() (
     assert_equal "$network_sha" "$(<"$release/.bundles/network-bbr.sha256")" 'network cache marker'
     vps_distribution_ensure_command network:bbr || fail 'cached network ensure failed'
     assert_equal 2 "$calls" 'feature plus shared dependency download count'
-    [[ ! -e "$release/commands/network/dns.sh" && ! -e "$release/lib/ufw.sh" ]] || fail 'BBR downloaded unrelated code'
+    [[ ! -e "$release/commands/network/dns.sh" && ! -e "$release/lib/nftables.sh" ]] || fail 'BBR downloaded unrelated code'
     vps_distribution_ensure_command network:dns || fail 'DNS install failed'
     assert_equal 3 "$calls" 'shared command dependency was downloaded twice'
     [[ ! -e "$release/commands/system/reinstall.sh" ]] || fail 'unrelated commands downloaded reinstall'
@@ -298,14 +301,21 @@ test_lazy_feature_install_and_cache() (
     [[ -f "$release/commands/system/reinstall.sh" ]] || fail 'reinstall command missing'
     [[ ! -e "$TEST_SYSTEM_ROOT/var/lib/vpsctl/reinstall/reinstall.sh" ]] || fail 'feature loading downloaded the upstream installer'
     vps_distribution_ensure_command service:iperf3 || fail 'iperf3 lazy install failed'
-    assert_equal 6 "$calls" 'iperf3 downloads its feature and shared UFW dependency'
-    [[ -f "$release/commands/service/iperf3.sh" && -f "$release/lib/ufw.sh" ]] || fail 'iperf3 feature or UFW dependency missing'
+    assert_equal 6 "$calls" 'iperf3 downloads its feature and shared nftables dependency'
+    [[ -f "$release/commands/service/iperf3.sh" && -f "$release/lib/nftables.sh" ]] || fail 'iperf3 feature or nftables dependency missing'
     [[ ! -e "$release/commands/service/tcping.sh" ]] || fail 'iperf3 loading downloaded unrelated service'
+    vps_distribution_ensure_command network:nftables || fail 'nftables lazy install failed'
+    assert_equal 8 "$calls" 'nftables loads its feature and proxy runtime migration scripts'
+    assert_contains "$downloads" $'vpsctl-service-proxy-0.1.0.tar.gz\nvpsctl-network-nftables-0.1.0.tar.gz\n' 'proxy migration scripts load before the network command'
+    [[ -f "$release/commands/service/proxy/relay-forward.sh" && -f "$release/.bundles/service-proxy.sha256" ]] || fail 'nftables proxy migration dependency missing'
+    [[ ! -e "$TEST_SYSTEM_ROOT/usr/local/bin/xray" && ! -e "$TEST_SYSTEM_ROOT/usr/local/bin/sing-box" &&
+        ! -e "$TEST_SYSTEM_ROOT/etc/vpsctl/proxy" ]] || fail 'loading nftables dependencies installed a proxy core or configuration'
     vps_distribution_download() { return 20; }
     vps_distribution_ensure_command network:bbr || fail 'cached BBR failed offline'
     vps_distribution_ensure_command network:dns || fail 'cached DNS failed offline'
     vps_distribution_ensure_command system:reinstall || fail 'cached reinstall wrapper failed offline'
     vps_distribution_ensure_command service:iperf3 || fail 'cached iperf3 failed offline'
+    vps_distribution_ensure_command network:nftables || fail 'cached nftables migration dependency failed offline'
     [[ -z "$(find "$release/.bundles" -mindepth 1 ! -name '*.sha256' -print -quit)" ]] || fail 'lazy download left temporary assets'
 )
 
@@ -327,7 +337,7 @@ test_lazy_swap_install_and_cache() (
     [[ -f "$release/commands/system/swap.sh" && -f "$release/lib/command.sh" ]] || fail 'swap command or shared dependency missing'
     assert_equal "$swap_sha" "$(<"$release/.bundles/system-swap.sha256")" 'swap cache marker'
     assert_equal $'shared-command.sha256\nsystem-swap.sha256' "$(find "$release/.bundles" -type f -printf '%f\n' | sort)" 'swap cache has no unrelated bundles'
-    [[ ! -e "$release/lib/ufw.sh" && ! -e "$release/commands/system/kernel.sh" && ! -e "$release/commands/system/reinstall.sh" ]] || fail 'swap loaded unrelated code'
+    [[ ! -e "$release/lib/nftables.sh" && ! -e "$release/commands/system/kernel.sh" && ! -e "$release/commands/system/reinstall.sh" ]] || fail 'swap loaded unrelated code'
     [[ ! -e "$TEST_SYSTEM_ROOT/var/lib/vpsctl/system/swap" ]] || fail 'feature loading created swap state'
     vps_distribution_download() {
         calls=$((calls + 1))
@@ -379,7 +389,7 @@ test_command_cache_eviction() (
     marker="$release/.bundles/service-tcping.sha256"
     script="$release/commands/service/tcping.sh"
     listener="$release/commands/service/tcping/listener.py"
-    shared="$release/lib/ufw.sh"
+    shared="$release/lib/nftables.sh"
     other="$release/commands/network/bbr.sh"
     [[ -f "$marker" && -f "$script" && -f "$listener" && -f "$shared" && -f "$other" ]] || fail 'cache eviction fixture is incomplete'
 
@@ -388,7 +398,7 @@ test_command_cache_eviction() (
     vps_distribution_remove_command_cache self:status >/dev/null 2>&1 || status=$?
     assert_equal 2 "$status" 'self bundle eviction refused'
     status=0
-    vps_distribution_remove_command_cache shared:ufw >/dev/null 2>&1 || status=$?
+    vps_distribution_remove_command_cache shared:nftables >/dev/null 2>&1 || status=$?
     assert_equal 2 "$status" 'shared bundle eviction refused'
     [[ -f "$marker" && -f "$shared" ]] || fail 'invalid eviction touched cache'
 
@@ -556,7 +566,7 @@ test_manual_update_is_atomic_and_versioned() (
     assert_equal 755 "$(stat -c %a "$new_release")" 'updated release directory permissions'
     assert_equal 644 "$(stat -c %a "$new_release/.release/manifest.tsv")" 'updated manifest permissions'
     [[ ! -e "$old_release" && ! -e "$history" ]] || fail 'update retained a managed historical release'
-    [[ ! -e "$new_release/commands/network" && ! -e "$new_release/lib/command.sh" && ! -e "$new_release/lib/ufw.sh" ]] || fail 'update prefetched feature or shared code'
+    [[ ! -e "$new_release/commands/network" && ! -e "$new_release/lib/command.sh" && ! -e "$new_release/lib/nftables.sh" ]] || fail 'update prefetched feature or shared code'
     assert_equal core.sha256 "$(find "$new_release/.bundles" -type f -printf '%f\n')" 'update fetched only core'
     [[ -f "$new_release/lib/nested/future-helper.sh" ]] || fail 'update rejected new shared helper'
     assert_equal 0.2.0 "$(find "$TEST_INSTALL_ROOT/releases" -mindepth 1 -maxdepth 1 -printf '%f\n')" 'only current release remains'
@@ -987,7 +997,7 @@ test_system_bundle_requires_kernel_modules() (
 
 test_private_modules_and_shared_boundaries() (
     local bundle tree="$TEST_TEMP/private-modules" path files status archive="$TEST_TEMP/boundary.tar.gz"
-    for bundle in network-ufw security-access security-tls service-proxy service-tcping service-iperf3 shared-backup system-backup system-backup-docker system-backup-repo; do
+    for bundle in shared-nftables network-nftables security-access security-tls service-proxy service-tcping service-iperf3 shared-backup system-backup system-backup-docker system-backup-repo; do
         rm -rf "$tree"
         mkdir -p "$tree"
         files="$(vps_registry_bundle_files "$bundle")"
@@ -1004,13 +1014,16 @@ test_private_modules_and_shared_boundaries() (
             mv "$tree/missing" "$tree/$path"
         done <<<"$files"
     done
-    for bundle in shared-command shared-ufw shared-server-test shared-backup network-bbr system-swap system-backup system-backup-docker system-backup-repo security-fail2ban; do
+    for bundle in shared-command shared-nftables shared-server-test shared-backup network-bbr system-swap system-backup system-backup-docker system-backup-repo security-fail2ban; do
         status=0
         vps_distribution_archive_path_allowed "$bundle" lib/distribution.sh || status=$?
         assert_equal 1 "$status" "$bundle may overwrite core"
         status=0
         vps_distribution_archive_path_allowed "$bundle" commands/network/dns.sh || status=$?
         assert_equal 1 "$status" "$bundle contains an unrelated command"
+        status=0
+        vps_distribution_archive_path_allowed "$bundle" scripts/po0-relay.sh || status=$?
+        assert_equal 1 "$status" "$bundle may overwrite the nftables migration helper"
     done
 )
 

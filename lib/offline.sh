@@ -103,7 +103,7 @@ vps_offline_read_components() {
             "$asset" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*$ && "$sha" =~ ^[0-9a-f]{64}$ &&
             "$url" == https://github.com/* && "$relative" == "upstream/$id/$asset" &&
             "$line" == $'component\t'"$id"$'\t'"$tag"$'\t'"$asset"$'\t'"$sha"$'\t'"$relative"$'\t'"$url" ]] || return 10
-        case "$id" in xray | sing-box | lego | rfw) ;; *) return 10 ;; esac
+        case "$id" in xray | sing-box | lego) ;; *) return 10 ;; esac
         [[ -z "${seen[$id]+set}" ]] || return 10
         seen[$id]=1
         vps_offline_relative_path "$relative" || return 10
@@ -124,7 +124,7 @@ vps_offline_read_components() {
             VPS_OFFLINE_COMPONENT_URL="$url"
         fi
     done <"$root/components.tsv"
-    ((${#seen[@]} == 4)) && [[ -z "$wanted" || -n "${seen[$wanted]+set}" ]] || return 10
+    ((${#seen[@]} == 3)) && [[ -z "$wanted" || -n "${seen[$wanted]+set}" ]] || return 10
 }
 
 vps_offline_validate_package() {

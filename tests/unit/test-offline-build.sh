@@ -89,8 +89,8 @@ shutil.copyfile(root / hashlib.sha256(url.encode()).hexdigest(), sys.argv[sys.ar
                 store(checksum_url, f'SHA2-256= {digest}\n'.encode())
                 assets.append({'name': checksum_name, 'browser_download_url': checksum_url})
             sums.append(f'{digest}  {name}\n')
-        if component in ('lego', 'rfw'):
-            name = 'lego_1.2.3_checksums.txt' if component == 'lego' else 'checksums.txt'
+        if component == 'lego':
+            name = 'lego_1.2.3_checksums.txt'
             url = f'https://github.com/{repository}/releases/download/{tag}/{name}'
             store(url, ''.join(sums).encode())
             assets.append({'name': name, 'browser_download_url': url})
@@ -101,11 +101,11 @@ shutil.copyfile(root / hashlib.sha256(url.encode()).hexdigest(), sys.argv[sys.ar
     snapshot = root / 'snapshot'
     run(resolver + [snapshot], env=env)
     calls = (fixture / 'calls').read_text().splitlines()
-    check(len([url for url in calls if url.endswith('/releases/latest')]) == 4, 'latest was not resolved exactly once per component')
+    check(len([url for url in calls if url.endswith('/releases/latest')]) == 3, 'latest was not resolved exactly once per component')
     check(len(calls) == len(set(calls)), 'shared upstream checksums downloaded more than once')
     for arch in ('amd64', 'arm64'):
         rows = [line.split('\t') for line in (snapshot / arch / 'components.tsv').read_text().splitlines()]
-        check(len(rows) == 4 and all(len(row) == 7 for row in rows), 'component TSV contract changed')
+        check(len(rows) == 3 and all(len(row) == 7 for row in rows), 'component TSV contract changed')
         check(all(row[2] == 'v1.2.3' for row in rows), 'actual tags were not persisted')
         check(all(hashlib.sha256((snapshot / arch / row[5]).read_bytes()).hexdigest() == row[4] for row in rows), 'snapshot content differs from manifest')
     run(resolver + [snapshot], success=False, env=env)
@@ -213,7 +213,7 @@ shutil.copyfile(root / hashlib.sha256(url.encode()).hexdigest(), sys.argv[sys.ar
     before = {path.name: path.read_bytes() for path in mixed.iterdir()}
     run(['bash', project / 'scripts/build-release.sh', mixed], success=False)
     check({path.name: path.read_bytes() for path in mixed.iterdir()} == before, 'invalid mixed output changed during rejection')
-    binary = package / 'upstream/rfw/rfw-x86_64-unknown-linux-musl'
+    binary = package / 'upstream/lego/lego_v1.2.3_linux_amd64.tar.gz'
     binary.write_text('corrupted\n')
     run(helper + ['smoke', package], success=False)
     (online / 'vpsctl.sh').write_text('corrupted\n')
