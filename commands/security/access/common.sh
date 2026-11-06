@@ -50,6 +50,10 @@ access_detect_platform() {
             init="$(vps_cmd_trim "$init")"
             [[ "$init" == init\(* ]] && init=init
         fi
+        if [[ "$init" == init* || "$init" == openrc-init ]] &&
+            command -v rc-service >/dev/null 2>&1 && [[ -d /run/openrc ]]; then
+            init=openrc
+        fi
     fi
     VPSCTL_ENV_OS_ID="$os_id"
     VPSCTL_ENV_INIT="${init:-unknown}"
@@ -65,7 +69,16 @@ access_require_linux() {
 }
 
 access_require_platform() {
+    local scope="${1:-full}"
+
     access_require_linux || return $?
+    if [[ "$scope" == login && "$VPSCTL_ENV_OS_ID" == alpine && "$VPSCTL_ENV_INIT" == openrc ]]; then
+        command -v rc-service >/dev/null 2>&1 || {
+            vps_cmd_error "未找到 rc-service，无法管理 Alpine SSH 服务"
+            return 3
+        }
+        return 0
+    fi
     case "$VPSCTL_ENV_OS_ID" in
         debian | ubuntu | rhel | centos | rocky | almalinux | ol | fedora) ;;
         *)

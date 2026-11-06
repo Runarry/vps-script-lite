@@ -62,6 +62,21 @@ for arg in "$@"; do
     [[ "$arg" != --unit=* ]] || : >"${VPSCTL_SYSTEM_ROOT}/run/${arg#--unit=}.timer"
 done'
 
+# shellcheck disable=SC2016 # Variables belong to the generated command mock.
+make_mock rc-service '
+printf "%s\n" "$*" >>"${VPSCTL_SYSTEM_ROOT}/run/rc-service.log"
+[[ "${1:-}" == sshd ]] || exit 1
+case "${2:-}" in
+    status) exit "${ACCESS_TEST_OPENRC_STATUS:-0}" ;;
+    reload)
+        if [[ -e "${VPSCTL_SYSTEM_ROOT}/run/fail-reload-once" ]]; then
+            rm -f -- "${VPSCTL_SYSTEM_ROOT}/run/fail-reload-once"
+            exit 1
+        fi
+        ;;
+    *) exit 1 ;;
+esac'
+
 make_mock getent '
 case "${1:-}:${2:-}" in
     passwd:root) printf "root:x:0:0:root:/root:/bin/bash\n" ;;
@@ -465,6 +480,8 @@ test_cli_validation_and_status() {
     assert_status 0 "upper boundary port is accepted" run_access --dry-run ssh prepare --port 65535 --firewall manual
 }
 
+# Each platform fixture exports its own values; these changes must stay local.
+# shellcheck disable=SC2030
 test_readonly_platforms() (
     local output init state expected before after trace="$TEST_TEMP/status-systemctl.log"
 
@@ -1387,6 +1404,85 @@ test_direct_ssh_policy_apply() {
     assert_status 0 "abort after blocked direct apply" run_access ssh abort --transaction "$tx"
 }
 
+# The platform fixtures intentionally keep their environment in separate subshells.
+# shellcheck disable=SC2031
+test_alpine_login() (
+    local key_file="$TEST_TEMP/alpine.pub" managed authorized baseline output backup command status marker expected
+    export VPSCTL_ENV_OS_ID=alpine VPSCTL_ENV_INIT=openrc
+    export ACCESS_TEST_SYSTEMCTL_TRACE="$TEST_TEMP/alpine-systemctl.log"
+    managed="$TEST_SYSTEM_ROOT/etc/ssh/sshd_config.d/00-vpsctl-access.conf"
+    authorized="$TEST_SYSTEM_ROOT/home/alice/.ssh/authorized_keys"
+    printf 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAlpine alpine-test\n' >"$key_file"
+
+    reset_system
+    mkdir -p "$TEST_SYSTEM_ROOT/etc/init.d"
+    touch "$TEST_SYSTEM_ROOT/etc/init.d/sshd"
+    output="$(run_access status --json)"
+    assert_contains "$output" '"service": "sshd", "service_state": "active"' 'OpenRC service status'
+    output="$(ACCESS_TEST_OPENRC_STATUS=3 run_access status --json)"
+    assert_contains "$output" '"service_state": "inactive"' 'stopped OpenRC service'
+    output="$(ACCESS_TEST_OPENRC_STATUS=1 run_access status --json)"
+    assert_contains "$output" '"service_state": "unknown"' 'failed OpenRC service query'
+
+    reset_system
+    sed -i 's/pubkeyauthentication yes/pubkeyauthentication no/' "$TEST_SYSTEM_ROOT/run/sshd-effective"
+    assert_status 0 'Alpine key dry-run' run_access --dry-run key add --user alice --public-key-file "$key_file"
+    assert_status 0 'Alpine generation dry-run' run_access --dry-run key generate --user alice
+    [[ ! -e "$authorized" && ! -e "$managed" && ! -e "$TEST_SYSTEM_ROOT/var/lib/vpsctl" ]] || fail 'Alpine dry-run wrote managed files'
+    baseline="$(sshd -T | grep -v '^pubkeyauthentication ')"
+    assert_status 0 'Alpine adds key and enables authentication' run_access key add --user alice --public-key-file "$key_file"
+    assert_equal "$baseline" "$(sshd -T | grep -v '^pubkeyauthentication ')" 'Alpine preserves unrelated settings'
+    assert_file_contains "$TEST_SYSTEM_ROOT/run/rc-service.log" 'sshd reload' 'OpenRC reloaded SSH'
+    baseline="$(sha256sum "$authorized" "$managed")"
+    assert_status 0 'Alpine duplicate key via stdin' run_access key add --user alice --stdin <"$key_file"
+    assert_equal "$baseline" "$(sha256sum "$authorized" "$managed")" 'Alpine key add is idempotent'
+    assert_status 0 'Alpine disables passwords' run_access --yes ssh apply --password-login deny
+    backup="$(extract_id bak "$ACCESS_TEST_OUTPUT")"
+    assert_file_contains "$managed" 'PasswordAuthentication no' 'Alpine password deny'
+    printf -v command 'env VPSCTL_NON_INTERACTIVE=0 bash %q --no-color restore --backup %q' "$TEST_ROOT/commands/security/access.sh" "$backup"
+    assert_status 0 'Alpine restores login policy' script -q -e -c "$command" /dev/null <<<"$backup"
+    assert_equal "$baseline" "$(sha256sum "$authorized" "$managed")" 'Alpine restore preserves keys and restores SSH policy'
+
+    for marker in fail-validation-once fail-reload-once; do
+        reset_system
+        seed_alice_key
+        baseline="$(sha256sum "$authorized")"
+        sed -i 's/pubkeyauthentication yes/pubkeyauthentication no/' "$TEST_SYSTEM_ROOT/run/sshd-effective"
+        touch "$TEST_SYSTEM_ROOT/run/$marker"
+        expected=20
+        [[ "$marker" != fail-validation-once ]] || expected=10
+        assert_status "$expected" "Alpine handles $marker" run_access key add --user alice --public-key-file "$key_file"
+        assert_equal "$baseline" "$(sha256sum "$authorized")" 'Alpine failure restores existing keys'
+        [[ ! -e "$managed" ]] || fail 'Alpine failure retained SSH config'
+    done
+
+    reset_system
+    seed_alice_key
+    baseline="$(sha256sum "$authorized")"
+    printf -v command 'env VPSCTL_QUIET=0 bash %q --no-color key generate --user alice' "$TEST_ROOT/commands/security/access.sh"
+    assert_status 130 'Alpine cancels generated key' script -q -e -c "$command" /dev/null <<<CANCEL
+    assert_equal "$baseline" "$(sha256sum "$authorized")" 'Alpine cancellation preserves existing keys'
+    assert_status 0 'Alpine saves generated key' script -q -e -c "$command" /dev/null <<<SAVED
+    assert_file_contains "$authorized" 'AAAAIGenerated' 'Alpine saved generated key'
+    backup="$(extract_id bak "$ACCESS_TEST_OUTPUT")"
+    printf -v command 'env VPSCTL_NON_INTERACTIVE=0 bash %q --no-color restore --backup %q' "$TEST_ROOT/commands/security/access.sh" "$backup"
+    assert_status 0 'Alpine restores authorized_keys' script -q -e -c "$command" /dev/null <<<"$backup"
+    assert_equal "$baseline" "$(sha256sum "$authorized")" 'Alpine restores original keys'
+
+    reset_system
+    printf -v command 'env VPSCTL_NON_INTERACTIVE=0 VPSCTL_ASSUME_YES=0 VPSCTL_QUIET=0 bash %q --no-color' "$TEST_ROOT/commands/security/access.sh"
+    status=0
+    output="$(printf '3\n2\n1\ny\n5\n' | script -q -e -c "$command" /dev/null 2>&1)" || status=$?
+    assert_equal 0 "$status" 'Alpine menu login policy'
+    assert_file_contains "$managed" 'PasswordAuthentication no' 'Alpine menu applies password policy'
+    [[ "$output" != *'创建管理员用户'* && "$output" != *'更改 SSH 端口'* ]] || fail 'Alpine menu exposed unsupported actions'
+    assert_status 3 'Alpine account creation remains unsupported' run_access user add --name deploy
+    assert_status 3 'Alpine port transactions remain unsupported' run_access ssh prepare --port 2222 --firewall manual
+    assert_status 3 'Alpine session verification remains unsupported' run_access session verify --transaction tx-test
+    [[ ! -e "$ACCESS_TEST_SYSTEMCTL_TRACE" && ! -e "$TEST_SYSTEM_ROOT/run/systemd-run.log" ]] || fail 'Alpine login used systemd'
+    printf 'PASS: Alpine/OpenRC keys, login policy, menu, restore and rollback\n'
+)
+
 test_cli_validation_and_status
 test_readonly_platforms
 test_direct_ssh_policy_apply
@@ -1394,6 +1490,7 @@ test_target_login_policy
 test_user_password_and_keys
 test_key_file_sources
 test_key_pubkey_enable
+test_alpine_login
 test_sshd_shape_and_firewall_rejections
 test_abort_expiry_and_reload_rollback
 test_abort_managed_write_failure

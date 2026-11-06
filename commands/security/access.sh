@@ -48,7 +48,7 @@ access_usage() {
 
 全局选项：
   --dry-run            展示写操作计划，不修改系统
-  --install-deps       明确允许安装依赖（本命令通常依赖 OpenSSH/systemd）
+  --install-deps       明确允许安装依赖（OpenSSH、flock、ss 等）
   --yes                跳过允许自动确认的普通提示
   --non-interactive    禁止交互读取；passwd/key generate 仍要求 TTY
   --quiet              隐藏非必要信息
@@ -84,7 +84,9 @@ access_usage() {
 权限：
   status 与 session verify 可由非 root 执行；其他写操作需要 root。
   status 在 Linux 上尽力读取状态，不要求 systemd，也不安装依赖。
-  无 systemd 或无法查询服务时，服务状态为 unknown；修改与事务操作仍要求 systemd。
+  Alpine/OpenRC 支持密钥添加/生成、ssh apply 登录策略及对应备份恢复。
+  用户/密码管理和 SSH 端口事务仍要求 Debian/Ubuntu 或 RHEL 系的 systemd。
+  无可用服务管理器或无法查询服务时，服务状态为 unknown。
 EOF
 }
 
@@ -142,7 +144,7 @@ access_status_user_fields() {
 access_status() {
     local user="$1" json="$2" port=unknown root_login=unknown password_login=unknown pubkey=unknown managed=false
     local active='' tx_status='' expires='' service_state=unknown strict=invalid listening=false
-    local service=unknown active_state=unknown load_state=unknown service_properties name value
+    local service=unknown active_state=unknown load_state=unknown service_properties name value rc
     local firewall_backend=unknown firewall_port_rule=null firewall_managed=false firewall_mode=unmanaged
 
     if access_sshd_validate_standard >/dev/null 2>&1; then
@@ -166,6 +168,15 @@ access_status() {
                 loaded:active | loaded:inactive) service_state="$active_state" ;;
             esac
         fi
+    elif [[ "$VPSCTL_ENV_OS_ID" == alpine && "$VPSCTL_ENV_INIT" == openrc ]] &&
+        command -v rc-service >/dev/null 2>&1 && [[ -f "$(vps_cmd_system_path /etc/init.d/sshd)" ]]; then
+        service="$ACCESS_SSH_SERVICE"
+        rc=0
+        rc-service "$service" status >/dev/null 2>&1 || rc=$?
+        case "$rc" in
+            0) service_state=active ;;
+            3) service_state=inactive ;;
+        esac
     fi
     if access_validate_port "$port" && access_sshd_port_listening "$port"; then
         listening=true
@@ -659,6 +670,7 @@ access_restore() {
         return 3
     }
     kind="$(access_kv_get "$manifest" kind 2>/dev/null || true)"
+    [[ "$kind" != ssh ]] || access_require_platform || return $?
     case "$kind" in
         ssh | ssh-policy) access_ssh_restore "$backup_id" ;;
         authorized_keys) access_key_restore "$backup_id" ;;
@@ -671,11 +683,18 @@ access_restore() {
 
 access_menu() {
     local choice action value user source port root_mode password_mode firewall tx backup rc status=0
+    local -a options=(status "查看状态") ssh_options=()
+
+    if [[ "$VPSCTL_ENV_INIT" == systemd ]]; then
+        options+=(user "创建管理员用户" password "设置用户密码")
+        ssh_options+=(port "更改 SSH 端口")
+    fi
+    options+=(key "添加或生成 SSH 密钥" ssh "修改 SSH 设置")
+    [[ "$VPSCTL_ENV_INIT" != systemd ]] || options+=(transaction "提交或中止活动事务")
+    options+=(restore "恢复历史备份" quit "退出")
+    ssh_options+=(root "更改 root 登录" password "更改密码登录")
     while true; do
-        choice="$(vps_cmd_prompt_select "SSH 访问安全" status \
-            status "查看状态" user "创建管理员用户" password "设置用户密码" \
-            key "添加或生成 SSH 密钥" ssh "修改 SSH 设置" \
-            transaction "提交或中止活动事务" restore "恢复历史备份" quit "退出")" || {
+        choice="$(vps_cmd_prompt_select "SSH 访问安全" status "${options[@]}")" || {
             rc=$?
             [[ "$rc" == 130 ]] && return "$status"
             return "$rc"
@@ -718,7 +737,7 @@ access_menu() {
                 fi
                 ;;
             ssh)
-                action="$(vps_cmd_prompt_select "变更项目" port port "更改 SSH 端口" root "更改 root 登录" password "更改密码登录")" || continue
+                action="$(vps_cmd_prompt_select "变更项目" "${ssh_options[0]}" "${ssh_options[@]}")" || continue
                 port=''
                 root_mode=''
                 password_mode=''
@@ -805,7 +824,10 @@ access_main() {
         access_dispatch_status
         return $?
     fi
-    access_require_platform || return $?
+    case "$action:${2:-}" in
+        : | key:* | restore:* | ssh:apply) access_require_platform login || return $? ;;
+        *) access_require_platform || return $? ;;
+    esac
     if [[ -z "$action" ]]; then
         access_menu
         return $?

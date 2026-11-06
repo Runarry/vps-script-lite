@@ -330,7 +330,7 @@ vps_registry_init() {
         "disruptive" \
         "optional-root" \
         "supported" \
-        "linux,init:systemd" \
+        "linux" \
         "experimental"
 
     vps_registry_register_command \

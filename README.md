@@ -4,9 +4,11 @@
 
 项目采用“一个管理入口、多个独立命令”的结构：管理入口只负责参数解析、固定命令登记、公共上下文和分发；每项实际功能原则上由一个公开入口脚本实现，复杂入口可拆为不单独分发的私有子模块。这样既能通过统一入口使用，也能单独运行、测试和排错。
 
-> 当前版本为 0.12.0，提供网络、系统内核、重装与 DD、Swap、系统清理、备份与恢复、访问、TLS 证书、代理、TCPing 探测监听、iperf3 测速服务端与服务器测试入口。支持演练的系统变更命令应先使用 `--dry-run` 并阅读对应恢复说明；内核变更需提前确认带外控制台或救援入口可用。重装与服务器测试会下载并运行第三方代码，不支持演练；重装在重启后可清除目标磁盘数据，服务器测试会产生明显 CPU/磁盘/网络负载。
+> 当前版本为 0.12.1，提供网络、系统内核、重装与 DD、Swap、系统清理、备份与恢复、访问、TLS 证书、代理、TCPing 探测监听、iperf3 测速服务端与服务器测试入口。支持演练的系统变更命令应先使用 `--dry-run` 并阅读对应恢复说明；内核变更需提前确认带外控制台或救援入口可用。重装与服务器测试会下载并运行第三方代码，不支持演练；重装在重启后可清除目标磁盘数据，服务器测试会产生明显 CPU/磁盘/网络负载。
 
-应用、功能与 GitHub Release 分发统一使用 `0.12.0`。仓库根 `VERSION` 是规范版本源，tag 为 `v0.12.0`；发布资产、安装目录、`vpsctl self` 与命令行版本展示均使用同一版本号。
+应用、功能与 GitHub Release 分发统一使用 `0.12.1`。仓库根 `VERSION` 是规范版本源，tag 为 `v0.12.1`；发布资产、安装目录、`vpsctl self` 与命令行版本展示均使用同一版本号。
+
+`v0.12.1` 补齐 Alpine/OpenRC 的 SSH 密钥访问设置，支持添加/生成密钥、自动启用公钥认证、root/密码登录策略及备份恢复。保留原有配置校验与失败回滚，菜单只显示支持的操作；账户管理和 SSH 端口事务仍限 systemd。详见[访问管理与验收记录](docs/access-management.md)。
 
 `v0.12.0` 统一使用原生 nftables，移除 UFW/RFW 命令和发布资产，提供双栈访问控制、临时授权、连接防护及自动服务联动。升级管理器后，通过 `vpsctl network nftables enable` 备份旧状态、重建服务规则并退役旧后端；旧手工规则不会自动导入。接口与恢复说明见 [nftables 管理](docs/nftables-management.md)，真机验证范围见[验收记录](docs/nftables-validation.md)。
 
@@ -62,7 +64,7 @@ apk add --no-cache bash curl ca-certificates
 | `network bbr` | 支持入口与依赖安装；实际变更仍要求内核暴露所选拥塞控制和 qdisc 能力 |
 | `network dns` | 支持静态 `/etc/resolv.conf` 与 openresolv；检测到 Alpine DHCP 可能回写 plain 后端时，会在零写入状态拒绝并要求 openresolv，或明确禁用 udhcpc/dhcpcd 的 DNS hook |
 | `network nftables` | 写操作要求内核提供 nftables，开机恢复支持 systemd/OpenRC；具体平台验证范围以当前验收记录为准 |
-| `security access` | SSH 服务编排仅支持 systemd；不能把核心的 OpenRC 支持外推为访问管理支持 |
+| `security access` | OpenRC 支持密钥添加/生成、自动启用公钥认证、root/密码登录策略及对应备份恢复；账户管理和 SSH 端口事务仍限 systemd，实际验收见[访问管理](docs/access-management.md) |
 | `security fail2ban` | 帮助与 `status [--json]` 可在无 systemd 的 Linux 上查询；安装和服务编排不支持 `apk`/OpenRC，仍要求文档列出的包管理器与 Fail2ban 0.11+ |
 | `security tls` | 导入与查看支持 Alpine；续期 timer 需要 systemd；ACME 的 lego 二进制仅 `x86_64`/`aarch64` |
 | `system kernel` | `status` 可只读查询当前运行内核；内核包及 GRUB 变更不支持 Alpine，仅支持 Debian/Ubuntu amd64 上的 APT/dpkg；自动切换限可识别的标准 GRUB 2 |
@@ -83,7 +85,7 @@ curl -fsSL https://github.com/Runarry/vps-script-lite/releases/latest/download/v
 
 仓库 `master` 的 `vpsctl.sh` 也会安装最新已发布版本，不会安装未发布的源码功能。它先读取 Release 清单、校验并运行同一版本的安装器，再由该安装器校验对应的包格式。若旧源码入口报 `unsupported manifest schema`，请改用上面的 Release 地址；该报错可能只是源码与已发布清单格式不同，不需要先卸载。
 
-**自 v0.8.10 起采用 manifest schema 2，与 v0.8.9 按领域打包的 schema 1 不兼容。** v0.8.10 及之后的 schema 2 版本可通过 `vpsctl self update` 升级到 v0.12.0。从 v0.8.9 迁移时，请先下载并校验 v0.12.0 的安装器和 manifest，再运行 `vpsctl --non-interactive self uninstall --confirm-uninstall`（不加 `--purge`），然后执行新安装器。直接重跑安装器只会启动已有管理器；不要用旧版 `self update` 跨格式升级。普通卸载保留已部署服务、配置、功能状态和备份；反向迁移也使用普通卸载再安装。
+**自 v0.8.10 起采用 manifest schema 2，与 v0.8.9 按领域打包的 schema 1 不兼容。** v0.8.10 及之后的 schema 2 版本可通过 `vpsctl self update` 升级到 v0.12.1。从 v0.8.9 迁移时，请先下载并校验 v0.12.1 的安装器和 manifest，再运行 `vpsctl --non-interactive self uninstall --confirm-uninstall`（不加 `--purge`），然后执行新安装器。直接重跑安装器只会启动已有管理器；不要用旧版 `self update` 跨格式升级。普通卸载保留已部署服务、配置、功能状态和备份；反向迁移也使用普通卸载再安装。
 
 安装后使用快捷命令 `vpsctl`。启动 `vpsctl` 只读取本地已安装内容，不联网检查更新；完成上述首次迁移后，需要查看或执行同格式分发更新时显式运行：
 
@@ -97,8 +99,8 @@ vpsctl self update --version vX.Y.Z  # 替换为已发布的同格式版本
 
 ```bash
 tmp_dir="$(mktemp -d)"
-# v0.12.0 使用 schema 2；从 v0.8.9 迁移时先校验本版本安装器和清单。
-base_url="https://github.com/Runarry/vps-script-lite/releases/download/v0.12.0"
+# v0.12.1 使用 schema 2；从 v0.8.9 迁移时先校验本版本安装器和清单。
+base_url="https://github.com/Runarry/vps-script-lite/releases/download/v0.12.1"
 curl -fL "$base_url/vpsctl.sh" -o "$tmp_dir/vpsctl.sh"
 curl -fL "$base_url/vpsctl-manifest.tsv" -o "$tmp_dir/vpsctl-manifest.tsv"
 awk -F '\t' '$1 == "asset" && $2 == "launcher" { print $4 "  vpsctl.sh" }' \
@@ -286,7 +288,7 @@ bash bin/vpsctl service proxy update --core xray --version vX.Y.Z
 
 - 规范：已建立。
 - 目录骨架：已建立。
-- 当前版本：0.12.0。
+- 当前版本：0.12.1。
 - 管理入口：提供环境检测、终端 UI、固定注册表和安全分发。
 - 功能命令：提供 `network bbr`、`network dns`、`network ip-policy`、`network nftables`、`system kernel`、`system reinstall`、`system swap`、`system clean`、`system backup`、`system backup-docker`、`system backup-repo`、`security access`、`security fail2ban`、`security tls`、`service proxy`、`service tcping`、`service iperf3`、`test nodequality` 和 `test tcpquality`；均处于 `experimental` 生命周期。
 - nftables：以端口放行 / 禁止、IP 访问控制、服务联动、更多管理和启用/停用五项组织菜单，统一管理 IPv4/IPv6 规则及连接防护。只管理项目专属表，支持与独立 PO0 中转共存；旧 UFW/RFW 命令已移除，旧手工规则不自动导入。防护速率表示连接数或 UDP 包速率，不是带宽限速。接口和生命周期见 [nftables 管理](docs/nftables-management.md)。

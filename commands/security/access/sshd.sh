@@ -12,6 +12,7 @@ access_sshd_init() {
     ACCESS_SSH_CONFIG_DIR="$(vps_cmd_system_path /etc/ssh/sshd_config.d)" || return $?
     case "$os_id" in
         debian | ubuntu) ACCESS_SSH_SERVICE=ssh.service ;;
+        alpine) ACCESS_SSH_SERVICE=sshd ;;
         *) ACCESS_SSH_SERVICE=sshd.service ;;
     esac
 }
@@ -223,11 +224,8 @@ access_sshd_pubkey_preflight() {
     case "$effective" in yes | no) ;; *) return 10 ;; esac
     access_sshd_pubkey_snapshot "$user" "$effective" >/dev/null || return $?
     if [[ "$effective" == no ]]; then
-        command -v ss >/dev/null 2>&1 || {
-            vps_cmd_error "缺少 ss，无法验证启用公钥认证后的 SSH 监听端口"
-            return 3
-        }
-        systemctl is-active --quiet "$ACCESS_SSH_SERVICE" || {
+        vps_cmd_ensure_tools security-access ss || return $?
+        access_sshd_service_active || {
             vps_cmd_error "$ACCESS_SSH_SERVICE 当前未运行，无法自动启用公钥认证"
             return 3
         }
@@ -294,7 +292,7 @@ access_sshd_enable_pubkey_locked() {
     backup_dir="$(access_backup_path "$backup_id")" || return $?
     # Public-key enablement does not normalize Port sources or alter firewall
     # rules; retain the usual backup format for the existing restore command.
-    access_sshd_make_backup "$backup_id" "$backup_dir" '' "$port" "$port" || return $?
+    access_sshd_make_backup "$backup_id" "$backup_dir" '' "$port" "$port" ssh-policy || return $?
     access_sshd_install_candidate "$candidate" || status=$?
     ((status != 0)) || access_sshd_validate_standard || status=$?
     ((status != 0)) || access_sshd_assert_pubkey_enabled "$user" "$baseline" || status=$?
@@ -464,17 +462,29 @@ access_sshd_install_candidate() {
     access_atomic_from_file "$candidate" "$ACCESS_CONFIG" 0644
 }
 
+access_sshd_service_active() {
+    if [[ "$VPSCTL_ENV_INIT" == openrc ]]; then
+        rc-service "$ACCESS_SSH_SERVICE" status >/dev/null 2>&1
+    else
+        systemctl is-active --quiet "$ACCESS_SSH_SERVICE"
+    fi
+}
+
 access_sshd_reload() {
     if [[ "${VPSCTL_DRY_RUN:-0}" == 1 ]]; then
         vps_cmd_info "演练：将 reload $ACCESS_SSH_SERVICE 并检查服务状态"
         return 0
     fi
-    systemctl is-active --quiet "$ACCESS_SSH_SERVICE" || {
+    access_sshd_service_active || {
         vps_cmd_error "$ACCESS_SSH_SERVICE 当前未运行"
         return 3
     }
-    systemctl reload "$ACCESS_SSH_SERVICE" || return 20
-    systemctl is-active --quiet "$ACCESS_SSH_SERVICE" || return 20
+    if [[ "$VPSCTL_ENV_INIT" == openrc ]]; then
+        rc-service "$ACCESS_SSH_SERVICE" reload || return 20
+    else
+        systemctl reload "$ACCESS_SSH_SERVICE" || return 20
+    fi
+    access_sshd_service_active || return 20
 }
 
 access_sshd_port_listening() {
@@ -581,7 +591,11 @@ access_sshd_print_recovery() {
         printf -v command 'install -o %q -g %q -m %q -- %q %q' "$uid" "$gid" "$mode" "$backup_dir/port-files/$index" "$physical"
         vps_cmd_error "$command"
     done
-    printf -v command '%q -t -f %q && systemctl reload %q' "$(access_sshd_binary 2>/dev/null || printf sshd)" "$ACCESS_MAIN_CONFIG" "$ACCESS_SSH_SERVICE"
+    if [[ "$VPSCTL_ENV_INIT" == openrc ]]; then
+        printf -v command '%q -t -f %q && rc-service %q reload' "$(access_sshd_binary 2>/dev/null || printf sshd)" "$ACCESS_MAIN_CONFIG" "$ACCESS_SSH_SERVICE"
+    else
+        printf -v command '%q -t -f %q && systemctl reload %q' "$(access_sshd_binary 2>/dev/null || printf sshd)" "$ACCESS_MAIN_CONFIG" "$ACCESS_SSH_SERVICE"
+    fi
     vps_cmd_error "$command"
     if [[ "$(access_kv_get "$manifest" kind 2>/dev/null || true)" != ssh-policy ]]; then
         vps_cmd_error "防火墙只可按 vpsctl 标记恢复；不要按端口删除未知来源规则。"
@@ -854,7 +868,7 @@ access_ssh_apply() {
     [[ -n "$requested_root" || -n "$requested_password" ]] || return 2
     case "$requested_root" in '' | allow | deny) ;; *) return 2 ;; esac
     case "$requested_password" in '' | allow | deny) ;; *) return 2 ;; esac
-    vps_cmd_ensure_tools security-access sshd ss systemctl || return $?
+    vps_cmd_ensure_tools security-access sshd ss flock || return $?
     if [[ "${VPSCTL_DRY_RUN:-0}" == 1 && "${VPS_CMD_DEPENDENCIES_PLANNED:-0}" == 1 ]]; then
         vps_cmd_warning "演练已列出 SSH 依赖；安装后需重新运行才能校验配置"
         return 3

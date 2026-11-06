@@ -218,7 +218,7 @@ test_registry() {
     test_assert_equal "disruptive" "${VPS_COMMAND_RISK["security:access"]}" "access risk"
     test_assert_equal "optional-root" "${VPS_COMMAND_PRIVILEGE["security:access"]}" "access privilege"
     test_assert_equal "supported" "${VPS_COMMAND_DRY_RUN["security:access"]}" "access dry-run"
-    test_assert_equal "linux,init:systemd" "${VPS_COMMAND_REQUIREMENTS["security:access"]}" "access requirements"
+    test_assert_equal "linux" "${VPS_COMMAND_REQUIREMENTS["security:access"]}" "access requirements"
     test_assert_equal "experimental" "${VPS_COMMAND_LIFECYCLE["security:access"]}" "access lifecycle"
     test_assert_equal "commands/security/fail2ban.sh" "${VPS_COMMAND_PATH["security:fail2ban"]}" "Fail2ban command path"
     test_assert_equal "disruptive" "${VPS_COMMAND_RISK["security:fail2ban"]}" "Fail2ban risk"

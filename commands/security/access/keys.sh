@@ -16,6 +16,7 @@ access_key_ensure_ssh_keygen() {
     case "$manager" in
         apt-get) package=openssh-client ;;
         dnf5 | dnf | yum) package=openssh-clients ;;
+        apk) package=openssh-keygen ;;
         *)
             vps_cmd_error "当前包管理器没有经过验证的 ssh-keygen 软件包映射"
             return 3
@@ -296,6 +297,7 @@ access_key_add_line() {
     ACCESS_SSH_PUBKEY_ENABLED=0
     ACCESS_SSH_PUBKEY_BACKUP_ID=''
     vps_cmd_require_root || return $?
+    vps_cmd_ensure_tools security-access getent flock || return $?
     access_require_login_user "$user" || return $?
     access_key_validate_line "$line" || return $?
     authorized="$(access_key_authorized_path "$user")" || return $?
@@ -363,11 +365,11 @@ access_key_rollback_last_add_locked() {
         rm -f -- "$tmp"
         return 30
     }
-    chmod --reference="$authorized" "$tmp" || {
+    chmod "$(stat -c %a -- "$authorized")" -- "$tmp" || {
         rm -f -- "$tmp"
         return 20
     }
-    chown --reference="$authorized" "$tmp" || {
+    chown "$(stat -c %u:%g -- "$authorized")" -- "$tmp" || {
         rm -f -- "$tmp"
         return 20
     }
@@ -505,6 +507,7 @@ access_key_generate() {
     local user="$1" key_file key_type=ed25519 saved='' status
 
     vps_cmd_require_root || return $?
+    vps_cmd_ensure_tools security-access getent flock || return $?
     access_require_login_user "$user" || return $?
     access_key_ensure_ssh_keygen || return $?
     if [[ "${VPSCTL_DRY_RUN:-0}" == 1 ]]; then

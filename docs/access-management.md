@@ -11,10 +11,20 @@
 | 风险 | `disruptive` |
 | 权限 | `optional-root`；帮助、公开状态和第二会话证明可由普通用户执行，所有变更要求 root |
 | 演练 | `supported` |
-| 能力要求 | 状态查询要求 `linux`；修改、交互菜单与事务操作要求 `linux,init:systemd` |
+| 能力要求 | 入口要求 `linux`；具体操作按发行版、服务管理器与依赖分别检查 |
 | 生命周期 | `experimental` |
 
-状态查询在 Linux 上尽力读取可获得的信息，不要求 systemd 或特定发行版。当前修改、交互菜单与事务操作仍只支持 Debian/Ubuntu 与 RHEL 系的 systemd 环境，不提供 OpenRC 服务管理；在 OpenRC、SysV、WSL、容器或无法唯一确定 SSH systemd unit 的环境中，不应尝试 SSH 应用、准备、提交、中止或恢复。功能脚本还会检查账户工具、OpenSSH 服务端、`sshd -t` 等动作实际需要的前置条件。
+状态查询在 Linux 上尽力读取可获得的信息，不要求 systemd 或特定发行版。Debian/Ubuntu 与 RHEL 系的 systemd 环境支持全部访问管理操作。Alpine/OpenRC 支持已有登录用户（含 root）的密钥添加与生成、自动启用公钥认证、`ssh apply` 的 root/密码登录策略，以及 `authorized_keys` 和 `ssh-policy` 备份恢复；通过 `rc-service sshd` 查询和 reload 服务。Alpine 菜单只显示这些可用操作；账户创建、账户密码设置和 SSH 端口事务仍不支持。
+
+修改要求标准 OpenSSH 配置含一个有效的 `Include /etc/ssh/sshd_config.d/*.conf`，并通过原有复杂配置检查与 `sshd -t`。需要 reload 时要求 SSH 服务正在运行。缺少 `ssh-keygen`、`getent`、`flock` 或 `ss` 时使用现有依赖安装流程，自动化可传 `--install-deps`；不会把 init 系统当作普通依赖安装。添加密钥不解除账户锁定，也不绕过现有 root 登录限制。
+
+Alpine 上可以通过 `vpsctl security access` 菜单操作，或为 root 导入已有公钥：
+
+```bash
+vpsctl --install-deps security access key add --user root --public-key-file /root/id_ed25519.pub
+```
+
+也可用 `vpsctl --install-deps security access key generate --user root` 在终端生成并保存一次性私钥。确认新密钥能登录后，使用 `vpsctl security access ssh apply --password-login deny` 关闭密码登录。
 
 本命令只管理本机账户、密码、`authorized_keys` 和自己的 SSH drop-in。它不管理云安全组、托管防火墙、路由器端口映射、堡垒机策略、PAM/LDAP/SSSD 身份源、SELinux 自定义端口标签或发行版之外的 SSH 守护进程。
 
@@ -185,11 +195,11 @@ prepare 先保存 `nft.scope.json` 并保留旧、新端口需求，然后更新
 
 常见退出码遵循项目统一约定：`2` 参数错误，`3` 前置条件或依赖不满足，`4` 权限不足，`10` 配置或输入校验失败，`20` 外部命令或服务操作失败，`30` 部分完成或需要人工恢复，`130` 用户中断。发生 `30` 时应立即保留当前会话并按命令输出的事务/备份路径恢复。
 
-所有验证必须通过 `ssh host-vps-scripts` 在专用真实环境执行，不得在当前系统或 WSL 运行项目代码。至少覆盖：普通用户/root 权限、用户和密码失败后的部分完成、公钥去重与权限、dry-run 零写入、登录策略直接应用及失败恢复、策略备份恢复、复杂配置写前拒绝、双端口监听、新非 root 会话证明、证明过期/复用/错误端口拒绝、commit 后旧端口收敛、abort、历史 restore、防火墙自动与手工模式，以及断开原会话后仍可从候选会话恢复。OpenRC 验证状态查询可用且修改、交互菜单与事务操作明确拒绝，不作为 SSH 服务管理的支持平台验收。
+所有验证必须通过 `ssh host-vps-scripts` 在专用真实环境执行，不得在当前系统或 WSL 运行项目代码。至少覆盖：普通用户/root 权限、用户和密码失败后的部分完成、公钥去重与权限、dry-run 零写入、登录策略直接应用及失败恢复、策略备份恢复、复杂配置写前拒绝、双端口监听、新非 root 会话证明、证明过期/复用/错误端口拒绝、commit 后旧端口收敛、abort、历史 restore、防火墙自动与手工模式，以及断开原会话后仍可从候选会话恢复。Alpine/OpenRC 验证密钥和登录策略的真实 reload、登录、恢复与菜单，同时确认账户管理和端口事务仍明确拒绝。
 
 仓库提供不纳入默认测试套件的显式真实验收脚本 `tests/integration/test-security-access-real.sh`。它只应在专用主机以 `VPSCTL_REAL_ACCESS_TEST=1` 启用，并要求调用方提供可登录管理员、私钥路径、该用户可读的项目副本和空闲候选端口；脚本在同一持续 root 会话内完成双端口 prepare、无 TTY 的 publickey 第二会话证明、root-only 证明权限检查、abort 与配置哈希复原检查。`VPSCTL_REAL_ACCESS_USER=root` 验证纯端口修改；非 root 管理员则验证禁用密码后的公钥登录，并需免密 sudo。
 
-`tests/integration/test-security-access-pubkey-real.sh` 使用相同开关，要求受管 drop-in 路径空闲且没有活动事务。它创建临时用户和密钥，将磁盘配置置为禁用公钥认证（此时不 reload），验证添加公钥后自动启用、真实 SSH 登录成功、其他有效配置保持不变及重复添加幂等；退出时移除测试配置和用户、reload 并核对配置恢复。
+`tests/integration/test-security-access-pubkey-real.sh` 使用相同开关，支持 systemd 与 Alpine/OpenRC，要求受管 drop-in 路径空闲且没有活动事务；验收工具需要 OpenSSL、SSH 客户端和 util-linux `script`。它创建临时用户和密钥，将磁盘配置置为禁用公钥认证（此时不 reload），验证演练、添加公钥后自动启用、权限、真实 SSH 登录、重复添加幂等、禁用密码与策略恢复，以及真实生成密钥的登录和取消；退出时移除测试配置和用户、reload 并核对配置恢复。生成测试通过临时 askpass 提供空口令，实际私钥只保存在权限受限的临时目录，不输出到验收日志。
 
 `tests/integration/test-security-access-policy-real.sh` 通过 `VPSCTL_REAL_ACCESS_POLICY_TEST=1` 显式启用。它使用临时账户和密钥验证直接应用、真实登录允许/拒绝及备份恢复，再回归端口事务的验证、提交、中止与定时回滚。root 密钥登录使用真实 root，root 密码策略使用临时 UID 0 别名验证，不修改现有 root 密码。脚本先检查原定时器和期限均为 15 分钟，再仅对测试事务添加 3 秒运行时覆盖，验证 systemd 自动回滚；退出时恢复 SSH 配置，核对监听、防火墙和定时器，并移除临时账户。
 
@@ -198,3 +208,14 @@ prepare 先保存 `nft.scope.json` 并保留旧、新端口需求，然后更新
 全部检查通过 `ssh host-vps-scripts` 执行：SSH 访问单元测试、`test-vpsctl.sh` 入口集成测试，以及上述策略真实验收脚本。单元测试覆盖参数、一次确认菜单、取消、非交互、dry-run、复杂配置拒绝、配置校验与 reload 失败恢复、活动事务冲突和策略备份恢复。
 
 真实验收完成 24 次登录检查，覆盖 root/普通用户的密钥与密码允许或拒绝、组合策略及恢复；策略操作未改变端口或防火墙，也未创建事务或定时器。原端口事务的第二会话证明、提交、恢复、中止及 systemd 定时回滚均通过。结束时核对原 SSH 文件内容与权限、有效配置、监听、防火墙、root 密码摘要和定时器均恢复，临时账户已移除。
+
+### 2026-11-06 Alpine/OpenRC 密钥访问验收
+
+全部项目执行均经 `ssh host-vps-scripts`：Debian 13/systemd 宿主，以及该宿主内的 Alpine 3.23.8/x86_64 容器。Alpine 以真实 `/sbin/init` 和 OpenRC default runlevel 运行发行版的 sshd 服务，使用默认 SSH 配置及 BusyBox 文件工具。
+
+- **PASS**：`tests/unit/test-security-access.sh`，覆盖现有 systemd 行为和新增 OpenRC 状态、密钥添加/生成、取消、幂等、菜单、登录策略、备份恢复及校验/reload 失败回滚；`tests/unit/test-libraries.sh` 与 `VPSCTL_TEST_ONLY=dispatch bash tests/integration/test-vpsctl.sh` 通过。
+- **PASS**：两个平台执行 `VPSCTL_REAL_ACCESS_TEST=1 bash tests/integration/test-security-access-pubkey-real.sh`。导入和真实生成的密钥均完成 SSH 登录；演练、文件权限、重复添加、取消生成、禁用密码和策略恢复通过，退出后有效配置恢复且临时用户已删除。
+- **PASS**：Alpine 另行验证 root 公钥登录、从禁用公钥认证自动启用，以及恢复公钥认证策略；缺少 `ss` 时 `--install-deps` 经 APK 安装依赖后继续完成操作。root 账户原状态在测试后恢复。
+- **静态检查**：改动脚本的 `bash -n` 通过；ShellCheck 与基线均为 48 项既有诊断，无新增。生产脚本及真实验收脚本的 shfmt 通过；两个单元脚本保留基线相同的空行格式差异和数组索引解析诊断，未作为零诊断通过。
+
+证据位于专用宿主 `/var/tmp/vpsctl-access-alpine-20261106/logs/`，包括 `access-unit.log`、`libraries.log`、`dispatch.log`、`alpine-root.log`、两个 `*-pubkey-real.log`、`static-comparison.json` 和 `restoration.log`。临时容器、测试镜像和测试私钥已清理；宿主 SSH 配置与服务恢复。未运行全项目套件、ARM 验收或主机重启，也未连接用户提供的实际 VPS。
