@@ -37,6 +37,7 @@
 - [TLS 证书管理](docs/tls-management.md)：域名证书导入、ACME 申请与自动续期。
 - [服务器测试](docs/server-testing.md)：NodeQuality 与 TcpQuality 的上游来源、负载、报告上传、清理和退出码边界。
 - [优化评审与验收记录](docs/optimization-review-2026-09-30.md#当前处理状态)：已完成范围、剩余候选及各轮验证证据。
+- [v0.12.1 发布验收](docs/release-0.12.1-validation.md)：Alpine 密钥访问、完整资产、离线系统依赖、实际升级和恢复记录。
 - [v0.12.0 发布验收](docs/release-0.12.0-validation.md)：原生防火墙分发、8 个离线包、公开资产、实际升级和恢复记录。
 - [v0.11.0 发布验收](docs/release-0.11.0-validation.md)：8 个离线包、公开资产、实际升级和恢复记录。
 - [v0.10.0 发布验收](docs/release-0.10.0-validation.md)：备份功能分发、发布资产、实际升级和恢复记录。
