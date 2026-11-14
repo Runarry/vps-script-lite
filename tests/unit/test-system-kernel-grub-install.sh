@@ -425,6 +425,8 @@ test_default_and_next_repair_plan() (
 
 test_apt_plan_trust_and_scope() (
     local test_apt_case=valid package output log="$TEST_TEMP/apt-grub-plan.log"
+    local test_signed_package=grub-efi-amd64-signed test_signed_version=1+2.12+9
+    local test_signed_depends='grub-common (= 2.12-9)' test_signed_metadata=valid
     reset_fixture
     : >"$log"
     apt-get() {
@@ -474,7 +476,7 @@ test_apt_plan_trust_and_scope() (
                         ;;
                 esac
                 for package in grub-common grub2-common grub-pc-bin grub-pc libefiboot1; do
-                    [[ "$test_apt_case" != efi-modules-without-common || "$package" != grub-common ]] || continue
+                    [[ ("$test_apt_case" != efi-modules-without-common && "$test_apt_case" != signed-upgrade-without-common) || "$package" != grub-common ]] || continue
                     printf 'Inst %s (2.12-9 Debian:13/stable [amd64])\n' "$package"
                     printf 'Conf %s (2.12-9 Debian:13/stable [amd64])\n' "$package"
                 done
@@ -483,7 +485,7 @@ test_apt_plan_trust_and_scope() (
                 elif [[ "$test_apt_case" == efi-change ]]; then
                     printf 'Inst grub-efi-amd64 (2.12-9 Debian:13/stable [amd64])\n'
                 fi
-                if [[ "$test_apt_case" == efi-modules-* || "$test_apt_case" == replace-efi-upgrade ]]; then
+                if [[ "$test_apt_case" == efi-modules-* || "$test_apt_case" == replace-efi-upgrade* || "$test_apt_case" == signed-upgrade-* ]]; then
                     for package in grub-efi-amd64-bin grub-efi-amd64-unsigned; do
                         test_efi_version=2.12-9
                         if [[ "$test_apt_case" == efi-modules-bin-mismatch && "$package" == grub-efi-amd64-bin ]] ||
@@ -499,25 +501,46 @@ test_apt_plan_trust_and_scope() (
                         efi-modules-shim) printf 'Inst shim-signed (2.12-9 Debian:13/stable [amd64])\n' ;;
                     esac
                 fi
+                if [[ "$test_apt_case" == signed-upgrade-* || "$test_apt_case" == replace-efi-upgrade-signed ]]; then
+                    printf 'Inst %s (%s Debian:13/stable [amd64])\n' "$test_signed_package" "$test_signed_version"
+                    printf 'Conf %s (%s Debian:13/stable [amd64])\n' "$test_signed_package" "$test_signed_version"
+                fi
                 ;;
             *) test_fail "package planning attempted an unexpected APT operation: $*" ;;
         esac
     }
     apt-cache() {
+        if [[ "${1:-}" == show ]]; then
+            [[ "$#" == 2 && "$2" == "$test_signed_package=$test_signed_version" ]] || return 97
+            printf 'apt-cache:show:%s\n' "$2" >>"$log"
+            [[ "$test_signed_metadata" != unavailable ]] || return 100
+            printf 'Package: grub-efi-amd64-signed\nVersion: %s\n' "$test_signed_version"
+            case "$test_signed_metadata" in
+                wrong-version) printf 'Version: 1+2.12+8\n' ;;
+                wrong-package) printf 'Package: shim-signed\n' ;;
+            esac
+            printf 'Depends: %s\n\n' "$test_signed_depends"
+            return 0
+        fi
         [[ "${1:-}" == policy ]] || return 97
         local queried="$2" source='https://deb.debian.org/debian trixie/main amd64 Packages' policy_version=2.12-9
         if [[ ("$test_apt_case" == foreign-request || "$test_apt_case" == replace-efi-foreign) && "$queried" == grub-pc ]] ||
             [[ "$test_apt_case" == foreign-dependency && "$queried" == libefiboot1 ]] ||
-            [[ "$test_apt_case" == efi-modules-foreign && "$queried" == grub-efi-amd64-bin ]]; then
+            [[ "$test_apt_case" == efi-modules-foreign && "$queried" == grub-efi-amd64-bin ]] ||
+            [[ "$test_apt_case" == signed-upgrade-foreign && "$queried" == "$test_signed_package" ]]; then
             source='https://foreign.example trixie/main amd64 Packages'
         fi
         if [[ "$test_apt_case" == efi-modules-bin-mismatch && "$queried" == grub-efi-amd64-bin ]] ||
             [[ "$test_apt_case" == efi-modules-unsigned-mismatch && "$queried" == grub-efi-amd64-unsigned ]]; then
             policy_version=2.12-10
         fi
+        if [[ "$queried" == "$test_signed_package" && ("$test_apt_case" == signed-upgrade-* || "$test_apt_case" == replace-efi-upgrade-signed) ]]; then
+            policy_version="$test_signed_version"
+        fi
         printf '%s:\n  Installed: (none)\n  Candidate: %s\n  Version table:\n     %s 500\n        500 %s\n' "$queried" "$policy_version" "$policy_version" "$source"
         if [[ "$test_apt_case" == mixed-dependency && "$queried" == libefiboot1 ]] ||
-            [[ "$test_apt_case" == efi-modules-mixed && "$queried" == grub-efi-amd64-unsigned ]]; then
+            [[ "$test_apt_case" == efi-modules-mixed && "$queried" == grub-efi-amd64-unsigned ]] ||
+            [[ "$test_apt_case" == signed-upgrade-mixed && "$queried" == "$test_signed_package" ]]; then
             printf '        500 https://foreign.example trixie/main amd64 Packages\n'
         fi
     }
@@ -612,6 +635,53 @@ test_apt_plan_trust_and_scope() (
     _kernel_grub_install_plan_packages || test_fail 'replacement accepts required matching EFI module upgrades'
     assert_equal 2.12-9 "${KERNEL_GRUB_INSTALL_EXPECTED_VERSIONS['grub-efi-amd64-bin']}" 'retained module upgrade remains pinned'
     assert_equal 2.12-8 "$KERNEL_GRUB_INSTALL_REMOVE_VERSION" 'control package removal retains its pre-upgrade version'
+
+    KERNEL_PKG_STATUS['grub-efi-amd64-signed']='ii '
+    KERNEL_PKG_VERSION['grub-efi-amd64-signed']=1+2.12+8
+    test_apt_case=replace-efi-upgrade-signed
+    _kernel_grub_install_plan_packages || test_fail 'existing signed EFI package follows its exact grub-common dependency during BIOS replacement'
+    assert_equal grub-efi-amd64 "$KERNEL_GRUB_INSTALL_REMOVE_PACKAGE" 'signed upgrade does not broaden the control package removal'
+    assert_equal 1+2.12+9 "${KERNEL_GRUB_INSTALL_EXPECTED_VERSIONS['grub-efi-amd64-signed']}" 'distinct signed version retained for post-install verification'
+    assert_contains "$(kernel_join_values "${KERNEL_GRUB_INSTALL_ARGS[@]}")" 'grub-efi-amd64-signed=1+2.12+9' 'signed package pinned in the install plan'
+    assert_contains "$(<"$log")" 'apt-cache:show:grub-efi-amd64-signed=1+2.12+9' 'metadata lookup is bound to the planned version'
+
+    unset 'KERNEL_PKG_STATUS[grub-efi-amd64]' 'KERNEL_PKG_VERSION[grub-efi-amd64]'
+    for test_apt_case in signed-upgrade-foreign signed-upgrade-mixed; do
+        assert_status 30 "$test_apt_case still requires trusted signed package sources" _kernel_grub_install_plan_packages
+    done
+    test_apt_case=signed-upgrade-without-common
+    assert_status 3 'signed package exception requires a grub-common change' _kernel_grub_install_plan_packages
+    test_apt_case=signed-upgrade-valid
+    KERNEL_PKG_VERSION['grub-common']=2.12-9
+    assert_status 3 'unchanged grub-common cannot authorize a signed package upgrade' _kernel_grub_install_plan_packages
+    KERNEL_PKG_VERSION['grub-common']=2.12-8
+    for test_signed_depends in 'grub-common (= 2.12-8)' 'grub-common (>= 2.12-9)' 'grub-common (= 2.12-9) | shim-signed' ''; do
+        assert_status 3 'signed candidate must require the exact planned grub-common version' _kernel_grub_install_plan_packages
+    done
+    test_signed_depends='grub-common (= 2.12-9)'
+    for test_signed_metadata in wrong-version wrong-package; do
+        assert_status 3 'signed candidate metadata must identify the exact package and version' _kernel_grub_install_plan_packages
+    done
+    test_signed_metadata=unavailable
+    assert_status 20 'unavailable signed candidate metadata cannot authorize an upgrade' _kernel_grub_install_plan_packages
+    test_signed_metadata=valid
+    for output in 'hi ' 'rc ' 'iU '; do
+        KERNEL_PKG_STATUS['grub-efi-amd64-signed']="$output"
+        assert_status 3 'held or incomplete signed package cannot use the upgrade exception' _kernel_grub_install_plan_packages
+    done
+    unset 'KERNEL_PKG_STATUS[grub-efi-amd64-signed]'
+    assert_status 3 'BIOS installation cannot introduce a signed EFI package' _kernel_grub_install_plan_packages
+    KERNEL_PKG_STATUS['grub-efi-amd64-signed']='ii '
+    KERNEL_PKG_VERSION['grub-efi-amd64-signed']=1+2.12+10
+    assert_status 3 'signed package compatibility cannot authorize a downgrade' _kernel_grub_install_plan_packages
+    KERNEL_PKG_VERSION['grub-efi-amd64-signed']=1+2.12+8
+    test_signed_package=grub-efi-amd64-signed:amd64
+    unset 'KERNEL_PKG_STATUS[grub-efi-amd64-signed]' 'KERNEL_PKG_VERSION[grub-efi-amd64-signed]'
+    KERNEL_PKG_STATUS[$test_signed_package]='ii '
+    KERNEL_PKG_VERSION[$test_signed_package]=1+2.12+8
+    test_signed_depends=$'other-package,\n grub-common (= 2.12-9)'
+    _kernel_grub_install_plan_packages || test_fail 'architecture-qualified signed package and folded dependency metadata rejected'
+    assert_equal 1+2.12+9 "${KERNEL_GRUB_INSTALL_EXPECTED_VERSIONS[$test_signed_package]}" 'architecture-qualified signed package retains its exact planned version'
 
     KERNEL_PKG_STATUS=(['grub-pc']='ii ')
     KERNEL_PKG_VERSION=(['grub-pc']=2.12-8)
@@ -803,6 +873,16 @@ test_configuration_signature_and_path_guards() (
         paths="$(_kernel_grub_install_config_paths)"
         assert_contains "$paths" "$TEST_SYSTEM_ROOT/usr/lib/grub/x86_64-efi" "$package changes include existing EFI modules in the pre-write backup"
     done
+    KERNEL_GRUB_INSTALL_EXPECTED_VERSIONS=(['grub-efi-amd64-bin']=2.12-9 ['grub-efi-amd64-signed']=1+2.12+9)
+    paths="$(_kernel_grub_install_config_paths)"
+    assert_contains "$paths"$'\n' "$TEST_SYSTEM_ROOT/usr/lib/grub/x86_64-efi"$'\n' 'combined module upgrade keeps unsigned modules in the backup'
+    assert_contains "$paths" "$TEST_SYSTEM_ROOT/usr/lib/grub/x86_64-efi-signed" 'signed module upgrade includes its separate recovery directory'
+    mkdir -p "$TEST_SYSTEM_ROOT/usr/lib/grub/x86_64-efi-signed"
+    printf 'original signed module\n' >"$TEST_SYSTEM_ROOT/usr/lib/grub/x86_64-efi-signed/grubx64.efi.signed"
+    before="$(_kernel_grub_install_config_signature)"
+    printf 'changed signed module\n' >>"$TEST_SYSTEM_ROOT/usr/lib/grub/x86_64-efi-signed/grubx64.efi.signed"
+    after="$(_kernel_grub_install_config_signature)"
+    [[ "$before" != "$after" ]] || test_fail 'signed module change is absent from confirmation drift signature'
     KERNEL_GRUB_INSTALL_EXPECTED_VERSIONS=()
     _kernel_grub_install_validate_paths || test_fail 'safe fixture configuration paths rejected'
     before="$(_kernel_grub_install_config_signature)" || test_fail 'safe configuration signature rejected'
@@ -892,6 +972,8 @@ test_execute_debconf_isolation_and_readback() (
                 [[ "$test_execute_case" != apt-failure ]] || return 100
                 [[ "$test_execute_case" != boot-drift ]] || printf 'unexpected initrd replacement\n' >>"$KERNEL_BOOT_DIR/initrd.img-6.12.12-amd64"
                 [[ "$test_execute_case" != efi-bin-lost ]] || KERNEL_PKG_STATUS['grub-efi-amd64-bin']='rc '
+                [[ "$test_execute_case" != efi-signed-lost ]] || KERNEL_PKG_STATUS['grub-efi-amd64-signed']='rc '
+                [[ "$test_execute_case" != efi-signed-wrong-version ]] || KERNEL_PKG_VERSION['grub-efi-amd64-signed']=1+2.12+8
                 ;;
             dpkg)
                 [[ "$#" == 4 && "$2" == --remove && "$3" == -- && "$4" == grub-efi-amd64 ]] || test_fail 'replacement removed an unapproved package or forced removal'
@@ -929,7 +1011,7 @@ test_execute_debconf_isolation_and_readback() (
         esac
     }
 
-    for test_execute_case in success btrfs-success efi-replace efi-remove-failure efi-still-installed efi-bin-lost \
+    for test_execute_case in success btrfs-success efi-replace efi-remove-failure efi-still-installed efi-bin-lost efi-signed-lost efi-signed-wrong-version \
         missing-env apt-failure grub-failure readback-failure table-drift debconf-drift debconf-flag-drift cloud-auto-drift boot-drift; do
         reset_fixture
         : >"$log"
@@ -955,6 +1037,12 @@ test_execute_debconf_isolation_and_readback() (
             KERNEL_PKG_VERSION['grub-efi-amd64-bin']=2.12-9
             KERNEL_GRUB_INSTALL_EXPECTED_VERSIONS['grub-efi-amd64-bin']=2.12-9
             KERNEL_GRUB_INSTALL_ARGS+=(grub-efi-amd64-bin=2.12-9)
+        fi
+        if [[ "$test_execute_case" == efi-signed-* ]]; then
+            KERNEL_PKG_STATUS['grub-efi-amd64-signed']='ii '
+            KERNEL_PKG_VERSION['grub-efi-amd64-signed']=1+2.12+9
+            KERNEL_GRUB_INSTALL_EXPECTED_VERSIONS['grub-efi-amd64-signed']=1+2.12+9
+            KERNEL_GRUB_INSTALL_ARGS+=(grub-efi-amd64-signed=1+2.12+9)
         fi
         printf 'fixture normal module\n' >"$KERNEL_BOOT_DIR/grub/i386-pc/normal.mod"
         write_grub_fixture '1>1'

@@ -102,3 +102,17 @@ Debian 12 的 `btrfs-progs 6.2` 实测只接受文件系统挂载点：当 `/boo
 实际安装后，EFI 控制包变为残留配置状态，完整 BIOS 包和 EFI 模块均为预期版本的已安装状态，dpkg 审计干净；内核、ESP 文件和 GPT 不变，Btrfs 默认项精确固定、`GRUB_SAVEDEFAULT=false`、next_entry 清除。新恢复备份权限及全部摘要通过，原始引导区备份与写入前字节一致，`apt-plan.txt` 包含明确的 `REMOVE` 记录。随后实际固件重启产生新 boot ID，SeaBIOS/GRUB 进入原 `6.1.0-54-cloud-amd64`，启动状态可解析，原“缺少完整 grub-pc”拦截消失，当前运行内核仍按原规则受保护。
 
 主要结果为 `corrected-dry-verification.log`、`corrected-install-verification.log` 及固件启动证据；完整脚本、包状态、文件摘要和恢复材料保留于上述远端目录。本轮没有重跑全量测试或其他平台启动矩阵。
+
+## 2026-11-14：已有签名 EFI 模块的配套升级
+
+本次修复 BIOS 环境安装 `grub-pc` 时，已有 `grub-efi-amd64-signed` 因精确依赖 `grub-common` 而必须同步升级，却被其他启动器包变更限制拒绝的问题。只允许已安装、未锁定的签名包随 `grub-common` 升级，逐包保留发行版可信来源检查，并读取精确候选的 `Depends` 验证配套版本；不允许新增、重装、降级或扩大删除范围。原签名模块目录同时纳入确认期间的变化检查和备份。
+
+所有执行通过 `ssh host-vps-scripts`，证据目录为 `/root/vpsctl-signed-grub-20261114/`。最终 `grub-install.sh` 的 SHA-256 为 `2e9921cb9e41f4ba4ed2cf72c8f7fd09e36208f3380a99b39fb1233f8a761b76`。`validation/status` 中 GRUB 安装回归、Bash 语法、ShellCheck 和 shfmt 检查均为 `0`；源码摘要保存在 `validation/modified-source.sha256`。新增回归覆盖合法配套升级、可信来源、精确依赖及元数据不匹配、锁定或不完整状态、新增与降级拒绝、签名目录备份及变化检查，以及安装后签名包丢失或版本不符时禁止写引导。未重跑全量套件或其他发行版矩阵。
+
+真实验收使用独立 Debian 13 amd64、SeaBIOS/TCG 虚拟机，GPT 包含 BIOS Boot 分区和保留的 ESP，根文件系统及 `/boot` 位于单设备 Btrfs `@rootfs` 子卷。使用 Debian Snapshot 的真实旧包建立基线：普通 GRUB 包为 `2.12-9+deb13u1`，签名包为 `1+2.12+9+deb13u1`，同时装有 shim，缺少完整 `grub-pc`。官方 APT 计划为 6 升级、1 新装、1 删除：普通包升级至 `2.12-9+deb13u2`，签名包升级至 `1+2.12+9+deb13u2`，只移除普通 `grub-efi-amd64` 控制包。
+
+`acceptance/baseline.verify.log` 在真实磁盘启动后复现原 CLI 对签名包的拒绝，退出码为 `3`，失败前后状态一致。修正版演练在 `fixed-dry-run.verify.log` 中通过配置、包状态、GPT、ESP、引导区及备份列表的只读比对。`fixed-install.verify.log` 记录实际修复成功：原 EFI 控制包仅变为残留配置状态，签名包和其他 GRUB 包达到计划版本，shim 版本不变，dpkg 审计干净。GPT、整分区 ESP 及其文件、两个内核和 initramfs 均保留；恢复备份摘要通过，保护 MBR 与嵌入区匹配原始字节，备份 tar 内四个旧签名 EFI 文件与安装前 SHA-256 一致。
+
+修复后两次通过 SeaBIOS 和磁盘 GRUB 启动，验收启动参数均不含 QEMU `-kernel` 或 `-initrd`。第一次进入原 `6.12.116+deb13-cloud-amd64`；随后通过 CLI 固定默认版本，第二次进入 `6.12.107+deb13-cloud-amd64`。两次 boot ID 均变化，实际运行内核和持久默认项一致，内核命令行保留正确的 `/@rootfs/boot/vmlinuz-*` 路径与 `rootflags=subvol=@rootfs`；GPT、ESP、保留内核文件和 dpkg 状态再次通过检查。
+
+启动与切换证据分别保存在 `acceptance/first-boot.verify.log`、`switch.verify.log`、`second-boot.verify.log` 及对应的串口日志和 QEMU 参数记录。完整恢复材料归档为 `acceptance/guest-evidence.tar.gz`，附 SHA-256 文件。虚拟机最终正常关机，无遗留 loop 映射，`acceptance/final-status.txt` 为 `VM_SHUTDOWN_AND_HOST_INVARIANTS_PASS`。准备工具时 `btrfs-progs` 的包触发器重新生成了专用宿主 initrd，SSH 中断后由用户重启恢复；这两项差异保存在 `host-diff-resumed.txt`。恢复后续测前后的 `host-resumed.txt` 与 `host-after.txt` 完全一致，宿主 ESP、GRUB、内核镜像及磁盘首部摘要保持不变，未在宿主执行引导安装。本轮修复和验收未连接或操作业务机器。

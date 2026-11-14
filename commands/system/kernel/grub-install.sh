@@ -416,6 +416,48 @@ PY
     fi
 }
 
+_kernel_grub_install_require_signed_upgrade() {
+    local package="$1" version="$2" planned_common="$3" resolved common_package metadata
+    resolved="$(_kernel_inventory_resolve_package "$package" 2>/dev/null || true)"
+    common_package="$(_kernel_inventory_resolve_package grub-common 2>/dev/null || true)"
+    if [[ -z "$resolved" || "${KERNEL_PKG_STATUS[$resolved]:-}" != 'ii ' ||
+        -z "$common_package" || -z "$planned_common" ]] ||
+        ! kernel_inventory_package_installed "$common_package" ||
+        ! dpkg --compare-versions "$planned_common" gt "${KERNEL_PKG_VERSION[$common_package]}" ||
+        ! dpkg --compare-versions "$version" gt "${KERNEL_PKG_VERSION[$resolved]}"; then
+        vps_cmd_error "签名 EFI 模块变更仅允许已安装且未锁定的软件包随 grub-common 升级：$package"
+        return 3
+    fi
+    # The signed package has its own version scheme. Its exact dependency,
+    # not equality of the two package versions, ties it to grub-common.
+    if ! metadata="$(LC_ALL=C apt-cache show "$package=$version" 2>&1)"; then
+        vps_cmd_error "无法读取签名 EFI 模块的精确候选元数据：$metadata"
+        return 20
+    fi
+    if ! python3 - "${package%%:*}" "$version" "$planned_common" "$metadata" <<'PY'; then
+from email.parser import Parser
+import re
+import sys
+
+package, version, common, metadata = sys.argv[1:]
+records = re.split(r"\n[ \t]*\n", metadata.strip())
+for record in records:
+    fields = Parser().parsestr(record)
+    if fields.get_all("Package") != [package] or fields.get_all("Version") != [version]:
+        sys.exit(1)
+    dependencies = fields.get_all("Depends", [])
+    if len(dependencies) != 1:
+        sys.exit(1)
+    matches = [re.fullmatch(r"grub-common\s*\(=\s*([^\s)]+)\s*\)", item.strip())
+               for item in dependencies[0].split(",")]
+    if not any(match and match[1] == common for match in matches):
+        sys.exit(1)
+PY
+        vps_cmd_error "签名 EFI 模块候选的精确 grub-common 依赖与安装计划不符：$package=$version"
+        return 3
+    fi
+}
+
 _kernel_grub_install_plan_packages() {
     local KERNEL_TYPE=official package resolved version old requested installed=0
     local efi_bin_installed=0 efi_bin_package='' efi_bin_version='' planned_common='' planned_efi_bin=''
@@ -470,6 +512,9 @@ _kernel_grub_install_plan_packages() {
                     vps_cmd_error "EFI 模块变更不是已有 amd64 模块随 grub-common 的必要同版本升级：$package"
                     return 3
                 fi
+                ;;
+            grub-efi-amd64-signed)
+                _kernel_grub_install_require_signed_upgrade "$package" "${KERNEL_INSTALL_EXPECTED_VERSIONS[$package]}" "$planned_common" || return $?
                 ;;
             linux-* | kernel-* | grub-efi* | shim-* | systemd-boot*)
                 vps_cmd_error "BIOS GRUB 安装计划不得改变内核或其他启动器软件包：$package"
@@ -553,18 +598,20 @@ _kernel_grub_install_debconf_snapshot() {
 }
 
 _kernel_grub_install_config_paths() {
-    local package
+    local package efi_modules=0 signed_modules=0
     printf '%s\n' "$KERNEL_GRUB_DEFAULT_FILE" "$KERNEL_GRUB_DEFAULT_DIR" \
         "$(vps_cmd_system_path /etc/grub.d)" "$KERNEL_BOOT_DIR/grub" \
         "$(vps_cmd_system_path /usr/lib/grub/i386-pc)"
     for package in "${!KERNEL_GRUB_INSTALL_EXPECTED_VERSIONS[@]}"; do
         case "${package%%:*}" in
             grub-efi-amd64-bin | grub-efi-amd64-unsigned)
-                printf '%s\n' "$(vps_cmd_system_path /usr/lib/grub/x86_64-efi)"
-                break
+                efi_modules=1
                 ;;
+            grub-efi-amd64-signed) signed_modules=1 ;;
         esac
     done
+    ((efi_modules == 0)) || printf '%s\n' "$(vps_cmd_system_path /usr/lib/grub/x86_64-efi)"
+    ((signed_modules == 0)) || printf '%s\n' "$(vps_cmd_system_path /usr/lib/grub/x86_64-efi-signed)"
 }
 
 _kernel_grub_install_config_signature() {
