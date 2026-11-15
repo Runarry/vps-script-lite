@@ -4,9 +4,11 @@
 
 项目采用“一个管理入口、多个独立命令”的结构：管理入口只负责参数解析、固定命令登记、公共上下文和分发；每项实际功能原则上由一个公开入口脚本实现，复杂入口可拆为不单独分发的私有子模块。这样既能通过统一入口使用，也能单独运行、测试和排错。
 
-> 当前版本为 0.12.2，提供网络、系统内核、重装与 DD、Swap、系统清理、备份与恢复、访问、TLS 证书、代理、TCPing 探测监听、iperf3 测速服务端与服务器测试入口。支持演练的系统变更命令应先使用 `--dry-run` 并阅读对应恢复说明；内核变更需提前确认带外控制台或救援入口可用。重装与服务器测试会下载并运行第三方代码，不支持演练；重装在重启后可清除目标磁盘数据，服务器测试会产生明显 CPU/磁盘/网络负载。
+> 当前版本为 0.13.0，提供网络、系统内核、重装与 DD、Swap、系统清理、备份与恢复、访问、TLS 证书、代理、TCPing 探测监听、iperf3 测速服务端与服务器测试入口。支持演练的系统变更命令应先使用 `--dry-run` 并阅读对应恢复说明；内核变更需提前确认带外控制台或救援入口可用。重装与服务器测试会下载并运行第三方代码，不支持演练；重装在重启后可清除目标磁盘数据，服务器测试会产生明显 CPU/磁盘/网络负载。
 
-应用、功能与 GitHub Release 分发统一使用 `0.12.2`。仓库根 `VERSION` 是规范版本源，tag 为 `v0.12.2`；发布资产、安装目录、`vpsctl self` 与命令行版本展示均使用同一版本号。
+应用、功能与 GitHub Release 分发统一使用 `0.13.0`。仓库根 `VERSION` 是规范版本源，tag 为 `v0.13.0`；发布资产、安装目录、`vpsctl self` 与命令行版本展示均使用同一版本号。
+
+`v0.13.0` 新增 `vpsctl network tune` 和 PO0 单文件调优入口，提供 TCP 缓冲区估算与手动设置、网卡总出口整形、端口总额及每条 TCP 流限速。三项功能独立配置并可叠加，支持演练、持久化、失败回滚、旧优化服务接管与 BBR 队列保护。需要 Linux/systemd、Python 3.9 或更新版本；安装或升级管理器不会自动应用网络参数。用法及实际验收范围见[网络调优](docs/network-tuning.md)。
 
 `v0.12.2` 修复 BIOS GRUB 安装/修复时，已有签名 EFI 模块必须随 `grub-common` 升级却被拒绝的问题。仅允许受信来源、未锁定且精确依赖匹配的配套升级，保留删除限制，并将原签名模块纳入备份和安装后校验。详见[系统内核管理](docs/kernel-management.md)及[真实验收记录](docs/kernel-grub-install-validation.md#2026-11-14已有签名-efi-模块的配套升级)。
 
@@ -21,7 +23,8 @@
 - [命令登记规范](docs/command-registry.md)：新增命令时必须维护的元数据和清单格式。
 - [开发与验收流程](docs/development-workflow.md)：从设计、实现到测试和评审的流程。
 - [主管理脚本与 UI](docs/manager-ui.md)：启动检测、菜单结构、非交互模式和扩展方式。
-- [网络设置](docs/network-settings.md)：BBR、DNS、IP 地址族偏好和 nftables 的接口、安全边界、持久化路径和恢复要求。
+- [网络设置](docs/network-settings.md)：BBR、DNS、IP 地址族偏好、nftables 和网络调优的接口及恢复要求。
+- TCP 缓冲区估算、网卡出口队列和源端口出口限速见[网络调优](docs/network-tuning.md)。
 - [nftables 管理](docs/nftables-management.md)：防火墙规则、服务联动、临时租约与恢复边界。
 - [系统内核管理](docs/kernel-management.md)：发行版官方内核与 XanMod BBRv3 的安装、固定默认版本、按版本卸载和恢复；另见[验收记录](docs/kernel-validation.md)。
 - [系统重装与 DD](docs/reinstall-management.md)：Linux、Windows 与 RAW DD 快捷菜单、上游参数透传、取消重装及工具缓存清理。
@@ -66,6 +69,7 @@ apk add --no-cache bash curl ca-certificates
 | `network bbr` | 支持入口与依赖安装；实际变更仍要求内核暴露所选拥塞控制和 qdisc 能力 |
 | `network dns` | 支持静态 `/etc/resolv.conf` 与 openresolv；检测到 Alpine DHCP 可能回写 plain 后端时，会在零写入状态拒绝并要求 openresolv，或明确禁用 udhcpc/dhcpcd 的 DNS hook |
 | `network nftables` | 写操作要求内核提供 nftables，开机恢复支持 systemd/OpenRC；具体平台验证范围以当前验收记录为准 |
+| `network tune` | Python 3 可用时提供只读查询和估算。实际调优要求 Linux/systemd 和相应内核能力 |
 | `security access` | OpenRC 支持密钥添加/生成、自动启用公钥认证、root/密码登录策略及对应备份恢复；账户管理和 SSH 端口事务仍限 systemd，实际验收见[访问管理](docs/access-management.md) |
 | `security fail2ban` | 帮助与 `status [--json]` 可在无 systemd 的 Linux 上查询；安装和服务编排不支持 `apk`/OpenRC，仍要求文档列出的包管理器与 Fail2ban 0.11+ |
 | `security tls` | 导入与查看支持 Alpine；续期 timer 需要 systemd；ACME 的 lego 二进制仅 `x86_64`/`aarch64` |
@@ -87,7 +91,7 @@ curl -fsSL https://github.com/Runarry/vps-script-lite/releases/latest/download/v
 
 仓库 `master` 的 `vpsctl.sh` 也会安装最新已发布版本，不会安装未发布的源码功能。它先读取 Release 清单、校验并运行同一版本的安装器，再由该安装器校验对应的包格式。若旧源码入口报 `unsupported manifest schema`，请改用上面的 Release 地址；该报错可能只是源码与已发布清单格式不同，不需要先卸载。
 
-**自 v0.8.10 起采用 manifest schema 2，与 v0.8.9 按领域打包的 schema 1 不兼容。** v0.8.10 及之后的 schema 2 版本可通过 `vpsctl self update` 升级到 v0.12.2。从 v0.8.9 迁移时，请先下载并校验 v0.12.2 的安装器和 manifest，再运行 `vpsctl --non-interactive self uninstall --confirm-uninstall`（不加 `--purge`），然后执行新安装器。直接重跑安装器只会启动已有管理器；不要用旧版 `self update` 跨格式升级。普通卸载保留已部署服务、配置、功能状态和备份；反向迁移也使用普通卸载再安装。
+**自 v0.8.10 起采用 manifest schema 2，与 v0.8.9 按领域打包的 schema 1 不兼容。** v0.8.10 及之后的 schema 2 版本可通过 `vpsctl self update` 升级到 v0.13.0。从 v0.8.9 迁移时，请先下载并校验 v0.13.0 的安装器和 manifest，再运行 `vpsctl --non-interactive self uninstall --confirm-uninstall`（不加 `--purge`），然后执行新安装器。直接重跑安装器只会启动已有管理器；不要用旧版 `self update` 跨格式升级。普通卸载保留已部署服务、配置、功能状态和备份；反向迁移也使用普通卸载再安装。
 
 安装后使用快捷命令 `vpsctl`。启动 `vpsctl` 只读取本地已安装内容，不联网检查更新；完成上述首次迁移后，需要查看或执行同格式分发更新时显式运行：
 
@@ -101,8 +105,8 @@ vpsctl self update --version vX.Y.Z  # 替换为已发布的同格式版本
 
 ```bash
 tmp_dir="$(mktemp -d)"
-# v0.12.2 使用 schema 2；从 v0.8.9 迁移时先校验本版本安装器和清单。
-base_url="https://github.com/Runarry/vps-script-lite/releases/download/v0.12.2"
+# v0.13.0 使用 schema 2；从 v0.8.9 迁移时先校验本版本安装器和清单。
+base_url="https://github.com/Runarry/vps-script-lite/releases/download/v0.13.0"
 curl -fL "$base_url/vpsctl.sh" -o "$tmp_dir/vpsctl.sh"
 curl -fL "$base_url/vpsctl-manifest.tsv" -o "$tmp_dir/vpsctl-manifest.tsv"
 awk -F '\t' '$1 == "asset" && $2 == "launcher" { print $4 "  vpsctl.sh" }' \
@@ -202,6 +206,7 @@ bash bin/vpsctl network bbr status
 bash bin/vpsctl network dns show
 bash bin/vpsctl network ip-policy status
 bash bin/vpsctl network nftables status
+bash bin/vpsctl network tune status
 bash bin/vpsctl system kernel status
 bash bin/vpsctl system kernel install --type official --confirm-install INSTALL-KERNEL
 bash bin/vpsctl system kernel switch --release RELEASE --confirm-switch SWITCH-KERNEL
@@ -262,6 +267,7 @@ bash bin/vpsctl --dry-run --install-deps network bbr enable
 bash bin/vpsctl --dry-run --install-deps network dns set --server 1.1.1.1 --server 1.0.0.1
 bash bin/vpsctl --dry-run network ip-policy set --policy prefer_ipv4
 bash bin/vpsctl --dry-run --install-deps network nftables enable
+bash bin/vpsctl --dry-run network tune buffer set --recommended --rtt-ms 120 --tx-mbps 200
 bash bin/vpsctl --dry-run --install-deps system kernel install --type official
 bash bin/vpsctl --dry-run system swap set --size auto
 bash bin/vpsctl --dry-run system swap disable
@@ -278,7 +284,7 @@ bash bin/vpsctl service proxy update --core xray --version vX.Y.Z
 
 在线模式下，代理内核安装和更新默认查询最新稳定版，也可用 `--release-channel prerelease` 选择最新预发布版，或用 `--version TAG` 精确选择稳定或预发布 Release；后两项互斥。`--core all` 可共享 release channel，但不能共享一个 `--version`，因为 Xray 与 sing-box 的 tag 空间不同。安装时选择的通道不会写入状态；以后不带版本选项执行 `update` 仍查询最新稳定版，但当目标低于当前版本时会在下载资产前成功跳过，不隐式降级。显式指定通道或 tag 允许回退，相同版本仍可重建配置。内核资产继续执行官方来源、唯一资产、SHA-256、解压目标、二进制版本和现有配置兼容性校验，更新完成后不会自动重启服务。
 
-在主管理菜单中选择 BBR、DNS、IP 地址族偏好、nftables、内核管理、重装与 DD、Swap 管理、系统清理、访问管理、Fail2ban、TLS 证书、代理管理或两项服务器测试后，会直接进入对应功能入口，不再经过“命令详情”或输入 `r` 才运行的中间页；菜单选项执行的是真实动作，不提供演练、依赖授权、自动同意、非交互、静默或详细日志等执行型全局参数开关。系统内核菜单以官方标准内核为推荐安装项，并通过编号选择具体切换或卸载版本；代理内核的安装和更新会用编号选择最新稳定版（推荐）、最新预发布版或精确 Release tag。`--dry-run`、`--install-deps`、`--yes`、`--non-interactive`、`--quiet`、`--verbose` 只用于直接功能 CLI，并写在领域之前；重装与服务器测试明确拒绝 `--dry-run`，服务器测试也不承诺非交互自动化。子动作及选项见[网络设置](docs/network-settings.md)、[系统内核管理](docs/kernel-management.md)、[系统重装与 DD](docs/reinstall-management.md)、[Swap 管理](docs/swap-management.md)、[系统清理](docs/system-clean.md)、[访问管理](docs/access-management.md)、[Fail2ban 管理](docs/fail2ban-management.md)、[TLS 证书管理](docs/tls-management.md)、[代理管理](docs/proxy-management.md)和[服务器测试](docs/server-testing.md)。机器可读格式开关、`--force` 和 `--confirm-*` 确认标志同样只用于直接 CLI，菜单中的危险动作改用明确的交互提示和必要的强确认短语。
+在主管理菜单中选择 BBR、DNS、IP 地址族偏好、nftables、网络调优、内核管理、重装与 DD、Swap 管理、系统清理、访问管理、Fail2ban、TLS 证书、代理管理或两项服务器测试后，会直接进入对应功能入口，不再经过“命令详情”或输入 `r` 才运行的中间页；菜单选项执行的是真实动作，不提供演练、依赖授权、自动同意、非交互、静默或详细日志等执行型全局参数开关。系统内核菜单以官方标准内核为推荐安装项，并通过编号选择具体切换或卸载版本；代理内核的安装和更新会用编号选择最新稳定版（推荐）、最新预发布版或精确 Release tag。`--dry-run`、`--install-deps`、`--yes`、`--non-interactive`、`--quiet`、`--verbose` 只用于直接功能 CLI，并写在领域之前；重装与服务器测试明确拒绝 `--dry-run`，服务器测试也不承诺非交互自动化。子动作及选项见[网络设置](docs/network-settings.md)、[系统内核管理](docs/kernel-management.md)、[系统重装与 DD](docs/reinstall-management.md)、[Swap 管理](docs/swap-management.md)、[系统清理](docs/system-clean.md)、[访问管理](docs/access-management.md)、[Fail2ban 管理](docs/fail2ban-management.md)、[TLS 证书管理](docs/tls-management.md)、[代理管理](docs/proxy-management.md)和[服务器测试](docs/server-testing.md)。机器可读格式开关、`--force` 和 `--confirm-*` 确认标志同样只用于直接 CLI，菜单中的危险动作改用明确的交互提示和必要的强确认短语。
 
 依赖检查按用户当前选择的动作延迟执行：只有该动作实际缺少可安装工具时，真实执行的交互流程才询问是否安装，不会为其他菜单动作预装依赖；真实非交互安装仍必须显式提供 `--install-deps`；`--dry-run` 会直接展示缺失依赖和安装计划，无需该授权且不询问。该授权支持 `apt-get`、`dnf5`、`dnf`、`yum`、`apk`、`pacman` 和 `zypper`，实际安装需要 root，也不会绕过 Linux、init 系统、CPU 架构、内核能力或功能本体等平台门禁。它与 `--dry-run` 组合时只展示固定的软件包安装命令，不实际安装，部分动作会在依赖计划后安全停止并提示安装后重跑。上例中的 `--core` 是直接命令和非交互调用保留的高级消歧参数：只有一个符合条件的内核时通常可自动解析，存在多个候选时应显式指定。
 
@@ -286,13 +292,15 @@ bash bin/vpsctl service proxy update --core xray --version vX.Y.Z
 
 内网 PO0 可单独复制 [po0-relay.sh](scripts/po0-relay.sh)，运行 `sudo bash po0-relay.sh`，通过分组编号菜单管理多条 IPv4 TCP／UDP 端口转发。支持直接粘贴常见节点 URI，查看时获取替换为 PO0 公网 IPv4 和入站端口的分享链接；URI 功能按需使用 Python 3 标准库。支持单端口、端口区间，以及原 PO0 脚本生成配置的自动导入；不需要安装 vpsctl。使用和恢复说明见 [PO0 中转管理](docs/po0-relay.md)。
 
+选择菜单 10 或运行 `bash po0-relay.sh tune --help` 可使用内置调优运行时。命令与 `vpsctl network tune` 共享同一套参数。见[网络调优](docs/network-tuning.md)。
+
 ## 当前状态
 
 - 规范：已建立。
 - 目录骨架：已建立。
-- 当前版本：0.12.2。
+- 当前版本：0.13.0。
 - 管理入口：提供环境检测、终端 UI、固定注册表和安全分发。
-- 功能命令：提供 `network bbr`、`network dns`、`network ip-policy`、`network nftables`、`system kernel`、`system reinstall`、`system swap`、`system clean`、`system backup`、`system backup-docker`、`system backup-repo`、`security access`、`security fail2ban`、`security tls`、`service proxy`、`service tcping`、`service iperf3`、`test nodequality` 和 `test tcpquality`；均处于 `experimental` 生命周期。
+- 功能命令：提供 `network bbr`、`network dns`、`network ip-policy`、`network nftables`、`network tune`、`system kernel`、`system reinstall`、`system swap`、`system clean`、`system backup`、`system backup-docker`、`system backup-repo`、`security access`、`security fail2ban`、`security tls`、`service proxy`、`service tcping`、`service iperf3`、`test nodequality` 和 `test tcpquality`；均处于 `experimental` 生命周期。
 - nftables：以端口放行 / 禁止、IP 访问控制、服务联动、更多管理和启用/停用五项组织菜单，统一管理 IPv4/IPv6 规则及连接防护。只管理项目专属表，支持与独立 PO0 中转共存；旧 UFW/RFW 命令已移除，旧手工规则不自动导入。防护速率表示连接数或 UDP 包速率，不是带宽限速。接口和生命周期见 [nftables 管理](docs/nftables-management.md)。
 - 公共函数库：提供环境检测、命令注册、终端 UI 及网络和服务命令所需公共能力。
 - 验收说明：所有项目测试与验证统一通过 `ssh host-vps-scripts` 在专用真实环境中执行；不得在当前系统或 WSL 中测试。发布前仍须按对应功能文档完成真实环境验收。

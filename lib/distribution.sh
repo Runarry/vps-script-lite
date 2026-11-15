@@ -430,6 +430,7 @@ vps_distribution_ensure_command() {
 
 vps_distribution_remove_command_cache() {
     local command_key="${1:-}" validation="${2:-}" domain action bundle files release_root marker lock path parent relative status=0
+    local private_root
     local -a bundle_files=() private_dirs=()
     vps_distribution_is_distributed || return 0
     [[ $# == 1 || ($# == 2 && "$validation" == cleanup) ]] || return 2
@@ -439,6 +440,8 @@ vps_distribution_remove_command_cache() {
     domain="${command_key%%:*}"
     action="${command_key#*:}"
     bundle="${domain}-${action}"
+    private_root="commands/${domain}/${action}"
+    if [[ "$bundle" == network-tune ]]; then private_root='lib/network_tune'; fi
     files="$(vps_registry_bundle_files "$bundle")" || return $?
     mapfile -t bundle_files <<<"$files"
     vps_distribution_require_self_mutation || return $?
@@ -458,7 +461,7 @@ vps_distribution_remove_command_cache() {
     # Check every target before unlinking any file; the registry is the only
     # source of paths, and this operation must never reach shared/core files.
     for relative in "${bundle_files[@]}"; do
-        if [[ "$relative" != "commands/${domain}/${action}.sh" && "$relative" != "commands/${domain}/${action}/"* &&
+        if [[ "$relative" != "commands/${domain}/${action}.sh" && "$relative" != "$private_root/"* &&
             ! ( "$bundle" == network-nftables && "$relative" == scripts/po0-relay.sh ) ]]; then
             vps_distribution_error "功能缓存路径超出命令范围：$relative"
             status=3
@@ -487,7 +490,7 @@ vps_distribution_remove_command_cache() {
     done
     for relative in "${bundle_files[@]}"; do
         parent="${relative%/*}"
-        while [[ "$parent" == "commands/${domain}/${action}" || "$parent" == "commands/${domain}/${action}/"* ]]; do
+        while [[ "$parent" == "$private_root" || "$parent" == "$private_root/"* ]]; do
             private_dirs+=("${release_root}/${parent}")
             parent="${parent%/*}"
         done
@@ -1126,7 +1129,8 @@ vps_distribution_clean_bundle() (
         before+='.'
     done
     private_dir="$VPSCTL_PROJECT_ROOT/commands/${key/:/\/}"
-    if [[ "$files" == *"commands/${key/:/\/}/"* && (-e "$private_dir" || -L "$private_dir") ]]; then
+    if [[ "$bundle" == network-tune ]]; then private_dir="$VPSCTL_PROJECT_ROOT/lib/network_tune"; fi
+    if [[ "$files" == *"${private_dir#"$VPSCTL_PROJECT_ROOT"/}/"* && (-e "$private_dir" || -L "$private_dir") ]]; then
         vps_distribution_clean_path_safe "$private_dir" || return $?
         [[ -d "$private_dir" ]] || return 3
         targets+=("$private_dir")

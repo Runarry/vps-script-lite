@@ -299,6 +299,56 @@ else
 fi
 ok 'public help and bounded non-TTY menu refusal'
 
+python3 "$ROOT/scripts/embed-network-tune.py" --check || fail 'embedded tuning runtime is stale'
+mkdir "$TMP/tune-work"
+source_help="$(bash "$ROOT/bin/vpsctl" --non-interactive network tune --help)" || fail 'vpsctl tune help'
+standalone_help="$(cd "$TMP" && TMPDIR="$TMP/tune-work" bash ./standalone.sh tune --non-interactive --help)" || fail 'standalone tune help'
+equal "$source_help" "$standalone_help" 'isolated PO0 tune help matches vpsctl'
+status=0
+TMPDIR="$TMP/tune-work" bash "$TMP/standalone.sh" tune invalid-action >"$TMP/tune-error.log" 2>&1 || status=$?
+equal 2 "$status" 'standalone tune forwards usage errors'
+[[ -z $(find "$TMP/tune-work" -mindepth 1 -print -quit) ]] || fail 'standalone tune leaves a temporary runtime'
+ok 'standalone tuning payload matches the canonical CLI and cleans up on success and failure'
+
+(
+    command() {
+        [[ ${1-}:${2-} != -v:tc ]] || return 1
+        builtin command "$@"
+    }
+    apt-get() { fail 'a leaf-level --dry-run started apt-get'; }
+    po0_tune egress --non-interactive set --dry-run --install-deps --interface wan0 --mode fq >"$TMP/tune-deps.log" 2>&1 || fail 'standalone dependency dry run'
+    grep -Fq 'apt-get install -y -- iproute2' "$TMP/tune-deps.log" || fail 'standalone dependency plan misses iproute2'
+    ok 'standalone leaf-level dry run only plans missing dependencies'
+)
+
+(
+    po0_import_legacy "$ROOT/tests/fixtures/po0-legacy-multiple.nft"
+    PO0_TUNE_PORTS_STATE="$TMP/tune-ports.json"
+    cat >"$PO0_TUNE_PORTS_STATE" <<'JSON'
+{"schema_version":1,"rules":{
+  "old-cap":{"interface":"wan0","port":20001,"protocol":"tcp","family":"both"},
+  "new-cap":{"interface":"wan0","port":23102,"protocol":"udp","family":"ipv4"},
+  "wrong-family":{"interface":"wan0","port":20001,"protocol":"tcp","family":"ipv6"},
+  "wrong-interface":{"interface":"other0","port":20001,"protocol":"tcp","family":"both"}
+}}
+JSON
+    cp "$PO0_TUNE_PORTS_STATE" "$TMP/tune-ports.before"
+    po0_prepare_change() { return 0; }
+    po0_apply() { po0_write_state >"$TMP/tune-relay.tsv"; }
+    po0_action_edit <<<$'1\n2\n23101-23103\ny' >"$TMP/tune-edit.log" 2>&1 || fail 'relay port edit with caps'
+    grep -Fq '静态限速 old-cap' "$TMP/tune-edit.log" || fail 'edit did not warn for the old port'
+    grep -Fq '静态限速 new-cap' "$TMP/tune-edit.log" || fail 'edit did not warn for a cap inside the proposed range'
+    po0_action_delete <<<$'1\ny' >"$TMP/tune-delete.log" 2>&1 || fail 'relay delete with caps'
+    grep -Fq '静态限速 old-cap' "$TMP/tune-delete.log" || fail 'delete did not warn for the old port'
+    if grep -Eq 'new-cap|wrong-family|wrong-interface' "$TMP/tune-delete.log" ||
+        grep -Eq 'wrong-family|wrong-interface' "$TMP/tune-edit.log"; then fail 'reported nonmatching cap'; fi
+    cmp -s "$TMP/tune-ports.before" "$PO0_TUNE_PORTS_STATE" || fail 'relay operations changed saved caps'
+    printf '{malformed\n' >"$PO0_TUNE_PORTS_STATE"
+    po0_action_delete <<<$'1\ny' >"$TMP/tune-malformed.log" 2>&1 || fail 'malformed cap state blocked a relay delete'
+    grep -Fq '无法检查已保存' "$TMP/tune-malformed.log" || fail 'malformed cap state was not diagnosed'
+    ok 'relay edit and delete warn for matching IPv4 caps and retain their saved rules'
+)
+
 (
     po0_import_legacy "$ROOT/tests/fixtures/po0-legacy-multiple.nft"
     unset SSH_CONNECTION
@@ -588,8 +638,9 @@ colored = menu(env)
 assert b'\x1b[' in colored, 'interactive xterm menu lacks color'
 for label in ('线路管理', '状态与维护', '全局设置'):
     assert label.encode() in colored, 'menu group missing: ' + label
-options = [line for line in colored.decode().splitlines() if __import__('re').match(r'\s+[0-9]\)', line)]
-assert len(options) == 10 and all(len(__import__('re').findall(r'[0-9]\)', line)) == 1 for line in options), options
+options = [line for line in colored.decode().splitlines() if __import__('re').match(r'\s+[0-9]+\)', line)]
+assert len(options) == 11 and all(len(__import__('re').findall(r'[0-9]+\)', line)) == 1 for line in options), options
+assert any('10) 网络调优' in line for line in options), options
 env['NO_COLOR'] = '1'
 assert b'\x1b' not in menu(env), 'NO_COLOR ignored on real TTY'
 env.pop('NO_COLOR')

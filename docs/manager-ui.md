@@ -56,12 +56,13 @@ UI 显示以下摘要：
     │   ├── BBR 管理（bbr）
     │   ├── DNS 管理（dns）
     │   ├── IP 地址族偏好（ip-policy）
-    │   └── nftables 防火墙（nftables）
-    │       ├── 端口放行 / 禁止
-    │       ├── IP 访问控制
-    │       ├── 服务联动
-    │       ├── 更多管理
-    │       └── 启用 / 停用
+    │   ├── nftables 防火墙（nftables）
+    │   │   ├── 端口放行 / 禁止
+    │   │   ├── IP 访问控制
+    │   │   ├── 服务联动
+    │   │   ├── 更多管理
+    │   │   └── 启用 / 停用
+    │   └── 网络调优（tune）
     ├── 系统管理（system）
     │   ├── 内核管理（kernel）
     │   │   ├── 查看版本、来源、关联包、启动完整性与保护状态
@@ -101,7 +102,9 @@ UI 显示以下摘要：
         └── 卸载受管脚本（uninstall）
 ```
 
-主菜单不会扫描目录或推测功能分类，只显示固定注册表中已经登记的真实功能。业务领域登记 `network`、`system`、`security`、`service` 与 `test`，包含 `bbr`、`dns`、`ip-policy`、`nftables`、`kernel`、`reinstall`、`swap`、`clean`、`backup`、`backup-docker`、`backup-repo`、`access`、`fail2ban`、`tls`、`proxy`、`tcping`、`iperf3`、`nodequality`、`tcpquality` 十九个入口，另有常驻 `self` 领域。用户选择功能后，入口立即无附加参数分发该公开脚本，由功能脚本进入自己的交互 UI、开始测试，或像轻量入口 `reinstall` 一样显示本地帮助；不再显示命令详情页，也不再要求输入 `r` 才运行。环境详情仍可通过非菜单命令 `vpsctl env` 查看。
+主菜单不会扫描目录或推测功能分类，只显示固定注册表中已经登记的真实功能。业务领域登记 `network`、`system`、`security`、`service` 与 `test`，包含 `bbr`、`dns`、`ip-policy`、`nftables`、`tune`、`kernel`、`reinstall`、`swap`、`clean`、`backup`、`backup-docker`、`backup-repo`、`access`、`fail2ban`、`tls`、`proxy`、`tcping`、`iperf3`、`nodequality`、`tcpquality` 二十个入口，另有常驻 `self` 领域。用户选择功能后，入口立即无附加参数分发该公开脚本，由功能脚本进入自己的交互 UI、开始测试，或像轻量入口 `reinstall` 一样显示本地帮助；不再显示命令详情页，也不再要求输入 `r` 才运行。环境详情仍可通过非菜单命令 `vpsctl env` 查看。
+
+网络调优追加为网络领域第 5 项。TTY 进入 TCP 缓冲区、出口队列、端口限速和诊断的编号菜单，非交互调用省略子命令时显示状态。独立 PO0 脚本的菜单 10 使用同一套调优界面。接口和恢复说明见[网络调优](network-tuning.md)。
 
 `system kernel` 的菜单展示当前运行版本，并以编号选择查看完整状态、安装/更新、固定默认版本或卸载指定版本。状态页按完整 release 汇总内核与启动信息。安装类型默认推荐发行版官方标准内核；Debian 可选 Cloud，Ubuntu LTS 仅在适配 HWE 元包有候选时显示，XanMod 继续提供 auto/main/lts 和 CPU 等级选择。切换与卸载候选由 current、default、next、启动文件完整性和 dpkg 归属状态过滤，用户无需手工输入 release。安装、切换、卸载分别要求 `INSTALL-KERNEL`、`SWITCH-KERNEL`、`REMOVE-KERNEL` 强确认；菜单不会自动重启，流程提示重启核对后再卸载旧版本。
 
@@ -151,13 +154,14 @@ UI 使用 ASCII 边框和可选 ANSI 语义色，适合普通 SSH 终端：青�
 - `/etc/vpsctl/` 下的配置；
 - `/var/lib/vpsctl/` 中除 self 元数据之外的功能状态和备份；
 - 各功能已经安装的内核、软件包、服务、规则或其他组件；
+- `/usr/local/lib/vpsctl/network-tune/runtime.pyz`；
 - `/usr/local/libexec/` 及其中的外部二进制。
 
 `--purge` 只扩大删除范围，仍遵守上述保护边界，只额外删除 `/var/lib/vpsctl/self/` 中的安装、自更新与分发缓存元数据；这部分范围会包含在同一次交互确认中。`--confirm-purge` 是授权别名，必须与 `--purge` 一起使用，否则返回 `2`；旧的 `--purge --confirm-uninstall --confirm-purge` 组合继续有效。self 卸载不同于 nftables、代理等功能自身的卸载或 purge；它绝不代替用户逐项卸载已安装组件。
 
 ## 5. 当前边界
 
-管理入口已登记网络功能、系统内核、重装与 DD、Swap 管理、系统清理、访问管理、Fail2ban 防护、TLS 证书、代理管理、TCPing 探测监听与服务器测试。UI 只负责展示元数据、收集用户选择并分发，不实现 BBR、DNS、IP 地址族偏好、nftables、内核、重装、Swap、清理、用户凭据、SSH 事务、Fail2ban、TLS、代理、TCPing 或测试业务逻辑。
+管理入口已登记网络功能、系统内核、重装与 DD、Swap 管理、系统清理、访问管理、Fail2ban 防护、TLS 证书、代理管理、TCPing 探测监听与服务器测试。UI 只负责展示元数据、收集用户选择并分发。业务逻辑由各功能入口执行。
 
 网络功能的当前边界为：
 

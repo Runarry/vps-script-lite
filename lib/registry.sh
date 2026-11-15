@@ -24,7 +24,7 @@ declare -ga VPS_REGISTRY_RESULTS=()
 # the builder and runtime use these exact file lists (including private modules).
 declare -ga VPS_BUNDLE_IDS=(
     core shared-command shared-nftables shared-server-test shared-backup
-    network-bbr network-dns network-ip-policy network-nftables
+    network-bbr network-dns network-ip-policy network-nftables network-tune
     system-kernel system-reinstall system-swap system-clean system-backup system-backup-docker system-backup-repo
     security-access security-fail2ban security-tls
     service-proxy service-tcping service-iperf3 test-nodequality test-tcpquality
@@ -41,6 +41,7 @@ vps_registry_bundle_files() {
             printf 'commands/network/%s.sh\n' "${1#network-}"
             ;;
         network-nftables) printf '%s\n' commands/network/nftables.sh commands/network/nftables/{common,inventory,rules,actions,menu,runtime,legacy}.sh scripts/po0-relay.sh ;;
+        network-tune) printf '%s\n' commands/network/tune.sh lib/network_tune/{__init__,__main__,buffers,cli,common,egress,ports}.py ;;
         system-kernel) printf '%s\n' commands/system/kernel.sh commands/system/kernel/{providers,inventory,grub,grub-install}.sh ;;
         system-reinstall) printf '%s\n' commands/system/reinstall.sh ;;
         system-swap) printf '%s\n' commands/system/swap.sh ;;
@@ -162,7 +163,7 @@ vps_registry_init() {
     vps_registry_register_domain \
         "network" \
         "网络设置" \
-        "BBR、本机 DNS、IP 地址族偏好与 nftables 防火墙管理"
+        "BBR、本机 DNS、IP 地址族偏好、nftables 防火墙与网络调优"
 
     vps_registry_register_domain \
         "system" \
@@ -235,6 +236,18 @@ vps_registry_init() {
         "optional-root" \
         "supported" \
         "linux" \
+        "experimental"
+
+    vps_registry_register_command \
+        "network" \
+        "tune" \
+        "网络调优" \
+        "估算和调整 TCP 缓冲区、出口队列与端口限速" \
+        "commands/network/tune.sh" \
+        "disruptive" \
+        "optional-root" \
+        "supported" \
+        "linux,init:systemd" \
         "experimental"
 
     vps_registry_register_command \

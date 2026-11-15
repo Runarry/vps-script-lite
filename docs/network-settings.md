@@ -1,6 +1,6 @@
 # 网络设置
 
-固定的 `network` 领域提供 BBR、DNS、IP 地址族偏好和 nftables 四个入口。本文记录公开命令接口、风险边界、落盘位置、失败语义和发布验收要求；nftables 的完整管理、迁移及业务联动见 [nftables 管理](nftables-management.md)。实际验证结果以各功能验收记录为准。
+固定的 `network` 领域提供 BBR、DNS、IP 地址族偏好、nftables 和网络调优。本文记录公开命令接口、风险边界、落盘位置、失败语义和发布验收要求。功能详情见 [nftables 管理](nftables-management.md) 和[网络调优](network-tuning.md)。
 
 ## 1. 入口与公共约定
 
@@ -10,6 +10,7 @@
 | `network dns` | `show`、`test`、`set`、`refresh`、`verify`、`restore` | `disruptive` | `optional-root` | 支持 | `linux` | `experimental` |
 | `network ip-policy` | `status`、`set`、`restore` | `disruptive` | `optional-root` | 支持 | `linux`、`libc:glibc`；帮助不要求 glibc | `experimental` |
 | `network nftables` | 状态、启停、端口规则、来源控制、防护策略及服务同步 | `disruptive` | `optional-root` | 支持 | `linux`；写操作要求 nftables 工具和内核能力，开机恢复支持 systemd/OpenRC | `experimental` |
+| `network tune` | 状态、诊断、TCP 缓冲区、网卡出口队列、源端口出口限速 | `disruptive` | `optional-root` | 支持 | Linux、Python 3，写操作要求 systemd 和对应内核能力 | `experimental` |
 
 全局选项必须位于领域前，例如：
 
@@ -23,10 +24,10 @@ bash bin/vpsctl --dry-run --install-deps network dns set --server 1.1.1.1
 - `--dry-run` 展示检测结果和计划，不写系统、不安装依赖、不改变服务状态。缺少工具时无需 `--install-deps` 即可展示包管理器计划；DNS 可继续展示后续计划，BBR 和 nftables 在缺失工具妨碍安全验证时会提示安装后重跑。
 - `--yes` 只跳过允许自动同意的普通提示，不绕过能力检查、写前验证或功能自身的危险操作确认。
 - `--non-interactive` 禁止读取终端；缺少必要参数或必要的强确认时立即失败。
-- 修改操作分别使用 `/run/vpsctl/network-bbr.lock`、`/run/vpsctl/network-dns.lock` 和 `/run/vpsctl/network-nftables.lock`，阻止同一功能的并发事务互相覆盖。
+- 修改操作使用 `/run/vpsctl/` 下的对应功能锁。网络调优的出口队列、端口限速与 BBR 的 live qdisc 变更共用 `network-qdisc.lock`。
 - 普通用户可运行帮助和可读取的状态查询；写 `/etc`、`/usr/local`、systemd 单元或持久状态时需要 root。
 
-这些执行型全局参数只用于直接功能 CLI；主管理菜单进入 BBR、DNS、IP 地址族偏好或 nftables UI 后执行真实动作，不提供演练、依赖授权、自动同意、非交互、静默或详细日志开关。机器可读输出选项、`--force` 与 `--confirm-*` 确认标志也只在直接 CLI 暴露；菜单用编号选择固定值，用经校验的文本输入收集开放值，并在危险动作前执行对应交互确认。
+这些执行型全局参数只用于直接功能 CLI。主管理菜单进入各功能的 UI 后执行真实动作，用编号选择固定值，用经校验的文本输入收集开放值，并在危险动作前执行对应交互确认。机器可读输出选项、`--force` 与 `--confirm-*` 确认标志也只在直接 CLI 暴露。
 
 ## 2. BBR
 
@@ -136,7 +137,7 @@ bash bin/vpsctl network ip-policy restore
 
 ## 6. 退出码
 
-四个入口遵守统一退出码：
+网络入口遵守统一退出码：
 
 | 退出码 | 含义与网络命令示例 |
 | ---: | --- |
@@ -160,6 +161,7 @@ bash bin/vpsctl network ip-policy restore
 - DNS：分别覆盖 systemd-resolved、NetworkManager、openresolv、静态 resolv.conf；在 Alpine 覆盖 DHCP 静态后端拒绝，以及 udhcpc `RESOLV_CONF="no"`/dhcpcd `nohook resolv.conf` 的分别接管；验证 legacy Debian 安全拒绝、候选前测失败零写入、写后失败保留配置并返回 `30`、按备份恢复。
 - IP 地址族偏好：覆盖空/注释/自定义 `/etc/gai.conf`、两种完整 precedence 表、所有权冲突、重复设置、dry-run、精确恢复和新进程实际解析排序。
 - nftables：覆盖 IPv4/IPv6、端口与来源控制、服务联动、TCP 连接/UDP 包防护、原子失败恢复、停用后恢复、重启后加载、旧受管防火墙清理和独立 PO0 共存；实际结果另行记录。
-- 四入口：覆盖普通用户/root、`--dry-run`、`--non-interactive`、锁冲突、中断、重复执行及各基础退出码。
+- 网络调优覆盖缓冲区应用和恢复、出口队列与逐端口 IPv4/IPv6 整形、共存和开机加载。命令、持久化路径和恢复动作见[网络调优](network-tuning.md)。
+- 网络入口覆盖普通用户/root、`--dry-run`、`--non-interactive`、锁冲突、中断、重复执行及各基础退出码。
 
 nftables 和 DNS 的中断性用例不得在唯一可用的远程管理链路上直接试验；应准备控制台或快照恢复通道。

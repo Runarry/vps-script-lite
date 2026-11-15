@@ -180,7 +180,7 @@ test_residue_locks_and_partial_failure() (
 )
 
 test_bundle_eviction_and_reload() (
-    local build="$TEST_TEMP/build-tcping" relative before after
+    local build="$TEST_TEMP/build-tcping" relative before after runtime
     mkdir -p "$build"
     while IFS= read -r relative; do
         mkdir -p "$build/${relative%/*}"
@@ -192,6 +192,10 @@ test_bundle_eviction_and_reload() (
     cache_bundle shared-nftables
     cache_bundle service-tcping
     cache_bundle service-iperf3
+    cache_bundle network-tune
+    runtime="$VPSCTL_INSTALL_ROOT/network-tune/runtime.pyz"
+    mkdir -p -- "${runtime%/*}"
+    printf 'persisted runtime\n' >"$runtime"
     if vps_registry_has_command system:clean; then cache_bundle system-clean; fi
     before="$(find "$VPSCTL_SYSTEM_ROOT" -printf '%P %y %s %T@\n' | sort)"
     VPSCTL_DRY_RUN=1 assert_status 0 vps_distribution_clean_bundles
@@ -201,6 +205,9 @@ test_bundle_eviction_and_reload() (
     assert_absent "$VPSCTL_PROJECT_ROOT/commands/service/tcping.sh"
     assert_absent "$VPSCTL_PROJECT_ROOT/commands/service/tcping"
     assert_absent "$VPSCTL_PROJECT_ROOT/commands/service/iperf3.sh"
+    assert_absent "$VPSCTL_PROJECT_ROOT/commands/network/tune.sh"
+    assert_absent "$VPSCTL_PROJECT_ROOT/lib/network_tune"
+    assert_exists "$runtime"
     assert_exists "$VPSCTL_PROJECT_ROOT/lib/command.sh"
     assert_exists "$VPSCTL_PROJECT_ROOT/lib/nftables.sh"
     assert_exists "$VPSCTL_PROJECT_ROOT/.bundles/core.sha256"

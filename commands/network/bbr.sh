@@ -235,7 +235,7 @@ bbr_ensure_dependencies() {
             tools=(sysctl base64)
             [[ "${VPSCTL_DRY_RUN:-0}" == "1" ]] || tools+=(flock)
             if [[ "$BBR_APPLY_LIVE_QDISC" == "1" ]]; then
-                tools+=(ip tc)
+                tools+=(ip tc python3)
             fi
             ;;
         restore)
@@ -901,7 +901,84 @@ bbr_capture_live_qdisc() {
         vps_cmd_error "当前 root qdisc 类型不安全：${BBR_TX_LIVE_QDISC}"
         return 3
     }
+    bbr_guard_live_qdisc "$BBR_TX_LIVE_INTERFACE" || return $?
     BBR_TX_LIVE_QDISC_CAPTURED=1
+}
+
+# The historical BBR snapshot stores only a qdisc type. It cannot recover
+# custom options, children, or root classifiers, so those belong to tune.
+bbr_guard_live_qdisc() {
+    local interface="$1" state_path tree filters parent_filters='[]' handle
+    command -v python3 >/dev/null 2>&1 || {
+        vps_cmd_error "保护完整 live qdisc 需要 python3；普通非 live BBR 设置不受影响"
+        return 3
+    }
+    state_path="$(vps_cmd_system_path /var/lib/vpsctl/network/tune/egress.json)" || return $?
+    vps_cmd_require_no_symlink_components "$state_path" || return $?
+    tree="$(tc -j qdisc show dev "$interface")" || return 20
+    filters="$(tc -j filter show dev "$interface" root)" || return 20
+    handle="$(python3 -c 'import json,sys; print(next((q.get("handle", "0:") for q in json.loads(sys.argv[1]) if q.get("root")), "0:"))' "$tree")" || return 20
+    if [[ "$handle" != "0:" ]]; then
+        parent_filters="$(tc -j filter show dev "$interface" parent "$handle")" || return 20
+    fi
+    if ! python3 - "$interface" "$state_path" "$tree" "$filters" "$parent_filters" "$(vps_cmd_system_path "/sys/class/net/${interface}/mtu")" <<'PY'
+import json
+import pathlib
+import sys
+
+iface, state_path, tree_text, filters, parent_filters, mtu_path = sys.argv[1:]
+try:
+    path = pathlib.Path(state_path)
+    if path.exists():
+        state = json.loads(path.read_text())
+        if state.get("schema_version") != 1 or not isinstance(state.get("interfaces"), dict):
+            raise ValueError("invalid ownership state")
+        record = state["interfaces"].get(iface)
+        if record and record.get("enabled", True):
+            raise ValueError("owned by network tune")
+    tree = [q for q in json.loads(tree_text) if q.get("kind") not in ("ingress", "clsact")]
+    if len(tree) != 1 or not tree[0].get("root") or json.loads(filters) or json.loads(parent_filters):
+        raise ValueError("queue tree or root filters")
+    root = tree[0]
+    mtu = int(pathlib.Path(mtu_path).read_text()) if pathlib.Path(mtu_path).exists() else 1500
+    defaults = {
+        "noqueue": {},
+        "fq": {"limit": 10000, "flow_limit": 100, "buckets": 1024,
+               "orphan_mask": 1023, "quantum": 2 * (mtu + 14),
+               "initial_quantum": 10 * (mtu + 14), "pacing": True,
+               "low_rate_threshold": 68750, "refill_delay": 40000,
+               "timer_slack": 10000, "horizon": 10000000, "horizon_drop": None,
+               "bands": 3, "priomap": [1, 2, 2, 2, 1, 2, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1],
+               "weights": [589824, 196608, 65536]},
+        "fq_codel": {"limit": 10240, "flows": 1024, "quantum": mtu + 14,
+                     "target": 5000, "interval": 100000, "memory_limit": 33554432,
+                     "ecn": True, "drop_batch": 64},
+    }
+    if root.get("kind") not in defaults:
+        raise ValueError("unsupported queue kind")
+    expected = defaults[root["kind"]]
+    options = root.get("options", {})
+    if options and root["kind"] == "fq_codel" and not options.get("ecn", False):
+        raise ValueError("custom noecn queue")
+    if options and root["kind"] == "fq" and "low_rate_threshold" not in options:
+        raise ValueError("custom zero low_rate_threshold")
+    for key, value in options.items():
+        key = key.strip()
+        if root["kind"] == "fq_codel" and key in ("target", "interval"):
+            # CoDel stores 1024 ns ticks and floors its integer-us dump.
+            target = expected[key]
+            if value in (target, target * 1000 // 1024 * 1024 // 1000):
+                continue
+        if key not in expected or expected[key] != value:
+            raise ValueError("custom queue option: " + key)
+except (ValueError, TypeError, KeyError, OSError) as exc:
+    print(str(exc), file=sys.stderr)
+    sys.exit(1)
+PY
+    then
+        vps_cmd_error "拒绝覆盖受管或包含自定义参数/子队列的 live qdisc；请使用 network tune 管理完整队列"
+        return 10
+    fi
 }
 
 bbr_apply_live_qdisc() {
@@ -924,6 +1001,7 @@ bbr_restore_saved_live_qdisc() {
         vps_cmd_error "网卡已消失，无法恢复已保存的 live qdisc：${BBR_ORIGINAL_LIVE_INTERFACE}"
         return 20
     }
+    bbr_guard_live_qdisc "$BBR_ORIGINAL_LIVE_INTERFACE" || return $?
     vps_cmd_run tc qdisc replace dev "$BBR_ORIGINAL_LIVE_INTERFACE" root "$BBR_ORIGINAL_LIVE_QDISC" || {
         vps_cmd_error "无法将 ${BBR_ORIGINAL_LIVE_INTERFACE} 的 root qdisc 恢复为 ${BBR_ORIGINAL_LIVE_QDISC}"
         return 20
@@ -978,7 +1056,7 @@ bbr_apply_settings() {
     fi
     vps_cmd_require_root || return $?
     if [[ "$VPSCTL_DRY_RUN" != "1" ]]; then
-        vps_cmd_lock network-bbr || return $?
+        vps_cmd_lock network-qdisc || return $?
         locked=1
     fi
     bbr_validate_managed_paths || status=$?
@@ -1095,11 +1173,17 @@ bbr_restore() {
     fi
 
     if [[ "$VPSCTL_DRY_RUN" != "1" ]]; then
-        vps_cmd_lock network-bbr || return $?
+        vps_cmd_lock network-qdisc || return $?
         locked=1
     fi
     bbr_validate_managed_paths || status=$?
     ((status != 0)) || bbr_validate_restore_ownership || status=$?
+    if ((status == 0)) && [[ "$BBR_ORIGINAL_LIVE_PRESENT" == "1" ]] &&
+        ip link show dev "$BBR_ORIGINAL_LIVE_INTERFACE" >/dev/null 2>&1; then
+        # Ownership/rich-tree conflicts are known before touching persistence
+        # or sysctl. Keep historical partial restore for a disappeared device.
+        bbr_guard_live_qdisc "$BBR_ORIGINAL_LIVE_INTERFACE" || status=$?
+    fi
     ((status != 0)) || bbr_begin_transaction || status=$?
     ((status != 0)) || bbr_load_algorithm_module "$BBR_ORIGINAL_ALGORITHM" || status=$?
     ((status != 0)) || bbr_prepare_qdisc "$BBR_ORIGINAL_QDISC" || status=$?

@@ -21,6 +21,7 @@ for syntax_file in \
     "${TEST_ROOT}"/lib/backup/*.sh \
     "${TEST_ROOT}/lib/ui.sh" \
     "${TEST_ROOT}/commands/network/bbr.sh" \
+    "${TEST_ROOT}/commands/network/tune.sh" \
     "${TEST_ROOT}/commands/network/dns.sh" \
     "${TEST_ROOT}/commands/network/ip-policy.sh" \
     "${TEST_ROOT}/commands/network/nftables.sh" \
@@ -55,6 +56,8 @@ for syntax_file in \
     "${TEST_ROOT}/scripts/po0-relay.sh" \
     "${TEST_ROOT}/tests/unit/test-po0-relay.sh" \
     "${TEST_ROOT}/tests/integration/test-po0-relay-real.sh" \
+    "${TEST_ROOT}/tests/integration/test-network-tune-real.sh" \
+    "${TEST_ROOT}/tests/integration/test-network-tune-boot-real.sh" \
     "${TEST_ROOT}/tests/unit/test-libraries.sh" \
     "${TEST_ROOT}/tests/unit/test-command.sh" \
     "${TEST_ROOT}/tests/unit/test-distribution.sh" \
@@ -141,6 +144,9 @@ bash "${TEST_ROOT}/tests/unit/test-offline-distribution.sh"
 bash "${TEST_ROOT}/tests/unit/test-offline-runtime.sh"
 bash "${TEST_ROOT}/tests/unit/test-po0-relay.sh"
 bash "${TEST_ROOT}/tests/unit/test-network-bbr.sh"
+for tune_test in "${TEST_ROOT}"/tests/unit/test-network-tune-*.py; do
+    python3 -B "$tune_test"
+done
 bash "${TEST_ROOT}/tests/unit/test-network-dns.sh"
 bash "${TEST_ROOT}/tests/unit/test-network-ip-policy.sh"
 bash "${TEST_ROOT}/tests/unit/test-nftables-library.sh"

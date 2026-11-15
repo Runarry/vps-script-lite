@@ -960,7 +960,7 @@ test_uninstall_confirmation_contract() (
 )
 
 test_purge_removes_only_self_state() (
-    local release="${TEST_INSTALL_ROOT}/releases/0.3.0"
+    local release="${TEST_INSTALL_ROOT}/releases/0.3.0" runtime="$TEST_INSTALL_ROOT/network-tune/runtime.pyz"
     mkdir -p "$TEST_INSTALL_ROOT/releases" "$TEST_SELF_ROOT"
     rm -f -- "$TEST_INSTALL_ROOT/current"
     prepare_managed_install "$release" 0.3.0
@@ -968,10 +968,13 @@ test_purge_removes_only_self_state() (
     printf 'legacy installer\n' >"$TEST_SELF_ROOT/vpsctl.sh/keep"
     mkdir -p "$TEST_SYSTEM_ROOT/etc/vpsctl" "$TEST_SYSTEM_ROOT/var/lib/vpsctl/security" "$TEST_SYSTEM_ROOT/usr/local/libexec"
     touch "$TEST_SYSTEM_ROOT/etc/vpsctl/purge-keep" "$TEST_SYSTEM_ROOT/var/lib/vpsctl/security/purge-keep" "$TEST_SYSTEM_ROOT/usr/local/libexec/purge-keep"
+    mkdir -p "${runtime%/*}"
+    printf 'persisted runtime\n' >"$runtime"
     VPSCTL_DISTRIBUTED=1
     VPSCTL_PROJECT_ROOT="$release"
     vps_distribution_self_uninstall 1 >/dev/null || fail 'purge uninstall failed'
     [[ ! -e "$TEST_SELF_ROOT" ]] || fail 'purge retained self state'
+    assert_equal 'persisted runtime' "$(<"$runtime")" 'purge preserves the network tuning boot runtime'
     [[ -e "$TEST_SYSTEM_ROOT/etc/vpsctl/purge-keep" && -e "$TEST_SYSTEM_ROOT/var/lib/vpsctl/security/purge-keep" && -e "$TEST_SYSTEM_ROOT/usr/local/libexec/purge-keep" ]] || fail 'purge removed preserved data'
 )
 

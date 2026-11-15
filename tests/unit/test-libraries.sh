@@ -157,7 +157,7 @@ test_registry() {
     vps_registry_init
 
     test_assert_equal "6" "${#VPS_DOMAIN_IDS[@]}" "registered domain count"
-    test_assert_equal "22" "${#VPS_COMMAND_KEYS[@]}" "registered command count"
+    test_assert_equal "23" "${#VPS_COMMAND_KEYS[@]}" "registered command count"
     test_assert_equal "network" "${VPS_DOMAIN_IDS[0]}" "network domain id"
     test_assert_equal "system" "${VPS_DOMAIN_IDS[1]}" "system domain id"
     test_assert_equal "security" "${VPS_DOMAIN_IDS[2]}" "security domain id"
@@ -168,7 +168,9 @@ test_registry() {
     test_assert_equal "commands/network/dns.sh" "${VPS_COMMAND_PATH["network:dns"]}" "DNS command path"
     test_assert_equal "commands/network/ip-policy.sh" "${VPS_COMMAND_PATH["network:ip-policy"]}" "IP policy command path"
     test_assert_equal "commands/network/nftables.sh" "${VPS_COMMAND_PATH["network:nftables"]}" "nftables command path"
+    test_assert_equal "commands/network/tune.sh" "${VPS_COMMAND_PATH["network:tune"]}" "network tuning command path"
     test_assert_equal $'shared-command\nshared-nftables\nservice-proxy\nnetwork-nftables' "$(vps_registry_command_bundles network:nftables)" "nftables migration dependencies"
+    test_assert_equal $'shared-command\nnetwork-tune' "$(vps_registry_command_bundles network:tune)" "network tuning dependencies"
     ! vps_registry_has_command network:ufw || test_fail "removed UFW command remains registered"
     ! vps_registry_has_command network:rfw || test_fail "removed RFW command remains registered"
     test_assert_equal "change" "${VPS_COMMAND_RISK["network:bbr"]}" "BBR risk"

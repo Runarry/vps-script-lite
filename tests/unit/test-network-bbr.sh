@@ -108,6 +108,22 @@ EOF
 cat >"${TEST_FAKE_BIN}/tc" <<'EOF'
 #!/usr/bin/env bash
 set -Eeuo pipefail
+if [[ "$*" == "-j qdisc show dev eth0" ]]; then
+    if [[ -f "${VPSCTL_SYSTEM_ROOT}/tc-tree.json" ]]; then
+        cat "${VPSCTL_SYSTEM_ROOT}/tc-tree.json"
+    else
+        printf '[{"kind":"%s","handle":"0:","root":true,"options":{}}]\n' "$(<"${VPSCTL_SYSTEM_ROOT}/tc-root-qdisc")"
+    fi
+    exit 0
+fi
+if [[ "$1 $2 $3" == "-j filter show" ]]; then
+    if [[ -f "${VPSCTL_SYSTEM_ROOT}/tc-filters.json" ]]; then
+        cat "${VPSCTL_SYSTEM_ROOT}/tc-filters.json"
+    else
+        printf '[]\n'
+    fi
+    exit 0
+fi
 if [[ "$*" == "qdisc show dev eth0" ]]; then
     printf '%s\n' "$*" >>"${VPSCTL_SYSTEM_ROOT}/tc-query.log"
     printf 'qdisc %s 0: root refcnt 2\n' "$(<"${VPSCTL_SYSTEM_ROOT}/tc-root-qdisc")"
@@ -890,6 +906,71 @@ test_persistence_and_restore() {
     test_assert_contains "$(<"$sysctl_path")" "# Managed by vpsctl network bbr." "managed marker after takeover overwrite"
 }
 
+test_quantized_default_live_qdisc() {
+    local original_path="${TEST_SYSTEM_ROOT}/var/lib/vpsctl/network/bbr/original.conf"
+    printf '[{"kind":"fq_codel","handle":"0:","root":true,"options":{"limit":10240,"flows":1024,"quantum":1514,"target":4999,"interval":99999,"memory_limit":33554432,"ecn":true,"drop_batch":64}}]\n' >"${TEST_SYSTEM_ROOT}/tc-tree.json"
+    run_bbr --yes enable --apply-live-qdisc
+    test_assert_equal 0 "$RUN_STATUS" "quantized default fq_codel live apply"
+    rm -f -- "${TEST_SYSTEM_ROOT}/tc-tree.json"
+    run_bbr --yes restore
+    test_assert_equal 0 "$RUN_STATUS" "quantized default fq_codel live restore"
+    rm -f -- "$original_path"
+}
+
+test_rich_qdisc_guard() {
+    local original_path="${TEST_SYSTEM_ROOT}/var/lib/vpsctl/network/bbr/original.conf"
+    local tune_state="${TEST_SYSTEM_ROOT}/var/lib/vpsctl/network/tune/egress.json"
+    local sysctl_path="${TEST_SYSTEM_ROOT}/etc/sysctl.d/90-vpsctl-bbr.conf"
+    local modules_path="${TEST_SYSTEM_ROOT}/etc/modules-load.d/90-vpsctl-bbr.conf"
+
+    run_bbr --yes enable --apply-live-qdisc
+    test_assert_equal 0 "$RUN_STATUS" "plain live enable before rich guard"
+    [[ -f "${TEST_SYSTEM_ROOT}/run/vpsctl/network-qdisc.lock" ]] || test_fail "BBR did not use shared qdisc lock"
+
+    printf '[{"kind":"fq","handle":"9101:","root":true,"options":{"maxrate":56250000}}]\n' >"${TEST_SYSTEM_ROOT}/tc-tree.json"
+    reset_bbr_effect_logs
+    run_bbr --yes set --algorithm cubic --qdisc fq_codel --apply-live-qdisc
+    test_assert_equal 10 "$RUN_STATUS" "custom maxrate live guard"
+    test_assert_contains "$RUN_OUTPUT" "拒绝覆盖" "custom maxrate guard message"
+    test_assert_no_bbr_effects "custom maxrate live guard"
+
+    run_bbr --yes set --algorithm cubic --qdisc fq_codel
+    test_assert_equal 0 "$RUN_STATUS" "rich queue permits ordinary non-live BBR"
+    reset_bbr_effect_logs
+    run_bbr --yes restore
+    test_assert_equal 10 "$RUN_STATUS" "rich queue blocks saved type-only restore before mutation"
+    test_assert_no_bbr_effects "rich saved live restore preflight"
+
+    printf '[{"kind":"tbf","handle":"9400:","root":true,"options":{"rate":56250000,"burst":262125,"lat":20000}},{"kind":"fq","handle":"9401:","parent":"9400:1","options":{"limit":1024}}]\n' >"${TEST_SYSTEM_ROOT}/tc-tree.json"
+    reset_bbr_effect_logs
+    run_bbr --yes enable --apply-live-qdisc
+    test_assert_equal 10 "$RUN_STATUS" "TBF child topology guard"
+    test_assert_no_bbr_effects "TBF child topology guard"
+    rm -f -- "${TEST_SYSTEM_ROOT}/tc-tree.json"
+
+    mkdir -p -- "${tune_state%/*}"
+    printf '{"schema_version":1,"interfaces":{"eth0":{"enabled":true}}}\n' >"$tune_state"
+    reset_bbr_effect_logs
+    run_bbr --yes set --algorithm cubic --qdisc fq_codel --apply-live-qdisc
+    test_assert_equal 10 "$RUN_STATUS" "owned plain queue guard"
+    test_assert_no_bbr_effects "owned plain queue guard"
+    reset_bbr_effect_logs
+    run_bbr --yes restore
+    test_assert_equal 10 "$RUN_STATUS" "owned queue blocks saved live restore before mutation"
+    test_assert_no_bbr_effects "owned saved live restore preflight"
+    rm -f -- "$tune_state"
+
+    printf '[{"kind":"u32"}]\n' >"${TEST_SYSTEM_ROOT}/tc-filters.json"
+    reset_bbr_effect_logs
+    run_bbr --yes set --algorithm cubic --qdisc fq_codel --apply-live-qdisc
+    test_assert_equal 10 "$RUN_STATUS" "root classifier guard"
+    test_assert_no_bbr_effects "root classifier guard"
+    rm -f -- "${TEST_SYSTEM_ROOT}/tc-filters.json" "$original_path" "$sysctl_path" "$modules_path"
+    printf 'cubic\n' >"${TEST_SYSTEM_ROOT}/proc/sys/net/ipv4/tcp_congestion_control"
+    printf 'fq_codel\n' >"${TEST_SYSTEM_ROOT}/proc/sys/net/core/default_qdisc"
+    printf 'fq_codel\n' >"${TEST_SYSTEM_ROOT}/tc-root-qdisc"
+}
+
 test_status_and_arguments
 test_interactive_menu
 test_dry_run
@@ -901,5 +982,7 @@ test_live_qdisc_rollback
 test_non_live_then_first_live_snapshot
 test_original_state_validation
 test_repeated_apply
+test_quantized_default_live_qdisc
+test_rich_qdisc_guard
 test_persistence_and_restore
 printf 'PASS: network bbr tests\n'

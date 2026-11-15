@@ -63,6 +63,8 @@ vpsctl list
 
 `network nftables` 在加载 `shared-nftables` 后、加载自身包前额外缓存 `service-proxy`，完整顺序为 `shared-command`、`shared-nftables`、`service-proxy`、`network-nftables`。这是旧代理中转后台运行时的脚本迁移依赖；功能帮助也会缓存它，但不会安装代理内核、部署代理服务或重启代理。仍使用现有包及其固定文件清单，不复制包所有权。
 
+`network tune` 追加为网络领域第 5 项。`network-tune` bundle 包含调优入口和固定的 Python 标准库模块，只依赖 `shared-command`。PO0 单文件仍由 `network-nftables` bundle 提供，其内置调优运行时来自同一套模块。出口队列和端口限速的 systemd 单元使用独立于分发缓存的 `/usr/local/lib/vpsctl/network-tune/runtime.pyz`，功能包清理、自更新和 self 卸载均保留该运行时。详见[网络调优](network-tuning.md)。
+
 `system kernel` 的状态可由普通用户读取，安装、切换和卸载要求 root 与各自的强确认短语，`--yes` 不能绕过。内核包与 GRUB 变更只支持 Debian/Ubuntu amd64；其他 Linux 上的 `status` 仍可查询运行内核。支持的平台可从当前发行版受信 APT 源安装官方标准内核、Debian Cloud 或有候选的 Ubuntu LTS HWE，也可从 XanMod 官方源安装 BBRv3 并验证完整仓库密钥指纹。直接 CLI 省略安装类型仍默认 XanMod，交互菜单默认推荐官方标准内核。状态按 release 展示来源、关联包、启动完整性和 current/default/next/保护状态；标准 GRUB 2 环境可把具体 release 的稳定 entry ID 固定为默认项，其他启动器或无法解析的默认项拒绝危险动作。卸载必须明确指定非 current/default/next 的 release，只提交经过模拟验证的精确包数组，保护共享包和其他版本，不使用通配符或 `autoremove`。完整恢复边界见[系统内核管理](kernel-management.md)。
 
 `system reinstall` 无参数在交互 TTY 中进入快捷菜单，无 TTY 或设置 `--non-interactive` 时显示本地帮助；显式 `menu` 要求交互 TTY。菜单提供常用 Linux、Windows 与 RAW DD 预设，摘要隐藏密码，安装确认默认拒绝。准备成功后可选择立即重启、稍后重启（默认）或上游 `reset` 取消；立即重启选择本身即为授权，`q` 或 EOF 按稍后重启处理。`--yes` 不能替代安装确认、系统选择或重启授权。
